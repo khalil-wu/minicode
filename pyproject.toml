@@ -5,6 +5,7 @@ description = "MiniCode backend agent loop prototype"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1.0",
+  "openai>=1.75,<2.0",
   "uvicorn>=0.32,<1.0",
 ]
 
