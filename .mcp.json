@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "websearch": {
+      "command": "python",
+      "args": ["-m", "backend.mcp.servers.websearch"],
+      "env": {},
+      "autoStart": true
+    },
+    "docparse": {
+      "command": "python",
+      "args": ["-m", "backend.mcp.servers.docparse"],
+      "env": {},
+      "autoStart": true
+    },
+    "memory-rag": {
+      "command": "python",
+      "args": ["-m", "backend.mcp.servers.memory_rag"],
+      "env": {},
+      "autoStart": false
+    },
+    "code-index": {
+      "command": "python",
+      "args": ["-m", "backend.mcp.servers.code_index"],
+      "env": {},
+      "autoStart": false
+    }
+  }
+}

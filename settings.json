@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "auto_allow": [
+      "read_file", "list_files", "grep_files", "ask_user",
+      "read_artifact", "load_skill", "read_memory",
+      "mcp__memory_rag__*", "mcp__code_index__search"
+    ],
+    "require_confirm": [
+      "run_command", "web_fetch", "mcp__websearch__*"
+    ],
+    "require_diff_review": [
+      "write_file", "edit_file"
+    ],
+    "always_deny": [],
+    "path_allowlist": ["./src", "./tests", "./backend", "./frontend"],
+    "path_denylist": [".env", "*.key", "*.pem", "secrets/"]
+  },
+  "agent": {
+    "max_iterations": 30,
+    "compaction_threshold": 0.75,
+    "stagnation_limit": 3,
+    "history_keep_recent": 15
+  },
+  "token_budget": {
+    "total": 128000,
+    "system_prompt": 2000,
+    "active_skills": 4000,
+    "memory_index": 1000,
+    "tool_schemas": 6000,
+    "agent_state": 2000,
+    "rag_chunks": 8000,
+    "response_reserve": 8000
+  }
+}

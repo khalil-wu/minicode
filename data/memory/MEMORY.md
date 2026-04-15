@@ -1,0 +1,4 @@
+- [user_profile](user_profile.md) — 用户偏好与工作风格
+- [project_context](project_context.md) — 项目背景与当前目标
+- [feedback](feedback.md) — 用户对 Agent 行为的纠正记录
+- [reference](reference.md) — 外部资源与文档链接

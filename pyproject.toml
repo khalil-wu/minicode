@@ -1,20 +1,23 @@
 [project]
 name = "minicode"
-version = "0.1.0"
-description = "MiniCode backend agent loop prototype"
+version = "0.2.0"
+description = "MiniCode Agent — AI 编程助手后端"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1.0",
   "openai>=1.75,<2.0",
-  "uvicorn>=0.32,<1.0",
+  "uvicorn[standard]>=0.32,<1.0",
 ]
 
 [project.optional-dependencies]
 dev = [
   "httpx>=0.28,<1.0",
   "pytest>=8.3,<9.0",
+  "pytest-asyncio>=0.25,<1.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+asyncio_mode = "auto"
+pythonpath = ["."]
