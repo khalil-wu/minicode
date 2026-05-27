@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MiniCode Startup Recovery</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --surface-base: #eef3f8;
+        --surface-card: rgba(255, 255, 255, 0.94);
+        --border-subtle: rgba(15, 23, 42, 0.08);
+        --text-strong: #0f172a;
+        --text-muted: #5c6679;
+        --accent: #2952ff;
+        --danger: #d94b4b;
+        --shadow: 0 22px 56px rgba(15, 23, 42, 0.12);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        background:
+          radial-gradient(circle at top, rgba(255, 255, 255, 0.95) 0%, rgba(239, 243, 248, 0.92) 48%, rgba(226, 233, 242, 0.98) 100%),
+          var(--surface-base);
+        color: var(--text-strong);
+      }
+
+      .shell {
+        display: flex;
+        min-height: 100vh;
+        align-items: center;
+        justify-content: center;
+        padding: 28px;
+      }
+
+      .card {
+        width: min(760px, 100%);
+        border: 1px solid var(--border-subtle);
+        border-radius: 28px;
+        background: var(--surface-card);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(18px);
+        overflow: hidden;
+      }
+
+      .hero {
+        padding: 28px 30px 18px;
+        border-bottom: 1px solid var(--border-subtle);
+      }
+
+      .eyebrow {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.18em;
+        color: var(--text-muted);
+      }
+
+      h1 {
+        margin: 12px 0 0;
+        font-size: 30px;
+        line-height: 1.15;
+        letter-spacing: -0.03em;
+      }
+
+      p {
+        margin: 12px 0 0;
+        line-height: 1.65;
+        color: var(--text-muted);
+      }
+
+      .section {
+        padding: 22px 30px;
+      }
+
+      .stack {
+        display: grid;
+        gap: 14px;
+      }
+
+      .detail {
+        margin: 0;
+        max-height: 220px;
+        overflow: auto;
+        border-radius: 20px;
+        border: 1px solid var(--border-subtle);
+        background: #f8fafc;
+        padding: 16px 18px;
+        font-family: "JetBrains Mono", "Cascadia Code", monospace;
+        font-size: 12px;
+        line-height: 1.6;
+        color: #334155;
+        white-space: pre-wrap;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      button {
+        appearance: none;
+        border: none;
+        border-radius: 999px;
+        padding: 11px 18px;
+        font: inherit;
+        cursor: pointer;
+        transition: transform 160ms ease, opacity 160ms ease, background 160ms ease;
+      }
+
+      button:hover {
+        transform: translateY(-1px);
+      }
+
+      button:disabled {
+        opacity: 0.56;
+        cursor: wait;
+        transform: none;
+      }
+
+      .primary {
+        background: var(--accent);
+        color: white;
+      }
+
+      .secondary {
+        background: #e9eef6;
+        color: var(--text-strong);
+      }
+
+      .danger {
+        background: #fff1f1;
+        color: var(--danger);
+      }
+
+      .footer {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 18px 30px 26px;
+        border-top: 1px solid var(--border-subtle);
+        color: var(--text-muted);
+        font-size: 13px;
+      }
+
+      .meta {
+        word-break: break-all;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <div class="card">
+        <div class="hero">
+          <div class="eyebrow">Startup recovery</div>
+          <h1 id="title">MiniCode Desktop couldn't finish startup</h1>
+          <p id="message">The desktop shell hit a startup issue before the main runtime became available.</p>
+        </div>
+        <div class="section stack">
+          <div class="actions">
+            <button id="retry" class="primary">Retry startup</button>
+            <button id="logs" class="secondary">Open desktop log</button>
+            <button id="quit" class="danger">Quit MiniCode</button>
+          </div>
+          <pre id="detail" class="detail">Waiting for diagnostic details...</pre>
+        </div>
+        <div class="footer">
+          <div>Backend sidecar, health check, or renderer boot may have failed.</div>
+          <div id="logPath" class="meta"></div>
+        </div>
+      </div>
+    </div>
+    <script>
+      const state = {
+        busy: false,
+      };
+
+      const titleEl = document.getElementById("title");
+      const messageEl = document.getElementById("message");
+      const detailEl = document.getElementById("detail");
+      const logPathEl = document.getElementById("logPath");
+      const retryButton = document.getElementById("retry");
+      const logsButton = document.getElementById("logs");
+      const quitButton = document.getElementById("quit");
+
+      function setBusy(nextBusy) {
+        state.busy = nextBusy;
+        retryButton.disabled = nextBusy;
+        retryButton.textContent = nextBusy ? "Retrying..." : "Retry startup";
+      }
+
+      function applyStartupState(payload) {
+        if (!payload) return;
+        titleEl.textContent = payload.title || "MiniCode Desktop couldn't finish startup";
+        messageEl.textContent = payload.message || "MiniCode Desktop hit a startup issue.";
+        detailEl.textContent = payload.detail || "No additional details were captured.";
+        logPathEl.textContent = payload.logsPath ? `Log: ${payload.logsPath}` : "";
+      }
+
+      async function bootstrap() {
+        if (!window.minicodeStartup) {
+          detailEl.textContent = "Startup bridge was not available in this recovery surface.";
+          retryButton.disabled = true;
+          logsButton.disabled = true;
+          return;
+        }
+
+        applyStartupState(await window.minicodeStartup.getState());
+        window.minicodeStartup.onState((payload) => {
+          applyStartupState(payload);
+          setBusy(false);
+        });
+      }
+
+      retryButton.addEventListener("click", async () => {
+        if (!window.minicodeStartup || state.busy) return;
+        setBusy(true);
+        const ok = await window.minicodeStartup.retry();
+        if (!ok) {
+          setBusy(false);
+        }
+      });
+
+      logsButton.addEventListener("click", async () => {
+        if (!window.minicodeStartup) return;
+        await window.minicodeStartup.openLogs();
+      });
+
+      quitButton.addEventListener("click", async () => {
+        if (!window.minicodeStartup) return;
+        await window.minicodeStartup.quit();
+      });
+
+      void bootstrap();
+    </script>
+  </body>
+</html>

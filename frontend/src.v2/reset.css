@@ -1,0 +1,440 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-ui);
+  font-size: var(--text-md);
+  background: var(--surface-base);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Keyframe Animations ─────────────────────────────── */
+
+@keyframes cursorBlink {
+  0%, 100% { opacity: 0.38; }
+  45%, 55% { opacity: 1; }
+}
+
+@keyframes thinking-pulse {
+  0%, 100% { opacity: 0.45; transform: scale(0.92); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes thinking-wave {
+  0%, 100% { opacity: 0.42; transform: scaleY(0.45); }
+  45% { opacity: 1; transform: scaleY(1); }
+}
+
+@keyframes thinking-flow {
+  0% { transform: translateX(-115%); opacity: 0; }
+  20% { opacity: 0.75; }
+  70% { opacity: 0.75; }
+  100% { transform: translateX(115%); opacity: 0; }
+}
+
+@keyframes overlay-in {
+  from { opacity: 0; backdrop-filter: blur(0); }
+  to { opacity: 1; backdrop-filter: blur(6px); }
+}
+
+@keyframes overlay-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes modal-in {
+  from { opacity: 0; transform: scale(0.95) translateY(8px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+@keyframes message-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slide-down {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(100%) scale(0.9); }
+  to { opacity: 1; transform: translateX(0) scale(1); }
+}
+
+@keyframes toast-out {
+  from { opacity: 1; transform: translateX(0) scale(1); }
+  to { opacity: 0; transform: translateX(100%) scale(0.9); }
+}
+
+@keyframes progress-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes connection-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+@keyframes thinking-shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes preview-flash {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+/* ── Overlay & Modal Animations ──────────────────────── */
+
+.overlay-backdrop {
+  animation: overlay-in 200ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+.overlay-backdrop.closing {
+  animation: overlay-out 150ms ease-in both;
+}
+
+.modal-content {
+  animation: modal-in 250ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+/* ── Message Animations ──────────────────────────────── */
+
+.message-enter {
+  animation: message-in 200ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+.tool-call-enter {
+  animation: slide-up 250ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+/* ── Toast Notifications ─────────────────────────────── */
+
+.toast-enter {
+  animation: toast-in 300ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+.toast-exit {
+  animation: toast-out 200ms ease-in both;
+}
+
+/* ── Progress & Loading ──────────────────────────────── */
+
+.progress-bar {
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--surface-soft);
+}
+
+.progress-bar::after {
+  content: '';
+  display: block;
+  width: 25%;
+  height: 100%;
+  background: var(--accent-primary);
+  border-radius: 2px;
+  animation: progress-indeterminate 1.5s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.spinner {
+  animation: spin 800ms linear infinite;
+  border: 2px solid var(--border-subtle);
+  border-top-color: var(--accent-primary);
+  border-radius: 50%;
+}
+
+.skeleton {
+  background: linear-gradient(90deg, var(--surface-soft) 25%, var(--surface-hover) 50%, var(--surface-soft) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  border-radius: var(--radius-sm, 4px);
+}
+
+.thinking-shimmer {
+  display: inline-block;
+  width: 32px;
+  height: 3px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--accent-primary) 25%, var(--surface-hover) 50%, var(--accent-primary) 75%);
+  background-size: 200% 100%;
+  animation: thinking-shimmer 1.8s ease-in-out infinite;
+  vertical-align: middle;
+  margin-left: 6px;
+}
+
+.thinking-wave {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  width: 15px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+.thinking-wave > span {
+  width: 3px;
+  height: 10px;
+  border-radius: 3px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklch, var(--accent-primary) 72%, white),
+    color-mix(in oklch, var(--accent-primary) 52%, var(--text-muted))
+  );
+  transform-origin: 50% 100%;
+  animation: thinking-wave 1.05s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.thinking-wave > span:nth-child(2) {
+  animation-delay: 110ms;
+}
+
+.thinking-wave > span:nth-child(3) {
+  animation-delay: 220ms;
+}
+
+.thinking-flow {
+  position: relative;
+  width: 24px;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--accent-primary) 12%, transparent);
+}
+
+.thinking-flow::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 55%;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in oklch, var(--accent-primary) 72%, white),
+    transparent
+  );
+  animation: thinking-flow 1.35s ease-in-out infinite;
+}
+
+.thinking-mini-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-primary);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent-primary) 14%, transparent);
+  animation: thinking-pulse 1s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+.streaming-caret {
+  animation: cursorBlink 1.15s ease-in-out infinite;
+}
+
+/* ── Hover & Interaction ─────────────────────────────── */
+
+.window-control:hover {
+  background: var(--surface-hover) !important;
+  color: var(--text-primary) !important;
+}
+
+.window-control-close:hover {
+  background: #e81123 !important;
+  color: #fff !important;
+}
+
+.window-control:active,
+.window-control-close:active {
+  transform: none;
+}
+
+.editor-tab:hover .editor-tab-close {
+  opacity: 1 !important;
+}
+
+.editor-tab:hover {
+  background: var(--surface-hover) !important;
+}
+
+.code-block-wrapper:hover .code-action-btn,
+.code-block-wrapper:focus-within .code-action-btn {
+  opacity: 1 !important;
+}
+
+.assistant-msg:hover .msg-actions {
+  opacity: 1 !important;
+}
+
+.assistant-msg:focus-within .msg-actions {
+  opacity: 1 !important;
+}
+
+.user-msg:hover .msg-actions {
+  opacity: 1 !important;
+}
+
+.user-msg:focus-within .msg-actions {
+  opacity: 1 !important;
+}
+
+button {
+  transition: background 100ms ease,
+              color 100ms ease,
+              border-color 100ms ease,
+              opacity 100ms ease,
+              transform 100ms ease,
+              box-shadow 100ms ease;
+}
+
+button:active {
+  transform: scale(0.97);
+}
+
+button:hover {
+  box-shadow: 0 1px 3px color-mix(in oklch, var(--surface-base) 20%, transparent);
+}
+
+/* ── Sidebar & Panel Transitions ─────────────────────── */
+
+.sidebar-animate {
+  transition: width 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.dock-animate {
+  transition: height 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.panel-fade {
+  animation: fade-in 150ms ease both;
+}
+
+/* ── Connection Banner ───────────────────────────────── */
+
+.connection-banner {
+  animation: slide-down 200ms ease both;
+}
+
+.connection-dot {
+  animation: connection-pulse 1.5s ease-in-out infinite;
+}
+
+/* ── Custom scrollbars ───────────────────────────────── */
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-subtle);
+  border-radius: 4px;
+  transition: background 150ms ease;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong, var(--border-subtle));
+}
+
+/* ── Focus ring for keyboard navigation ──────────────── */
+
+:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+button:focus-visible {
+  outline-offset: 1px;
+}
+
+input:focus-visible,
+textarea:focus-visible {
+  outline-offset: -1px;
+}
+
+.xterm textarea,
+.xterm .xterm-helper-textarea {
+  position: absolute !important;
+  left: -9999em !important;
+  top: 0 !important;
+  width: 0 !important;
+  height: 0 !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  outline: 0 !important;
+  resize: none !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+.xterm textarea:focus-visible,
+.xterm .xterm-helper-textarea:focus-visible {
+  outline: 0 !important;
+}
+
+/* ── Selection color ─────────────────────────────────── */
+
+::selection {
+  background: color-mix(in oklch, var(--accent-primary) 30%, transparent);
+}
+
+/* ── Reduced motion ──────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ── Global Layout Dragging Performance Optimization ── */
+body.layout-dragging iframe,
+body.layout-dragging .xterm-screen,
+body.layout-dragging textarea,
+body.layout-dragging select,
+body.layout-dragging div.xterm {
+  pointer-events: none !important;
+  user-select: none !important;
+}

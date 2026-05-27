@@ -42,6 +42,19 @@ class Embedder:
         self._base_url = base_url or os.getenv("OPENAI_BASE_URL", "")
         self._client = None
         self._dimension = 1536
+        self._warmed_up = False
+
+    async def warmup(self) -> bool:
+        """预热 embedder：确保 API 客户端初始化或离线 fallback 就绪。"""
+        if self._warmed_up:
+            return True
+        try:
+            await self.embed("warmup")
+            self._warmed_up = True
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Embedder 预热失败: %s", exc)
+            return False
 
     async def embed(self, text: str) -> list[float]:
         """

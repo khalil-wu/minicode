@@ -19,14 +19,35 @@ class StreamEventType(Enum):
     """流式事件类型。"""
 
     TEXT_CHUNK = "text_chunk"  # 文本片段
-    TOOL_CALL = "tool_call"  # 工具调用请求
+    THINKING_CHUNK = "thinking_delta"
+    IMAGE_CHUNK = "image_chunk"  # 图片内容块（base64）
+    TOOL_CALL_START = "tool_call_start"  # 工具块开始（id+name 已知，args 未完成）
+    TOOL_CALL_DELTA = "tool_call_delta"  # 工具参数 JSON 片段
+    TOOL_CALL = "tool_call"  # 工具调用请求（完整参数）
     DONE = "done"  # 生成完毕
     ERROR = "error"  # 错误
 
 
 @dataclass
+class ToolCallStartEvent:
+    """工具调用开始事件（参数尚未完成）。"""
+
+    id: str
+    name: str
+    index: int = 0
+
+
+@dataclass
+class ToolCallDeltaEvent:
+    """工具调用参数增量事件。"""
+
+    id: str
+    partial_arguments: str
+
+
+@dataclass
 class ToolCallEvent:
-    """工具调用事件数据。"""
+    """工具调用事件数据（完整参数）。"""
 
     id: str  # 工具调用 ID（用于结果关联）
     name: str  # 工具名称
@@ -39,10 +60,12 @@ class UsageInfo:
 
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
-        return self.input_tokens + self.output_tokens
+        return self.input_tokens + self.output_tokens + self.cache_creation_input_tokens + self.cache_read_input_tokens
 
 
 @dataclass
@@ -52,6 +75,7 @@ class StreamEvent:
 
     根据 type 读取对应字段：
     - TEXT_CHUNK: content 为文本片段
+    - IMAGE_CHUNK: image_data (base64), image_media_type
     - TOOL_CALL: tool_calls 列表
     - DONE: usage 用量信息
     - ERROR: content 为错误描述
@@ -60,7 +84,11 @@ class StreamEvent:
     type: StreamEventType
     content: str = ""
     tool_calls: list[ToolCallEvent] = field(default_factory=list)
+    tool_call_start: ToolCallStartEvent | None = None
+    tool_call_delta: ToolCallDeltaEvent | None = None
     usage: UsageInfo = field(default_factory=UsageInfo)
+    image_data: str = ""
+    image_media_type: str = ""
 
 
 @dataclass
@@ -82,11 +110,34 @@ class LLMMessage:
     # tool 角色的结果
     tool_call_id: str | None = None
 
+    # user 角色的图片附件（多模态输入）
+    # 每项: {"media_type": "image/png", "data": "<base64>"}
+    images: list[dict[str, str]] = field(default_factory=list)
+
+    # user role document attachments for provider-native multimodal inputs.
+    # Each item: {"media_type": "application/pdf", "data": "<base64>", "file_name": "paper.pdf"}
+    documents: list[dict[str, str]] = field(default_factory=list)
+
     def to_openai_message(self) -> dict[str, Any]:
         """转换为 OpenAI Chat Completions API 格式。"""
         msg: dict[str, Any] = {"role": self.role}
 
-        if self.content:
+        if self.role == "user" and self.images:
+            parts: list[dict[str, Any]] = []
+            if self.content:
+                parts.append({"type": "text", "text": self.content})
+            for img in self.images:
+                media_type = img.get("media_type") or "image/png"
+                data = img.get("data") or ""
+                if not data:
+                    continue
+                parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{media_type};base64,{data}"},
+                })
+            if parts:
+                msg["content"] = parts
+        elif self.content:
             msg["content"] = self.content
 
         if self.role == "assistant" and self.tool_calls:

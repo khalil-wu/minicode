@@ -1,25 +1,51 @@
 {
   "permissions": {
     "auto_allow": [
-      "read_file", "list_files", "grep_files", "ask_user",
-      "read_artifact", "load_skill", "read_memory",
-      "mcp__memory_rag__*", "mcp__code_index__search"
+      "read_file",
+      "list_files",
+      "grep_files",
+      "ask_user",
+      "read_artifact",
+      "load_skill",
+      "read_memory",
+      "mcp__memory_rag__*",
+      "mcp__code_index__search",
+      "todo_write",
+      "task"
     ],
     "require_confirm": [
-      "run_command", "web_fetch", "mcp__websearch__*"
+      "run_command",
+      "web_fetch",
+      "mcp__websearch__*"
     ],
     "require_diff_review": [
-      "write_file", "edit_file"
+      "write_file",
+      "edit_file"
     ],
     "always_deny": [],
-    "path_allowlist": ["./src", "./tests", "./backend", "./frontend"],
-    "path_denylist": [".env", "*.key", "*.pem", "secrets/"]
+    "path_allowlist": [
+      "./src",
+      "./tests",
+      "./backend",
+      "./frontend"
+    ],
+    "path_denylist": [
+      ".env",
+      "settings.json",
+      "*.key",
+      "*.pem",
+      "secrets/"
+    ]
   },
   "agent": {
     "max_iterations": 30,
     "compaction_threshold": 0.75,
     "stagnation_limit": 3,
-    "history_keep_recent": 15
+    "history_keep_recent": 15,
+    "fallback_providers": [
+      "anthropic"
+    ],
+    "agent_mode": "react"
   },
   "token_budget": {
     "total": 128000,
@@ -30,5 +56,60 @@
     "agent_state": 2000,
     "rag_chunks": 8000,
     "response_reserve": 8000
+  },
+  "llm": {
+    "provider": "custom",
+    "openai": {
+      "api_key": "",
+      "base_url": "https://lucen.cc/v1",
+      "model": "gpt-4o",
+      "available_models": [
+        "gpt-4o"
+      ],
+      "reasoning_effort": "high",
+      "max_tokens": 8192,
+      "wire_api": "responses"
+    },
+    "anthropic": {
+      "api_key": "",
+      "base_url": "https://anyrouter.top",
+      "model": "claude-sonnet-4-6",
+      "available_models": [
+        "claude-sonnet-4-6"
+      ],
+      "max_tokens": 8192,
+      "thinking_budget": 0
+    },
+    "custom": {
+      "api_key": "",
+      "base_url": "https://gw2.oops.asia/v1",
+      "model": "gpt-5.4",
+      "available_models": [
+        "codex-auto-review",
+        "gpt-5.2",
+        "gpt-5.2-2025-12-11",
+        "gpt-5.2-chat-latest",
+        "gpt-5.2-pro",
+        "gpt-5.2-pro-2025-12-11",
+        "gpt-5.3-codex",
+        "gpt-5.4",
+        "gpt-5.4-2026-03-05",
+        "gpt-5.4-mini",
+        "gpt-5.5",
+        "gpt-4o-audio-preview",
+        "gpt-5.3-codex-spark",
+        "gpt-image-2",
+        "gpt-image-1",
+        "gpt-image-1.5",
+        "claude-sonnet-4.6",
+        "claude-sonnet-4-6",
+        "claude-opus-4.6",
+        "claude-opus-4-6"
+      ],
+      "reasoning_effort": "low",
+      "max_tokens": 8192,
+      "thinking_budget": 0,
+      "wire_api": "chat"
+    }
   }
 }

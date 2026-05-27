@@ -1,169 +1,37 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="dark">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MiniCode — AI 编程助手</title>
-    <meta name="description" content="MiniCode Agent — 基于上下文工程的 AI 编程助手">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/style.css">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MiniCode</title>
+    <!--
+      Theme boot script — must execute synchronously before any stylesheet
+      (including the JS-imported tokens.css from src/index.css) is evaluated,
+      so that `[data-theme]` selectors resolve correctly on first paint and
+      no FOUC occurs. See design.md §Cross-cutting #6.1.
+    -->
+    <script>
+      (function () {
+        try {
+          var pref = localStorage.getItem('minicode.theme');
+          var theme = pref;
+          if (!theme || theme === 'system') {
+            theme = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+          }
+          if (theme !== 'light' && theme !== 'dark') {
+            theme = 'dark';
+          }
+          document.documentElement.setAttribute('data-theme', theme);
+        } catch (e) { /* localStorage unavailable: leave default (CSS :root = dark) */ }
+      })();
+    </script>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
 </head>
-<body>
-    <!-- ═══ Header (48px) ═══ -->
-    <header class="header" id="header">
-        <div class="header-left">
-            <div class="logo">◆ <span>MiniCode</span></div>
-            <div class="skill-badges" id="skillBadges"></div>
-        </div>
-        <div class="header-right">
-            <button class="icon-btn" id="btnSkills" title="Skills">⚡</button>
-            <button class="icon-btn" id="btnMCP" title="MCP Servers">☁</button>
-            <button class="icon-btn" id="btnSettings" title="设置">⚙</button>
-            <button class="icon-btn sidebar-toggle" id="btnSidebar" title="侧边栏">◫</button>
-        </div>
-    </header>
-
-    <!-- ═══ Main Layout ═══ -->
-    <main class="main-layout" id="mainLayout">
-        <!-- Chat Panel -->
-        <section class="chat-panel" id="chatPanel">
-            <div class="message-list" id="messageList">
-                <!-- 欢迎消息 -->
-                <div class="welcome-screen" id="welcomeScreen">
-                    <div class="welcome-logo">◆</div>
-                    <h1>MiniCode</h1>
-                    <p class="welcome-subtitle">AI 编程助手 · 基于上下文工程</p>
-                    <div class="welcome-features">
-                        <div class="feature-card">
-                            <span class="feature-icon">📁</span>
-                            <span>读写文件</span>
-                        </div>
-                        <div class="feature-card">
-                            <span class="feature-icon">🔍</span>
-                            <span>代码搜索</span>
-                        </div>
-                        <div class="feature-card">
-                            <span class="feature-icon">⚡</span>
-                            <span>执行命令</span>
-                        </div>
-                        <div class="feature-card">
-                            <span class="feature-icon">🛡️</span>
-                            <span>权限审批</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            <div class="scroll-anchor" id="scrollAnchor"></div>
-        </section>
-
-        <!-- Context Sidebar (280px, 可折叠) -->
-        <aside class="context-sidebar" id="contextSidebar">
-            <!-- Skills Panel -->
-            <div class="sidebar-panel">
-                <div class="panel-title">
-                    <span>⚡ Skills</span>
-                </div>
-                <div class="panel-content" id="skillsPanel">
-                    <div class="empty-hint">暂无激活的 Skill</div>
-                </div>
-            </div>
-
-            <!-- MCP Status -->
-            <div class="sidebar-panel">
-                <div class="panel-title">
-                    <span>☁ MCP Servers</span>
-                </div>
-                <div class="panel-content" id="mcpPanel">
-                    <div class="mcp-item">
-                        <span class="status-dot offline"></span>
-                        <span class="mcp-name">websearch</span>
-                        <span class="mcp-status">offline</span>
-                    </div>
-                    <div class="mcp-item">
-                        <span class="status-dot offline"></span>
-                        <span class="mcp-name">docparse</span>
-                        <span class="mcp-status">offline</span>
-                    </div>
-                    <div class="mcp-item">
-                        <span class="status-dot offline"></span>
-                        <span class="mcp-name">memory-rag</span>
-                        <span class="mcp-status">offline</span>
-                    </div>
-                    <div class="mcp-item">
-                        <span class="status-dot offline"></span>
-                        <span class="mcp-name">code-index</span>
-                        <span class="mcp-status">offline</span>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Context Budget -->
-            <div class="sidebar-panel">
-                <div class="panel-title">
-                    <span>📊 Context Budget</span>
-                </div>
-                <div class="panel-content" id="budgetPanel">
-                    <div class="budget-bar-container">
-                        <div class="budget-bar" id="budgetBar" style="width: 0%"></div>
-                    </div>
-                    <div class="budget-label" id="budgetLabel">0K / 128K</div>
-                    <div class="budget-breakdown" id="budgetBreakdown">
-                        <div class="budget-item"><span class="budget-dot sys"></span>System <span class="budget-val">0K</span></div>
-                        <div class="budget-item"><span class="budget-dot rag"></span>RAG <span class="budget-val">0K</span></div>
-                        <div class="budget-item"><span class="budget-dot hist"></span>History <span class="budget-val">0K</span></div>
-                        <div class="budget-item"><span class="budget-dot tools"></span>Tools <span class="budget-val">0K</span></div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Session Info -->
-            <div class="sidebar-panel">
-                <div class="panel-title">
-                    <span>📋 Session</span>
-                </div>
-                <div class="panel-content" id="sessionPanel">
-                    <div class="session-stat">
-                        <span>迭代次数</span>
-                        <span id="iterCount">0</span>
-                    </div>
-                    <div class="session-stat">
-                        <span>工具调用</span>
-                        <span id="toolCallCount">0</span>
-                    </div>
-                    <div class="session-stat">
-                        <span>Artifacts</span>
-                        <span id="artifactCount">0</span>
-                    </div>
-                </div>
-            </div>
-        </aside>
-    </main>
-
-    <!-- ═══ Input Area ═══ -->
-    <footer class="input-area" id="inputArea">
-        <div class="input-active-skills" id="inputSkillTags"></div>
-        <div class="input-row">
-            <button class="input-icon-btn" id="btnSkillInput" title="Skills (/)">⚡</button>
-            <button class="input-icon-btn" id="btnAttach" title="上传文件">📎</button>
-            <textarea
-                id="userInput"
-                class="user-input"
-                placeholder="发送消息，或用 /skill-name 激活 Skill..."
-                rows="1"
-            ></textarea>
-            <button class="send-btn" id="btnSend" title="发送 (Enter)">
-                <span class="send-icon">↵</span>
-            </button>
-        </div>
-        <div class="input-hint">Enter 发送 · Shift+Enter 换行</div>
-    </footer>
-
-    <!-- ═══ 审批弹窗遮罩 ═══ -->
-    <div class="approval-overlay" id="approvalOverlay" style="display:none;">
-        <div class="approval-modal" id="approvalModal"></div>
-    </div>
-
-    <script src="/static/app.js"></script>
+<body class="bg-surface-primary text-text-primary font-sans antialiased">
+    <div id="root"></div>
+    <script type="module" src="/src.v2/main.tsx"></script>
 </body>
 </html>

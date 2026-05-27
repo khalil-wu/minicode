@@ -24,15 +24,22 @@ MCP 客户端（DESIGN.md §六）。
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
-import os
-import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from backend.runtime_env import sanitized_subprocess_env
+
 logger = logging.getLogger(__name__)
+RETRIABLE_TIMEOUT_TOOLS = {
+    "search",
+    "fetch_page",
+    "mcp__websearch__search",
+    "mcp__websearch__fetch_page",
+}
 
 # ── 数据类型 ────────────────────────────────────────────────
 
@@ -91,21 +98,21 @@ class MCPServerCapabilities:
 class _JsonRpcHelper:
     """JSON-RPC 2.0 请求/响应构建。"""
 
-    _next_id: int = 0
+    _id_counter = itertools.count(1)
 
     @classmethod
     def request(cls, method: str, params: dict[str, Any] | None = None) -> tuple[int, bytes]:
         """构建 JSON-RPC 请求，返回 (id, 编码后的字节)。"""
-        cls._next_id += 1
+        req_id = next(cls._id_counter)
         msg: dict[str, Any] = {
             "jsonrpc": "2.0",
-            "id": cls._next_id,
+            "id": req_id,
             "method": method,
         }
-        if params:
+        if params is not None:
             msg["params"] = params
         payload = json.dumps(msg, ensure_ascii=False)
-        return cls._next_id, (payload + "\n").encode("utf-8")
+        return req_id, (payload + "\n").encode("utf-8")
 
     @classmethod
     def notification(cls, method: str, params: dict[str, Any] | None = None) -> bytes:
@@ -114,7 +121,7 @@ class _JsonRpcHelper:
             "jsonrpc": "2.0",
             "method": method,
         }
-        if params:
+        if params is not None:
             msg["params"] = params
         payload = json.dumps(msg, ensure_ascii=False)
         return (payload + "\n").encode("utf-8")
@@ -192,6 +199,7 @@ class MCPClient:
         # 请求-响应关联
         self._pending: dict[int, asyncio.Future] = {}
         self._reader_task: asyncio.Task | None = None
+        self._stderr_task: asyncio.Task | None = None
 
     @property
     def connected(self) -> bool:
@@ -220,16 +228,27 @@ class MCPClient:
     async def _connect_stdio(self) -> None:
         """stdio 模式连接。"""
         # 构建环境变量
-        env = {**os.environ, **self._env}
+        env = sanitized_subprocess_env(self._env)
+
+        # 确保在使用正确的 Python 环境（如虚拟环境）中启动
+        cmd = self._command
+        if cmd == "python":
+            import sys
+            cmd = sys.executable
+        else:
+            import shutil
+            resolved = shutil.which(cmd)
+            if resolved:
+                cmd = resolved
 
         logger.info(
             "[MCP:%s] 启动子进程: %s %s",
-            self.server_name, self._command, " ".join(self._args),
+            self.server_name, cmd, " ".join(self._args),
         )
 
         try:
             self._process = await asyncio.create_subprocess_exec(
-                self._command, *self._args,
+                cmd, *self._args,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -254,10 +273,26 @@ class MCPClient:
         )
 
         # 启动 stderr 日志协程
-        asyncio.create_task(
+        self._stderr_task = asyncio.create_task(
             self._read_stderr_loop(),
             name=f"mcp-stderr-{self.server_name}",
         )
+
+        # 短暂等待，检测子进程是否在启动阶段立即退出
+        try:
+            await asyncio.wait_for(
+                self._process.wait(),
+                timeout=0.5,
+            )
+            # 进程已退出 — 握手不可能成功，快速失败
+            exit_code = self._process.returncode
+            raise ConnectionError(
+                f"MCP Server '{self.server_name}' 启动后立即退出 (exit={exit_code})，"
+                "请检查依赖是否已安装（如 pip install 'mcp[cli]'）"
+            )
+        except asyncio.TimeoutError:
+            # 进程仍在运行，继续握手
+            pass
 
         # 执行 MCP 握手
         await self._handshake()
@@ -391,10 +426,14 @@ class MCPClient:
                 is_error=True,
             )
 
-        result = await self._send_request_auto("tools/call", {
+        params = {
             "name": tool_name,
             "arguments": arguments or {},
-        })
+        }
+        result = await self._send_request_auto("tools/call", params)
+        if result is None and tool_name in RETRIABLE_TIMEOUT_TOOLS:
+            logger.warning("[MCP:%s] 宸ュ叿璋冪敤瓒呮椂锛岄噸璇曚竴娆? %s", self.server_name, tool_name)
+            result = await self._send_request_auto("tools/call", params)
 
         if result is None:
             return MCPCallResult(
@@ -450,6 +489,12 @@ class MCPClient:
                 await self._reader_task
             except asyncio.CancelledError:
                 pass
+        if self._stderr_task and not self._stderr_task.done():
+            self._stderr_task.cancel()
+            try:
+                await self._stderr_task
+            except asyncio.CancelledError:
+                pass
 
         # 关闭子进程
         if self._process:
@@ -459,7 +504,10 @@ class MCPClient:
                 self._process.terminate()
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
             except (asyncio.TimeoutError, ProcessLookupError):
-                self._process.kill()
+                try:
+                    self._process.kill()
+                except (ProcessLookupError, OSError):
+                    pass
             finally:
                 self._process = None
 
@@ -600,7 +648,13 @@ class MCPClient:
             while True:
                 line = await reader.readline()
                 if not line:
-                    break  # EOF，子进程退出
+                    # EOF — 子进程已退出，取消所有挂起请求让它们快速失败
+                    self._connected = False
+                    for fut in self._pending.values():
+                        if not fut.done():
+                            fut.cancel()
+                    self._pending.clear()
+                    break
 
                 line_str = line.decode("utf-8", errors="replace").strip()
                 if not line_str:

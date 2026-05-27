@@ -77,8 +77,10 @@ class SkillExecutor:
             return ""
 
         return (
-            "\n## 可用 Skills\n"
-            "以下 Skills 可以通过 /skill-name 激活：\n"
+            "\n\n## Available Skills\n"
+            "When the user's request matches a skill description below, "
+            "use load_skill to activate it automatically — no need to ask the user first. "
+            "The user can also invoke skills explicitly via /skill-name.\n\n"
             + summary
         )
 

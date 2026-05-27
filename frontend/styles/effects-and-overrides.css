@@ -1,0 +1,160 @@
+/* ══════════════════════════════════════════════════════════════
+   MiniCode Effects and Overrides CSS
+   Reconstructed CSS for Third-Party Overrides and Effects
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── 状态与动画 (States & Animations) ── */
+.spin-slow {
+  animation: spin 2s linear infinite;
+}
+
+@keyframes titlebarClusterIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes composer-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(-2px) scale(1);
+  }
+}
+
+/* ── 第三方组件重写 (Monaco, xterm, react-window, etc.) ── */
+/* Monaco Editor */
+.monaco-editor {
+  background-color: transparent !important;
+}
+.monaco-editor-background {
+  background-color: transparent !important;
+}
+.monaco-editor .margin {
+  background-color: transparent !important;
+}
+
+/* Xterm.js */
+.xterm .xterm-viewport {
+  background-color: transparent !important;
+}
+
+.terminal-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  background: var(--surface-soft);
+  color: var(--text-secondary);
+  border: 1px solid transparent;
+  border-bottom: none;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.terminal-tab:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.terminal-tab.active {
+  background: var(--surface-panel);
+  color: var(--accent-primary);
+  border-color: var(--border-subtle);
+}
+
+/* File Tree */
+.file-tree-header {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 8px 12px;
+}
+
+.file-tree-node {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.file-tree-node:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.file-tree-node.active {
+  background: var(--accent-soft);
+  color: var(--accent-primary);
+}
+
+/* Diff Review */
+.diff-review-container {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.diff-hunk {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--surface-panel);
+}
+
+.diff-hunk-header {
+  background: var(--surface-soft);
+  padding: 8px 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.diff-hunk-line {
+  display: flex;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.diff-hunk-line.addition {
+  background: rgba(52, 211, 153, 0.1);
+  color: #34d399;
+}
+
+.diff-hunk-line.deletion {
+  background: rgba(248, 113, 113, 0.1);
+  color: #f87171;
+}
+
+.diff-hunk-line-number {
+  min-width: 40px;
+  padding: 0 8px;
+  color: var(--text-disabled);
+  text-align: right;
+  user-select: none;
+  border-right: 1px solid var(--border-subtle);
+}
+
+.diff-hunk-line-content {
+  padding: 0 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

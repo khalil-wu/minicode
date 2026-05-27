@@ -1,0 +1,237 @@
+/*
+ * tokens.css — Single source of truth for all design tokens.
+ *
+ * Aligned with: .kiro/specs/desktop-ui-redesign/design.md
+ *   §Pillar 1 (Color System), §Pillar 2 (Typography),
+ *   §Cross-cutting #6 (Theming), #7 (Motion), #8 (A11y), #9 (Performance).
+ *
+ * All colors are expressed in OKLCH for perceptual uniformity.
+ * All token values come from design.md anchor tables (§1.1–§1.5, §2.2–§2.5).
+ *
+ * Theme scoping:
+ *   :root                  — default dark theme
+ *   [data-theme="light"]   — forced light theme (set by inline boot script)
+ *
+ * The set of token names defined in :root MUST equal the set defined in
+ * [data-theme="light"] (P1.7 / P6.2 light parity invariant).
+ *
+ * Component-layer code SHALL NOT use raw hex / rgba literals — only
+ * `var(--token-name)` references (P1.6).
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* ── Surface layers (8) — Pillar 1.1
+     Tonal monotonicity invariant (P1.2):
+       L is monotone non-decreasing across the 8 steps,
+       adjacent ΔL ∈ [0.018, 0.035]. ───────────────────── */
+  --surface-base:    oklch(0.145 0.004 80);
+  --surface-sidebar: oklch(0.165 0.004 80);
+  --surface-page:    oklch(0.185 0.005 80);
+  --surface-soft:    oklch(0.210 0.005 80);
+  --surface-panel:   oklch(0.230 0.006 80);
+  --surface-raised:  oklch(0.260 0.006 80);
+  --surface-hover:   oklch(0.295 0.007 80);
+  --surface-active:  oklch(0.330 0.007 80);
+
+  /* ── Text (4) — Pillar 1.2
+     WCAG invariant (P1.3): primary/secondary ≥ 4.5:1 vs any surface,
+     muted ≥ 3.0:1 (large text only). ────────────────────── */
+  --text-primary:   oklch(0.965 0.005 80);
+  --text-secondary: oklch(0.840 0.006 80);
+  --text-muted:     oklch(0.680 0.006 80);
+  --text-disabled:  oklch(0.965 0.005 80 / 0.50);
+  --text-on-accent: oklch(0.985 0.005 80);
+
+  /* ── Border (4) — Pillar 1.3 ──────────────────────────── */
+  --border-subtle: oklch(0.870 0.006 80 / 0.15);
+  --border-soft:   oklch(0.870 0.006 80 / 0.22);
+  --border-strong: oklch(0.870 0.006 80 / 0.40);
+  --border-focus:  var(--accent-primary);
+
+  /* ── Accent (7) — Pillar 1.3
+     P1.5: hue ∈ [60°, 80°], chroma ∈ [0.04, 0.10] for primary.
+     --accent-primary  ≈ #a89278 (warm brown, Anthropic mid)
+     --accent-strong   ≈ #d97757 (warm orange, used sparingly) ── */
+  --accent-primary:   oklch(0.66 0.05 70);
+  --accent-secondary: oklch(0.74 0.06 72);
+  --accent-strong:    oklch(0.69 0.13 45);
+  --accent-hover:     oklch(0.78 0.06 70);
+  --accent-active:    oklch(0.58 0.05 70);
+  --accent-soft:      oklch(0.66 0.05 70 / 0.10);
+  --accent-glow:      none;
+
+  /* ── State (8) — Pillar 1.4
+     4 base + 4 soft (alpha 0.12). Hue ranges per requirement R1.4. ── */
+  --state-success:      oklch(0.74 0.13 142);
+  --state-success-soft: oklch(0.74 0.13 142 / 0.12);
+  --state-warning:      oklch(0.78 0.14 80);
+  --state-warning-soft: oklch(0.78 0.14 80 / 0.12);
+  --state-danger:       oklch(0.71 0.16 28);
+  --state-danger-soft:  oklch(0.71 0.16 28 / 0.12);
+  --state-info:         oklch(0.74 0.10 240);
+  --state-info-soft:    oklch(0.74 0.10 240 / 0.12);
+  --command-accent:        oklch(0.82 0.045 245);
+  --command-accent-strong: oklch(0.86 0.055 245);
+  --command-border:        oklch(0.82 0.045 245 / 0.48);
+
+  /* ── Font stacks (3) — Pillar 2.2
+     Three families: UI sans / Mono / Reading prose.
+     Each stack provides ≥ 3 fallbacks. ─────────────────── */
+  --font-ui:    "Inter Variable", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif;
+  --font-mono:  "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, "SF Mono", Monaco, Consolas, monospace;
+  --font-prose: "Source Serif 4", "Source Sans 3", "Inter Variable", "Inter", -apple-system, "Noto Sans SC", sans-serif;
+
+  /* ── Font sizes (8) — Pillar 2.3 ── */
+  --text-xs:   13px;
+  --text-sm:   14px;
+  --text-base: 15px;
+  --text-md:   16px;
+  --text-lg:   20px;
+  --text-xl:   24px;
+  --text-2xl:  30px;
+  --text-3xl:  38px;
+
+  /* ── Leading (5) — Pillar 2.4 ─────────────────────────── */
+  --leading-tight:   1.25;
+  --leading-snug:    1.40;
+  --leading-normal:  1.55;
+  --leading-relaxed: 1.70;
+  --leading-loose:   1.85;
+
+  /* ── Weight (4) — Pillar 2.5 ──────────────────────────── */
+  --weight-regular:  400;
+  --weight-medium:   500;
+  --weight-semibold: 600;
+  --weight-bold:     700;
+
+  /* ── Radius (5) ───────────────────────────────────────── */
+  --radius-sm:   6px;
+  --radius-md:   8px;
+  --radius-lg:   12px;
+  --radius-xl:   14px;
+  --radius-full: 9999px;
+
+  /* ── Shadows (4) ──────────────────────────────────────── */
+  --shadow-sm:     0 1px 3px 0 rgba(0, 0, 0, 0.10), 0 1px 2px -1px rgba(0, 0, 0, 0.10);
+  --shadow-md:     0 4px 6px -1px rgba(0, 0, 0, 0.10), 0 2px 4px -2px rgba(0, 0, 0, 0.10);
+  --shadow-panel:  0 1px 3px 0 rgba(0, 0, 0, 0.10), 0 1px 2px -1px rgba(0, 0, 0, 0.10);
+  --shadow-strong: 0 10px 15px -3px rgba(0, 0, 0, 0.10), 0 4px 6px -4px rgba(0, 0, 0, 0.10);
+
+  /* ── Transitions (4) — Cross-cutting #7
+     Single registry: 100 / 150 / 200 / 250 ms with the standard
+     material easing. Animation duration allowlist documented in
+     design.md §Cross-cutting #7. ───────────────────────── */
+  --transition-micro:  all 100ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-fast:   all 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-normal: all 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-slow:   all 250ms cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* ── Layout vars ──────────────────────────────────────── */
+  --header-height:       44px;
+  --dock-height:         280px;
+  --app-text-scale:      1;
+  --sidebar-width:       240px;
+  --context-panel-width: 280px;
+  --input-max-width:     860px;
+
+  /* ────────────────────────────────────────────────────────
+     Backward-compatibility aliases.
+
+     These names are referenced by existing components / CSS files
+     during the multi-phase migration. They map onto the new token
+     vocabulary without changing visual output. Phase F (final
+     hardening) will remove these once all callers have been migrated.
+
+     Per design.md §"Risk Mitigation":
+       "tokens.css 中保留别名 ... 避免 breaking，新增 token 时只加不删，
+        Phase F 可清理 deprecated alias"
+     ──────────────────────────────────────────────────────── */
+  --font-sans:        var(--font-ui);
+  --surface-input:    oklch(0.240 0.006 80);
+  --surface-overlay:  oklch(0.260 0.006 80);
+  --text-strong:      oklch(0.965 0.005 80);
+  --accent-border:    oklch(0.66 0.05 70 / 0.25);
+  --shadow-glow:      none;
+  --ai-accent:            #a89278;
+  --ai-accent-rgb:        168, 146, 120;
+  --ai-accent-strong:     #c4a882;
+  --ai-accent-strong-rgb: 196, 168, 130;
+  --ai-accent-deep-rgb:   140, 122, 100;
+  --accent-rgb:           168, 146, 120;
+}
+
+/* ════════════════════════════════════════════════════════
+   Light theme — forced via inline boot script writing
+   `data-theme="light"` to <html> before first paint.
+   Token name set MUST match :root (P1.7 / P6.2).
+   ════════════════════════════════════════════════════════ */
+[data-theme="light"] {
+  color-scheme: light;
+
+  /* Surface (8) */
+  --surface-base:    oklch(0.985 0.004 85);
+  --surface-sidebar: oklch(0.972 0.004 85);
+  --surface-page:    oklch(0.962 0.004 85);
+  --surface-soft:    oklch(0.945 0.004 85);
+  --surface-panel:   oklch(0.930 0.005 85);
+  --surface-raised:  oklch(0.910 0.005 85);
+  --surface-hover:   oklch(0.880 0.005 85);
+  --surface-active:  oklch(0.850 0.006 85);
+
+  /* Text (4) */
+  --text-primary:   oklch(0.220 0.006 80);
+  --text-secondary: oklch(0.380 0.006 80);
+  --text-muted:     oklch(0.520 0.006 80);
+  --text-disabled:  oklch(0.220 0.006 80 / 0.50);
+  --text-on-accent: oklch(0.985 0.005 80);
+
+  /* Border (4) */
+  --border-subtle: oklch(0.220 0.006 80 / 0.10);
+  --border-soft:   oklch(0.220 0.006 80 / 0.18);
+  --border-strong: oklch(0.220 0.006 80 / 0.30);
+  --border-focus:  var(--accent-primary);
+
+  /* Accent (7) — light mode pushes L lower so primary stays
+     ≥ 4.5:1 vs surface-page (P1.4 invariant under light theme). */
+  --accent-primary:   oklch(0.55 0.06 65);
+  --accent-secondary: oklch(0.62 0.06 67);
+  --accent-strong:    oklch(0.58 0.13 45);
+  --accent-hover:     oklch(0.49 0.06 65);
+  --accent-active:    oklch(0.42 0.06 65);
+  --accent-soft:      oklch(0.55 0.06 65 / 0.12);
+  --accent-glow:      none;
+
+  /* State (8) — chroma raised on light surfaces for visibility. */
+  --state-success:      oklch(0.55 0.16 142);
+  --state-success-soft: oklch(0.55 0.16 142 / 0.12);
+  --state-warning:      oklch(0.62 0.16 80);
+  --state-warning-soft: oklch(0.62 0.16 80 / 0.12);
+  --state-danger:       oklch(0.55 0.18 28);
+  --state-danger-soft:  oklch(0.55 0.18 28 / 0.12);
+  --state-info:         oklch(0.52 0.13 240);
+  --state-info-soft:    oklch(0.52 0.13 240 / 0.12);
+  --command-accent:        oklch(0.62 0.075 245);
+  --command-accent-strong: oklch(0.47 0.085 245);
+  --command-border:        oklch(0.62 0.075 245 / 0.42);
+
+  /* Shadows — deeper on light backgrounds for proper elevation. */
+  --shadow-sm:     0 1px 3px 0 rgba(15, 23, 42, 0.08), 0 1px 2px -1px rgba(15, 23, 42, 0.06);
+  --shadow-md:     0 4px 6px -1px rgba(15, 23, 42, 0.10), 0 2px 4px -2px rgba(15, 23, 42, 0.08);
+  --shadow-panel:  0 1px 3px 0 rgba(15, 23, 42, 0.10), 0 1px 2px -1px rgba(15, 23, 42, 0.08);
+  --shadow-strong: 0 10px 15px -3px rgba(15, 23, 42, 0.12), 0 4px 6px -4px rgba(15, 23, 42, 0.10);
+
+  /* Backward-compat aliases (mirror :root layout). */
+  --surface-input:        oklch(0.945 0.004 85);
+  --surface-overlay:      oklch(0.930 0.005 85);
+  --text-strong:          oklch(0.150 0.006 80);
+  --accent-border:        oklch(0.55 0.06 65 / 0.30);
+  --shadow-glow:          none;
+  --ai-accent:            #8c7a64;
+  --ai-accent-rgb:        140, 122, 100;
+  --ai-accent-strong:     #b9986f;
+  --ai-accent-strong-rgb: 185, 152, 111;
+  --ai-accent-deep-rgb:   105, 90, 72;
+  --accent-rgb:           140, 122, 100;
+}

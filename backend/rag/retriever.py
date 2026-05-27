@@ -1,14 +1,5 @@
 """
-向量检索器（DESIGN.md §四.1/4.2）。
-
-两种 RAG 路径共用此检索器：
-  1. 被动 RAG: Context 构建时静默注入（用户无感知）
-  2. 主动 RAG: Agent 调用 mcp__memory_rag__recall 按需检索
-
-检索后的后处理：
-  - 相关性过滤: 低于阈值的结果丢弃
-  - 去重: 内容高度重叠的结果合并
-  - 截断: 按 token 预算裁剪
+Vector retrieval shared by passive and active RAG flows.
 """
 
 from __future__ import annotations
@@ -22,25 +13,21 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RetrievedChunk:
-    """检索到的内容块。"""
+    """A retrieved chunk plus score and source metadata."""
+
     content: str
-    score: float  # 相关性分数 [0, 1]
-    source: str = ""  # 来源标识
+    score: float
+    source: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class Retriever:
     """
-    向量检索器。
+    Shared vector retriever.
 
-    使用示例：
-        retriever = Retriever()
-        results = retriever.retrieve(
-            query="WebSocket 消息处理",
-            collection=chroma_collection,
-            top_k=5,
-            min_score=0.7,
-        )
+    Used by:
+    1. Passive RAG: context injection during prompt building.
+    2. Active RAG: explicit recall tools.
     """
 
     def __init__(
@@ -54,39 +41,47 @@ class Retriever:
     def retrieve(
         self,
         query: str,
-        collection: Any,  # chromadb.Collection
+        collection: Any,
         top_k: int | None = None,
         min_score: float | None = None,
         where_filter: dict[str, Any] | None = None,
+        query_embeddings: list[list[float]] | None = None,
     ) -> list[RetrievedChunk]:
         """
-        从 ChromaDB collection 检索相关内容。
-
-        Args:
-            query: 查询文本
-            collection: ChromaDB collection 对象
-            top_k: 返回数量上限
-            min_score: 最低相关性阈值
-            where_filter: 元数据过滤条件
-
-        Returns:
-            RetrievedChunk 列表（按相关性排序）
+        Retrieve relevant chunks from a Chroma collection.
         """
+
         top_k = top_k or self._default_top_k
         min_score = min_score if min_score is not None else self._default_min_score
 
-        try:
-            query_kwargs: dict[str, Any] = {
-                "query_texts": [query],
-                "n_results": top_k,
-            }
-            if where_filter:
-                query_kwargs["where"] = where_filter
+        query_kwargs: dict[str, Any] = {"n_results": top_k}
+        if query_embeddings:
+            query_kwargs["query_embeddings"] = query_embeddings
+        else:
+            query_kwargs["query_texts"] = [query]
 
+        if where_filter:
+            query_kwargs["where"] = where_filter
+
+        try:
             results = collection.query(**query_kwargs)
         except Exception as exc:
-            logger.error("向量检索失败: %s", exc)
-            return []
+            if not query_embeddings:
+                logger.error("向量检索失败: %s", exc)
+                return []
+
+            logger.warning("向量检索失败，回退到 query_texts: %s", exc)
+            fallback_kwargs: dict[str, Any] = {
+                "n_results": top_k,
+                "query_texts": [query],
+            }
+            if where_filter:
+                fallback_kwargs["where"] = where_filter
+            try:
+                results = collection.query(**fallback_kwargs)
+            except Exception as fallback_exc:
+                logger.error("向量检索失败: %s", fallback_exc)
+                return []
 
         if not results or not results["ids"] or not results["ids"][0]:
             return []
@@ -97,24 +92,21 @@ class Retriever:
         metas = results["metadatas"][0] if results.get("metadatas") else []
         distances = results["distances"][0] if results.get("distances") else []
 
-        for i, (doc_id, doc, meta) in enumerate(zip(ids, docs, metas)):
-            # 距离转相关性分数
+        for i, (_doc_id, doc, meta) in enumerate(zip(ids, docs, metas)):
             score = 1.0 - (distances[i] if i < len(distances) else 0.5)
-
-            # 过滤低相关性
             if score < min_score:
                 continue
 
-            chunks.append(RetrievedChunk(
-                content=doc,
-                score=score,
-                source=meta.get("source", "") if meta else "",
-                metadata=meta or {},
-            ))
+            chunks.append(
+                RetrievedChunk(
+                    content=doc,
+                    score=score,
+                    source=meta.get("source", "") if meta else "",
+                    metadata=meta or {},
+                )
+            )
 
-        # 去重：内容高度重叠的合并
         chunks = self._deduplicate(chunks)
-
         return chunks
 
     def retrieve_and_format(
@@ -124,33 +116,23 @@ class Retriever:
         top_k: int = 3,
         min_score: float = 0.82,
         max_tokens: int = 3000,
+        query_embeddings: list[list[float]] | None = None,
     ) -> str:
         """
-        检索并格式化为注入 context 的文本。
-
-        用于被动 RAG：直接返回可拼入 system prompt 的文本。
-
-        Args:
-            query: 查询文本
-            collection: ChromaDB collection
-            top_k: 返回数量
-            min_score: 相关性阈值（被动 RAG 用较高阈值）
-            max_tokens: 输出 token 上限
-
-        Returns:
-            格式化的背景知识文本，空字符串表示无相关内容
+        Retrieve and format results for prompt injection.
         """
+
         chunks = self.retrieve(
             query=query,
             collection=collection,
             top_k=top_k,
             min_score=min_score,
+            query_embeddings=query_embeddings,
         )
 
         if not chunks:
             return ""
 
-        # 按 token 预算裁剪
         parts: list[str] = []
         used = 0
         max_chars = max_tokens * 4
@@ -173,27 +155,34 @@ class Retriever:
         similarity_threshold: float = 0.8,
     ) -> list[RetrievedChunk]:
         """
-        去除内容高度重叠的检索结果。
-
-        使用简单的 Jaccard 相似度判断重叠。
+        Remove highly overlapping chunks using character 3-gram Jaccard similarity.
         """
+
         if len(chunks) <= 1:
             return chunks
+
+        def _ngrams(text: str, n: int = 3) -> set[str]:
+            text = text.lower().strip()
+            if len(text) < n:
+                return {text}
+            return {text[i : i + n] for i in range(len(text) - n + 1)}
 
         result: list[RetrievedChunk] = []
 
         for chunk in chunks:
             is_duplicate = False
-            chunk_words = set(chunk.content.split())
+            chunk_grams = _ngrams(chunk.content)
+
+            if not chunk_grams:
+                continue
 
             for existing in result:
-                existing_words = set(existing.content.split())
-                if not chunk_words or not existing_words:
+                existing_grams = _ngrams(existing.content)
+                if not existing_grams:
                     continue
 
-                # Jaccard 相似度
-                intersection = len(chunk_words & existing_words)
-                union = len(chunk_words | existing_words)
+                intersection = len(chunk_grams & existing_grams)
+                union = len(chunk_grams | existing_grams)
                 similarity = intersection / union if union > 0 else 0
 
                 if similarity > similarity_threshold:

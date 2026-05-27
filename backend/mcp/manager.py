@@ -1,45 +1,60 @@
-"""
-MCP Server 生命周期管理（DESIGN.md §六）。
-
-职责：
-  - 从 .mcp.json 读取所有 Server 配置
-  - 启动 / 停止 / 重启 MCP Server
-  - 健康检查（定期 ping）
-  - 连接状态通知（前端侧边栏联动）
-  - 错误恢复（自动重连，最多 3 次）
-
-.mcp.json 格式（与 Claude Code 兼容）：
-  {
-    "mcpServers": {
-      "websearch": {
-        "command": "python",
-        "args": ["-m", "backend.mcp.servers.websearch"],
-        "env": {}
-      }
-    }
-  }
-"""
-
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import os
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Awaitable
+from typing import Any, Awaitable, Callable
 
 from backend.config import PROJECT_ROOT
 from backend.mcp.client import MCPClient, MCPToolDef, MCPTransport
 
 logger = logging.getLogger(__name__)
 
+_ALLOWED_MCP_COMMANDS = frozenset({
+    "python", "python3", "python3.11", "python3.12", "python3.13",
+    "node", "npx", "npm", "uv", "uvx", "pip", "pipx",
+    "deno", "bun", "bunx", "tsx", "ts-node",
+    "docker", "podman",
+})
+
+_DANGEROUS_SHELL_CHARS = re.compile(r"[;&|`$(){}!<>]")
+
+
+def _is_safe_mcp_command(command: str) -> bool:
+    """Validate that an MCP server command is from the allowlist."""
+    cmd = command.strip()
+    base = Path(cmd).name.lower()
+    if base.endswith(".exe"):
+        base = base[:-4]
+    if base in _ALLOWED_MCP_COMMANDS:
+        return True
+    if cmd.startswith(("/", "\\")) or (len(cmd) > 2 and cmd[1] == ":"):
+        base = Path(cmd).stem.lower()
+        return base in _ALLOWED_MCP_COMMANDS
+    return False
+
+
+def _has_shell_injection(args: list[str]) -> bool:
+    """Check if args contain shell metacharacters that suggest injection."""
+    for arg in args:
+        if _DANGEROUS_SHELL_CHARS.search(arg):
+            return True
+    return False
+
+
 MCP_CONFIG_FILE = PROJECT_ROOT / ".mcp.json"
+OPENMCP_CONFIG_FILE = PROJECT_ROOT / ".openmcp" / "connection.json"
+MCP_CIRCUIT_BREAKER_THRESHOLD = 5
+_HEALTH_CHECK_INTERVAL_SECONDS = 60.0
+_ORIGINAL_ASYNCIO_SLEEP = asyncio.sleep
 
 
 class ServerStatus(Enum):
-    """Server 连接状态。"""
     OFFLINE = "offline"
     STARTING = "starting"
     CONNECTED = "connected"
@@ -49,7 +64,6 @@ class ServerStatus(Enum):
 
 @dataclass
 class MCPServerConfig:
-    """单个 MCP Server 的配置。"""
     name: str
     command: str = "python"
     args: list[str] = field(default_factory=list)
@@ -58,207 +72,228 @@ class MCPServerConfig:
     url: str | None = None
     auto_start: bool = True
     max_retries: int = 3
+    source: str = "local"
+    priority: int = 1000
 
 
 @dataclass
 class MCPServerState:
-    """MCP Server 的运行时状态。"""
     config: MCPServerConfig
     client: MCPClient | None = None
     status: ServerStatus = ServerStatus.OFFLINE
     tools: list[MCPToolDef] = field(default_factory=list)
     retry_count: int = 0
     last_error: str = ""
+    consecutive_failures: int = 0
+    circuit_open: bool = False
 
     def to_status_dict(self) -> dict[str, Any]:
-        """转换为前端可用的状态字典。"""
         return {
             "name": self.config.name,
             "status": self.status.value,
             "tools_count": len(self.tools),
             "error": self.last_error if self.status == ServerStatus.ERROR else "",
+            "source": self.config.source,
+            "priority": self.config.priority,
+            "transport": self.config.transport,
         }
 
 
 class MCPServerManager:
-    """
-    MCP Server 生命周期管理器。
-
-    使用示例：
-        manager = MCPServerManager()
-        await manager.start_all()        # 启动所有配置的 Server
-        tools = manager.get_all_tools()  # 获取所有 Server 提供的工具
-        await manager.stop_all()         # 停止所有 Server
-    """
-
     def __init__(
         self,
         config_path: Path | None = None,
         on_status_change: Callable[[str, ServerStatus], Awaitable[None]] | None = None,
+        openmcp_config_path: Path | None = None,
     ) -> None:
-        """
-        初始化管理器。
-
-        Args:
-            config_path: .mcp.json 路径（默认项目根目录）
-            on_status_change: 状态变更回调（用于推送前端）
-        """
         self._config_path = config_path or MCP_CONFIG_FILE
+        self._openmcp_config_path = openmcp_config_path or OPENMCP_CONFIG_FILE
         self._servers: dict[str, MCPServerState] = {}
         self._on_status_change = on_status_change
-        self._health_tasks: dict[str, asyncio.Task] = {}
+        self._health_tasks: dict[str, asyncio.Task[Any]] = {}
 
     def load_config(self) -> list[MCPServerConfig]:
-        """
-        从 .mcp.json 加载配置。
+        external_configs = self._load_openmcp_configs()
+        local_configs = self._load_local_configs()
 
-        格式兼容 Claude Code 的 .mcp.json。
-        """
+        merged: dict[str, MCPServerConfig] = {}
+        for config in external_configs:
+            merged[config.name] = config
+        for config in local_configs:
+            merged.setdefault(config.name, config)
+
+        return list(merged.values())
+
+    def _load_local_configs(self) -> list[MCPServerConfig]:
         if not self._config_path.exists():
-            logger.info("未找到 %s，跳过 MCP Server 加载", self._config_path)
+            logger.info("No local MCP config found at %s", self._config_path)
             return []
 
         try:
-            with open(self._config_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            data = json.loads(self._config_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as exc:
-            logger.error("读取 .mcp.json 失败: %s", exc)
+            logger.error("Failed to read %s: %s", self._config_path, exc)
             return []
 
         servers_data = data.get("mcpServers", {})
         configs: list[MCPServerConfig] = []
+        for index, (name, conf) in enumerate(servers_data.items()):
+            command = conf.get("command", "python")
+            args = list(conf.get("args", []))
+            if not _is_safe_mcp_command(command):
+                logger.warning(
+                    "MCP server '%s' blocked: command '%s' not in allowlist", name, command
+                )
+                continue
+            if _has_shell_injection(args):
+                logger.warning(
+                    "MCP server '%s' blocked: args contain shell metacharacters", name
+                )
+                continue
+            resolved_env = {
+                str(key): _resolve_env_placeholders(str(value))
+                for key, value in dict(conf.get("env", {})).items()
+            }
+            configs.append(
+                MCPServerConfig(
+                    name=name,
+                    command=command,
+                    args=args,
+                    env=resolved_env,
+                    transport=conf.get("transport", "stdio"),
+                    url=_optional_str(_resolve_env_placeholders(conf.get("url"))),
+                    auto_start=conf.get("autoStart", True),
+                    max_retries=conf.get("maxRetries", 3),
+                    source="local",
+                    priority=1000 + index,
+                )
+            )
+        return configs
 
-        for name, conf in servers_data.items():
-            configs.append(MCPServerConfig(
-                name=name,
-                command=conf.get("command", "python"),
-                args=conf.get("args", []),
-                env=conf.get("env", {}),
-                transport=conf.get("transport", "stdio"),
-                url=conf.get("url"),
-                auto_start=conf.get("autoStart", True),
-                max_retries=conf.get("maxRetries", 3),
-            ))
+    def _load_openmcp_configs(self) -> list[MCPServerConfig]:
+        if not self._openmcp_config_path.exists():
+            logger.info("No external MCP config found at %s", self._openmcp_config_path)
+            return []
 
-        logger.info("从 .mcp.json 加载了 %d 个 Server 配置", len(configs))
+        try:
+            data = json.loads(self._openmcp_config_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.error("Failed to read %s: %s", self._openmcp_config_path, exc)
+            return []
+
+        items = data.get("items", [])
+        configs: list[MCPServerConfig] = []
+        for index, raw_item in enumerate(items):
+            item = dict(raw_item or {})
+            nested = item.get("server")
+            if isinstance(nested, dict):
+                merged = dict(nested)
+                merged.update({k: v for k, v in item.items() if k != "server"})
+                item = merged
+
+            if item.get("enabled", True) is False:
+                continue
+
+            resolved_item = _resolve_mapping_placeholders(item)
+            name = str(
+                resolved_item.get("name")
+                or resolved_item.get("id")
+                or resolved_item.get("server_name")
+                or resolved_item.get("provider")
+                or ""
+            ).strip()
+            if not name:
+                continue
+
+            transport = str(resolved_item.get("transport") or "").strip().lower()
+            url = resolved_item.get("url") or resolved_item.get("endpoint")
+            if not transport:
+                transport = "http" if url else "stdio"
+            if transport == "http" and not _optional_str(url):
+                continue
+
+            priority = _safe_int(resolved_item.get("priority"), default=index)
+            configs.append(
+                MCPServerConfig(
+                    name=name,
+                    command=str(resolved_item.get("command") or "python"),
+                    args=[str(arg) for arg in list(resolved_item.get("args", []))],
+                    env={
+                        str(key): str(value)
+                        for key, value in dict(resolved_item.get("env", {})).items()
+                    },
+                    transport=transport,
+                    url=_optional_str(url),
+                    auto_start=bool(
+                        resolved_item.get(
+                            "autoStart", resolved_item.get("auto_start", True)
+                        )
+                    ),
+                    max_retries=_safe_int(resolved_item.get("maxRetries"), default=3),
+                    source="external",
+                    priority=priority,
+                )
+            )
+
+        configs.sort(key=lambda config: (config.priority, config.name))
         return configs
 
     async def start_all(self) -> None:
-        """启动所有配置为 auto_start 的 Server。"""
-        configs = self.load_config()
-
-        tasks = []
-        for config in configs:
-            if config.auto_start:
-                tasks.append(self.start_server(config))
-
+        tasks = [
+            self.start_server(config)
+            for config in self.load_config()
+            if config.auto_start
+        ]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def start_server(self, config: MCPServerConfig) -> None:
-        """
-        启动单个 MCP Server。
-
-        流程：
-          1. 创建 MCPClient
-          2. 连接（启动子进程 + 握手）
-          3. 获取工具列表
-          4. 更新状态
-          5. 启动健康检查
-        """
-        name = config.name
-        logger.info("[MCPManager] 启动 Server: %s", name)
-
-        # 更新状态
-        state = MCPServerState(config=config, status=ServerStatus.STARTING)
-        self._servers[name] = state
-        await self._notify_status(name, ServerStatus.STARTING)
-
-        # 创建客户端
-        transport = MCPTransport.HTTP if config.transport == "http" else MCPTransport.STDIO
-        client = MCPClient(
-            server_name=name,
-            command=config.command,
-            args=config.args,
-            env=config.env,
-            transport=transport,
-            url=config.url,
-            timeout=30.0,
-        )
-        state.client = client
-
-        try:
-            # 连接
-            await client.connect()
-
-            # 获取工具列表
-            tools = await client.list_tools()
-            state.tools = tools
-            state.status = ServerStatus.CONNECTED
-            state.retry_count = 0
-            state.last_error = ""
-
-            await self._notify_status(name, ServerStatus.CONNECTED)
-            logger.info(
-                "[MCPManager] Server '%s' 已连接, %d 个工具",
-                name, len(tools),
-            )
-
-            # 启动健康检查
-            self._start_health_check(name)
-
-        except Exception as exc:
-            error_msg = str(exc)
-            logger.error("[MCPManager] Server '%s' 启动失败: %s", name, error_msg)
+        state = await self._prepare_state(config)
+        if state.circuit_open:
             state.status = ServerStatus.ERROR
-            state.last_error = error_msg
-            await self._notify_status(name, ServerStatus.ERROR)
-
-    async def stop_server(self, name: str) -> None:
-        """停止单个 Server。"""
-        state = self._servers.get(name)
-        if not state:
+            if not state.last_error:
+                state.last_error = self._build_circuit_error_message()
+            await self._notify_status(config.name, ServerStatus.ERROR)
             return
 
-        # 取消健康检查
+        state.status = ServerStatus.STARTING
+        await self._notify_status(config.name, ServerStatus.STARTING)
+        await self._attempt_connection(config.name, state)
+
+    async def stop_server(self, name: str) -> None:
+        state = self._servers.get(name)
+        if state is None:
+            return
+
         health_task = self._health_tasks.pop(name, None)
         if health_task and not health_task.done():
             health_task.cancel()
 
-        # 关闭客户端
         if state.client:
             await state.client.close()
 
         state.status = ServerStatus.OFFLINE
         state.tools = []
+        state.retry_count = 0
+        state.consecutive_failures = 0
+        state.circuit_open = False
+        state.last_error = ""
         await self._notify_status(name, ServerStatus.OFFLINE)
-        logger.info("[MCPManager] Server '%s' 已停止", name)
 
     async def stop_all(self) -> None:
-        """停止所有 Server。"""
         tasks = [self.stop_server(name) for name in list(self._servers.keys())]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def restart_server(self, name: str) -> None:
-        """重启单个 Server。"""
         state = self._servers.get(name)
-        if not state:
+        if state is None:
             return
-
         await self.stop_server(name)
         await asyncio.sleep(1)
         await self.start_server(state.config)
 
-    # ── 工具查询 ──────────────────────────────────────
-
     def get_all_tools(self) -> dict[str, list[MCPToolDef]]:
-        """
-        获取所有已连接 Server 的工具列表。
-
-        Returns:
-            {server_name: [MCPToolDef, ...]}
-        """
         result: dict[str, list[MCPToolDef]] = {}
         for name, state in self._servers.items():
             if state.status == ServerStatus.CONNECTED and state.tools:
@@ -266,95 +301,183 @@ class MCPServerManager:
         return result
 
     def get_client(self, server_name: str) -> MCPClient | None:
-        """获取指定 Server 的客户端实例。"""
         state = self._servers.get(server_name)
         if state and state.status == ServerStatus.CONNECTED:
             return state.client
         return None
 
     def get_all_status(self) -> list[dict[str, Any]]:
-        """获取所有 Server 的状态（用于前端侧边栏）。"""
         return [state.to_status_dict() for state in self._servers.values()]
 
     @property
     def connected_count(self) -> int:
         return sum(
-            1 for s in self._servers.values()
-            if s.status == ServerStatus.CONNECTED
+            1
+            for state in self._servers.values()
+            if state.status == ServerStatus.CONNECTED
         )
-
-    # ── 健康检查 ──────────────────────────────────────
 
     def _start_health_check(self, name: str) -> None:
-        """启动后台健康检查任务。"""
-        # 取消旧任务
-        old = self._health_tasks.pop(name, None)
-        if old and not old.done():
-            old.cancel()
+        old_task = self._health_tasks.pop(name, None)
+        if old_task and not old_task.done():
+            old_task.cancel()
 
-        task = asyncio.create_task(
-            self._health_check_loop(name),
-            name=f"mcp-health-{name}",
-        )
+        task = asyncio.create_task(self._health_check_loop(name), name=f"mcp-health-{name}")
         self._health_tasks[name] = task
 
     async def _health_check_loop(self, name: str) -> None:
-        """
-        定期检查 Server 健康状态。
-
-        策略：
-          - 每 60 秒尝试 list_tools()
-          - 失败时标记 ERROR，尝试重连
-          - 重连失败 3 次后放弃
-        """
         try:
             while True:
-                await asyncio.sleep(60)
-
+                await _ORIGINAL_ASYNCIO_SLEEP(_HEALTH_CHECK_INTERVAL_SECONDS)
                 state = self._servers.get(name)
                 if not state or state.status != ServerStatus.CONNECTED:
-                    break
-
+                    return
                 if not state.client or not state.client.connected:
-                    # 连接断开，尝试重连
                     await self._try_reconnect(name)
-                    break
-
+                    return
         except asyncio.CancelledError:
-            pass
+            return
 
     async def _try_reconnect(self, name: str) -> None:
-        """尝试重连 Server。"""
         state = self._servers.get(name)
-        if not state:
+        if state is None:
+            return
+
+        if state.circuit_open:
+            state.status = ServerStatus.ERROR
+            if not state.last_error:
+                state.last_error = self._build_circuit_error_message()
+            await self._notify_status(name, ServerStatus.ERROR)
             return
 
         if state.retry_count >= state.config.max_retries:
-            logger.warning(
-                "[MCPManager] Server '%s' 重连次数已达上限 (%d)",
-                name, state.config.max_retries,
-            )
             state.status = ServerStatus.ERROR
-            state.last_error = f"重连 {state.config.max_retries} 次失败"
+            state.last_error = f"Reconnect failed after {state.config.max_retries} attempts"
             await self._notify_status(name, ServerStatus.ERROR)
             return
 
         state.retry_count += 1
         state.status = ServerStatus.RECONNECTING
         await self._notify_status(name, ServerStatus.RECONNECTING)
+        await asyncio.sleep(2 ** state.retry_count)
+        await self._attempt_connection(name, state)
 
-        logger.info(
-            "[MCPManager] 重连 Server '%s' (第 %d/%d 次)",
-            name, state.retry_count, state.config.max_retries,
+    async def _attempt_connection(self, name: str, state: MCPServerState) -> None:
+        client = state.client or self._create_client(state.config)
+        state.client = client
+
+        try:
+            await client.connect()
+            state.tools = await client.list_tools()
+            state.status = ServerStatus.CONNECTED
+            state.retry_count = 0
+            state.consecutive_failures = 0
+            state.circuit_open = False
+            state.last_error = ""
+            await self._notify_status(name, ServerStatus.CONNECTED)
+            self._start_health_check(name)
+        except Exception as exc:
+            state.status = ServerStatus.ERROR
+            state.tools = []
+            state.consecutive_failures += 1
+            if state.consecutive_failures >= MCP_CIRCUIT_BREAKER_THRESHOLD:
+                state.circuit_open = True
+                state.last_error = (
+                    f"{self._build_circuit_error_message()} ({exc.__class__.__name__}: {exc})"
+                )
+            else:
+                state.last_error = f"{exc.__class__.__name__}: {exc}"
+            logger.error("Failed to start MCP server '%s': %s", name, state.last_error)
+            await self._notify_status(name, ServerStatus.ERROR)
+
+    async def _prepare_state(self, config: MCPServerConfig) -> MCPServerState:
+        state = self._servers.get(config.name)
+        if state is None:
+            state = MCPServerState(config=config)
+            self._servers[config.name] = state
+            return state
+
+        config_changed = not _same_runtime_config(state.config, config)
+        state.config = config
+        if config_changed and state.client is not None:
+            try:
+                await state.client.close()
+            except Exception:
+                pass
+            state.client = None
+        return state
+
+    def _create_client(self, config: MCPServerConfig) -> MCPClient:
+        transport = (
+            MCPTransport.HTTP if config.transport.lower() == "http" else MCPTransport.STDIO
+        )
+        return MCPClient(
+            server_name=config.name,
+            command=config.command,
+            args=config.args,
+            env=config.env,
+            transport=transport,
+            url=config.url,
+            timeout=20.0,
         )
 
-        await asyncio.sleep(2 ** state.retry_count)  # 指数退避
-        await self.start_server(state.config)
+    @staticmethod
+    def _build_circuit_error_message() -> str:
+        return (
+            f"Circuit open after {MCP_CIRCUIT_BREAKER_THRESHOLD} consecutive failures; "
+            "manual recovery required"
+        )
 
     async def _notify_status(self, name: str, status: ServerStatus) -> None:
-        """通知状态变更。"""
         if self._on_status_change:
             try:
                 await self._on_status_change(name, status)
             except Exception as exc:
-                logger.error("状态回调异常: %s", exc)
+                logger.error("Status callback failed: %s", exc)
+
+
+def _safe_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _resolve_mapping_placeholders(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _resolve_mapping_placeholders(item_value)
+            for key, item_value in value.items()
+        }
+    if isinstance(value, list):
+        return [_resolve_mapping_placeholders(item) for item in value]
+    return _resolve_env_placeholders(value)
+
+
+def _resolve_env_placeholders(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+
+    pattern = re.compile(r"\$\{([A-Z0-9_]+)\}")
+
+    def replace(match: re.Match[str]) -> str:
+        return os.getenv(match.group(1), "")
+
+    return pattern.sub(replace, value)
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _same_runtime_config(left: MCPServerConfig, right: MCPServerConfig) -> bool:
+    return (
+        left.command == right.command
+        and left.args == right.args
+        and left.env == right.env
+        and left.transport == right.transport
+        and left.url == right.url
+    )

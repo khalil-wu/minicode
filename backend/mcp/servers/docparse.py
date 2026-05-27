@@ -39,6 +39,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from backend.artifact.store import ArtifactStore
+from backend.attachments.store import AttachmentStore
+
 logger = logging.getLogger(__name__)
 
 # ── MCP Server 框架 ────────────────────────────────────────
@@ -72,6 +75,85 @@ def _gen_doc_id(source: str) -> str:
     return "doc_" + hashlib.md5(source.encode()).hexdigest()[:8]
 
 
+def _is_parse_error(text: str) -> bool:
+    return str(text or "").strip().lower().startswith(("error:", "错误:", "閿欒:"))
+
+
+def _doc_from_attachment_ref(ref: str) -> dict[str, Any] | None:
+    resolved = AttachmentStore().resolve_content(ref)
+    if resolved is None:
+        return None
+
+    artifact_id, content, metadata = resolved
+    attachment = metadata.get("attachment")
+    if not isinstance(attachment, dict):
+        attachment = {}
+
+    file_name = str(attachment.get("file_name") or artifact_id)
+    media_type = str(attachment.get("media_type") or "")
+    fmt = "pdf" if media_type == "application/pdf" else Path(file_name).suffix.lstrip(".")
+    try:
+        pages = int(attachment.get("pages") or attachment.get("page_count") or 0)
+    except (TypeError, ValueError):
+        pages = 0
+    return {
+        "title": str(attachment.get("title") or Path(file_name).stem),
+        "full_text": content,
+        "format": fmt or str(attachment.get("kind") or "document"),
+        "pages": pages,
+        "source": str(attachment.get("doc_id") or artifact_id),
+        "artifact_id": artifact_id,
+        "attachment": attachment,
+    }
+
+
+def _doc_from_artifact_ref(ref: str) -> dict[str, Any] | None:
+    store = ArtifactStore()
+    content = store.get(ref)
+    if content is None:
+        return None
+
+    meta = store.get_meta(ref)
+    source = str(getattr(meta, "source", "") or ref)
+    return {
+        "title": Path(source).stem or ref,
+        "full_text": content,
+        "format": str(getattr(meta, "type", "") or "text"),
+        "pages": max(1, len(content.splitlines()) // 50),
+        "source": ref,
+        "artifact_id": ref,
+    }
+
+
+def _store_parsed_doc(source: str, parsed: dict[str, Any]) -> str:
+    attachment = parsed.get("attachment")
+    doc_id = ""
+    if isinstance(attachment, dict):
+        doc_id = str(attachment.get("doc_id") or "").strip()
+    doc_id = doc_id or _gen_doc_id(source)
+    _parsed_docs[doc_id] = {
+        "title": parsed["title"],
+        "sections": _split_sections(str(parsed["full_text"])),
+        "full_text": parsed["full_text"],
+        "format": parsed["format"],
+        "pages": parsed["pages"],
+        "source": parsed.get("source", source),
+        "artifact_id": parsed.get("artifact_id"),
+    }
+    return doc_id
+
+
+def _get_or_load_doc(doc_id: str) -> dict[str, Any] | None:
+    doc = _parsed_docs.get(doc_id)
+    if doc is not None:
+        return doc
+    parsed = _doc_from_attachment_ref(doc_id) or _doc_from_artifact_ref(doc_id)
+    if parsed is None:
+        return None
+    loaded_doc_id = _store_parsed_doc(doc_id, parsed)
+    return _parsed_docs.get(loaded_doc_id)
+
+
 # ── 解析器 ──────────────────────────────────────────────────
 
 def _parse_pdf(file_path: str) -> dict[str, Any]:
@@ -83,14 +165,16 @@ def _parse_pdf(file_path: str) -> dict[str, Any]:
     try:
         import pymupdf4llm
         md_text = pymupdf4llm.to_markdown(file_path)
+        if _is_parse_error(md_text):
+            raise RuntimeError(md_text)
         return {
             "title": Path(file_path).stem,
             "full_text": md_text,
             "format": "pdf",
             "pages": _count_pdf_pages(file_path),
         }
-    except ImportError:
-        pass
+    except (ImportError, Exception) as exc:
+        logger.warning("pymupdf4llm failed, fallback to pymupdf: %s", exc)
 
     # Fallback: pymupdf
     try:
@@ -100,16 +184,19 @@ def _parse_pdf(file_path: str) -> dict[str, Any]:
         for page in doc:
             pages_text.append(page.get_text())
         doc.close()
+        full_text = "\n\n".join(pages_text)
+        if not full_text.strip():
+            raise RuntimeError("PDF contains no extractable text")
         return {
             "title": Path(file_path).stem,
-            "full_text": "\n\n".join(pages_text),
+            "full_text": full_text,
             "format": "pdf",
             "pages": len(pages_text),
         }
-    except ImportError:
+    except (ImportError, Exception) as exc:
         return {
             "title": Path(file_path).stem,
-            "full_text": "错误: 需要安装 pymupdf4llm 或 pymupdf: pip install pymupdf4llm",
+            "full_text": f"错误: PDF 解析失败。请安装依赖或检查文件: {exc}",
             "format": "pdf",
             "pages": 0,
         }
@@ -127,10 +214,10 @@ def _parse_docx(file_path: str) -> dict[str, Any]:
             "format": "docx",
             "pages": max(1, len(paragraphs) // 30),
         }
-    except ImportError:
+    except (ImportError, Exception) as exc:
         return {
             "title": Path(file_path).stem,
-            "full_text": "错误: 需要安装 python-docx: pip install python-docx",
+            "full_text": f"错误: 需要安装 python-docx 或 Word 解析失败: {exc}",
             "format": "docx",
             "pages": 0,
         }
@@ -268,6 +355,8 @@ if HAS_MCP and mcp:
         # 判断来源类型
         if source.startswith(("http://", "https://")):
             parsed = _parse_url(source)
+        elif (loaded := _doc_from_attachment_ref(source) or _doc_from_artifact_ref(source)) is not None:
+            parsed = loaded
         elif not Path(source).exists():
             return f"错误: 文件不存在: {source}"
         else:
@@ -280,19 +369,11 @@ if HAS_MCP and mcp:
                 parsed = _parse_text(source)
 
         # 分割章节
-        sections = _split_sections(parsed["full_text"])
+        doc_id = _store_parsed_doc(source, parsed)
+        sections = _parsed_docs[doc_id]["sections"]
 
         # 生成 doc_id 并缓存
         doc_id = _gen_doc_id(source)
-        _parsed_docs[doc_id] = {
-            "title": parsed["title"],
-            "sections": sections,
-            "full_text": parsed["full_text"],
-            "format": parsed["format"],
-            "pages": parsed["pages"],
-            "source": source,
-        }
-
         # 构建概览输出（Token-efficient）
         word_count = len(parsed["full_text"])
         output = [
@@ -332,7 +413,7 @@ if HAS_MCP and mcp:
             get_section("doc_a1b2c3d4", 0)   # 读取第一个章节
             get_section("doc_a1b2c3d4", 2)   # 读取第三个章节
         """
-        doc = _parsed_docs.get(doc_id)
+        doc = _get_or_load_doc(doc_id)
         if not doc:
             return f"错误: 文档 '{doc_id}' 不存在。请先使用 parse() 解析文档。"
 
@@ -376,7 +457,7 @@ if HAS_MCP and mcp:
         Returns:
             文档全文（可能截断）
         """
-        doc = _parsed_docs.get(doc_id)
+        doc = _get_or_load_doc(doc_id)
         if not doc:
             return f"错误: 文档 '{doc_id}' 不存在。"
 

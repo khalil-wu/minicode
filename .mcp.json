@@ -2,27 +2,53 @@
   "mcpServers": {
     "websearch": {
       "command": "python",
-      "args": ["-m", "backend.mcp.servers.websearch"],
+      "args": [
+        "-m",
+        "backend.mcp.servers.websearch"
+      ],
       "env": {},
-      "autoStart": true
+      "autoStart": false,
+      "transport": "stdio"
     },
     "docparse": {
       "command": "python",
-      "args": ["-m", "backend.mcp.servers.docparse"],
+      "args": [
+        "-m",
+        "backend.mcp.servers.docparse"
+      ],
       "env": {},
-      "autoStart": true
+      "autoStart": true,
+      "transport": "stdio"
     },
     "memory-rag": {
       "command": "python",
-      "args": ["-m", "backend.mcp.servers.memory_rag"],
+      "args": [
+        "-m",
+        "backend.mcp.servers.memory_rag"
+      ],
       "env": {},
-      "autoStart": false
+      "autoStart": true,
+      "transport": "stdio"
     },
     "code-index": {
       "command": "python",
-      "args": ["-m", "backend.mcp.servers.code_index"],
+      "args": [
+        "-m",
+        "backend.mcp.servers.code_index"
+      ],
       "env": {},
-      "autoStart": false
+      "autoStart": false,
+      "transport": "stdio"
+    },
+    "sequential-thinking": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ],
+      "env": {},
+      "autoStart": true,
+      "transport": "stdio"
     }
   }
 }

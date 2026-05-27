@@ -1,0 +1,10 @@
+/*
+ * MiniCode Style V2 — 设计系统
+ * 全部使用 CSS Variables，支持无感主题切换
+ * 模块化引入
+ */
+
+@import "./styles/reset.css";
+@import "./styles/layout.css";
+@import "./styles/components.css";
+@import "./styles/effects-and-overrides.css";
