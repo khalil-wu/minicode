@@ -201,6 +201,26 @@
   line-height: 1.4;
   transition: color var(--transition-fast);
   overflow-wrap: anywhere;
+  cursor: default;
+}
+
+.inline-task-content:not(.inline-task-content-in-progress):not(.inline-task-content-blocked) {
+  cursor: text;
+}
+
+.inline-task-edit-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  font-size: var(--text-sm);
+  font-family: var(--font-ui);
+  line-height: 1.4;
+  background: var(--surface-base);
+  border: 1px solid var(--accent-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--accent-primary) 20%, transparent);
 }
 
 .inline-task-content-completed {

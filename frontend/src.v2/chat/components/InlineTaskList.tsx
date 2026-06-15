@@ -185,6 +185,9 @@ function TaskRow({
   const isDone = todo.status === "completed";
   const isBlocked = todo.status === "blocked";
   const removeTodo = useAppStore((s) => s.removeTodo);
+  const updateTodo = useAppStore((s) => s.updateTodo);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editContent, setEditContent] = useState(todo.content);
 
   const icon = isActive
     ? <Loader2 size={14} />
@@ -214,6 +217,26 @@ function TaskRow({
     }
   };
 
+  const handleDoubleClick = () => {
+    if (!isActive && !isStreaming) {
+      setIsEditing(true);
+      setEditContent(todo.content);
+    }
+  };
+
+  const handleSave = () => {
+    const trimmed = editContent.trim();
+    if (trimmed && trimmed !== todo.content) {
+      updateTodo(todo.id, { content: trimmed });
+    }
+    setIsEditing(false);
+  };
+
+  const handleCancel = () => {
+    setEditContent(todo.content);
+    setIsEditing(false);
+  };
+
   return (
     <div className="inline-task-row">
       <span className="inline-task-id">#{index}</span>
@@ -222,9 +245,28 @@ function TaskRow({
         {icon}
       </span>
 
-      <span className={contentClass}>
-        {todo.content}
-      </span>
+      {isEditing ? (
+        <input
+          type="text"
+          className="inline-task-edit-input"
+          value={editContent}
+          onChange={(e) => setEditContent(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") handleSave();
+            if (e.key === "Escape") handleCancel();
+          }}
+          onBlur={handleSave}
+          autoFocus
+        />
+      ) : (
+        <span
+          className={contentClass}
+          onDoubleClick={handleDoubleClick}
+          title={!isActive && !isStreaming ? "双击编辑" : ""}
+        >
+          {todo.content}
+        </span>
+      )}
 
       {isActive && isStreaming && todo.activeForm && (
         <span className="inline-task-active-form" title={todo.activeForm}>
@@ -232,7 +274,7 @@ function TaskRow({
         </span>
       )}
 
-      {!isActive && !isStreaming && (
+      {!isActive && !isStreaming && !isEditing && (
         <button
           type="button"
           className="inline-task-delete-btn"

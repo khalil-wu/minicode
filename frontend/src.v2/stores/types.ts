@@ -604,6 +604,7 @@ export interface ChatSlice {
   conversationMessages: Record<string, ChatMessage[]>;
   conversationStreaming: Record<string, boolean>;
   isStreaming: boolean;
+  isPaused: boolean;
   isConnected: boolean;
   lastUsage: { input: number; output: number; cacheRead: number; cacheWrite: number } | null;
   sideChats: Record<string, SideChatThread>;
@@ -614,6 +615,8 @@ export interface ChatSlice {
   recallMessage: (id: string) => void;
   removeEmptyStreamingAssistant: (conversationId?: string) => void;
   interrupt: () => void;
+  pauseStreaming: () => void;
+  resumeStreaming: () => void;
   requestConversationSwitch: (id: string) => void;
   applyConversationSwitched: (payload: { conversationId: string }) => void;
   switchConversation: (id: string) => void;
