@@ -55,7 +55,7 @@ export const SharedBackdrop = () => {
 
   return (
     <div
-      className="fixed inset-0 bg-black/50 backdrop-blur-sm"
+      className="fixed inset-0 bg-black/50"
       style={{ zIndex: "var(--z-modal-backdrop)" }}
       onClick={handleBackdropClick}
       aria-hidden="true"
