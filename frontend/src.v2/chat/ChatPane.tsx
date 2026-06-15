@@ -6,6 +6,7 @@ import { ChatSearch } from "./ChatSearch";
 import { SafeBoundary } from "../shell/ChunkErrorBoundary";
 import { ComposerErrorFallback } from "../components/ComposerErrorFallback";
 import { ChatErrorFallback } from "../components/ChatErrorFallback";
+import { TaskSuggestions } from "./components/TaskSuggestions";  // 🔧 新增
 
 export const ChatPane = () => {
   const [showSearch, setShowSearch] = useState(false);
@@ -60,6 +61,7 @@ export const ChatPane = () => {
         <MessageList />
       </SafeBoundary>
       <InlineAgentPrompt />
+      <TaskSuggestions />  {/* 🔧 新增：AI 任务建议 */}
       <SafeBoundary fallback={<ComposerErrorFallback />}>
         <Composer />
       </SafeBoundary>

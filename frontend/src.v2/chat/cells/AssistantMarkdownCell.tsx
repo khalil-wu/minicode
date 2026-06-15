@@ -1,4 +1,4 @@
-import { Copy, RotateCcw, Trash2, RotateCw } from "lucide-react";
+import { Copy, RotateCcw, Trash2, RotateCw, Quote } from "lucide-react";  // 🔧 添加 Quote
 import { useCallback, useEffect, useRef, useState } from "react";
 import type React from "react";
 import type { AssistantMarkdownCellState } from "./cellTypes";
@@ -115,6 +115,18 @@ export function AssistantMarkdownCell({
     deleteMessage(cell.messageId);
   }, [cell.messageId, deleteMessage]);
 
+  // 🔧 新增：引用回复功能
+  const quoteReply = useCallback(() => {
+    if (!cell.markdownSource) return;
+    const composerTextarea = document.querySelector('[data-composer-input]') as HTMLTextAreaElement;
+    if (composerTextarea) {
+      const quotedText = `> ${cell.markdownSource.split('\n').join('\n> ')}\n\n`;
+      composerTextarea.value = quotedText + composerTextarea.value;
+      composerTextarea.focus();
+      composerTextarea.setSelectionRange(quotedText.length, quotedText.length);
+    }
+  }, [cell.markdownSource]);
+
   const regenerate = useCallback(async () => {
     if (!cell.messageId) return;
     const state = useAppStore.getState();
@@ -205,6 +217,15 @@ export function AssistantMarkdownCell({
         )}
         {cell.messageId && (
           <>
+            <button
+              type="button"
+              onClick={quoteReply}
+              title="引用回复"
+              aria-label="引用回复"
+              className="cell-action-btn"
+            >
+              <Quote size={12} />
+            </button>
             <button
               type="button"
               onClick={regenerate}

@@ -1,7 +1,9 @@
-import { CheckCircle2, Circle, Loader2, ListChecks, OctagonAlert, ChevronDown, ChevronRight, X, Plus } from "lucide-react";
+import { CheckCircle2, Circle, Loader2, ListChecks, OctagonAlert, ChevronDown, ChevronRight, X, Plus, LayoutTemplate, BarChart3 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useAppStore } from "../../stores";
 import type { TodoItem } from "../../stores/types";
+import { TaskTemplates } from "./TaskTemplates";
+import { TaskStats } from "./TaskStats";
 import "./inline-task-list.css";
 
 export function InlineTaskList() {
@@ -12,6 +14,8 @@ export function InlineTaskList() {
   const [showCompleted, setShowCompleted] = useState(true);
   const [isAddingTask, setIsAddingTask] = useState(false);
   const [newTaskContent, setNewTaskContent] = useState("");
+  const [showTemplates, setShowTemplates] = useState(false);  // 🔧 新增
+  const [showStats, setShowStats] = useState(false);  // 🔧 新增
 
   if (todos.length === 0) return null;
 
@@ -81,15 +85,35 @@ export function InlineTaskList() {
             </span>
           )}
         </div>
-        {!collapsed && completed.length > 0 && (
-          <button
-            type="button"
-            className="inline-task-filter-btn"
-            onClick={() => setShowCompleted(!showCompleted)}
-            title={showCompleted ? "Hide completed" : "Show completed"}
-          >
-            {showCompleted ? "Hide" : "Show"} completed
-          </button>
+        {!collapsed && (
+          <>
+            {completed.length > 0 && (
+              <button
+                type="button"
+                className="inline-task-filter-btn"
+                onClick={() => setShowCompleted(!showCompleted)}
+                title={showCompleted ? "Hide completed" : "Show completed"}
+              >
+                {showCompleted ? "Hide" : "Show"} completed
+              </button>
+            )}
+            <button
+              type="button"
+              className="inline-task-filter-btn"
+              onClick={() => setShowStats(!showStats)}
+              title="View statistics"
+            >
+              <BarChart3 size={14} />
+            </button>
+            <button
+              type="button"
+              className="inline-task-filter-btn"
+              onClick={() => setShowTemplates(!showTemplates)}
+              title="Load template"
+            >
+              <LayoutTemplate size={14} />
+            </button>
+          </>
         )}
       </div>
 
@@ -168,6 +192,12 @@ export function InlineTaskList() {
           )}
         </>
       )}
+
+      {/* 🔧 新增：模板选择器 */}
+      {showTemplates && <TaskTemplates onClose={() => setShowTemplates(false)} />}
+
+      {/* 🔧 新增：任务统计 */}
+      {showStats && <TaskStats onClose={() => setShowStats(false)} />}
     </div>
   );
 }
