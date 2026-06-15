@@ -32,14 +32,12 @@ Resources:
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
-import os
 import sys
 import time
 from pathlib import Path
-from typing import Any
+
+from backend.memory.vector_memory import VectorMemory
 
 logger = logging.getLogger(__name__)
 
@@ -65,41 +63,21 @@ else:
 
 # ── 向量存储封装 ────────────────────────────────────────────
 
-# ChromaDB 数据目录
 DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data" / "chroma"
 
-_collection = None
-_client = None
+_vector_memory: VectorMemory | None = None
 
 
-def _get_collection():
-    """懒初始化 ChromaDB collection。"""
-    global _collection, _client
+def _get_vector_memory() -> VectorMemory:
+    """Return the shared memory backend used by both local and MCP tools."""
+    global _vector_memory
 
-    if _collection is not None:
-        return _collection
+    if _vector_memory is None:
+        _vector_memory = VectorMemory(storage_dir=DATA_DIR, collection_name="memory")
+    return _vector_memory
 
-    try:
-        import chromadb
-    except ImportError:
-        logger.error("需要安装 chromadb: pip install chromadb")
-        return None
-
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    _client = chromadb.PersistentClient(path=str(DATA_DIR))
-    _collection = _client.get_or_create_collection(
-        name="memory",
-        metadata={"hnsw:space": "cosine"},
-    )
-    logger.info("ChromaDB memory collection 就绪，数据目录: %s", DATA_DIR)
-    return _collection
-
-
-def _gen_memory_id(content: str) -> str:
-    """生成记忆 ID。"""
-    return "mem_" + hashlib.md5(
-        f"{content[:100]}:{time.time()}".encode()
-    ).hexdigest()[:10]
+def _format_memory_id(memory_id: str) -> str:
+    return memory_id.strip()
 
 
 # ── MCP Tools ──────────────────────────────────────────────
@@ -130,26 +108,21 @@ if HAS_MCP and mcp:
             remember("用户偏好使用 TypeScript + React 技术栈", tags=["偏好"], importance=4)
             remember("项目根目录是 /c/Desktop/MiniCode", tags=["项目"])
         """
-        collection = _get_collection()
-        if collection is None:
-            return "错误: 向量数据库未初始化。请确认已安装 chromadb。"
+        memory = _get_vector_memory()
 
         tags = tags or []
         importance = max(1, min(5, importance))
-        memory_id = _gen_memory_id(content)
-
-        metadata: dict[str, Any] = {
-            "tags": json.dumps(tags, ensure_ascii=False),
-            "importance": importance,
-            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "char_count": len(content),
-        }
 
         try:
-            collection.add(
-                ids=[memory_id],
-                documents=[content],
-                metadatas=[metadata],
+            memory_id = memory.remember(
+                content=content,
+                tags=tags,
+                importance=importance,
+                metadata={
+                    "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "char_count": len(content),
+                    "source": "mcp:memory-rag",
+                },
             )
         except Exception as exc:
             return f"错误: 存储失败: {exc}"
@@ -186,64 +159,33 @@ if HAS_MCP and mcp:
             recall("用户的技术栈偏好")
             recall("之前关于路由设计的讨论", top_k=3)
         """
-        collection = _get_collection()
-        if collection is None:
-            return "错误: 向量数据库未初始化。"
+        memory = _get_vector_memory()
 
         top_k = max(1, min(20, top_k))
 
         try:
-            results = collection.query(
-                query_texts=[query],
-                n_results=top_k,
-            )
+            results = memory.recall(query=query, top_k=top_k, min_score=min_score)
         except Exception as exc:
             return f"错误: 检索失败: {exc}"
 
-        if not results["ids"] or not results["ids"][0]:
+        if not results:
             return f"未找到与 \"{query}\" 相关的记忆。"
 
-        # 格式化输出
         lines = [f"搜索 \"{query}\" 的记忆：\n"]
-        count = 0
-
-        ids = results["ids"][0]
-        docs = results["documents"][0] if results["documents"] else []
-        metas = results["metadatas"][0] if results["metadatas"] else []
-        distances = results["distances"][0] if results.get("distances") else []
-
-        for i, (mid, doc, meta) in enumerate(zip(ids, docs, metas)):
-            # 计算相关性分数（距离转相似度）
-            score = 1 - (distances[i] if distances else 0.5)
-            if score < min_score:
-                continue
-
-            count += 1
-            importance = meta.get("importance", 3) if meta else 3
-            tags_str = meta.get("tags", "[]") if meta else "[]"
-            try:
-                tags = json.loads(tags_str)
-            except (json.JSONDecodeError, TypeError):
-                tags = []
-            created = meta.get("created_at", "") if meta else ""
-
-            # 预览（限制长度）
-            preview = doc[:200] if doc else ""
-            if len(doc) > 200:
-                preview += "..."
+        for count, item in enumerate(results, start=1):
+            mid = _format_memory_id(str(item.get("memory_id") or ""))
+            score = float(item.get("score") or 0.0)
+            importance = int(item.get("importance") or 3)
+            tags = [str(tag) for tag in item.get("tags", []) if str(tag).strip()]
+            preview = str(item.get("summary") or "")
 
             lines.append(f"{count}. **[{mid}]** (相关性: {score:.2f}, {'★' * importance})")
             if tags:
                 lines.append(f"   标签: {', '.join(tags)}")
-            if created:
-                lines.append(f"   时间: {created}")
             lines.append(f"   {preview}")
             lines.append("")
 
-        if count == 0:
-            return f"未找到相关性 ≥ {min_score} 的记忆。"
-
-        lines.append(f"共 {count} 条匹配。使用 get_memory(id) 获取完整内容。")
+        lines.append(f"共 {len(results)} 条匹配。使用 get_memory(id) 获取完整内容。")
         return "\n".join(lines)
 
 
@@ -258,25 +200,18 @@ if HAS_MCP and mcp:
         Returns:
             完整的记忆内容
         """
-        collection = _get_collection()
-        if collection is None:
-            return "错误: 向量数据库未初始化。"
+        memory = _get_vector_memory()
 
         try:
-            result = collection.get(ids=[memory_id])
+            doc = memory.get_memory(memory_id)
         except Exception as exc:
             return f"错误: 读取失败: {exc}"
 
-        if not result["ids"]:
+        if not doc:
             return f"记忆 '{memory_id}' 不存在。"
-
-        doc = result["documents"][0] if result["documents"] else ""
-        meta = result["metadatas"][0] if result["metadatas"] else {}
 
         return (
             f"**记忆 {memory_id}**\n"
-            f"- 重要性: {'★' * meta.get('importance', 3)}\n"
-            f"- 创建时间: {meta.get('created_at', '未知')}\n\n"
             f"{doc}"
         )
 
@@ -292,17 +227,13 @@ if HAS_MCP and mcp:
         Returns:
             操作结果
         """
-        collection = _get_collection()
-        if collection is None:
-            return "错误: 向量数据库未初始化。"
+        memory = _get_vector_memory()
 
         try:
-            # 先检查是否存在
-            existing = collection.get(ids=[memory_id])
-            if not existing["ids"]:
+            existing = memory.get_memory(memory_id)
+            if not existing:
                 return f"记忆 '{memory_id}' 不存在。"
-
-            collection.delete(ids=[memory_id])
+            memory.forget(memory_id)
             return f"已删除记忆 `{memory_id}`。"
         except Exception as exc:
             return f"错误: 删除失败: {exc}"
@@ -311,32 +242,19 @@ if HAS_MCP and mcp:
     @mcp.resource("memory://stats")
     def memory_stats() -> str:
         """记忆库统计信息。"""
-        collection = _get_collection()
-        if collection is None:
-            return "向量数据库未初始化。"
-
-        count = collection.count()
+        memory = _get_vector_memory()
+        count = len(memory.list_memories(limit=1000))
         return f"记忆库统计：共 {count} 条记忆。"
 
 
     @mcp.resource("memory://tags")
     def memory_tags() -> str:
         """所有标签列表。"""
-        collection = _get_collection()
-        if collection is None:
-            return "向量数据库未初始化。"
-
         try:
-            all_data = collection.get(limit=1000)
+            all_data = _get_vector_memory().list_memories(limit=1000)
             tags_set: set[str] = set()
-            for meta in (all_data.get("metadatas") or []):
-                if meta:
-                    tags_str = meta.get("tags", "[]")
-                    try:
-                        tags = json.loads(tags_str)
-                        tags_set.update(tags)
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+            for item in all_data:
+                tags_set.update(str(tag) for tag in item.get("tags", []) if str(tag).strip())
             if not tags_set:
                 return "暂无标签。"
             return "所有标签：\n" + "\n".join(f"- {t}" for t in sorted(tags_set))

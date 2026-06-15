@@ -24,8 +24,47 @@ class AgentEvent:
         return cls(type="text_chunk", data={"content": content})
 
     @classmethod
-    def thinking_chunk(cls, content: str) -> AgentEvent:
-        return cls(type="thinking_delta", data={"content": content})
+    def final_answer_started(cls, *, is_streaming: bool = True) -> AgentEvent:
+        return cls(type="final_answer_started", data={"is_streaming": is_streaming})
+
+    @classmethod
+    def final_answer_delta(cls, content: str) -> AgentEvent:
+        return cls(type="final_answer_delta", data={"content": content})
+
+    @classmethod
+    def final_answer_retracted(cls, reason: str = "") -> AgentEvent:
+        data: dict[str, Any] = {}
+        if reason:
+            data["reason"] = reason
+        return cls(type="final_answer_retracted", data=data)
+
+    @classmethod
+    def final_answer_committed(cls, content: str = "", *, is_streaming: bool = False) -> AgentEvent:
+        data: dict[str, Any] = {"is_streaming": is_streaming}
+        if content:
+            data["content"] = content
+        return cls(type="final_answer_committed", data=data)
+
+    @classmethod
+    def thinking_chunk(
+        cls,
+        content: str,
+        *,
+        source: str = "",
+        visibility: str = "",
+        is_raw_provider_reasoning: bool = False,
+        phase: str = "",
+    ) -> AgentEvent:
+        data: dict[str, Any] = {"content": content}
+        if source:
+            data["source"] = source
+        if visibility:
+            data["visibility"] = visibility
+        if is_raw_provider_reasoning:
+            data["is_raw_provider_reasoning"] = True
+        if phase:
+            data["phase"] = phase
+        return cls(type="thinking_delta", data=data)
 
     @classmethod
     def image_chunk(cls, data: str, media_type: str = "image/png") -> AgentEvent:
@@ -42,6 +81,12 @@ class AgentEvent:
         started_at: int | None = None,
         display_hint: str = "",
         input_summary: str = "",
+        result_kind: str = "",
+        activity_kind: str = "",
+        group_id: str = "",
+        step_id: str = "",
+        iteration_id: str = "",
+        phase: str = "",
     ) -> AgentEvent:
         data: dict[str, Any] = {
             "id": id,
@@ -55,7 +100,33 @@ class AgentEvent:
             data["display_hint"] = display_hint
         if input_summary:
             data["input_summary"] = input_summary
+        if result_kind:
+            data["result_kind"] = result_kind
+        if activity_kind:
+            data["activity_kind"] = activity_kind
+        if group_id:
+            data["group_id"] = group_id
+        if step_id:
+            data["step_id"] = step_id
+        if iteration_id:
+            data["iteration_id"] = iteration_id
+        if phase:
+            data["phase"] = phase
         return cls(type="tool_call", data=data)
+
+    @classmethod
+    def tool_output_delta(
+        cls,
+        id: str,
+        output: str,
+        *,
+        stream: str = "stdout",
+    ) -> AgentEvent:
+        """工具执行期间的增量输出（如命令的 stdout/stderr）。"""
+        return cls(
+            type="tool_output_delta",
+            data={"id": id, "output": output, "stream": stream},
+        )
 
     @classmethod
     def tool_result(
@@ -73,7 +144,20 @@ class AgentEvent:
         duration_ms: int | None = None,
         display_summary: str = "",
         result_kind: str = "",
+        activity_kind: str = "",
+        group_id: str = "",
+        step_id: str = "",
         limitation: str = "",
+        provider: str = "",
+        provider_error_type: str = "",
+        error_info: dict[str, Any] | None = None,
+        error_kind: str = "",
+        user_summary: str = "",
+        developer_detail: str = "",
+        recoverable: bool | None = None,
+        projection: str = "",
+        iteration_id: str = "",
+        phase: str = "",
     ) -> AgentEvent:
         result: dict[str, Any] = {
             "id": id,
@@ -99,8 +183,32 @@ class AgentEvent:
             result["display_summary"] = display_summary
         if result_kind:
             result["result_kind"] = result_kind
+        if group_id:
+            result["group_id"] = group_id
+        if step_id:
+            result["step_id"] = step_id
         if limitation:
             result["limitation"] = limitation
+        if provider:
+            result["provider"] = provider
+        if provider_error_type:
+            result["provider_error_type"] = provider_error_type
+        if error_info:
+            result["error_info"] = error_info
+        if error_kind:
+            result["error_kind"] = error_kind
+        if user_summary:
+            result["user_summary"] = user_summary
+        if developer_detail:
+            result["developer_detail"] = developer_detail
+        if recoverable is not None:
+            result["recoverable"] = recoverable
+        if projection:
+            result["projection"] = projection
+        if iteration_id:
+            result["iteration_id"] = iteration_id
+        if phase:
+            result["phase"] = phase
         return cls(type="tool_result", data=result)
 
     @classmethod
@@ -121,6 +229,7 @@ class AgentEvent:
         visibility: str = "timeline",
         group_id: str = "",
         step_id: str = "",
+        iteration_id: str = "",
     ) -> AgentEvent:
         payload: dict[str, Any] = {
             "id": id or f"{stage}:{message}",
@@ -144,7 +253,60 @@ class AgentEvent:
             payload["group_id"] = group_id
         if step_id:
             payload["step_id"] = step_id
+        if iteration_id:
+            payload["iteration_id"] = iteration_id
         return cls(type="agent.progress", data=payload)
+
+    @classmethod
+    def plan_step_updated(
+        cls,
+        plan_id: str,
+        status: str,
+        *,
+        step_id: str = "",
+        step_index: int | None = None,
+        title: str = "",
+        detail: str = "",
+        current_step: int | None = None,
+    ) -> AgentEvent:
+        data: dict[str, Any] = {"plan_id": plan_id, "status": status}
+        if step_id:
+            data["step_id"] = step_id
+        if step_index is not None:
+            data["step_index"] = step_index
+        if title:
+            data["title"] = title
+        if detail:
+            data["detail"] = detail
+        if current_step is not None:
+            data["current_step"] = current_step
+        return cls(type="plan_step_updated", data=data)
+
+    @classmethod
+    def plan_updated(
+        cls,
+        plan_id: str,
+        steps: list[dict[str, Any]],
+        *,
+        status: str = "executing",
+        current_step: int = 0,
+        explanation: str = "",
+    ) -> AgentEvent:
+        """Full-plan snapshot emitted by the update_plan tool.
+
+        Carries the entire step list so the frontend can create or replace the
+        live plan in one event; per-step progress still flows via
+        plan_step_updated.
+        """
+        data: dict[str, Any] = {
+            "plan_id": plan_id,
+            "status": status,
+            "steps": steps,
+            "current_step": current_step,
+        }
+        if explanation:
+            data["explanation"] = explanation
+        return cls(type="plan_updated", data=data)
 
     @classmethod
     def approval_request(
@@ -190,6 +352,7 @@ class AgentEvent:
         recoverable: bool = True,
         error_type: str = "api",
         error_code: str = "",
+        provider_error_type: str = "",
     ) -> AgentEvent:
         data: dict[str, Any] = {
             "message": message,
@@ -198,6 +361,8 @@ class AgentEvent:
         }
         if error_code:
             data["error_code"] = error_code
+        if provider_error_type:
+            data["provider_error_type"] = provider_error_type
         return cls(type="error", data=data)
 
     @classmethod
@@ -215,6 +380,24 @@ class AgentEvent:
     @classmethod
     def context_compacted(cls, summary: str) -> AgentEvent:
         return cls(type="context_compacted", data={"summary": summary})
+
+    @classmethod
+    def stream_resume(
+        cls,
+        conversation_id: str,
+        message_id: str | None,
+        tool_calls_pending: list[dict[str, Any]] | None = None,
+        accumulated_text: str = "",
+    ) -> AgentEvent:
+        return cls(
+            type="stream_resume",
+            data={
+                "conversation_id": conversation_id,
+                "message_id": message_id,
+                "tool_calls_pending": tool_calls_pending or [],
+                "accumulated_text": accumulated_text,
+            },
+        )
 
     @classmethod
     def command_result(
@@ -236,24 +419,6 @@ class AgentEvent:
         if data:
             payload["data"] = data
         return cls(type="command.result", data=payload)
-
-    @classmethod
-    def plan_update(
-        cls,
-        plan_id: str,
-        steps: list[dict[str, Any]],
-        current_step: int = 0,
-        status: str = "draft",
-    ) -> AgentEvent:
-        return cls(
-            type="plan.update",
-            data={
-                "plan_id": plan_id,
-                "steps": steps,
-                "current_step": current_step,
-                "status": status,
-            },
-        )
 
     @classmethod
     def task_update(
@@ -284,12 +449,51 @@ class AgentEvent:
         )
 
     @classmethod
+    def subagent_progress(
+        cls,
+        subagent_id: str,
+        *,
+        iteration: int = 0,
+        max_iterations: int = 0,
+        tool_name: str = "",
+        detail: str = "",
+    ) -> AgentEvent:
+        """Emitted during subagent execution to report intermediate progress."""
+        data: dict[str, Any] = {
+            "subagent_id": subagent_id,
+            "iteration": iteration,
+        }
+        if max_iterations:
+            data["max_iterations"] = max_iterations
+        if tool_name:
+            data["tool_name"] = tool_name
+        if detail:
+            data["detail"] = detail
+        return cls(type="subagent.progress", data=data)
+
+    @classmethod
     def subagent_done(
-        cls, subagent_id: str, summary: str = "", error: str = ""
+        cls,
+        subagent_id: str,
+        summary: str = "",
+        error: str = "",
+        *,
+        duration_ms: int | None = None,
+        iterations: int = 0,
+        tool_call_count: int = 0,
+        timed_out: bool = False,
     ) -> AgentEvent:
         data: dict[str, Any] = {"subagent_id": subagent_id, "summary": summary}
         if error:
             data["error"] = error
+        if duration_ms is not None:
+            data["duration_ms"] = duration_ms
+        if iterations:
+            data["iterations"] = iterations
+        if tool_call_count:
+            data["tool_call_count"] = tool_call_count
+        if timed_out:
+            data["timed_out"] = True
         return cls(type="subagent.done", data=data)
 
     @classmethod

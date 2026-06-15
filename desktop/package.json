@@ -35,6 +35,13 @@
     "files": [
       "main.js",
       "preload.js",
+      "backend-sidecar.js",
+      "cdp-bridge.js",
+      "ipc-handlers.js",
+      "pty-manager.js",
+      "security.js",
+      "utils.js",
+      "window-manager.js",
       "startup-error.html",
       "startup-error-preload.js",
       "package.json"

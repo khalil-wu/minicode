@@ -14,10 +14,19 @@ export const AgentProgressTrace = ({ mode = "full" }: AgentProgressTraceProps) =
     const key = conversationId || "__active__";
     const direct = agentProgress.filter((entry) => entry.conversationId === key);
     const scoped = direct.length ? direct : agentProgress.filter((entry) => entry.conversationId === "__active__");
+    // Only show meaningful phases, not individual tool calls
+    const meaningfulPhases = new Set(["planning", "verify", "recover", "plan", "approval"]);
     return scoped.filter((entry) =>
       entry.status !== "info" &&
       entry.visibility !== "debug" &&
-      !(entry.stage === "approval" && entry.toolName === "ask_user")
+      !(entry.stage === "approval" && entry.toolName === "ask_user") &&
+      (
+        meaningfulPhases.has(entry.phase || "") ||
+        entry.stage === "approval" ||
+        entry.stage === "verification" ||
+        entry.stage === "final" ||
+        entry.phase === "final"
+      )
     );
   }, [agentProgress, conversationId]);
 
@@ -28,32 +37,38 @@ export const AgentProgressTrace = ({ mode = "full" }: AgentProgressTraceProps) =
   const completedTools = entries.filter((entry) => entry.stage === "tool" && entry.status === "completed").length;
   const failedCount = entries.filter((entry) => entry.status === "failed").length;
   const recent = entries.slice(mode === "compact" ? -3 : -8).reverse();
+  const latestMessage = displayMessage(latest);
+  const latestDetail = displayDetail(latest, latestMessage);
 
   return (
     <section style={traceWrapStyle} aria-label="Agent execution trace">
       <div style={traceHeaderStyle}>
-        <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
+        <div className="flex-row-center" style={{ gap: 7, minWidth: 0 }}>
           <StatusIcon entry={latest} />
           <div style={{ minWidth: 0 }}>
             <div style={traceTitleStyle}>Progress</div>
-            <div style={traceCurrentStyle} title={latest.message}>{displayMessage(latest)}</div>
+            <div className="truncate" style={traceCurrentStyle} title={latestMessage}>{latestMessage}</div>
           </div>
         </div>
-        <span style={traceMetaStyle}>
+        <span className="shrink-0 font-mono" style={traceMetaStyle}>
           {latest.status === "running" ? "running" : failedCount ? `${failedCount} failed` : `${completedTools} tools`}
         </span>
       </div>
-      {mode === "full" && latest.detail && <div style={traceDetailStyle}>{latest.detail}</div>}
+      {mode === "full" && latestDetail && <div style={traceDetailStyle}>{latestDetail}</div>}
       <div style={traceListStyle}>
-        {recent.map((entry) => (
-          <div key={`${entry.conversationId ?? ""}-${entry.id}`} style={traceRowStyle}>
-            <StatusIcon entry={entry} small />
-            <span style={traceRowMessageStyle} title={entry.detail || entry.message}>
-              {displayMessage(entry)}
-            </span>
-            <span style={traceStageStyle}>{stageLabel(entry)}</span>
-          </div>
-        ))}
+        {recent.map((entry) => {
+          const message = displayMessage(entry);
+          const detail = displayDetail(entry, message);
+          return (
+            <div key={`${entry.conversationId ?? ""}-${entry.id}`} style={traceRowStyle}>
+              <StatusIcon entry={entry} small />
+              <span className="truncate" style={traceRowMessageStyle} title={detail || message}>
+                {message}
+              </span>
+              <span className="font-mono" style={traceStageStyle}>{stageLabel(entry)}</span>
+            </div>
+          );
+        })}
       </div>
     </section>
   );
@@ -61,17 +76,18 @@ export const AgentProgressTrace = ({ mode = "full" }: AgentProgressTraceProps) =
 
 const StatusIcon = ({ entry, small }: { entry: AgentProgressEntry; small?: boolean }) => {
   const size = small ? 12 : 14;
-  if (entry.status === "failed") return <XCircle size={size} color="var(--state-danger)" style={{ flexShrink: 0 }} />;
-  if (entry.status === "completed") return <CheckCircle size={size} color="var(--state-success)" style={{ flexShrink: 0 }} />;
-  if (entry.stage === "tool") return <Wrench size={size} color="var(--state-info)" style={{ flexShrink: 0 }} />;
-  if (entry.status === "running") return <Activity size={size} color="var(--state-info)" style={{ flexShrink: 0 }} />;
-  if (entry.stage === "approval") return <Clock size={size} color="var(--state-warning)" style={{ flexShrink: 0 }} />;
-  return <Circle size={size} color="var(--text-muted)" style={{ flexShrink: 0 }} />;
+  if (entry.status === "failed") return <XCircle size={size} color="var(--state-danger)" className="shrink-0" />;
+  if (entry.status === "completed") return <CheckCircle size={size} color="var(--state-success)" className="shrink-0" />;
+  if (entry.stage === "tool") return <Wrench size={size} color="var(--state-info)" className="shrink-0" />;
+  if (entry.status === "running") return <Activity size={size} color="var(--state-info)" className="shrink-0" />;
+  if (entry.stage === "approval") return <Clock size={size} color="var(--state-warning)" className="shrink-0" />;
+  return <Circle size={size} color="var(--text-muted)" className="shrink-0" />;
 };
 
 function stageLabel(entry: AgentProgressEntry): string {
-  if (entry.label) return entry.label.toLowerCase();
+  if (entry.label && !hasRawIterationCounter(entry.label)) return entry.label.toLowerCase();
   if (entry.toolName) return toolLabel(entry.toolName);
+  if (entry.phase === "iteration") return entry.stage === "final" ? "final" : "working";
   if (entry.phase === "model" || entry.phase === "orienting") return "think";
   if (entry.phase === "recover") return "recover";
   if (entry.stage === "planning") return "plan";
@@ -83,12 +99,17 @@ function stageLabel(entry: AgentProgressEntry): string {
 
 function displayMessage(entry: AgentProgressEntry): string {
   if (entry.stage !== "tool" || !entry.toolName) {
+    const friendly = friendlyProgressMessage(entry);
+    if (friendly) return friendly;
     if (entry.phase === "model" || entry.phase === "orienting" || entry.stage === "planning") return stageLabel(entry);
-    return safeProgressSummary(entry.summary || entry.message || stageLabel(entry));
+    return safeProgressSummary(entry.summary || entry.message || stageLabel(entry), stageLabel(entry));
   }
   if (entry.toolName === "todo_write") return "Updated tasks";
   if (entry.summary) {
-    return safeProgressSummary(entry.summary);
+    return safeProgressSummary(entry.summary, toolLabel(entry.toolName));
+  }
+  if (entry.toolName === "grep_files" && /^\s*(rg|grep)\b/i.test(entry.message)) {
+    return shortProgressTarget(entry.message);
   }
   if (!/\b(read_file|grep_files|glob_files|list_files|run_command|write_file|edit_file)\b/.test(entry.message)) {
     return toolLabel(entry.toolName);
@@ -97,6 +118,29 @@ function displayMessage(entry: AgentProgressEntry): string {
   const target = message.replace(entry.toolName, "").trim();
   const label = toolLabel(entry.toolName);
   return target ? `${label} ${shortProgressTarget(target)}` : label;
+}
+
+function displayDetail(entry: AgentProgressEntry, visibleMessage = displayMessage(entry)): string {
+  if (!entry.detail) return "";
+  const detail = safeProgressSummary(entry.detail, visibleMessage);
+  return detail === visibleMessage ? "" : detail;
+}
+
+function friendlyProgressMessage(entry: AgentProgressEntry): string {
+  if (entry.stage === "final" || entry.phase === "final") {
+    return entry.status === "completed" ? "Final answer ready" : "Writing final answer";
+  }
+  const rawText = [
+    entry.label,
+    entry.summary,
+    entry.message,
+    entry.detail,
+  ].filter(Boolean).join(" ");
+  if (!hasRawIterationCounter(rawText)) return "";
+  if (entry.phase === "model" || entry.phase === "orienting") return "Thinking";
+  if (entry.stage === "planning" || entry.phase === "planning") return "Planning";
+  if (entry.stage === "verification" || entry.phase === "verify") return "Checking work";
+  return "Working";
 }
 
 function toolLabel(toolName: string): string {
@@ -124,9 +168,10 @@ function toolLabel(toolName: string): string {
   }
 }
 
-function safeProgressSummary(summary: string): string {
+function safeProgressSummary(summary: string, fallback = "Working"): string {
   const text = summary.replace(/\s+/g, " ").trim();
   if (!text) return "";
+  if (hasRawIterationCounter(text)) return fallback;
   if (/允许的路径|禁止的路径|allowed paths|forbidden path|outside allowed|outside trusted/i.test(text)) {
     return "Outside allowed workspace";
   }
@@ -134,6 +179,10 @@ function safeProgressSummary(summary: string): string {
     return "Working";
   }
   return text.length > 88 ? `${text.slice(0, 85)}...` : text;
+}
+
+function hasRawIterationCounter(value: string): boolean {
+  return /\b(?:iter(?:ation)?\.?)\s*\d+\s*(?:\/|of)\s*\d+\b|\biteration\s+\d+\b/i.test(value);
 }
 
 function shortProgressTarget(value: string): string {
@@ -169,16 +218,11 @@ const traceCurrentStyle: React.CSSProperties = {
   color: "var(--text-primary)",
   fontSize: "var(--text-xs)",
   lineHeight: 1.45,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
 };
 
 const traceMetaStyle: React.CSSProperties = {
-  flexShrink: 0,
   color: "var(--accent-primary)",
   fontSize: "var(--text-xs)",
-  fontFamily: "var(--font-mono)",
 };
 
 const traceDetailStyle: React.CSSProperties = {
@@ -203,13 +247,9 @@ const traceRowStyle: React.CSSProperties = {
 const traceRowMessageStyle: React.CSSProperties = {
   color: "var(--text-secondary)",
   fontSize: "var(--text-xs)",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
 };
 
 const traceStageStyle: React.CSSProperties = {
   color: "var(--text-muted)",
   fontSize: "10px",
-  fontFamily: "var(--font-mono)",
 };

@@ -7,65 +7,80 @@ import { MainSlots } from "./MainSlots";
 import { BottomDock } from "./BottomDock";
 import { SideChatPanel } from "../panels/SideChatPanel";
 import { ChatPane } from "../chat/ChatPane";
+import { CoworkHome } from "./CoworkHome";
 import { useAppStore } from "../stores";
+import { SafeBoundary } from "./ChunkErrorBoundary";
+import { ChatErrorFallback } from "../components/ChatErrorFallback";
+import { isDesktop, runtime } from "../desktop/runtime";
+
+const connectionBannerMessage = (): string => {
+  const runtimeInfo = runtime();
+  const hasToken = Boolean(runtimeInfo?.runtimeToken?.trim());
+  if (isDesktop()) return "Connecting to MiniCode backend...";
+  if (!hasToken) return "Development browser is missing the Electron runtime token. Open the MiniCode desktop app for full access.";
+  return "Backend unavailable. Check that the MiniCode backend is running.";
+};
 
 const ConnectionBanner = () => {
   const isConnected = useAppStore((s) => s.isConnected);
   if (isConnected) return null;
   return (
     <div
+      className="flex items-center gap-2 px-4 py-1.5"
       style={{
-        padding: "6px 16px",
-        background: "color-mix(in oklch, var(--state-warning) 15%, var(--surface-base))",
-        borderBottom: "1px solid var(--state-warning)",
         display: "flex",
         alignItems: "center",
         gap: 8,
+        padding: "6px 16px",
+        background: "color-mix(in oklch, var(--state-warning) 15%, var(--surface-base))",
+        borderBottom: "1px solid var(--state-warning)",
         fontSize: "var(--text-sm)",
         color: "var(--state-warning)",
       }}
     >
-      <span style={{ animation: "thinking-pulse 1.5s ease-in-out infinite", width: 8, height: 8, borderRadius: "50%", background: "var(--state-warning)" }} />
-      Reconnecting to server...
+      <span
+        className="w-2 h-2 rounded-full"
+        style={{ width: 8, height: 8, borderRadius: "50%", animation: "thinking-pulse 1.5s ease-in-out infinite", background: "var(--state-warning)" }}
+      />
+      {connectionBannerMessage()}
     </div>
   );
 };
 
 const ChatModeShell = () => (
   <div
-    style={{
-      flex: 1,
-      minHeight: 0,
-      display: "flex",
-      flexDirection: "column",
-      overflow: "hidden",
-      maxWidth: 980,
-      width: "100%",
-      margin: "0 auto",
-    }}
+    className="flex-1 min-h-0 flex flex-col overflow-hidden w-full"
+    style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", width: "100%" }}
   >
-    <ChatPane />
+    <SafeBoundary fallback={<ChatErrorFallback />}>
+      <ChatPane />
+    </SafeBoundary>
   </div>
 );
 
 const CoworkModeShell = () => {
   const rightPanelOpen = useAppStore((s) => s.rightPanelOpen);
+  const isEmptyConversation = useAppStore(
+    (s) => !s.conversationId || s.messages.length === 0,
+  );
   return (
-    <div style={{ flex: 1, display: "flex", overflow: "hidden", minHeight: 0 }}>
+    <div
+      className="flex-1 flex overflow-hidden min-h-0"
+      style={{ flex: 1, display: "flex", overflow: "hidden", minHeight: 0 }}
+    >
       <SidebarLeft />
-      <div
-        style={{
-          flex: 1,
-          minHeight: 0,
-          display: "flex",
-          flexDirection: "column",
-          overflow: "hidden",
-          maxWidth: 760,
-          margin: "0 auto",
-        }}
-      >
-        <ChatPane />
-      </div>
+      {isEmptyConversation ? (
+        <CoworkHome />
+      ) : (
+        <div
+          className="flex-1 min-h-0 flex flex-col overflow-hidden"
+          style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}
+        >
+          <SafeBoundary fallback={<ChatErrorFallback />}>
+            <ChatPane />
+          </SafeBoundary>
+        </div>
+      )}
       {rightPanelOpen && <SidebarRight />}
     </div>
   );
@@ -86,7 +101,10 @@ const CodeModeShell = () => {
   }, [ensureCodeLayout]);
   return (
     <>
-      <div style={{ flex: 1, display: "flex", overflow: "hidden", minHeight: 0 }}>
+      <div
+        className="flex-1 flex overflow-hidden min-h-0"
+        style={{ flex: 1, display: "flex", overflow: "hidden", minHeight: 0 }}
+      >
         {!activeMaximized && <SidebarLeft />}
         <MainSlots />
         {!activeMaximized && rightPanelOpen && <SidebarRight />}
@@ -138,8 +156,8 @@ export const WorkbenchShell = () => {
           style={{
             position: "fixed",
             inset: 0,
-            zIndex: 900,
-            background: "rgba(0,0,0,0.18)",
+            zIndex: "var(--z-drawer)",  // 🆕 使用统一的 z-index
+            background: "var(--backdrop-subtle)",
             display: "flex",
             justifyContent: "flex-end",
             padding: "48px 16px 16px",
@@ -159,7 +177,7 @@ export const WorkbenchShell = () => {
               background: "var(--surface-page)",
               border: "1px solid var(--border-subtle)",
               borderRadius: "var(--radius-md, 8px)",
-              boxShadow: "0 8px 32px rgba(0,0,0,0.3)",
+              boxShadow: "var(--shadow-medium)",
               overflow: "hidden",
             }}
           >

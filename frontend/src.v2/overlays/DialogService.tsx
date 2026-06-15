@@ -209,10 +209,10 @@ const PromptDialog = ({
 const backdropStyle: CSSProperties = {
   position: "fixed",
   inset: 0,
-  zIndex: 1200,
+  zIndex: "var(--z-dialog)",
   display: "grid",
   placeItems: "center",
-  background: "rgba(0,0,0,0.48)",
+  background: "var(--backdrop-strong)",
   padding: 16,
 };
 

@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from backend.workspace.path_filters import is_windows_reserved_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -149,6 +151,9 @@ class FuzzySearchEngine:
 
                 # 跳过隐藏文件
                 if any(part.startswith(".") for part in rel_parts):
+                    continue
+
+                if is_windows_reserved_path(Path(*rel_parts)):
                     continue
 
                 self._file_cache.append(path)

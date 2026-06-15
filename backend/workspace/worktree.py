@@ -12,9 +12,18 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+from backend.runtime_env import sanitized_git_env
+
+if TYPE_CHECKING:
+    from backend.workspace.worktree_snapshots import (
+        WorktreeSnapshotRecord,
+        WorktreeSnapshotStore,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +50,26 @@ class WorktreeStatus:
     worktrees: list[WorktreeInfo]
 
 
+@dataclass(frozen=True)
+class WorktreeRemoval:
+    """Outcome of a snapshot-guarded worktree removal."""
+
+    removed: bool
+    snapshot: "WorktreeSnapshotRecord | None" = None
+    needs_force: bool = False
+    error: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class WorktreeRestore:
+    """Outcome of restoring a worktree snapshot."""
+
+    restored: bool
+    path: Optional[Path] = None
+    snapshot: "WorktreeSnapshotRecord | None" = None
+    error: Optional[str] = None
+
+
 class WorktreeManager:
     """
     Git Worktree 管理器。
@@ -49,14 +78,16 @@ class WorktreeManager:
     适用于并行开发、测试、代码审查等场景。
     """
 
-    def __init__(self, repo_root: Path):
+    def __init__(self, repo_root: Path, *, snapshot_store: "WorktreeSnapshotStore | None" = None):
         """
         初始化 Worktree 管理器。
 
         Args:
             repo_root: Git 仓库根目录
+            snapshot_store: 可选的快照存储(默认懒加载到 data/worktree-snapshots)
         """
         self.repo_root = repo_root.resolve()
+        self._snapshot_store = snapshot_store
 
         if not self._is_git_repo():
             raise ValueError(f"Not a git repository: {repo_root}")
@@ -74,6 +105,7 @@ class WorktreeManager:
             result = subprocess.run(
                 ["git", "worktree", "list", "--porcelain"],
                 cwd=self.repo_root,
+                env=sanitized_git_env(),
                 capture_output=True,
                 text=True, encoding="utf-8",
                 check=True,
@@ -152,6 +184,7 @@ class WorktreeManager:
             result = subprocess.run(
                 cmd,
                 cwd=self.repo_root,
+                env=sanitized_git_env(),
                 capture_output=True,
                 text=True, encoding="utf-8",
                 check=True,
@@ -189,6 +222,7 @@ class WorktreeManager:
             result = subprocess.run(
                 cmd,
                 cwd=self.repo_root,
+                env=sanitized_git_env(),
                 capture_output=True,
                 text=True, encoding="utf-8",
                 check=True,
@@ -213,6 +247,7 @@ class WorktreeManager:
             result = subprocess.run(
                 ["git", "worktree", "prune"],
                 cwd=self.repo_root,
+                env=sanitized_git_env(),
                 capture_output=True,
                 text=True, encoding="utf-8",
                 check=True,
@@ -226,12 +261,211 @@ class WorktreeManager:
             logger.error(f"Failed to prune worktrees: {e.stderr}")
             return False
 
+    # ── 快照 / 恢复 ──────────────────────────────────────────────
+
+    def has_local_changes(self, path: Path) -> bool:
+        """worktree 是否有未提交改动(含 untracked)。出错时保守返回 True。
+
+        注意:必须区分「成功且无输出」(干净)与「命令失败」(未知→保守),
+        所以不复用 _capture_output(后者把空输出也当成 None)。
+        """
+        try:
+            result = subprocess.run(
+                ["git", "status", "--porcelain=v1"],
+                cwd=Path(path),
+                env=sanitized_git_env(),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=True,
+            )
+        except (subprocess.CalledProcessError, OSError):
+            return True
+        return bool(result.stdout.strip())
+
+    def snapshot_worktree(
+        self,
+        path: Path,
+        *,
+        conversation_id: str = "",
+        branch: str = "",
+        label: str = "",
+    ) -> "WorktreeSnapshotRecord | None":
+        """删除前抓一份持久、完整(tracked + untracked)的 worktree 快照。
+
+        用 ``git add -A`` + ``write-tree`` + ``commit-tree`` 把整个工作状态
+        固化成一个 commit,再用 ``update-ref`` 锚到 ``refs/minicode/wt-snapshots/<id>``。
+        该 ref 存于 common git dir,worktree 删除后仍在、且不会被 GC。失败返回 None。
+        """
+        wt = Path(path).resolve()
+        if not wt.exists():
+            logger.warning("Cannot snapshot missing worktree: %s", wt)
+            return None
+
+        snapshot_id = f"wtsnap_{uuid.uuid4().hex[:12]}"
+        head = self._rev_parse(wt, "HEAD")
+
+        # index 污染无所谓:worktree 即将被删除
+        if not self._git_ok(wt, "add", "-A"):
+            logger.error("Snapshot failed at 'git add -A' for %s", wt)
+            return None
+        tree = self._capture_output(wt, "write-tree")
+        if not tree:
+            logger.error("Snapshot failed at 'git write-tree' for %s", wt)
+            return None
+
+        commit_args = ["commit-tree", tree]
+        if head:
+            commit_args += ["-p", head]
+        commit_args += ["-m", f"minicode worktree snapshot: {snapshot_id}"]
+        snapshot_sha = self._capture_output(wt, *commit_args)
+        if not snapshot_sha:
+            logger.error("Snapshot failed at 'git commit-tree' for %s", wt)
+            return None
+
+        ref = f"refs/minicode/wt-snapshots/{snapshot_id}"
+        if not self._git_ok(wt, "update-ref", ref, snapshot_sha):
+            logger.error("Snapshot failed at 'git update-ref %s' for %s", ref, wt)
+            return None
+
+        from backend.workspace.worktree_snapshots import WorktreeSnapshotRecord
+
+        record = WorktreeSnapshotRecord(
+            id=snapshot_id,
+            conversation_id=conversation_id,
+            branch=branch or self._current_branch(wt),
+            original_path=str(wt),
+            main_repo_path=str(self.repo_root),
+            head=head,
+            snapshot_sha=snapshot_sha,
+            snapshot_ref=ref,
+            label=label,
+        )
+        logger.info("Captured worktree snapshot %s (%s) for %s", snapshot_id, snapshot_sha[:8], wt)
+        return self._snapshots().save(record)
+
+    def restore_snapshot(
+        self,
+        snapshot_id: str,
+        *,
+        dest: Path | None = None,
+    ) -> WorktreeRestore:
+        """把快照恢复成一个 worktree(detached 在快照 commit 上)。
+
+        默认恢复到原路径;若原路径已存在且非空,则改用 ``<name>-restored``。
+        恢复出的 worktree 处于 detached HEAD,所有文件(tracked + 原 untracked)
+        以快照 commit 的形式回来。
+        """
+        record = self._snapshots().get(snapshot_id)
+        if record is None or not record.snapshot_sha:
+            logger.warning("Snapshot not found or has no commit: %s", snapshot_id)
+            return WorktreeRestore(restored=False, error=f"Snapshot '{snapshot_id}' was not found")
+
+        dest_path = Path(dest).resolve() if dest else Path(record.original_path).resolve()
+        if dest_path.exists() and any(dest_path.iterdir()):
+            candidate = dest_path.parent / f"{dest_path.name}-restored"
+            if candidate.exists():
+                candidate = dest_path.parent / f"{dest_path.name}-restored-{record.id[-6:]}"
+            dest_path = candidate
+
+        if not self._git_ok(
+            self.repo_root, "worktree", "add", "--detach", str(dest_path), record.snapshot_sha
+        ):
+            logger.error("Failed to restore snapshot %s to %s", snapshot_id, dest_path)
+            return WorktreeRestore(restored=False, snapshot=record, error="git worktree add failed")
+
+        logger.info("Restored worktree snapshot %s to %s", snapshot_id, dest_path)
+        return WorktreeRestore(restored=True, path=dest_path, snapshot=record)
+
+    def list_snapshots(
+        self, conversation_id: str | None = None, *, limit: int = 100
+    ) -> list["WorktreeSnapshotRecord"]:
+        return self._snapshots().list(conversation_id, limit=limit)
+
+    def safe_remove_worktree(
+        self,
+        path: Path,
+        *,
+        force: bool = False,
+        snapshot: bool = True,
+        conversation_id: str = "",
+        branch: str = "",
+    ) -> WorktreeRemoval:
+        """删除 worktree,脏工作区在销毁前先抓快照。
+
+        - 干净 worktree:直接删除(已提交内容随分支保留,无需快照)。
+        - 脏 worktree 且未 force:拒绝,``needs_force=True``。
+        - 脏 worktree 且 force:先快照(``snapshot=True`` 时)再删除。
+        """
+        wt = Path(path).resolve()
+        dirty = self.has_local_changes(wt)
+
+        if dirty and not force:
+            return WorktreeRemoval(
+                removed=False,
+                needs_force=True,
+                error="Worktree has local changes; confirm force cleanup to remove it",
+            )
+
+        snap = None
+        if dirty and snapshot:
+            snap = self.snapshot_worktree(wt, conversation_id=conversation_id, branch=branch)
+
+        removed = self.remove_worktree(wt, force=force)
+        if not removed:
+            return WorktreeRemoval(removed=False, snapshot=snap, error="git worktree remove failed")
+        return WorktreeRemoval(removed=True, snapshot=snap)
+
+    def _snapshots(self) -> "WorktreeSnapshotStore":
+        if self._snapshot_store is None:
+            from backend.workspace.worktree_snapshots import WorktreeSnapshotStore
+
+            self._snapshot_store = WorktreeSnapshotStore()
+        return self._snapshot_store
+
+    def _capture_output(self, cwd: Path, *args: str) -> str | None:
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=cwd,
+                env=sanitized_git_env(),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=True,
+            )
+        except (subprocess.CalledProcessError, OSError):
+            return None
+        return (result.stdout or "").strip() or None
+
+    def _git_ok(self, cwd: Path, *args: str) -> bool:
+        try:
+            subprocess.run(
+                ["git", *args],
+                cwd=cwd,
+                env=sanitized_git_env(),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=True,
+            )
+            return True
+        except (subprocess.CalledProcessError, OSError):
+            return False
+
+    def _rev_parse(self, cwd: Path, ref: str) -> str | None:
+        return self._capture_output(cwd, "rev-parse", "--verify", ref)
+
+    def _current_branch(self, cwd: Path) -> str:
+        return self._capture_output(cwd, "branch", "--show-current") or ""
+
     def _is_git_repo(self) -> bool:
         """检查是否为 Git 仓库"""
         try:
             subprocess.run(
                 ["git", "rev-parse", "--git-dir"],
                 cwd=self.repo_root,
+                env=sanitized_git_env(),
                 capture_output=True,
                 check=True,
             )

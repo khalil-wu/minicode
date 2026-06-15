@@ -1,0 +1,49 @@
+/* ════════════════════════════════════════════════════════
+   Context Budget Indicator
+   ════════════════════════════════════════════════════════ */
+
+.context-budget-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+  font-weight: 600;
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: var(--transition-fast);
+  opacity: 0.8;
+}
+
+.context-budget-indicator:hover {
+  opacity: 1;
+  background: color-mix(in oklch, currentColor 10%, transparent);
+  transform: translateY(-1px);
+}
+
+.context-budget-indicator[data-streaming="true"] {
+  animation: budget-pulse 2s ease-in-out infinite;
+}
+
+.context-budget-icon {
+  font-size: 10px;
+  line-height: 1;
+}
+
+.context-budget-text {
+  font-size: 11px;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+@keyframes budget-pulse {
+  0%, 100% {
+    opacity: 0.8;
+  }
+  50% {
+    opacity: 1;
+  }
+}

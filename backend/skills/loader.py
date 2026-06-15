@@ -34,6 +34,7 @@ SKILL.md 格式：
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -87,14 +88,33 @@ class SkillLoader:
 
     # 发现目录（按优先级排序）
     SEARCH_DIRS = [
-        ("project", PROJECT_ROOT / ".mini-code" / "skills"),
-        ("global", Path.home() / ".mini-code" / "skills"),
+        ("project", PROJECT_ROOT / ".codex" / "skills"),
+        ("project-legacy", PROJECT_ROOT / ".mini-code" / "skills"),
+        ("global", Path.home() / ".codex" / "skills"),
+        ("global-legacy", Path.home() / ".mini-code" / "skills"),
         ("builtin", PROJECT_ROOT / "skills"),
     ]
 
     def __init__(self) -> None:
         self._cache: dict[str, SkillMeta] = {}
         self._full_cache: dict[str, SkillFull] = {}
+
+    def _search_dirs(self) -> list[tuple[str, Path]]:
+        dirs = list(self.SEARCH_DIRS)
+        codex_home = str(os.environ.get("CODEX_HOME") or "").strip()
+        if codex_home:
+            dirs.insert(2, ("global", Path(codex_home).expanduser() / "skills"))
+
+        deduped: list[tuple[str, Path]] = []
+        seen: set[Path] = set()
+        for level, path in dirs:
+            expanded = path.expanduser()
+            key = expanded.resolve() if expanded.exists() else expanded.absolute()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append((level, expanded))
+        return deduped
 
     def discover(self) -> list[SkillMeta]:
         """
@@ -109,7 +129,7 @@ class SkillLoader:
         seen: dict[str, SkillMeta] = {}
 
         # 从最低优先级开始扫描，高优先级覆盖低优先级
-        for level, base_dir in reversed(self.SEARCH_DIRS):
+        for level, base_dir in reversed(self._search_dirs()):
             if not base_dir.exists():
                 continue
 

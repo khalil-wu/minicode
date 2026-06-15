@@ -12,7 +12,6 @@ import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any, Callable, Coroutine
 
 from backend.config import PROJECT_ROOT
@@ -143,26 +142,58 @@ class TaskScheduler:
         self._save()
         return True
 
-    def start(self) -> None:
-        if self._loop_task is None or self._loop_task.done():
-            self._loop_task = asyncio.ensure_future(self._run_loop())
+    async def start(self) -> None:
+        """Start the scheduler loop."""
+        if not hasattr(self, '_running') or not self._running:
+            self._running = True
+            self._loop_task = asyncio.create_task(self._run_loop())
+            logger.info("TaskScheduler started")
 
-    def stop(self) -> None:
-        if self._loop_task and not self._loop_task.done():
+    async def stop(self) -> None:
+        """Stop the scheduler loop."""
+        self._running = False
+        if hasattr(self, '_loop_task') and self._loop_task and not self._loop_task.done():
             self._loop_task.cancel()
+            try:
+                await self._loop_task
+            except asyncio.CancelledError:
+                pass
+        logger.info("TaskScheduler stopped")
 
     async def _run_loop(self) -> None:
-        while True:
-            await asyncio.sleep(60)
-            now = datetime.now(UTC)
-            for task in list(self._tasks.values()):
-                if not task.enabled:
-                    continue
-                if cron_matches(task.schedule, now):
-                    task.last_run_at = now.isoformat()
-                    self._save()
-                    if self._on_fire:
-                        try:
-                            await self._on_fire(task)
-                        except Exception as exc:
-                            logger.error("scheduled task %s fire failed: %s", task.id, exc)
+        """Main scheduler loop - checks tasks every 60 seconds."""
+        try:
+            while getattr(self, '_running', True):
+                await asyncio.sleep(60)
+                now = datetime.now(UTC)
+                for task in list(self._tasks.values()):
+                    if not task.enabled:
+                        continue
+                    if cron_matches(task.schedule, now):
+                        task.last_run_at = now.isoformat()
+                        self._save()
+                        if self._on_fire:
+                            try:
+                                await self._on_fire(task)
+                            except Exception as exc:
+                                logger.error("scheduled task %s fire failed: %s", task.id, exc)
+        except asyncio.CancelledError:
+            pass
+
+
+_GLOBAL_SCHEDULER: TaskScheduler | None = None
+
+
+def get_global_scheduler(on_fire: TaskFireCallback | None = None) -> TaskScheduler:
+    """Return the process-wide scheduler used by websocket handlers and bootstrap."""
+    global _GLOBAL_SCHEDULER
+    if _GLOBAL_SCHEDULER is None:
+        _GLOBAL_SCHEDULER = TaskScheduler(on_fire=on_fire)
+    elif on_fire is not None and _GLOBAL_SCHEDULER._on_fire is None:
+        _GLOBAL_SCHEDULER._on_fire = on_fire
+    return _GLOBAL_SCHEDULER
+
+
+def reset_global_scheduler_for_tests() -> None:
+    global _GLOBAL_SCHEDULER
+    _GLOBAL_SCHEDULER = None

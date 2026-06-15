@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
+import locale
 import os
 import shutil
 import signal
@@ -15,6 +17,51 @@ from backend.sandbox.policy import SandboxPolicy
 from backend.sandbox.result import SandboxResult
 
 MAX_OUTPUT_LENGTH = 20_000
+
+
+def _preferred_oem_encoding() -> str:
+    """Best-effort name of the encoding native console tools emit on this host.
+
+    On Windows this is the OEM/ANSI codepage (e.g. cp936 on zh-CN), which is what
+    git/cmd/dir write when they have not been told to use UTF-8. Elsewhere it is
+    the locale preferred encoding. Used as a fallback when bytes are not valid
+    UTF-8 so non-ASCII output is not replaced with U+FFFD garbage.
+    """
+    if sys.platform == "win32":
+        try:
+            import ctypes  # noqa: PLC0415
+
+            cp = ctypes.windll.kernel32.GetOEMCP()
+            if cp:
+                return f"cp{cp}"
+        except Exception:
+            pass
+    try:
+        return locale.getpreferredencoding(False) or "utf-8"
+    except Exception:
+        return "utf-8"
+
+
+def _decode_command_bytes(data: bytes) -> str:
+    """Decode finished command output, tolerating non-UTF-8 native tool output.
+
+    Tries strict UTF-8 first (the common case once children are nudged toward
+    UTF-8), then the host OEM/locale encoding for legacy native tools, and only
+    then falls back to lossy UTF-8 so we never raise.
+    """
+    if not data:
+        return ""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        fallback = _preferred_oem_encoding()
+        if fallback.lower() not in ("utf-8", "utf8"):
+            try:
+                return data.decode(fallback)
+            except (UnicodeDecodeError, LookupError):
+                pass
+        return data.decode("utf-8", errors="replace")
+
 
 
 class SandboxRunner:
@@ -36,15 +83,15 @@ class SandboxRunner:
         *,
         cwd: str | Path | None = None,
         cancel_event: asyncio.Event | None = None,
-        stream_callback: Callable[[str], Awaitable[None]] | None = None,
+        stream_callback: Callable[..., Awaitable[None]] | None = None,
     ) -> SandboxResult:
         env = self._build_env()
         wrapped_command = self._wrap_command(command)
         process_kwargs = self._process_kwargs()
 
         proc: asyncio.subprocess.Process | None = None
-        stdout_parts: list[str] = []
-        stderr_parts: list[str] = []
+        stdout_buf = bytearray()
+        stderr_buf = bytearray()
 
         try:
             proc = await asyncio.create_subprocess_shell(
@@ -63,32 +110,50 @@ class SandboxRunner:
                     await self._kill_tree(proc)
                 cancel_task = asyncio.create_task(_wait_cancel())
 
+            async def _forward_stream(piece: str, stream_name: str) -> None:
+                if not stream_callback or not piece:
+                    return
+                try:
+                    await stream_callback(piece, stream_name)
+                except TypeError:
+                    try:
+                        await stream_callback(piece)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
             async def _read_stream(
-                stream: Any, sink: list[str], *, forward: bool
+                stream: Any, sink: bytearray, *, stream_name: str
             ) -> int:
+                # Accumulate raw bytes and cap on byte length; the final decode
+                # handles UTF-8/native fallback. For live forwarding we use an
+                # incremental UTF-8 decoder so multi-byte characters split across
+                # read() boundaries are not corrupted mid-stream.
                 total = 0
+                decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
                 while stream is not None:
                     chunk = await stream.read(4096)
                     if not chunk:
                         break
-                    decoded = chunk.decode("utf-8", errors="replace")
                     remaining = MAX_OUTPUT_LENGTH - total
                     if remaining > 0:
-                        sink.append(decoded[:remaining])
-                    total += len(decoded)
-                    if forward and stream_callback:
-                        try:
-                            await stream_callback(decoded)
-                        except Exception:
-                            pass
+                        sink += chunk[:remaining]
+                    total += len(chunk)
+                    if stream_callback:
+                        piece = decoder.decode(chunk)
+                        await _forward_stream(piece, stream_name)
+                if stream_callback:
+                    tail = decoder.decode(b"", final=True)
+                    await _forward_stream(tail, stream_name)
                 return total
 
             try:
                 stdout_task = asyncio.create_task(
-                    _read_stream(proc.stdout, stdout_parts, forward=True)
+                    _read_stream(proc.stdout, stdout_buf, stream_name="stdout")
                 )
                 stderr_task = asyncio.create_task(
-                    _read_stream(proc.stderr, stderr_parts, forward=False)
+                    _read_stream(proc.stderr, stderr_buf, stream_name="stderr")
                 )
                 await asyncio.wait_for(
                     asyncio.gather(stdout_task, stderr_task, proc.wait()),
@@ -99,8 +164,8 @@ class SandboxRunner:
                 if cancel_task:
                     cancel_task.cancel()
                 return SandboxResult(
-                    stdout="".join(stdout_parts),
-                    stderr="".join(stderr_parts),
+                    stdout=_decode_command_bytes(bytes(stdout_buf)),
+                    stderr=_decode_command_bytes(bytes(stderr_buf)),
                     exit_code=-1,
                     timed_out=True,
                 )
@@ -110,15 +175,15 @@ class SandboxRunner:
 
             if cancel_event and cancel_event.is_set():
                 return SandboxResult(
-                    stdout="".join(stdout_parts),
-                    stderr="".join(stderr_parts),
+                    stdout=_decode_command_bytes(bytes(stdout_buf)),
+                    stderr=_decode_command_bytes(bytes(stderr_buf)),
                     exit_code=-1,
                     cancelled=True,
                 )
 
             return SandboxResult(
-                stdout="".join(stdout_parts),
-                stderr="".join(stderr_parts),
+                stdout=_decode_command_bytes(bytes(stdout_buf)),
+                stderr=_decode_command_bytes(bytes(stderr_buf)),
                 exit_code=proc.returncode or 0,
             )
 
@@ -129,10 +194,20 @@ class SandboxRunner:
 
     def _build_env(self) -> dict[str, str]:
         env = sanitized_subprocess_env()
+        # Nudge child processes toward UTF-8 so their output decodes cleanly.
+        # PYTHONUTF8/PYTHONIOENCODING cover Python children; PYTHONUNBUFFERED
+        # keeps streamed output prompt. Native Windows tools that ignore these
+        # are handled by the OEM-codepage fallback in _decode_command_bytes.
+        env.setdefault("PYTHONUTF8", "1")
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+        env.setdefault("PYTHONUNBUFFERED", "1")
         env.update(self._policy.env_overrides)
         return env
 
     def _wrap_command(self, command: str) -> str:
+        if self._policy.disable_os_sandbox:
+            return command
+
         if sys.platform == "linux":
             parts = []
             if not self._policy.allow_network and shutil.which("unshare"):

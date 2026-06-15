@@ -1,0 +1,338 @@
+/*
+ * utilities.css -- Tailwind directives + reusable utility classes
+ *
+ * The @tailwind directives below activate Tailwind's generated utility
+ * classes, which are used extensively in the shell layout components.
+ *
+ * Custom utility classes defined after the directives will take
+ * precedence over Tailwind's same-named classes (unlayered > layered).
+ *
+ * Import order (main.tsx):
+ *   tokens.css -> reset.css -> animations.css -> utilities.css
+ */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ════════════════════════════════════════════════════════
+   Custom utility classes (override Tailwind equivalents)
+   ════════════════════════════════════════════════════════ */
+
+/* ════════════════════════════════════════════════════════
+   1. .truncate  (27 occurrences across 14 files)
+   Replaces:  overflow: "hidden", textOverflow: "ellipsis",
+              whiteSpace: "nowrap"
+   ════════════════════════════════════════════════════════ */
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ════════════════════════════════════════════════════════
+   2. .flex-row-center  (45 occurrences across 14 files)
+   Replaces:  display: "flex", alignItems: "center"
+   ════════════════════════════════════════════════════════ */
+.flex-row-center {
+  display: flex;
+  align-items: center;
+}
+
+/* ════════════════════════════════════════════════════════
+   3. .flex-col  (32 occurrences across 12 files)
+   Replaces:  display: "flex", flexDirection: "column"
+
+   NOTE: Tailwind also provides `flex flex-col`, but this
+   single-class shorthand avoids the two-class combo and
+   keeps specificity low.
+   ════════════════════════════════════════════════════════ */
+.flex-col {
+  display: flex;
+  flex-direction: column;
+}
+
+
+/* ════════════════════════════════════════════════════════
+   5. .flex-center  (common sub-pattern)
+   Replaces:  display: "flex", alignItems: "center",
+              justifyContent: "center"
+   ════════════════════════════════════════════════════════ */
+.flex-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ════════════════════════════════════════════════════════
+   6. .flex-fill  (141 occurrences of flex:1, 140 of minWidth:0)
+   Replaces:  flex: 1, minWidth: 0
+
+   The min-width: 0 is critical inside flex containers to
+   allow text truncation of children.
+   ════════════════════════════════════════════════════════ */
+.flex-fill {
+  flex: 1;
+  min-width: 0;
+}
+
+
+
+/* ════════════════════════════════════════════════════════
+   8. .text-muted  (246 occurrences across 55 files)
+   Replaces:  color: "var(--text-muted)"
+   ════════════════════════════════════════════════════════ */
+.text-muted {
+  color: var(--text-muted);
+}
+
+/* ════════════════════════════════════════════════════════
+   9. .text-secondary  (common sub-pattern)
+   Replaces:  color: "var(--text-secondary)"
+   ════════════════════════════════════════════════════════ */
+.text-secondary {
+  color: var(--text-secondary);
+}
+
+/* ════════════════════════════════════════════════════════
+   10. .border-subtle  (164 occurrences across 46 files)
+   Replaces:  border: "1px solid var(--border-subtle)"
+   ════════════════════════════════════════════════════════ */
+.border-subtle {
+  border: 1px solid var(--border-subtle);
+}
+
+/* ════════════════════════════════════════════════════════
+   11. Typography utility classes (Phase 2 optimization)
+   Replaces: inline fontSize with consistent token usage
+   ════════════════════════════════════════════════════════ */
+.text-xs { font-size: var(--text-xs); }
+.text-sm { font-size: var(--text-sm); }
+.text-base { font-size: var(--text-base); }
+.text-md { font-size: var(--text-md); }
+.text-lg { font-size: var(--text-lg); }
+.text-xl { font-size: var(--text-xl); }
+.text-2xl { font-size: var(--text-2xl); }
+.text-3xl { font-size: var(--text-3xl); }
+
+.font-ui { font-family: var(--font-ui); }
+.font-mono { font-family: var(--font-mono); }
+.font-prose { font-family: var(--font-prose); }
+
+.cjk-copy,
+.md-prose {
+  font-family: var(--font-prose);
+  font-weight: 400;
+  letter-spacing: 0;
+  font-synthesis-weight: none;
+  text-rendering: optimizeLegibility;
+}
+
+.cjk-title {
+  font-family: var(--font-cjk);
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: var(--leading-snug);
+  font-synthesis-weight: none;
+  text-rendering: optimizeLegibility;
+}
+
+.md-prose .md-body {
+  font-family: inherit;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+/* GFM task lists (- [ ] / - [x]) render a checkbox, so they must not also
+   show a disc/number marker. remark-gfm tags the <ul> and <li> for us. */
+.md-prose ul.contains-task-list {
+  list-style: none;
+  padding-left: 0;
+}
+.md-prose li.task-list-item {
+  list-style: none;
+}
+.md-prose li.task-list-item input[type="checkbox"] {
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.md-prose strong {
+  font-weight: 600;
+}
+
+.md-prose h1,
+.md-prose h2,
+.md-prose h3 {
+  font-family: var(--font-prose);
+  letter-spacing: 0;
+  line-height: var(--leading-snug);
+}
+
+.md-prose pre,
+.md-prose code,
+.md-prose kbd,
+.md-prose samp {
+  font-family: var(--font-mono);
+  font-synthesis-weight: auto;
+}
+
+.btn-ghost-danger:focus-visible { outline: 2px solid var(--state-danger); outline-offset: 2px; }
+
+/* ════════════════════════════════════════════════════════
+   12. .tree-node-hover  — file tree row hover state
+   Replaces: onMouseEnter/onMouseLeave DOM mutations
+   ════════════════════════════════════════════════════════ */
+.tree-node-hover:not([data-selected]) { transition: background 80ms ease; }
+.tree-node-hover:not([data-selected]):hover { background: var(--surface-hover); }
+
+/* ════════════════════════════════════════════════════════
+   13. .session-row-hover  — session list row hover state
+   Replaces: onMouseEnter/onMouseLeave DOM mutations
+   ════════════════════════════════════════════════════════ */
+.session-row-hover { transition: background 120ms ease; }
+.session-row-hover:hover { background: var(--surface-soft); }
+.session-row-hover[data-active] { background: var(--surface-page); }
+
+/* ════════════════════════════════════════════════════════
+   CJK Typography — Anthropic-inspired optimization
+   
+   Noto Sans SC (loaded via Google Fonts) is the primary CJK
+   font, paired with Inter for Latin. It has geometric strokes,
+   proportional widths, and consistent weight distribution —
+   matching Anthropic's clean, readable CJK style.
+   
+   These rules improve Chinese text readability:
+   - font-variant-east-asian: proportional-width for mixed Latin+CJK
+   - font-synthesis: disabled to prevent artificial bold on CJK
+   - text-rendering: optimizeLegibility for better kerning
+   - CJK-aware line-height and letter-spacing via tokens
+   ════════════════════════════════════════════════════════ */
+
+/* Global CJK optimization for the entire app */
+:root {
+  font-synthesis: none;          /* Prevent browser-synthesized bold/oblique on CJK */
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-variant-east-asian: proportional-width;  /* Mixed Latin+CJK: proportional widths */
+}
+
+/* CJK content areas get generous line-height */
+.cjk-copy,
+.md-prose {
+  font-variant-east-asian: proportional-width;
+  line-height: var(--cjk-leading, 1.65);
+  letter-spacing: var(--cjk-spacing, 0.02em);
+}
+
+/* CJK titles: snug line-height, no extra spacing */
+.cjk-title {
+  font-variant-east-asian: proportional-width;
+}
+
+/* Prose paragraphs with CJK: generous vertical rhythm */
+.md-prose p,
+.md-prose li {
+  line-height: var(--cjk-leading, 1.65);
+}
+
+/* Headings with CJK: tighter, bold weight allowed */
+.md-prose h1,
+.md-prose h2,
+.md-prose h3 {
+  font-variant-east-asian: proportional-width;
+  font-synthesis-weight: auto;  /* Allow weight synthesis for headings */
+}
+
+/* ════════════════════════════════════════════════════════
+   Composer focus enhancement (Phase 2 UI optimization)
+   ════════════════════════════════════════════════════════ */
+.composer-container:focus-within {
+  border-color: var(--accent-primary) !important;
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent-primary) 10%, transparent), var(--shadow-soft) !important;
+}
+
+/* ════════════════════════════════════════════════════════
+   Button interaction feedback (Phase 3 UI optimization)
+   ════════════════════════════════════════════════════════ */
+.btn-primary,
+.btn-send {
+  transition: all 120ms ease-out;
+}
+
+.btn-primary:hover,
+.btn-send:hover {
+  filter: brightness(1.1);
+  box-shadow: var(--shadow-sm);
+}
+
+.btn-primary:active,
+.btn-send:active {
+  transform: scale(0.98);
+  filter: brightness(0.95);
+}
+
+/* ════════════════════════════════════════════════════════
+   Panel switching transition (Phase 6 UI optimization)
+   ════════════════════════════════════════════════════════ */
+.panel-content-wrapper {
+  animation: panel-fade-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@keyframes panel-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ════════════════════════════════════════════════════════
+   Custom scrollbar (Phase 11 UI optimization)
+   ════════════════════════════════════════════════════════ */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-soft);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
+}
+
+/* Firefox scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-soft) transparent;
+}
+
+/* ── Responsive breakpoints ── */
+@media (max-width: 1180px) {
+  [data-panel="right"] {
+    display: none !important;
+  }
+}
+
+@media (max-width: 768px) {
+  [data-panel="left"] {
+    position: absolute;
+    z-index: var(--z-sidebar, 10);
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+  }
+  [data-panel="left"].sidebar-open {
+    transform: translateX(0);
+  }
+}

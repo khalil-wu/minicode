@@ -26,8 +26,11 @@ async def handle_mcp_list(session: "WebSocketSession", data: dict[str, Any]) -> 
 
 
 async def handle_mcp_add(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    import json
     from backend.main import get_mcp_manager
+    from backend.mcp.config_file import read_mcp_config, write_mcp_config
     from backend.mcp.manager import MCPServerConfig
+    from backend.mcp.manager import MCP_CONFIG_FILE
 
     manager = get_mcp_manager()
     if manager is None:
@@ -44,11 +47,34 @@ async def handle_mcp_add(session: "WebSocketSession", data: dict[str, Any]) -> b
         name=name,
         command=str(data.get("command", "python")).strip(),
         args=[str(a) for a in (data.get("args") or [])],
+        env={str(key): str(value) for key, value in dict(data.get("env") or {}).items()},
         transport=transport,
         url=str(data.get("url", "")).strip() or None,
         source="user",
     )
-    await manager.start_server(config)
+    try:
+        current = read_mcp_config()
+        current_data = json.loads(str(current.get("content") or "{}"))
+        servers_data = current_data.setdefault("mcpServers", {})
+        server_entry: dict[str, Any] = {
+            "transport": config.transport,
+            "autoStart": config.auto_start,
+        }
+        if config.transport == "stdio":
+            server_entry["command"] = config.command
+            server_entry["args"] = config.args
+        if config.env:
+            server_entry["env"] = config.env
+        if config.url:
+            server_entry["url"] = config.url
+        servers_data[config.name] = server_entry
+        write_mcp_config(json.dumps(current_data, ensure_ascii=False, indent=2) + "\n", MCP_CONFIG_FILE)
+
+        await manager.start_server(config)
+        session.refresh_tool_registry_if_mcp_changed(allow_when_busy=False)
+    except Exception as exc:
+        await session._send_event(AgentEvent.error(f"Failed to add MCP server: {exc}", recoverable=True))
+        return True
     await session._send_ws_payload(
         {"type": "mcp_status", "servers": manager.get_all_status()},
         log_context="mcp_status",
@@ -57,7 +83,10 @@ async def handle_mcp_add(session: "WebSocketSession", data: dict[str, Any]) -> b
 
 
 async def handle_mcp_remove(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    import json
     from backend.main import get_mcp_manager
+    from backend.mcp.config_file import read_mcp_config, write_mcp_config
+    from backend.mcp.manager import MCP_CONFIG_FILE
 
     manager = get_mcp_manager()
     if manager is None:
@@ -67,7 +96,14 @@ async def handle_mcp_remove(session: "WebSocketSession", data: dict[str, Any]) -
     if not name:
         await session._send_event(AgentEvent.error("Server name is required", recoverable=True))
         return True
-    await manager.stop_server(name)
+    await manager.remove_server(name)
+    current = read_mcp_config()
+    current_data = json.loads(str(current.get("content") or "{}"))
+    servers_data = current_data.setdefault("mcpServers", {})
+    if isinstance(servers_data, dict):
+        servers_data.pop(name, None)
+        write_mcp_config(json.dumps(current_data, ensure_ascii=False, indent=2) + "\n", MCP_CONFIG_FILE)
+    session.refresh_tool_registry_if_mcp_changed(allow_when_busy=False)
     await session._send_ws_payload(
         {"type": "mcp_status", "servers": manager.get_all_status()},
         log_context="mcp_status",
@@ -87,6 +123,7 @@ async def handle_mcp_restart(session: "WebSocketSession", data: dict[str, Any]) 
         await session._send_event(AgentEvent.error("Server name is required", recoverable=True))
         return True
     await manager.restart_server(name)
+    session.refresh_tool_registry_if_mcp_changed(allow_when_busy=False)
     await session._send_ws_payload(
         {"type": "mcp_status", "servers": manager.get_all_status()},
         log_context="mcp_status",
@@ -210,28 +247,51 @@ async def handle_connectors_marketplace_install(session: "WebSocketSession", dat
 
     config = MCPServerConfig(
         name=str(template["name"]),
-        command=str(template.get("command") or "python"),
+        command=str(template.get("command") or ("python" if str(template.get("transport") or "stdio") == "stdio" else "")),
         args=[str(arg) for arg in (template.get("args") or [])],
         transport=str(template.get("transport") or "stdio"),
         url=str(template.get("url") or "").strip() or None,
+        env={str(key): str(value) for key, value in dict(template.get("env") or {}).items()},
+        auto_start=bool(template.get("autoStart", True)),
+        max_retries=int(template.get("maxRetries", 3)),
         source="marketplace",
+        requires_user_action=bool(template.get("requiresUserAction", False)),
+        setup_hint=str(template.get("setupHint") or ""),
+        docs_url=str(template.get("docsUrl") or ""),
     )
 
     try:
         current = read_mcp_config()
         current_data = json.loads(str(current.get("content") or "{}"))
         servers_data = current_data.setdefault("mcpServers", {})
-        servers_data[config.name] = {
-            "command": config.command,
-            "args": config.args,
+        server_entry: dict[str, Any] = {
             "env": dict(template.get("env") or {}),
-            "autoStart": True,
+            "autoStart": config.auto_start,
             "transport": config.transport,
-            **({"url": config.url} if config.url else {}),
         }
+        if config.max_retries != 3:
+            server_entry["maxRetries"] = config.max_retries
+        if config.transport == "stdio":
+            server_entry["command"] = config.command
+            server_entry["args"] = config.args
+        elif config.args:
+            server_entry["args"] = config.args
+        if config.url:
+            server_entry["url"] = config.url
+        if template.get("requiresUserAction"):
+            server_entry["requiresUserAction"] = True
+        if template.get("setupHint"):
+            server_entry["setupHint"] = str(template["setupHint"])
+        if template.get("docsUrl"):
+            server_entry["docsUrl"] = str(template["docsUrl"])
+        servers_data[config.name] = server_entry
         write_mcp_config(json.dumps(current_data, ensure_ascii=False, indent=2) + "\n", MCP_CONFIG_FILE)
 
-        await mgr.start_server(config)
+        if config.auto_start:
+            await mgr.start_server(config)
+        else:
+            await mgr.register_config(config)
+        session.refresh_tool_registry_if_mcp_changed(allow_when_busy=False)
         servers = mgr.get_all_status()
         connectors = get_marketplace_connectors([s.get("name", "") for s in servers if s.get("name")])
         status = next((s for s in servers if s.get("name") == config.name), {})
@@ -269,10 +329,18 @@ async def handle_connectors_marketplace_install(session: "WebSocketSession", dat
 # ---------------------------------------------------------------------------
 
 
-async def handle_scheduler_list(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    from backend.tasks.scheduler import TaskScheduler
+def _get_scheduler(session):
+    """Get the shared TaskScheduler from bootstrap state."""
+    from backend.api import _state as api_state
+    bootstrap = api_state.bootstrap
+    if bootstrap and getattr(bootstrap, 'task_scheduler', None):
+        return bootstrap.task_scheduler
+    from backend.tasks.scheduler import get_global_scheduler
+    return get_global_scheduler()
 
-    scheduler = TaskScheduler()
+
+async def handle_scheduler_list(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    scheduler = _get_scheduler(session)
     await session._send_ws_payload(
         {"type": "scheduler.list", "tasks": scheduler.list_tasks()},
         log_context="scheduler.list",
@@ -281,8 +349,6 @@ async def handle_scheduler_list(session: "WebSocketSession", data: dict[str, Any
 
 
 async def handle_scheduler_add(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    from backend.tasks.scheduler import TaskScheduler
-
     name = str(data.get("name", "")).strip()
     if not name:
         await session._send_event(AgentEvent.error("Task name is required", recoverable=True))
@@ -297,7 +363,7 @@ async def handle_scheduler_add(session: "WebSocketSession", data: dict[str, Any]
         return True
     permission_mode = str(data.get("permission_mode", "auto_approve"))
 
-    scheduler = TaskScheduler()
+    scheduler = _get_scheduler(session)
     scheduler.add_task(name=name, prompt=prompt, schedule=schedule, permission_mode=permission_mode)
     await session._send_ws_payload(
         {"type": "scheduler.list", "tasks": scheduler.list_tasks()},
@@ -307,14 +373,12 @@ async def handle_scheduler_add(session: "WebSocketSession", data: dict[str, Any]
 
 
 async def handle_scheduler_remove(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    from backend.tasks.scheduler import TaskScheduler
-
     task_id = str(data.get("task_id") or data.get("id") or "").strip()
     if not task_id:
         await session._send_event(AgentEvent.error("Task ID is required", recoverable=True))
         return True
 
-    scheduler = TaskScheduler()
+    scheduler = _get_scheduler(session)
     changed = scheduler.remove_task(task_id)
     if not changed:
         await session._send_event(AgentEvent.error(f"Task '{task_id}' not found", recoverable=True))
@@ -327,14 +391,12 @@ async def handle_scheduler_remove(session: "WebSocketSession", data: dict[str, A
 
 
 async def handle_scheduler_toggle(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    from backend.tasks.scheduler import TaskScheduler
-
     task_id = str(data.get("task_id") or data.get("id") or "").strip()
     if not task_id:
         await session._send_event(AgentEvent.error("Task ID is required", recoverable=True))
         return True
 
-    scheduler = TaskScheduler()
+    scheduler = _get_scheduler(session)
     changed = scheduler.toggle_task(task_id, bool(data.get("enabled", True)))
     if not changed:
         await session._send_event(AgentEvent.error(f"Task '{task_id}' not found", recoverable=True))

@@ -13,7 +13,7 @@ export const UsageRing = ({
   const contextPercent = contextUsage && contextUsage.limit > 0
     ? contextUsage.used / contextUsage.limit
     : 0;
-  const percent = clampPercent(totalBudgetPercent || contextPercent);
+  const percent = clampPercent((totalBudgetPercent ?? 0) > 0 ? totalBudgetPercent : (contextPercent ?? 0));
   const label = percent > 0 ? `${Math.round(percent * 100)}%` : "--";
   const color = usageColor(percent);
   const title = buildTitle({ buckets, contextUsage, percent });

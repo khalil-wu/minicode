@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
-from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from backend.agent.message import AgentEvent
@@ -28,10 +27,21 @@ async def handle_workspace_import(session: "WebSocketSession", data: dict[str, A
         message = f"Invalid project path: {path_str}"
         if hint:
             message = f"{message}. {hint}"
-        await session._send_event(AgentEvent.error(message, recoverable=True))
+        await session._send_event(
+            AgentEvent.error(
+                message,
+                recoverable=True,
+                error_type="workspace",
+                error_code="workspace_missing",
+            )
+        )
         return True
 
-    activated = await session._activate_workspace_path(str(project_path), announce=True)
+    activated = await session._activate_workspace_path(
+        str(project_path),
+        announce=True,
+        wait_for_initialize=True,
+    )
     if activated and session.active_conversation_id:
         branch = session._git_branch_for(project_path)
         updated = session.conversation_repo.update_workspace_binding(

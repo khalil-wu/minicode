@@ -56,7 +56,7 @@ const runtimeConfig = {
       compareWriteFile: (path, expectedHash, content) => ipcRenderer.invoke("minicode:fs:compareWriteFile", path, expectedHash, content),
       createDirectory: (path) => ipcRenderer.invoke("minicode:fs:createDirectory", path),
       renamePath: (oldPath, newPath) => ipcRenderer.invoke("minicode:fs:renamePath", oldPath, newPath),
-      deletePath: (path, recursive) => ipcRenderer.invoke("minicode:fs:deletePath", path, recursive),
+      deletePath: (path, recursive, confirm) => ipcRenderer.invoke("minicode:fs:deletePath", path, recursive, confirm),
     },
     pty: {
       spawn: (cwd) => ipcRenderer.invoke("minicode:pty:spawn", cwd),
@@ -64,6 +64,7 @@ const runtimeConfig = {
       resize: (sessionId, cols, rows) => ipcRenderer.invoke("minicode:pty:resize", sessionId, cols, rows),
       kill: (sessionId) => ipcRenderer.invoke("minicode:pty:kill", sessionId),
       list: () => ipcRenderer.invoke("minicode:pty:list"),
+      snapshot: (sessionId, maxChars) => ipcRenderer.invoke("minicode:pty:snapshot", sessionId, maxChars),
       onData: (callback) => {
         const handler = (_event, payload) => callback(payload);
         ipcRenderer.on("minicode:pty:data", handler);
@@ -81,7 +82,7 @@ const runtimeConfig = {
     browser: {
       discover: (endpoint) => ipcRenderer.invoke("minicode:browser:discover", endpoint),
       captureScreenshot: (endpoint, targetId) => ipcRenderer.invoke("minicode:browser:captureScreenshot", endpoint, targetId),
-      navigate: (endpoint, targetId, url) => ipcRenderer.invoke("minicode:browser:navigate", endpoint, targetId, url),
+      navigate: (endpoint, targetId, url, options) => ipcRenderer.invoke("minicode:browser:navigate", endpoint, targetId, url, options),
       click: (endpoint, targetId, selector) => ipcRenderer.invoke("minicode:browser:click", endpoint, targetId, selector),
       type: (endpoint, targetId, selector, text) => ipcRenderer.invoke("minicode:browser:type", endpoint, targetId, selector, text),
     }

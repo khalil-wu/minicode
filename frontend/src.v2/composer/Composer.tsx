@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
+import { GitBranch, Pause, Play, X } from "lucide-react";
 import { useAppStore } from "../stores";
 import { deriveSendState } from "../lib/send-state";
 import { sendChatMessage } from "../chat/sendChatMessage";
-import type { MessageAttachmentRef } from "../stores/types";
+import type { DiffReviewFile, GitChangeFile, MessageAttachmentRef } from "../stores/types";
 import { ContextChipRegion } from "./ActionChipRegion";
 import { AttachmentStrip } from "./AttachmentStrip";
 import { ComposerTextarea } from "./ComposerTextarea";
@@ -11,8 +12,15 @@ import { FooterRow } from "./FooterRow";
 import { uploadComposerFiles } from "./uploads";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { buildContextFallback, buildContextPayload } from "./contextPayload";
+import {
+  executeRuntimeSlashCommand,
+  getActiveRuntimeSlashCommand,
+  parseRuntimeSlashInput,
+  resolveRuntimeSlashMenuSelection,
+  syncRuntimeSlashPanelForDraft,
+} from "../lib/runtime-commands";
 
-export const Composer = () => {
+export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const draft = useAppStore((s) => s.draft);
   const setDraft = useAppStore((s) => s.setDraft);
   const isStreaming = useAppStore((s) => s.isStreaming);
@@ -31,10 +39,11 @@ export const Composer = () => {
   const addSelectedSkill = useAppStore((s) => s.addSelectedSkill);
   const removeSelectedSkill = useAppStore((s) => s.removeSelectedSkill);
   const setMentionResults = useAppStore((s) => s.setMentionResults);
-  const toggleSkillsMarketplace = useAppStore((s) => s.toggleSkillsMarketplace);
   const appMode = useAppStore((s) => s.appMode);
   const gitChanges = useAppStore((s) => s.gitChanges);
   const selectedSkills = useAppStore((s) => s.selectedSkills);
+  const activeGoal = useAppStore((s) => s.activeGoal);
+  const currentModel = useAppStore((s) => s.currentModel);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [menuFilter, setMenuFilter] = useState("");
@@ -46,27 +55,35 @@ export const Composer = () => {
     hasContent: draft.trim().length > 0 || hasReadyAttachment,
     isStreaming,
     isConnected,
+    hasModel: currentModel.trim().length > 0,
   });
   const codeMode = appMode === "code";
-  const activeSlashCommand = selectedSlashCommand ?? getActiveSlashCommand(draft);
+  const wideMode = codeMode;
+  const activeSlashCommand = selectedSlashCommand ?? getActiveRuntimeSlashCommand(draft);
   const commandModeActive = Boolean(activeSlashCommand && !slashPanelOpen);
-  const additions = [...gitChanges.workingTree, ...gitChanges.staged].reduce((sum, file) => sum + file.additions, 0);
-  const deletions = [...gitChanges.workingTree, ...gitChanges.staged].reduce((sum, file) => sum + file.deletions, 0);
+  const changedFiles = [...gitChanges.workingTree, ...gitChanges.staged];
+  const additions = changedFiles.reduce((sum, file) => sum + file.additions, 0);
+  const deletions = changedFiles.reduce((sum, file) => sum + file.deletions, 0);
+  const hasGitChanges = changedFiles.length > 0 || gitChanges.untracked.length > 0;
 
-  const addSystemNotice = (content: string) => {
-    const state = useAppStore.getState();
-    const notice = {
-      id: `m-${Date.now().toString(36)}-sys`,
-      role: "system" as const,
-      content,
-      artifacts: [],
-      timestamp: Date.now(),
-    };
-    if (state.conversationId) {
-      state.hydrateConversationMessages(state.conversationId, [...state.messages, notice], { activate: true });
-    } else {
-      useAppStore.setState({ messages: [...state.messages, notice] });
+  const openDiffReview = () => {
+    const store = useAppStore.getState();
+    const files = buildDiffReviewFiles(store.gitChanges.workingTree, store.gitChanges.staged);
+    if (files.length > 0) {
+      store.setDiffReviewState({
+        requestId: "working-tree",
+        toolName: "working tree",
+        diff: files.map((file) => file.patch).filter(Boolean).join("\n\n"),
+        files,
+        selectedPath: files[0]?.path,
+        status: "viewing",
+        mode: "view",
+        fileDecisions: {},
+        lineComments: [],
+      });
     }
+    store.setRightStackTab("diff");
+    store.requestGitChanges();
   };
 
   const sendUserMessage = async (
@@ -82,7 +99,9 @@ export const Composer = () => {
     let contextPayload = "";
     try {
       contextPayload = await buildContextPayload(contextRefs);
-    } catch {
+    } catch (error) {
+      // Log the error for debugging
+      console.warn("Failed to build context payload for @mentions, using fallback:", error);
       contextPayload = "";
     }
     const prefix = contextPayload || fallbackPayload;
@@ -93,6 +112,32 @@ export const Composer = () => {
       backendContent: [prefix, options?.backendContent ?? content].filter(Boolean).join("\n\n").trim(),
       attachments: readyAttachments,
       attachmentRefs: options?.attachmentRefs ?? [],
+      contextRefs,
+    });
+  };
+
+  const sendRuntimeSlashMessage = async (options: {
+    displayContent: string;
+    backendContent: string;
+    skipLocalAppend: boolean;
+  }) => {
+    const contextRefs = [
+      ...useAppStore.getState().selectedMentions,
+      ...useAppStore.getState().selectedSkills,
+    ];
+    const fallbackPayload = buildContextFallback(contextRefs);
+    let contextPayload = "";
+    try {
+      contextPayload = await buildContextPayload(contextRefs);
+    } catch (error) {
+      // Log the error for debugging
+      console.warn("Failed to build context payload for @mentions, using fallback:", error);
+      contextPayload = "";
+    }
+    const prefix = contextPayload || fallbackPayload;
+    return sendChatMessage({
+      ...options,
+      backendContent: [prefix, options.backendContent].filter(Boolean).join("\n\n").trim(),
       contextRefs,
     });
   };
@@ -109,10 +154,19 @@ export const Composer = () => {
     setSelectedSlashCommand(null);
   };
 
+  const stopRun = () => {
+    const conversationId = useAppStore.getState().conversationId;
+    interrupt();
+    sendClientCommand({
+      type: "interrupt",
+      ...(conversationId ? { conversation_id: conversationId } : {}),
+    });
+  };
+
   const submit = async () => {
-    if (sendState === "stop") {
-      interrupt();
-      sendClientCommand({ type: "interrupt" });
+    if (sendState === "stop" && !draft.trim()) return;
+    if (sendState === "stop" && draft.trim()) {
+      // User has typed content during streaming; ignore Enter and keep the run alive.
       return;
     }
     if (sendState !== "idle") return;
@@ -120,44 +174,12 @@ export const Composer = () => {
       ? [selectedSlashCommand, draft.trim()].filter(Boolean).join(" ")
       : draft.trim();
 
-    // Slash commands are command-mode input. Keep the UI quiet and let the
-    // backend slash registry handle local commands, templates, and mode aliases.
-    const slashMatch = content.match(/^(\/\w+)(?:\s+(.*))?$/s);
-    if (slashMatch) {
-      const cmd = slashMatch[1].toLowerCase();
-      const rest = (slashMatch[2] || "").trim();
-
-      // Extract inline @ mentions from the rest text
-      const inlineAtRefs = rest.matchAll(/@(file|folder|url):([^\s]+)/g);
-      for (const m of inlineAtRefs) {
-        const kind = m[1] as "file" | "folder" | "url";
-        const path = m[2];
-        const name = kind === "url" ? path : (path.split(/[/\\]/).pop() || path);
-        addSelectedMention({ path, name, kind });
+    const slashInput = parseRuntimeSlashInput(content);
+    if (slashInput) {
+      for (const mention of slashInput.mentions) {
+        addSelectedMention(mention);
       }
-
-      const skill = findSkill(cmd.slice(1));
-      if (skill) {
-        addSelectedSkill({
-          name: skill.name,
-          description: skill.description,
-          sourceLevel: skill.source_level,
-        });
-        sendClientCommand({ type: "load_skill", skill_name: skill.name });
-        if (rest) {
-          if (!await sendUserMessage(rest)) return;
-          resetComposer();
-        } else {
-          setDraft("");
-          closeSlashPanel();
-          setMenuFilter("");
-        }
-        return;
-      }
-
-      const cleanRest = rest.replace(/@(file|folder|url):[^\s]+/g, "").trim();
-      const commandLine = [cmd, cleanRest].filter(Boolean).join(" ");
-      await executeSlashCommand(commandLine);
+      await executeSlashCommand(slashInput.commandLine);
       return;
     }
 
@@ -180,64 +202,38 @@ export const Composer = () => {
     });
 
     const finalContent = content;
-    const displayContent = content;
+    const mentions = useAppStore.getState().selectedMentions;
+    const mentionSuffix = mentions.length > 0
+      ? " " + mentions.map((m) => `@${m.name}`).join(" ")
+      : "";
+    const displayContent = content + mentionSuffix;
 
     if (!await sendUserMessage(finalContent, readyAttachments, { attachmentRefs, displayContent })) return;
     resetComposer();
   };
 
   const executeSlashCommand = async (commandLine: string) => {
-    const [cmd, ...restParts] = commandLine.trim().split(/\s+/);
-    const rest = restParts.join(" ");
-      if (cmd === "/clear") {
-      const { showConfirm } = await import("../overlays/DialogService");
-      const ok = await showConfirm({
-        title: "Clear conversation",
-        message: "Clear all messages in the current conversation view? This cannot be undone.",
-        confirmLabel: "Clear",
-        danger: true,
-      });
-      if (!ok) return;
-      const state = useAppStore.getState();
-      if (state.conversationId) {
-        sendClientCommand({ type: "conversation.clear", conversation_id: state.conversationId });
-        state.hydrateConversationMessages(state.conversationId, [], { activate: true, isStreaming: false });
-      } else {
-        useAppStore.setState({ messages: [], isStreaming: false });
-      }
-      setDraft("");
-      setSelectedSlashCommand(null);
-      closeSlashPanel();
-      setMenuFilter("");
-      return;
-    }
-
-    if (cmd === "/skills" && !rest) {
-      const state = useAppStore.getState();
-      if (!state.skillsMarketplaceOpen) toggleSkillsMarketplace();
-      sendClientCommand({ type: "skills.list" });
-      sendClientCommand({ type: "skills.marketplace.list" });
-      setDraft("");
-      setSelectedSlashCommand(null);
-      closeSlashPanel();
-      setMenuFilter("");
-      return;
-    }
-
-    if (cmd === "/compact") {
-      useAppStore.getState().upsertSystemMessage(
-        "system-compact-status",
-        "Compacting context...",
-        { replacePrefix: "Context compact" },
-      );
-    }
-
-    const sent = sendChatMessage({
-      displayContent: commandLine,
-      backendContent: commandLine,
-      skipLocalAppend: true,
+    const result = await executeRuntimeSlashCommand(commandLine, {
+      getState: useAppStore.getState,
+      setState: useAppStore.setState,
+      sendClientCommand,
+      sendChatMessage: sendRuntimeSlashMessage,
+      sendUserMessage,
+      confirmClear: async () => {
+        const { showConfirm } = await import("../overlays/DialogService");
+        return showConfirm({
+          title: "Clear conversation",
+          message: "Clear all messages in the current conversation view? This cannot be undone.",
+          confirmLabel: "Clear",
+          danger: true,
+        });
+      },
     });
-    if (sent) {
+    if (result.reset === "composer") {
+      resetComposer();
+      return;
+    }
+    if (result.reset === "input") {
       setDraft("");
       setSelectedSlashCommand(null);
       closeSlashPanel();
@@ -251,25 +247,13 @@ export const Composer = () => {
     const lines = v.split("\n");
     const lastLine = lines[lines.length - 1];
 
-    const slashCommandLine = getSlashCommandLine(v);
-    if (slashCommandLine && !slashPanelOpen) {
-      openSlashPanel();
-      setMenuFilter(slashCommandLine);
-      sendClientCommand({ type: "skills.list" });
-      if (/^\/skills(?:\s|$)/i.test(slashCommandLine)) {
-        sendClientCommand({ type: "skills.list" });
-      }
-    } else if (slashPanelOpen) {
-      if (slashCommandLine) {
-        setMenuFilter(slashCommandLine);
-        if (/^\/skills(?:\s|$)/i.test(slashCommandLine)) {
-          sendClientCommand({ type: "skills.list" });
-        }
-      } else {
-        closeSlashPanel();
-        setMenuFilter("");
-      }
-    }
+    syncRuntimeSlashPanelForDraft(v, {
+      slashPanelOpen,
+      openSlashPanel,
+      closeSlashPanel,
+      setMenuFilter,
+      sendClientCommand,
+    });
 
     const atMatch = getMentionMatch(lastLine);
     if (atMatch) {
@@ -290,13 +274,22 @@ export const Composer = () => {
     }
 
     if (slashPanelOpen) {
-      const command = value.match(/^(\/[a-z][\w-]*)/i)?.[1] ?? value;
-      if (shouldTokenizeSlashCommand(command)) {
-        setSelectedSlashCommand(command);
-        setDraft("");
-      } else {
+      const selection = resolveRuntimeSlashMenuSelection(value, useAppStore.getState());
+      if (selection.kind === "skill") {
+        addSelectedSkill(selection.skill);
+        sendClientCommand({ type: "load_skill", skill_name: selection.skill.name });
         setSelectedSlashCommand(null);
-        setDraft(value);
+        setDraft("");
+        closeSlashPanel();
+        setMenuFilter("");
+        return;
+      }
+      if (selection.kind === "tokenize") {
+        setSelectedSlashCommand(selection.command);
+        setDraft("");
+      } else if (selection.kind === "execute") {
+        setSelectedSlashCommand(null);
+        void executeSlashCommand(selection.commandLine);
       }
       closeSlashPanel();
       setMenuFilter("");
@@ -318,7 +311,7 @@ export const Composer = () => {
         return;
       }
       const typed = value.match(/^(file|folder):(.*)$/);
-      const rawPath = typed ? typed[2] : value;
+      const rawPath = appendDraftLineAnchor(typed ? typed[2] : value, draft);
       const kind = typed?.[1] === "folder" || rawPath.endsWith("/") || rawPath.endsWith("\\") ? "folder" : "file";
       const name = rawPath.split(/[/\\]/).filter(Boolean).pop() || rawPath;
 
@@ -352,6 +345,29 @@ export const Composer = () => {
     sendClientCommand({ type: "skills.list" });
   }, []);
 
+  // Inject breathing keyframe animation stylesheet once
+  useEffect(() => {
+    const id = "mc-composer-breathe-style";
+    if (document.getElementById(id)) return;
+    const style = document.createElement("style");
+    style.id = id;
+    style.textContent = `
+@keyframes mc-composer-breathe {
+  0%, 100% {
+    border-color: color-mix(in oklch, var(--accent-primary) 30%, var(--border-subtle));
+    box-shadow: 0 0 0 2px color-mix(in oklch, var(--accent-primary) 5%, transparent),
+                0 12px 32px color-mix(in oklch, var(--surface-base) 18%, transparent);
+  }
+  50% {
+    border-color: color-mix(in oklch, var(--accent-primary) 55%, var(--border-subtle));
+    box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent-primary) 12%, transparent),
+                0 12px 32px color-mix(in oklch, var(--surface-base) 18%, transparent);
+  }
+}`;
+    document.head.appendChild(style);
+    return () => { style.remove(); };
+  }, []);
+
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
@@ -370,40 +386,60 @@ export const Composer = () => {
       onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
       onDragLeave={() => setDragOver(false)}
       onDrop={handleDrop}
+      className="composer-container relative mx-auto flex flex-col transition-[background_140ms_ease,border-color_300ms_ease,box-shadow_140ms_ease]"
       style={{
-        position: "relative",
-        width: codeMode ? "min(1320px, calc(100% - 96px))" : "min(980px, calc(100% - 44px))",
-        margin: codeMode ? "0 auto 14px" : "0 auto 20px",
-        padding: codeMode ? "0" : "8px 10px 10px",
+        position: codeMode || minimal ? "relative" : "absolute",
+        left: codeMode || minimal ? undefined : "50%",
+        bottom: codeMode || minimal ? undefined : 24,
+        transform: codeMode || minimal ? undefined : "translateX(-50%)",
+        zIndex: codeMode || minimal ? undefined : 6,
+        display: "flex",
+        flexDirection: "column",
+        width: minimal ? "100%" : wideMode ? "min(1320px, 100%)" : "min(880px, calc(100% - 40px))",
+        marginBottom: codeMode ? "14px" : minimal ? 0 : "0",
+        padding: codeMode ? "0" : "10px 12px 12px",
         background: commandModeActive ? commandComposerBackground : "var(--surface-page)",
         border: dragOver
           ? "2px dashed var(--command-accent, var(--state-info))"
           : commandModeActive
             ? "1px solid var(--command-border, var(--state-info))"
             : "1px solid var(--border-subtle)",
-        borderRadius: codeMode ? "14px" : "14px",
+        borderRadius: codeMode ? "var(--radius-md, 10px)" : "22px",
         boxShadow: commandModeActive
-          ? "0 0 0 1px color-mix(in oklch, var(--command-accent, var(--state-info)) 12%, transparent), 0 12px 32px color-mix(in oklch, var(--surface-base) 18%, transparent)"
-          : "0 12px 32px color-mix(in oklch, var(--surface-base) 18%, transparent)",
-        display: "flex",
-        flexDirection: "column",
-        transition: "background 140ms ease, border-color 140ms ease, box-shadow 140ms ease",
+          ? "0 0 0 1px color-mix(in oklch, var(--command-accent, var(--state-info)) 12%, transparent), var(--shadow-soft)"
+          : "var(--shadow-soft)",
+        ...(isStreaming && !commandModeActive ? breathingGlowStyle : {}),
       }}
     >
       {codeMode && (
-        <div style={codeComposerHeaderStyle}>
-          <span style={{ flex: 1 }} />
-          {(additions > 0 || deletions > 0) && (
-            <span style={diffStatStyle}>
+        <div className="min-h-[36px] flex items-center gap-3 px-3 text-sm" style={{ borderBottom: "1px solid var(--border-subtle)" }}>
+          <span className="flex-1" />
+          {(additions > 0 || deletions > 0 || gitChanges.untracked.length > 0) && (
+            <span className="inline-flex items-center gap-[5px] h-[26px] px-[10px] rounded-sm font-mono font-bold" style={{ background: "var(--surface-base)", border: "1px solid var(--border-subtle)" }}>
               {additions > 0 && <span style={{ color: "var(--state-success)" }}>+{additions.toLocaleString()}</span>}
               {deletions > 0 && <span style={{ color: "var(--state-danger)" }}>-{deletions.toLocaleString()}</span>}
+              {gitChanges.untracked.length > 0 && <span style={{ color: "var(--text-muted)" }}>+{gitChanges.untracked.length} files</span>}
             </span>
           )}
-          <button type="button" style={commitButtonStyle} disabled>
-            Commit changes
-          </button>
+          {hasGitChanges && (
+            <button
+              type="button"
+              className="h-7 px-[10px] rounded-sm text-sm inline-flex items-center gap-1.5"
+              style={{
+                border: "1px solid var(--border-subtle)",
+                background: "var(--surface-base)",
+                color: "var(--text-secondary)",
+                cursor: "pointer",
+              }}
+              onClick={openDiffReview}
+            >
+              <GitBranch size={13} />
+              Review diff
+            </button>
+          )}
         </div>
       )}
+      {activeGoal && <GoalBar />}
       <ContextChipRegion />
       <AttachmentStrip />
       <ComposerTextarea
@@ -413,6 +449,7 @@ export const Composer = () => {
         menuOpen={slashPanelOpen || mentionPanelOpen}
         onDropFiles={handleComposerFiles}
         compact={codeMode}
+        minimal={minimal}
         commandMode={commandModeActive}
         commandLabel={selectedSlashCommand ? selectedSlashCommand.slice(1) : null}
         onClearCommand={() => setSelectedSlashCommand(null)}
@@ -432,98 +469,102 @@ export const Composer = () => {
         kind={slashPanelOpen ? "slash" : "mention"}
         filter={menuFilter}
         onSelect={handleMenuSelect}
+        placement={minimal ? "below" : "above"}
       />
-      <FooterRow sendState={sendState} onSend={submit} compact={codeMode} />
+      <FooterRow sendState={sendState} onSend={sendState === "stop" ? stopRun : submit} compact={codeMode} minimal={minimal} />
     </div>
   );
 };
 
-const codeComposerHeaderStyle: React.CSSProperties = {
-  minHeight: 36,
-  display: "flex",
-  alignItems: "center",
-  gap: 12,
-  padding: "0 12px",
-  borderBottom: "1px solid var(--border-subtle)",
-  fontSize: "var(--text-sm)",
+const buildDiffReviewFiles = (workingTree: GitChangeFile[], staged: GitChangeFile[]): DiffReviewFile[] =>
+  [...staged, ...workingTree].flatMap((file) => {
+    if (!file.patch) return [];
+    return [{
+      path: file.path,
+      patch: file.patch,
+      additions: file.additions,
+      deletions: file.deletions,
+      isBinary: file.isBinary,
+    }];
+  });
+
+/** Breathing glow applied to the composer container while streaming. */
+const breathingGlowStyle: React.CSSProperties = {
+  animation: "mc-composer-breathe 2.4s ease-in-out infinite",
 };
 
-const diffStatStyle: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 5,
-  height: 26,
-  padding: "0 10px",
-  background: "var(--surface-base)",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 6px)",
-  fontFamily: "var(--font-mono)",
-  fontWeight: 700,
-};
-
-const commitButtonStyle: React.CSSProperties = {
-  height: 28,
-  padding: "0 10px",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 6px)",
-  background: "var(--surface-base)",
-  color: "var(--text-muted)",
-  fontSize: "var(--text-sm)",
-  cursor: "not-allowed",
+const GoalBar = () => {
+  const goal = useAppStore((s) => s.activeGoal);
+  const conversationId = useAppStore((s) => s.conversationId);
+  if (!goal) return null;
+  const paused = goal.status === "paused";
+  const sendGoalAction = (action: "pause" | "resume" | "clear") => {
+    sendClientCommand({
+      type: "conversation.goal.set",
+      conversation_id: conversationId || undefined,
+      action,
+      source: "frontend.goal_bar",
+    });
+  };
+  return (
+    <div className="min-h-[34px] flex items-center gap-2 px-3" style={{ borderBottom: "1px solid var(--border-subtle)", background: "color-mix(in oklch, var(--accent-primary) 8%, var(--surface-page))" }}>
+      <span
+        className="flex-none text-[11px] font-bold uppercase"
+        style={{ color: paused ? "var(--text-muted)" : "var(--accent-primary)" }}
+      >
+        {paused ? "Paused" : "Goal"}
+      </span>
+      <span className="flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-sm" style={{ color: "var(--text-primary)" }} title={goal.text}>
+        {goal.text}
+      </span>
+      <button
+        type="button"
+        title={paused ? "Resume goal" : "Pause goal"}
+        aria-label={paused ? "Resume goal" : "Pause goal"}
+        className="w-6 h-6 inline-flex items-center justify-center rounded-sm cursor-pointer"
+        style={{ border: "1px solid var(--border-subtle)", background: "var(--surface-soft)", color: "var(--text-secondary)" }}
+        onClick={() => sendGoalAction(paused ? "resume" : "pause")}
+      >
+        {paused ? <Play size={13} /> : <Pause size={13} />}
+      </button>
+      <button
+        type="button"
+        title="Clear goal"
+        aria-label="Clear goal"
+        className="w-6 h-6 inline-flex items-center justify-center rounded-sm cursor-pointer"
+        style={{ border: "1px solid var(--border-subtle)", background: "var(--surface-soft)", color: "var(--text-secondary)" }}
+        onClick={() => sendGoalAction("clear")}
+      >
+        <X size={13} />
+      </button>
+    </div>
+  );
 };
 
 const commandComposerBackground =
   "color-mix(in oklch, var(--command-accent, var(--state-info)) 7%, var(--surface-page))";
 
-const findSkill = (query: string) => {
-  const normalized = query.trim().toLowerCase();
-  if (!normalized) return null;
-  const skills = useAppStore.getState().availableSkills;
-  return (
-    skills.find((skill) => skill.name.toLowerCase() === normalized) ??
-    skills.find((skill) => skill.name.toLowerCase().includes(normalized)) ??
-    null
-  );
-};
-
 const normalizeMentionFilter = (value: string): string => {
   return value.trim();
 };
 
-const isComposerSlashCommand = (content: string): boolean => {
-  if (!content.startsWith("/") || content.startsWith("//")) return false;
-  return /^\/[a-z][\w-]*(?:\s+.*)?$/i.test(content.trimEnd());
-};
-
-const getSlashCommandLine = (value: string): string | null => {
-  const lines = value.split("\n");
-  if (lines.length > 1 && lines.slice(0, -1).some((line) => line.trim().length > 0)) return null;
-  const line = lines[lines.length - 1];
-  if (line === "/") return line;
-  if (!isComposerSlashCommand(line)) return null;
-  return line;
-};
-
-const getActiveSlashCommand = (value: string): string | null => {
-  const line = getSlashCommandLine(value);
-  if (!line || line === "/") return null;
-  return line.match(/^(\/[a-z][\w-]*)/i)?.[1] ?? null;
-};
-
-const shouldTokenizeSlashCommand = (command: string): boolean => {
-  const normalized = command.replace(/^\//, "").toLowerCase();
-  const match = useAppStore.getState().slashCommands.find((item) =>
-    item.command.toLowerCase() === normalized ||
-    item.name.toLowerCase() === normalized ||
-    item.label.toLowerCase() === `/${normalized}`
-  );
-  if (match) return match.type === "template";
-  return new Set(["review", "debug", "refactor", "test", "docs", "explain", "commit"]).has(normalized);
-};
-
 const getMentionMatch = (line: string): RegExpMatchArray | null => {
-  const match = line.match(/(?:^|\s)(@[A-Za-z0-9_./\\:-]*)$/);
+  const match = line.match(/(?:^|\s)(@[A-Za-z0-9_./\\:#-]*)$/);
   if (!match) return null;
   if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(match[1].slice(1))) return null;
   return match;
+};
+
+const appendDraftLineAnchor = (path: string, draft: string): string => {
+  if (path.includes("#")) return path;
+  const currentLine = draft.split("\n").at(-1) ?? draft;
+  const token = getMentionMatch(currentLine)?.[1] ?? "";
+  const anchor = normalizeLineAnchor(token);
+  return anchor ? `${path}#${anchor}` : path;
+};
+
+const normalizeLineAnchor = (token: string): string => {
+  const anchor = token.match(/#L?(\d+)(?:-L?(\d+))?$/i);
+  if (!anchor) return "";
+  return anchor[2] ? `${anchor[1]}-${anchor[2]}` : anchor[1];
 };

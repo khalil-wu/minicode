@@ -4,13 +4,15 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import asyncio
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
 from backend.agent.message import AgentEvent
-from backend.config import get_available_models, get_llm_provider
+from backend.config import get_available_models, get_llm_provider, load_config
+from backend.runtime_env import sanitized_git_env
 
 if TYPE_CHECKING:
     pass
@@ -25,6 +27,29 @@ class SessionCommandHandlersMixin:
 
         register_all_slash_commands(self.command_registry)
         register_domain_handlers(self)
+
+    def _refresh_llm_selection(self, *, prefer_config: bool = False) -> None:
+        previous_provider = getattr(self, "provider", "")
+        self.config = load_config()
+        provider_resolver = getattr(self, "_resolve_llm_provider", get_llm_provider)
+        models_resolver = getattr(self, "_resolve_available_models", get_available_models)
+        self.provider = provider_resolver()
+        self.available_models = list(models_resolver(self.provider))
+        config_model = str(getattr(self.config.llm, "model", "") or "").strip()
+        selected = str(getattr(self, "selected_model", "") or "").strip()
+
+        if self.provider != previous_provider:
+            self._model_override_active = False
+            selected = config_model
+        elif prefer_config or not getattr(self, "_model_override_active", False):
+            selected = config_model
+
+        if self.available_models and selected and selected not in self.available_models:
+            selected = ""
+            self._model_override_active = False
+        if not selected and self.available_models:
+            selected = self.available_models[0]
+        self.selected_model = selected
 
     # ── Skill toggle ─────────────────────────────────────
 
@@ -54,11 +79,21 @@ class SessionCommandHandlersMixin:
         normalized = model.strip()
         if not normalized:
             return
-        self.provider = get_llm_provider()
-        refreshed_models = get_available_models(self.provider)
-        self.available_models = list(refreshed_models)
-        if normalized not in self.available_models:
-            self.available_models.insert(0, normalized)
+        self._refresh_llm_selection()
+        if self.available_models and normalized not in self.available_models:
+            await self._send_event(
+                AgentEvent.error(
+                    (
+                        f"Model '{normalized}' is not in the configured model list. "
+                        f"Open Settings to add it, or choose one of: {', '.join(self.available_models)}."
+                    ),
+                    recoverable=True,
+                    error_type="llm",
+                    provider_error_type="model",
+                )
+            )
+            self._refresh_llm_selection(prefer_config=True)
+            return
         self.selected_model = normalized
         self._model_override_active = manual_override
 
@@ -68,6 +103,8 @@ class SessionCommandHandlersMixin:
         self.context_builder._llm = self.llm
 
     async def _send_llm_state(self) -> None:
+        self._refresh_llm_selection()
+        workspace_root = self._workspace_root_for_conversation()
         await self._send_ws_payload(
             {
                 "type": "llm.model.updated",
@@ -75,7 +112,7 @@ class SessionCommandHandlersMixin:
                 "model": self.selected_model,
                 "current_model": self.selected_model,
                 "available_models": self.available_models,
-                "working_directory": str(self._current_workspace_root()),
+                "working_directory": str(workspace_root) if workspace_root is not None else "",
             },
             log_context="llm.model.updated",
         )
@@ -132,13 +169,22 @@ class SessionCommandHandlersMixin:
         )
         return updated or conversation
 
-    async def _switch_workspace_for_conversation(self, conversation: Any, *, announce: bool) -> None:
+    async def _switch_workspace_for_conversation(
+        self,
+        conversation: Any,
+        *,
+        announce: bool,
+        wait_for_initialize: bool = False,
+    ) -> None:
         workspace_path = str(
             getattr(conversation, "worktree_path", "")
             or getattr(conversation, "workspace_root", "")
             or ""
         ).strip()
         if not workspace_path:
+            clear_runtime = getattr(self, "_clear_workspace_runtime", None)
+            if callable(clear_runtime):
+                clear_runtime()
             return
 
         if self._workspace_context:
@@ -151,9 +197,19 @@ class SessionCommandHandlersMixin:
             except Exception:
                 pass
 
-        await self._activate_workspace_path(workspace_path, announce=announce)
+        await self._activate_workspace_path(
+            workspace_path,
+            announce=announce,
+            wait_for_initialize=wait_for_initialize,
+        )
 
-    async def _activate_workspace_path(self, path_str: str, *, announce: bool = False) -> bool:
+    async def _activate_workspace_path(
+        self,
+        path_str: str,
+        *,
+        announce: bool = False,
+        wait_for_initialize: bool = False,
+    ) -> bool:
         from backend.workspace.context import WorkspaceContext
         from backend.workspace.path_utils import normalize_project_import_path
         from backend.workspace.recent_projects import RecentProjectStore
@@ -162,33 +218,58 @@ class SessionCommandHandlersMixin:
         project_path = normalize_project_import_path(path_str)
         if not project_path.exists() or not project_path.is_dir():
             await self._send_event(
-                AgentEvent.error(f"Session workspace does not exist: {path_str}", recoverable=True)
+                AgentEvent.error(
+                    f"Session workspace does not exist: {path_str}",
+                    recoverable=True,
+                    error_type="workspace",
+                    error_code="workspace_missing",
+                )
             )
             return False
 
         try:
             ctx = WorkspaceContext(project_path)
-            metadata = await ctx.initialize()
+            # 先切换全局工作区指针与会话上下文，使 git/file API 立即指向新目录，
+            # 再做耗时的文件索引扫描。
             self._workspace_context = ctx
             set_active_workspace_root(project_path)
             restart_file_watcher = getattr(self, "_restart_file_watcher", None)
             if callable(restart_file_watcher):
                 restart_file_watcher(project_path)
-            RecentProjectStore().add(
-                path=str(project_path),
-                name=metadata.name,
-                project_type=metadata.project_type,
-            )
-            if announce:
-                await self._send_ws_payload(
-                    {
-                        "type": "workspace.imported",
-                        "project": ctx.to_dict(),
-                        "summary": ctx.get_project_summary()[:3000],
-                        "file_count": metadata.file_count,
-                    },
-                    log_context="workspace.imported",
-                )
+            async def initialize_workspace() -> bool:
+                try:
+                    metadata = await ctx.initialize()
+                    RecentProjectStore().add(
+                        path=str(project_path),
+                        name=metadata.name,
+                        project_type=metadata.project_type,
+                    )
+                    if announce:
+                        await self._send_ws_payload(
+                            {
+                                "type": "workspace.imported",
+                                "project": ctx.to_dict(),
+                                "summary": ctx.get_project_summary()[:3000],
+                                "file_count": metadata.file_count,
+                            },
+                            log_context="workspace.imported",
+                        )
+                    return True
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    await self._send_event(
+                        AgentEvent.error(f"Failed to switch session workspace: {exc}", recoverable=True)
+                    )
+                    return False
+
+            if wait_for_initialize:
+                return await initialize_workspace()
+            else:
+                task = getattr(self, "_workspace_context_task", None)
+                if task is not None and not task.done():
+                    task.cancel()
+                self._workspace_context_task = asyncio.create_task(initialize_workspace())
             return True
         except Exception as exc:
             await self._send_event(
@@ -197,10 +278,17 @@ class SessionCommandHandlersMixin:
             return False
 
     def _git_branch_for(self, path: Path) -> str:
+        """Get git branch for a workspace path. Uses WorkspaceState when available."""
+        # If this path matches our current workspace state, use the cached repo
+        if hasattr(self, '_workspace_state') and path.resolve() == self._workspace_state.root:
+            return self._workspace_state.get_git_branch()
+
+        # Otherwise, fall back to subprocess
         try:
             result = subprocess.run(
                 ["git", "branch", "--show-current"],
                 cwd=path,
+                env=sanitized_git_env(),
                 capture_output=True,
                 text=True, encoding="utf-8",
                 timeout=5,
@@ -216,6 +304,7 @@ class SessionCommandHandlersMixin:
             result = subprocess.run(
                 ["git", "worktree", "list", "--porcelain"],
                 cwd=root,
+                env=sanitized_git_env(),
                 capture_output=True,
                 text=True, encoding="utf-8",
                 timeout=5,
@@ -271,6 +360,7 @@ class SessionCommandHandlersMixin:
             result = subprocess.run(
                 ["git", "status", "--porcelain=v1"],
                 cwd=path,
+                env=sanitized_git_env(),
                 capture_output=True,
                 text=True, encoding="utf-8",
                 timeout=5,

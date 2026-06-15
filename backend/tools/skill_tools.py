@@ -9,9 +9,13 @@ Skill 工具（DESIGN.md §5 / §8.2）。
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from backend.skills.names import normalize_skill_name
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
+
+if TYPE_CHECKING:
+    from backend.permissions.context import ToolExecutionContext
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +68,7 @@ class LoadSkillTool(BaseTool):
         )
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
-        skill_name = args.get("skill_name", "")
+        skill_name = normalize_skill_name(args.get("skill_name"))
         if not skill_name:
             return self._error_result("缺少 skill_name 参数")
 
@@ -126,7 +130,7 @@ class UnloadSkillTool(BaseTool):
         )
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
-        skill_name = args.get("skill_name", "")
+        skill_name = normalize_skill_name(args.get("skill_name"))
         if not skill_name:
             return self._error_result("缺少 skill_name 参数")
 

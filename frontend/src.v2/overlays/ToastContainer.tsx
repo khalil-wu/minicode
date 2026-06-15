@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
+import { CheckCircle, XCircle, Info, AlertTriangle } from "lucide-react";
 import { useAppStore } from "../stores";
 
 export interface ToastItem {
@@ -16,10 +17,17 @@ export const pushToast = (message: string, type: ToastItem["type"] = "info", dur
 };
 
 const TYPE_COLORS: Record<ToastItem["type"], string> = {
-  info: "var(--accent-primary)",
+  info: "var(--state-info)",
   success: "var(--state-success)",
   warning: "var(--state-warning)",
   error: "var(--state-danger)",
+};
+
+const TYPE_ICONS: Record<ToastItem["type"], React.ReactNode> = {
+  success: <CheckCircle size={16} />,
+  error: <XCircle size={16} />,
+  info: <Info size={16} />,
+  warning: <AlertTriangle size={16} />,
 };
 
 export const ToastContainer = () => {
@@ -53,13 +61,29 @@ export const ToastContainer = () => {
   if (toasts.length === 0) return null;
 
   return (
-    <div style={{ position: "fixed", top: 56, right: 16, zIndex: 300, display: "flex", flexDirection: "column", gap: 8, maxWidth: 360 }}>
+    <div
+      className="toast-container"
+      style={{
+        position: "fixed",
+        top: 56,
+        right: 16,
+        zIndex: "var(--z-toast)",  // 🆕 使用统一的 z-index 变量
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+        maxWidth: 360,
+        pointerEvents: "none",  // 🆕 允许点击穿透到背景
+      }}
+    >
       {toasts.map((t) => (
         <div
           key={t.id}
           className={exiting.has(t.id) ? "toast-exit" : "toast-enter"}
           onClick={() => dismiss(t.id)}
           style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
             background: "var(--surface-raised)",
             border: "1px solid var(--border-subtle)",
             borderLeft: `3px solid ${TYPE_COLORS[t.type]}`,
@@ -70,9 +94,13 @@ export const ToastContainer = () => {
             color: "var(--text-primary)",
             cursor: "pointer",
             lineHeight: 1.4,
+            pointerEvents: "auto",  // 🆕 但 toast 本身可点击
           }}
         >
-          {t.message}
+          <span style={{ color: TYPE_COLORS[t.type], flexShrink: 0, display: "flex" }}>
+            {TYPE_ICONS[t.type]}
+          </span>
+          <span style={{ flex: 1 }}>{t.message}</span>
         </div>
       ))}
     </div>

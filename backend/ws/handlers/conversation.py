@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
-import subprocess
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from backend.agent.message import AgentEvent
+from backend.conversations.models import DEFAULT_CONVERSATION_PERMISSION_MODE, utc_now_iso
+from backend.ws.conversation_errors import emit_conversation_not_found
 from backend.ws.utils import (
     normalize_permission_level,
     normalize_permission_mode,
@@ -24,10 +25,21 @@ logger = logging.getLogger(__name__)
 async def handle_conversation_create(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     memory_mode = str(data.get("memory_mode", "none"))
     git_isolated = bool(data.get("git_isolated") or data.get("gitIsolated"))
-    workspace_root = str(data.get("workspace_root") or session._current_workspace_root())
+    activate = not bool(data.get("side_chat") or data.get("sideChat"))
+    workspace_root = str(data.get("workspace_root") or data.get("workspaceRoot") or "").strip()
     permission_mode = normalize_permission_mode(
-        str(data.get("permission_mode") or data.get("permissionMode") or "default")
-    ) or "default"
+        str(data.get("permission_mode") or data.get("permissionMode") or DEFAULT_CONVERSATION_PERMISSION_MODE)
+    ) or DEFAULT_CONVERSATION_PERMISSION_MODE
+    if git_isolated and not workspace_root:
+        await session._send_event(
+            AgentEvent.error(
+                "Open a workspace folder before creating an isolated Git session.",
+                recoverable=True,
+                error_type="workspace",
+                error_code="workspace_required",
+            )
+        )
+        return True
     base_summary, snapshot, inherited_facts = session._build_inherited_snapshot(memory_mode)
     created = session.conversation_repo.create_conversation(
         conversation_id=str(data.get("conversation_id") or data.get("conversationId") or "").strip() or None,
@@ -50,11 +62,18 @@ async def handle_conversation_create(session: "WebSocketSession", data: dict[str
             worktree_path="",
             git_isolated=False,
         ) or created
-    session.active_conversation_id = created.id
-    if git_isolated:
-        await session._switch_workspace_for_conversation(created, announce=False)
-    session._load_active_conversation_snapshot(created.id, created.context_snapshot)
-    session._sync_permission_mode_with_active_conversation(source="conversation.create")
+    if activate:
+        session.active_conversation_id = created.id
+    if activate:
+        if workspace_root:
+            await session._switch_workspace_for_conversation(created, announce=False)
+        else:
+            clear_runtime = getattr(session, "_clear_workspace_runtime", None)
+            if callable(clear_runtime):
+                clear_runtime()
+    if activate:
+        session._load_active_conversation_snapshot(created.id, created.context_snapshot)
+        session._sync_permission_mode_with_active_conversation(source="conversation.create")
     await session._send_conversation_list()
     return True
 
@@ -63,9 +82,7 @@ async def handle_conversation_switch(session: "WebSocketSession", data: dict[str
     conversation_id = str(data.get("conversation_id", ""))
     target = session.conversation_repo.get_conversation(conversation_id)
     if target is None:
-        await session._send_event(
-            AgentEvent.error(f"Conversation '{conversation_id}' not found", recoverable=True)
-        )
+        await emit_conversation_not_found(session, conversation_id)
         return True
     session.active_conversation_id = target.id
     await session._switch_workspace_for_conversation(target, announce=True)
@@ -83,15 +100,62 @@ async def handle_conversation_switch(session: "WebSocketSession", data: dict[str
             "conversation_id": target.id,
             "conversation": target.to_dict(),
             "is_hydrating": is_hydrating,
+            "session": session.runtime_snapshot(),
         },
         log_context="conversation.switched",
     )
+    if data.get("_reemit_pending", True):
+        await session._reemit_pending_state(conversation_id=target.id)
     return True
+
+
+def _clear_active_conversation_runtime(session: "WebSocketSession") -> None:
+    session.active_conversation_id = None
+    try:
+        session.context_builder.clear()
+    except Exception:
+        pass
+    clear_runtime = getattr(session, "_clear_workspace_runtime", None)
+    if callable(clear_runtime):
+        clear_runtime()
+
+
+async def _activate_conversation_or_blank(session: "WebSocketSession", preferred_id: str | None = None) -> None:
+    target = None
+    if preferred_id:
+        candidate = session.conversation_repo.get_conversation(preferred_id)
+        if candidate is not None and not getattr(candidate, "archived", False):
+            target = candidate
+
+    if target is None:
+        conversations = [
+            item
+            for item in session.conversation_repo.list_conversations()
+            if not getattr(item, "archived", False)
+        ]
+        if not conversations:
+            conversations = session.conversation_repo.list_conversations()
+        if conversations:
+            target = session.conversation_repo.get_conversation(conversations[0].id)
+
+    if target is None:
+        _clear_active_conversation_runtime(session)
+        return
+
+    session.active_conversation_id = target.id
+    await session._switch_workspace_for_conversation(target, announce=True)
+    session._load_active_conversation_snapshot(target.id, target.context_snapshot)
+    session._sync_permission_mode_with_active_conversation(source="conversation.activate")
 
 
 async def handle_conversation_list(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     preferred = str(data.get("preferred_conversation_id") or "").strip()
-    session._ensure_active_conversation(preferred if preferred else None)
+    if preferred:
+        await _activate_conversation_or_blank(session, preferred)
+    elif session.active_conversation_id:
+        active = session.conversation_repo.get_conversation(session.active_conversation_id)
+        if active is None or getattr(active, "archived", False):
+            await _activate_conversation_or_blank(session)
     await session._send_conversation_list()
     return True
 
@@ -101,9 +165,7 @@ async def handle_conversation_rename(session: "WebSocketSession", data: dict[str
     title = str(data.get("title", ""))
     updated = session.conversation_repo.rename_conversation(conversation_id, title)
     if updated is None:
-        await session._send_event(
-            AgentEvent.error(f"Conversation '{conversation_id}' not found", recoverable=True)
-        )
+        await emit_conversation_not_found(session, conversation_id)
         return True
     await session._send_conversation_list()
     return True
@@ -113,12 +175,10 @@ async def handle_conversation_archive(session: "WebSocketSession", data: dict[st
     conversation_id = str(data.get("conversation_id", ""))
     updated = session.conversation_repo.set_archived(conversation_id, True)
     if updated is None:
-        await session._send_event(
-            AgentEvent.error(f"Conversation '{conversation_id}' not found", recoverable=True)
-        )
+        await emit_conversation_not_found(session, conversation_id)
         return True
     if session.active_conversation_id == conversation_id:
-        session._ensure_active_conversation()
+        await _activate_conversation_or_blank(session)
     await session._send_conversation_list()
     return True
 
@@ -127,9 +187,7 @@ async def handle_conversation_unarchive(session: "WebSocketSession", data: dict[
     conversation_id = str(data.get("conversation_id", ""))
     updated = session.conversation_repo.set_archived(conversation_id, False)
     if updated is None:
-        await session._send_event(
-            AgentEvent.error(f"Conversation '{conversation_id}' not found", recoverable=True)
-        )
+        await emit_conversation_not_found(session, conversation_id)
         return True
     await session._send_conversation_list()
     return True
@@ -152,12 +210,10 @@ async def handle_conversation_delete(session: "WebSocketSession", data: dict[str
             return True
     deleted = session.conversation_repo.delete_conversation(conversation_id)
     if not deleted:
-        await session._send_event(
-            AgentEvent.error(f"Conversation '{conversation_id}' not found", recoverable=True)
-        )
+        await emit_conversation_not_found(session, conversation_id)
         return True
     if session.active_conversation_id == conversation_id:
-        session._ensure_active_conversation()
+        await _activate_conversation_or_blank(session)
     await session._send_conversation_list()
     return True
 
@@ -166,9 +222,7 @@ async def handle_conversation_worktree_cleanup(session: "WebSocketSession", data
     conversation_id = str(data.get("conversation_id", "")).strip()
     target = session.conversation_repo.get_conversation(conversation_id)
     if target is None:
-        await session._send_event(
-            AgentEvent.error(f"Conversation '{conversation_id}' not found", recoverable=True)
-        )
+        await emit_conversation_not_found(session, conversation_id)
         return True
 
     cleanup = await _cleanup_conversation_worktree(session, target, force=bool(data.get("force")))
@@ -212,6 +266,7 @@ async def handle_conversation_clear(session: "WebSocketSession", data: dict[str,
             "conversation_id": conversation_id,
             "conversation": session.conversation_repo.get_conversation(conversation_id).to_dict(),
             "is_hydrating": False,
+            "session": session.runtime_snapshot(),
         },
         log_context="conversation.switched",
     )
@@ -232,13 +287,22 @@ async def handle_conversation_permission_mode_set(session: "WebSocketSession", d
     requested = normalize_permission_mode(str(data.get("mode") or data.get("permission_mode") or ""))
     if requested is None:
         await session._send_event(
-            AgentEvent.error("Invalid permission mode. Use default|plan|confirm|bypass", recoverable=True, error_type="tool")
+            AgentEvent.error(
+                "Invalid permission mode. Use confirm|auto|bypass. Legacy modes still accepted: default|plan|accept_edits",
+                recoverable=True,
+                error_type="tool",
+            )
         )
         return True
 
     explicit_conversation_id = str(data.get("conversation_id") or "").strip()
+    source = str(data.get("source") or "websocket.command").strip() or "websocket.command"
     if not explicit_conversation_id and not session.active_conversation_id:
-        session._ensure_active_conversation()
+        if session._set_permission_context_mode(requested, source=source):
+            await session._emit_permission_mode_updated()
+            await session._send_task_runtime_update()
+        await session._send_conversation_list()
+        return True
     conversation_id = str(explicit_conversation_id or session.active_conversation_id or "").strip()
     if not conversation_id:
         await session._send_event(
@@ -248,12 +312,9 @@ async def handle_conversation_permission_mode_set(session: "WebSocketSession", d
 
     updated = session.conversation_repo.update_permission_mode(conversation_id, requested)
     if updated is None:
-        await session._send_event(
-            AgentEvent.error(f"Conversation '{conversation_id}' not found", recoverable=True, error_type="tool")
-        )
+        await emit_conversation_not_found(session, conversation_id)
         return True
 
-    source = str(data.get("source") or "websocket.command").strip() or "websocket.command"
     if conversation_id == session.active_conversation_id:
         session._set_permission_context_mode(requested, source=source)
         await session._emit_permission_mode_updated()
@@ -263,10 +324,145 @@ async def handle_conversation_permission_mode_set(session: "WebSocketSession", d
     return True
 
 
+def _resolve_goal_target(session: "WebSocketSession", data: dict[str, Any]) -> tuple[str, Any | None]:
+    explicit_conversation_id = str(data.get("conversation_id") or "").strip()
+    conversation_id = str(explicit_conversation_id or session.active_conversation_id or "").strip()
+    if not conversation_id:
+        return "", None
+    return conversation_id, session.conversation_repo.get_conversation(conversation_id)
+
+
+async def _emit_goal_updated(
+    session: "WebSocketSession",
+    *,
+    conversation_id: str,
+    goal: dict[str, Any],
+    source: str,
+) -> None:
+    await session._send_ws_payload(
+        {
+            "type": "goal.updated",
+            "conversation_id": conversation_id,
+            "goal": dict(goal or {}),
+            "source": source,
+        },
+        log_context="goal.updated",
+    )
+
+
+async def handle_conversation_goal_set(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    conversation_id, target = _resolve_goal_target(session, data)
+    source = str(data.get("source") or "websocket.command").strip() or "websocket.command"
+    if not conversation_id:
+        await session._emit_command_result("goal", "No active conversation to update.", level="warning")
+        return True
+    if target is None:
+        await session._emit_command_result("goal", f"Conversation '{conversation_id}' not found.", level="error")
+        return True
+
+    action = str(data.get("action") or "set").strip().lower()
+    current_goal = dict(getattr(target, "goal", {}) or {})
+
+    if action in {"show", "status", "inspect"}:
+        await _emit_goal_updated(
+            session,
+            conversation_id=conversation_id,
+            goal=current_goal,
+            source=source,
+        )
+        if current_goal.get("text"):
+            await session._emit_command_result(
+                "goal",
+                f"Goal is {current_goal.get('status', 'active')}: {current_goal.get('text')}",
+                data={"conversation_id": conversation_id, "goal": current_goal},
+            )
+        else:
+            await session._emit_command_result(
+                "goal",
+                "No goal is set for this conversation.",
+                data={"conversation_id": conversation_id, "goal": {}},
+            )
+        return True
+
+    if action in {"clear", "delete", "reset"}:
+        updated = session.conversation_repo.update_goal(conversation_id, {})
+        if updated is None:
+            await session._emit_command_result("goal", f"Conversation '{conversation_id}' not found.", level="error")
+            return True
+        if conversation_id == session.active_conversation_id:
+            await _emit_goal_updated(session, conversation_id=conversation_id, goal={}, source=source)
+        await session._send_conversation_list()
+        await session._emit_command_result(
+            "goal",
+            "Cleared the conversation goal.",
+            data={"conversation_id": conversation_id, "goal": {}},
+        )
+        return True
+
+    if action in {"pause", "resume"}:
+        if not current_goal.get("text"):
+            await session._emit_command_result(
+                "goal",
+                "No goal is set for this conversation.",
+                level="warning",
+                data={"conversation_id": conversation_id, "goal": {}},
+            )
+            return True
+        next_goal = {
+            **current_goal,
+            "status": "paused" if action == "pause" else "active",
+            "updated_at": utc_now_iso(),
+            "source": source,
+        }
+        updated = session.conversation_repo.update_goal(conversation_id, next_goal)
+        if updated is None:
+            await session._emit_command_result("goal", f"Conversation '{conversation_id}' not found.", level="error")
+            return True
+        if conversation_id == session.active_conversation_id:
+            await _emit_goal_updated(session, conversation_id=conversation_id, goal=next_goal, source=source)
+        await session._send_conversation_list()
+        await session._emit_command_result(
+            "goal",
+            f"Goal {next_goal['status']}.",
+            data={"conversation_id": conversation_id, "goal": next_goal},
+        )
+        return True
+
+    text = str(data.get("text") or data.get("goal") or "").strip()
+    if not text:
+        await session._emit_command_result(
+            "goal",
+            "Usage: /goal <target> | /goal pause | /goal resume | /goal clear",
+            level="warning",
+        )
+        return True
+
+    now = utc_now_iso()
+    next_goal = {
+        "id": str(current_goal.get("id") or f"goal_{conversation_id}"),
+        "text": text[:4000],
+        "status": "active",
+        "created_at": str(current_goal.get("created_at") or now),
+        "updated_at": now,
+        "source": source,
+    }
+    updated = session.conversation_repo.update_goal(conversation_id, next_goal)
+    if updated is None:
+        await session._emit_command_result("goal", f"Conversation '{conversation_id}' not found.", level="error")
+        return True
+    if conversation_id == session.active_conversation_id:
+        await _emit_goal_updated(session, conversation_id=conversation_id, goal=next_goal, source=source)
+    await session._send_conversation_list()
+    await session._emit_command_result(
+        "goal",
+        "Updated the conversation goal.",
+        data={"conversation_id": conversation_id, "goal": next_goal},
+    )
+    return True
+
+
 def _resolve_permission_rule_target(session: "WebSocketSession", data: dict[str, Any]) -> tuple[str, Any | None]:
     explicit_conversation_id = str(data.get("conversation_id") or "").strip()
-    if not explicit_conversation_id and not session.active_conversation_id:
-        session._ensure_active_conversation()
     conversation_id = str(explicit_conversation_id or session.active_conversation_id or "").strip()
     if not conversation_id:
         return "", None
@@ -454,15 +650,33 @@ async def _cleanup_conversation_worktree(session: "WebSocketSession", conversati
 
     try:
         manager = WorktreeManager(base_root)
-        removed = manager.remove_worktree(worktree_path, force=force)
-        return {
-            "removed": removed, "conversation_id": conversation.id, "path": str(worktree_path),
-            "branch": getattr(conversation, "git_branch", ""),
-            "message": "Removed isolated worktree" if removed else "git worktree remove failed",
-            **({} if removed else {"error": "git worktree remove failed"}),
-        }
+        removal = manager.safe_remove_worktree(
+            worktree_path,
+            force=force,
+            conversation_id=conversation.id,
+            branch=str(getattr(conversation, "git_branch", "") or ""),
+        )
     except Exception as exc:
         return {"removed": False, "conversation_id": conversation.id, "path": str(worktree_path), "error": str(exc)}
+
+    if removal.needs_force:
+        return {"removed": False, "conversation_id": conversation.id, "path": str(worktree_path), "needs_force": True, "error": removal.error}
+
+    result: dict[str, Any] = {
+        "removed": removal.removed,
+        "conversation_id": conversation.id,
+        "path": str(worktree_path),
+        "branch": getattr(conversation, "git_branch", ""),
+        "message": "Removed isolated worktree" if removal.removed else (removal.error or "git worktree remove failed"),
+    }
+    if not removal.removed and removal.error:
+        result["error"] = removal.error
+    if removal.snapshot is not None:
+        result["snapshot_id"] = removal.snapshot.id
+        result["snapshot_ref"] = removal.snapshot.snapshot_ref
+        if removal.removed:
+            result["message"] = "Removed isolated worktree (snapshot saved; recoverable)"
+    return result
 
 
 HANDLERS: dict[str, Any] = {
@@ -477,6 +691,7 @@ HANDLERS: dict[str, Any] = {
     "conversation.worktree.cleanup": handle_conversation_worktree_cleanup,
     "conversation.memory_mode.set": handle_conversation_memory_mode_set,
     "conversation.permission_mode.set": handle_conversation_permission_mode_set,
+    "conversation.goal.set": handle_conversation_goal_set,
     "conversation.permission.rules.list": handle_conversation_permission_rules_list,
     "conversation.permission.rules.add": handle_conversation_permission_rules_add,
     "conversation.permission.rules.remove": handle_conversation_permission_rules_remove,

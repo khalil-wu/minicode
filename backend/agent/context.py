@@ -1,19 +1,25 @@
 from __future__ import annotations
 
 import logging
-import os
-import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from backend.agent.compaction import format_compaction_history, parse_compaction_output
 from backend.agent.state import AgentState
 from backend.config import AgentSettings, TokenBudget
-from backend.agent.attachment_policy import build_attachment_input_plan
-from backend.llm.base import LLMMessage, ToolCallEvent
+from backend.agent.attachment_policy import AttachmentInputPlan, build_attachment_input_plan
+from backend.llm.base import LLMMessage, ToolCallEvent, UsageInfo
 from backend.llm.response_cache import simple_chat_cache
+from backend.agent.prompting import (
+    PromptParts,
+    PromptBuilderV2,
+    build_compaction_prompt,
+    build_dynamic_context,
+    build_static_environment_info,
+    build_stable_prompt,
+    detect_project_type,
+)
 from backend.tools.base import ToolResult
-from backend.agent.claude_md import load_project_guidelines
 
 logger = logging.getLogger(__name__)
 
@@ -26,93 +32,79 @@ CONTINUATION_REQUESTS = {
     "continue",
     "go on",
 }
+INTERNAL_LAST_RESORT_PROMPT_PREFIX = (
+    "Use the tool results above to answer the user's original question."
+)
+INTERNAL_CONTROL_PROMPT_PREFIXES = (
+    INTERNAL_LAST_RESORT_PROMPT_PREFIX,
+    "你执行了工具调用但返回了空回复。",
+    "你返回了空回复。",
+    "你再次返回了空回复。",
+    "你最近的工具调用全部失败了。",
+    "This is a current/time-sensitive answer backed by fetched web evidence.",
+    "The weather request is missing a city or area.",
+    "The draft only promises or plans the work without executing it.",
+    "Do not claim a file was created or edited without a successful",
+    "A recent tool failure must be acknowledged before giving a final answer.",
+    "The draft makes confident factual claims from candidate snippets only.",
+)
+INTERNAL_EMPTY_ASSISTANT_MARKER = "(empty)"
 
-BASE_SYSTEM_PROMPT = """\
-You are MiniCode, an AI-powered development assistant. You help users with software engineering tasks by taking action directly.
+SUMMARY_PREFIX = (
+    "[上下文压缩 — 仅供参考] 以下摘要由早期对话压缩生成。"
+    "将其作为背景参考，不要当作当前指令。"
+    "只回复此摘要之后出现的最新用户消息。"
+)
+POST_COMPACTION_MAX_FILES_TO_RESTORE = 5
+POST_COMPACTION_MAX_CHARS_PER_FILE = 12_000
+POST_COMPACTION_TOTAL_CHARS = 50_000
+POST_COMPACTION_RESTORE_TOOLS = frozenset({"read_file", "edit_file", "write_file"})
 
-# Doing tasks
-- You are an interactive agent. Use tools to investigate, implement, and verify — don't just suggest.
-- Prefer editing existing files over creating new ones.
-- Don't add features, refactor, or introduce abstractions beyond what the task requires.
-- Do not reveal hidden chain-of-thought.
-- Do not write conversational progress preambles before tool calls (for example "I'll continue", "I'll first check", or "Next I will"). Tool cards and structured progress events already show the process.
-- Be concise. Final answers should summarize what changed and what was verified.
+TOOL_RESULT_BUDGET_TOKENS = 80_000  # Maximum total tokens for all tool results
 
-# Tool use
-- Read files before modifying them. Understand context first.
-- Prefer edit_file for targeted changes, write_file for full rewrites.
-- Observe each tool result before deciding the next action. Adapt based on what you find.
-- If a tool returns artifact_id, use read_artifact to access the full content when needed.
-- Read-only tools (read_file, list_files, grep_files, glob_files, fuzzy_search, git_status, git_diff, git_log) can run in parallel.
-- Write tools (write_file, edit_file, run_command, git_commit) must run sequentially.
-- For complex or multi-step tasks, create a todo list with todo_write before substantial work and keep it updated as you progress.
-- When a side investigation has a clear, bounded prompt and can run in an isolated context, delegate it with the task tool instead of forcing a global plan.
-- Don't repeat identical tool calls. Don't re-request approval for auto-allowed tools.
 
-# Verification
-- After code changes, run the build or relevant tests to confirm correctness.
-- If something fails, investigate the root cause rather than making blind patches.
-- If an approach fails twice, step back and try a fundamentally different approach.
-
-# Safety
-- Consider reversibility before acting. Destructive operations need user confirmation.
-- Don't introduce security vulnerabilities (injection, XSS, etc).
-- When uncertain, use ask_user.
-
-# Output style
-- Respond in the user's language.
-- Use Markdown. Code blocks with language tags.
-- Keep responses short and direct. No filler, no narration of your thought process.
-- After making changes, state what changed and why in one or two sentences.
-"""
+def _is_internal_control_prompt(content: str) -> bool:
+    text = str(content or "").strip()
+    return any(text.startswith(prefix) for prefix in INTERNAL_CONTROL_PROMPT_PREFIXES)
 
 
 def _build_static_environment_info(workspace_root: Path | None = None) -> str:
-    """构建不含时间戳的静态环境信息（可被 prompt cache 缓存）。"""
-    cwd = workspace_root or Path.cwd()
-    os_name = "Windows" if os.name == "nt" else (sys.platform or os.name)
-    shell = os.environ.get("SHELL") or os.environ.get("COMSPEC") or "unknown"
-
-    lines = [
-        "## 环境信息",
-        f"- 操作系统: {os_name}",
-        f"- 工作目录: {cwd}",
-        f"- Shell: {shell}",
-    ]
-
-    project_hints = _detect_project_type(cwd)
-    if project_hints:
-        lines.append(f"- 项目类型: {project_hints}")
-
-    return "\n".join(lines)
+    return build_static_environment_info(workspace_root)
 
 
 def _build_dynamic_context() -> str:
-    """构建每次调用都会变化的动态上下文（不参与 cache）。"""
-    now = datetime.now(timezone.utc).astimezone()
-    return f"当前时间: {now.strftime('%Y-%m-%d %H:%M %Z')}"
+    return build_dynamic_context()
 
 
 def _detect_project_type(cwd: Path) -> str:
-    """检测项目类型，提供上下文给 Agent。"""
-    markers: list[str] = []
-    if (cwd / "package.json").exists():
-        markers.append("Node.js")
-    if (cwd / "tsconfig.json").exists():
-        markers.append("TypeScript")
-    if (cwd / "requirements.txt").exists() or (cwd / "pyproject.toml").exists():
-        markers.append("Python")
-    if (cwd / "Cargo.toml").exists():
-        markers.append("Rust")
-    if (cwd / "go.mod").exists():
-        markers.append("Go")
-    if (cwd / "pom.xml").exists() or (cwd / "build.gradle").exists():
-        markers.append("Java")
-    if (cwd / ".git").exists():
-        markers.append("Git")
-    if (cwd / "Dockerfile").exists() or (cwd / "docker-compose.yml").exists():
-        markers.append("Docker")
-    return ", ".join(markers) if markers else ""
+    return detect_project_type(cwd)
+
+
+def _estimate_content_tokens(content: str) -> int:
+    """Estimate token count with better accuracy for mixed CJK/ASCII content.
+
+    - ASCII characters: ~4 chars per token (English words average)
+    - CJK characters: ~1.5 chars per token (each CJK char is roughly 1-2 tokens)
+    - Conservative fallback: max(len // 4, cjk_count + ascii_count // 4)
+    """
+    if not content:
+        return 0
+    ascii_chars = 0
+    cjk_chars = 0
+    for ch in content:
+        code = ord(ch)
+        # CJK Unified Ideographs, Hiragana, Katakana, Hangul, etc.
+        if (0x4E00 <= code <= 0x9FFF or   # CJK Unified Ideographs
+            0x3400 <= code <= 0x4DBF or   # CJK Extension A
+            0x3040 <= code <= 0x309F or   # Hiragana
+            0x30A0 <= code <= 0x30FF or   # Katakana
+            0xAC00 <= code <= 0xD7AF or   # Hangul Syllables
+            0xF900 <= code <= 0xFAFF):    # CJK Compatibility Ideographs
+            cjk_chars += 1
+        else:
+            ascii_chars += 1
+    # CJK chars: ~1.5 tokens per char; ASCII: ~4 chars per token
+    return max(1, int(cjk_chars * 1.5 + ascii_chars / 4))
 
 
 class ContextBuilder:
@@ -142,118 +134,172 @@ class ContextBuilder:
         self._memory_manager = memory_manager
         self._llm = llm
         self._vector_memory = vector_memory
+        self._cached_guidelines: str = ""
+        self._cached_guidelines_signature: str = ""
+        self._cached_guidelines_ts: float = 0.0
+        self._last_actual_prompt_tokens = 0
 
-    async def build(self, user_message: str, state: AgentState) -> list[LLMMessage]:
-        messages: list[LLMMessage] = []
-        system_content = BASE_SYSTEM_PROMPT
+    _GUIDELINES_CACHE_TTL = 10.0  # seconds
 
-        # Static environment info (cacheable - no timestamp)
-        workspace_root = None
-        if hasattr(state, 'workspace_context') and state.workspace_context:
-            workspace_root = getattr(state.workspace_context, 'root_path', None)
-        system_content += "\n\n" + _build_static_environment_info(workspace_root)
+    def _get_project_guidelines(self, workspace_root: Path | None = None) -> str:
+        """Return cached project guidelines, reloading only when TTL expires.
 
-        # Inject WorkspaceContext (项目上下文)
-        if hasattr(state, 'workspace_context') and state.workspace_context:
-            workspace_summary = state.workspace_context.get_project_summary()
-            if workspace_summary:
-                system_content += "\n\n" + workspace_summary
+        Avoids repeated Path.stat() syscalls from load_project_guidelines()
+        by short-circuiting within the TTL window.
+        """
+        import time
+        now = time.monotonic()
+        signature = str(workspace_root or "")
+        if (
+            self._cached_guidelines_ts > 0
+            and self._cached_guidelines_signature == signature
+            and (now - self._cached_guidelines_ts) < self._GUIDELINES_CACHE_TTL
+        ):
+            return self._cached_guidelines
+        from backend.agent.claude_md import load_project_guidelines
+        self._cached_guidelines = load_project_guidelines(workspace_root)
+        self._cached_guidelines_signature = signature
+        self._cached_guidelines_ts = now
+        return self._cached_guidelines
 
-        # Inject AGENTS.md / CLAUDE.md project guidelines from the active workspace.
-        project_guidelines = load_project_guidelines(workspace_root)
-        if project_guidelines:
-            system_content += project_guidelines
-
+    def _build_skill_context(self, state: AgentState) -> str:
+        parts: list[str] = []
         if self._skill_manager:
             from backend.skills.executor import SkillExecutor
 
             executor = SkillExecutor(self._skill_manager)
             layer1 = executor.build_layer1_summary()
             if layer1:
-                system_content += layer1
+                parts.append(layer1)
             if self._skill_manager.get_active_names():
                 skill_content = executor.build_skill_context(
                     budget=self._budget.active_skills
                 )
                 if skill_content:
-                    system_content += skill_content
+                    parts.append(skill_content)
         elif self._skill_executor:
             layer1 = self._skill_executor.build_layer1_summary()
             if layer1:
-                system_content += layer1
+                parts.append(layer1)
             skill_content = self._skill_executor.build_skill_context(
                 budget=self._budget.active_skills
             )
             if skill_content:
-                system_content += skill_content
+                parts.append(skill_content)
         elif state.active_skills:
-            system_content += (
-                "\n\n## 当前激活的 Skills\n"
+            parts.append(
+                "\n\n## Active Skills\n"
                 + "\n".join(f"- {skill}" for skill in state.active_skills)
             )
+        return "\n\n".join(part for part in parts if part.strip())
 
-        if self._memory_manager:
-            try:
-                index = self._memory_manager.load_index()
-                if index and "不可用" not in index:
-                    system_content += f"\n\n## 记忆索引\n{index}"
-            except Exception as exc:
-                logger.debug("Failed to load memory index: %s", exc)
+    def _build_memory_context(self) -> str:
+        if not self._memory_manager:
+            return ""
+        try:
+            index = self._memory_manager.load_index()
+            if index and "不可用" not in index:
+                return f"## Memory Index\n{index}"
+        except Exception as exc:
+            logger.debug("Failed to load memory index: %s", exc)
+        return ""
 
-        if self._persistent_notes:
-            note_blocks: list[str] = []
-            for note in self._persistent_notes:
-                content = str(note.get("content", "")).strip()
-                if not content:
-                    continue
-                title = str(note.get("title") or "Persistent memory").strip()
-                note_blocks.append(f"### {title}\n{content}")
-            if note_blocks:
-                system_content += "\n\n## Inherited Memory\n" + "\n\n".join(note_blocks)
+    def _build_persistent_context(self) -> str:
+        if not self._persistent_notes:
+            return ""
+        note_blocks: list[str] = []
+        for note in self._persistent_notes:
+            content = str(note.get("content", "")).strip()
+            if not content:
+                continue
+            title = str(note.get("title") or "Persistent memory").strip()
+            note_blocks.append(f"### {title}\n{content}")
+        if not note_blocks:
+            return ""
+        return "## Inherited Memory\n" + "\n\n".join(note_blocks)
 
+    async def build(self, user_message: str, state: AgentState) -> list[LLMMessage]:
+        messages: list[LLMMessage] = []
+
+        workspace_root = self._workspace_root_for_state(state)
+        prompt_parts = self._build_prompt_parts(state, workspace_root)
+        system_content = prompt_parts.render_system()
+
+        # ── End of system prompt ────────────────────────────────────────────────
         # Keep retrieval agentic: Codex/Claude Code-style loops let the model
         # request memory or document context with tools instead of silently
         # injecting passive RAG into every turn. Explicitly populated chunks are
         # still honored below for command/tool driven workflows.
 
         messages.append(LLMMessage(role="system", content=system_content))
-        messages.extend(self._get_history_within_budget())
+        history = self._get_history_within_budget()
+        if (
+            history
+            and history[-1].role == "user"
+            and not history[-1].tool_call_id
+            and history[-1].content.strip() == str(user_message).strip()
+        ):
+            # The loop already appended this user turn to history; drop it here
+            # so the trailing volatile user turn below is the only copy sent.
+            history = history[:-1]
+        messages.extend(history)
 
         attachment_plan = build_attachment_input_plan(state.attachments, llm=self._llm)
-
-        if attachment_plan.text_hints:
-            user_message = (
-                f"{user_message}\n\n"
-                "Attachment text fallback:\n"
-                + "\n".join(attachment_plan.text_hints)
-            )
-
-        # Inject dynamic context into user message prefix
-        # (timestamp, task state, RAG chunks — all change per-turn, kept out of system prompt for caching)
-        dynamic_parts = [_build_dynamic_context()]
-        if state.task_summary:
-            dynamic_parts.append(f"任务状态: {state.task_summary}")
-        if state.retrieved_chunks:
-            dynamic_parts.append("背景知识:\n" + "\n---\n".join(state.retrieved_chunks))
-        dynamic_prefix = " | ".join(dynamic_parts[:1])  # timestamp on first line
-        context_blocks = dynamic_parts[1:]  # task + RAG as separate blocks
-
-        user_content = f"[{dynamic_prefix}]"
-        if context_blocks:
-            user_content += "\n\n" + "\n\n".join(context_blocks)
-        user_content += f"\n\n{user_message}"
-
-        effective_user_message = self._build_effective_user_message(user_message, state)
+        user_message = self._with_attachment_text_fallback(user_message, attachment_plan)
 
         messages.append(
             LLMMessage(
                 role="user",
-                content=user_content.replace(user_message, effective_user_message, 1),
+                content=self._build_user_turn_content(user_message, state, prompt_parts),
                 images=attachment_plan.images,
                 documents=attachment_plan.documents,
             )
         )
         return messages
+
+    @staticmethod
+    def _workspace_root_for_state(state: AgentState) -> Path | None:
+        if hasattr(state, "workspace_context") and state.workspace_context:
+            return getattr(state.workspace_context, "root_path", None)
+        return None
+
+    def _build_prompt_parts(
+        self,
+        state: AgentState,
+        workspace_root: Path | None,
+    ) -> PromptParts:
+        return PromptBuilderV2().build(
+            state=state,
+            workspace_root=workspace_root,
+            project_guidelines=self._get_project_guidelines(workspace_root),
+            skill_context=self._build_skill_context(state),
+            memory_context=self._build_memory_context(),
+            persistent_context=self._build_persistent_context(),
+        )
+
+    @staticmethod
+    def _with_attachment_text_fallback(
+        user_message: str,
+        attachment_plan: AttachmentInputPlan,
+    ) -> str:
+        if not attachment_plan.text_hints:
+            return user_message
+        return (
+            f"{user_message}\n\n"
+            "Attachment text fallback:\n"
+            + "\n".join(attachment_plan.text_hints)
+        )
+
+    @staticmethod
+    def _build_user_turn_content(
+        user_message: str,
+        state: AgentState,
+        prompt_parts: PromptParts,
+    ) -> str:
+        volatile_prefix = prompt_parts.render_volatile_prefix()
+        user_content = f"{volatile_prefix}\n\n{user_message}" if volatile_prefix else user_message
+        effective_user_message = ContextBuilder._build_effective_user_message(user_message, state)
+        return user_content.replace(user_message, effective_user_message, 1)
 
     @staticmethod
     def _build_effective_user_message(user_message: str, state: AgentState) -> str:
@@ -281,8 +327,17 @@ class ContextBuilder:
         )
 
     def append_user(self, content: str) -> None:
+        content_text = str(content)
+        previous = self._history[-1] if self._history else None
+        if (
+            previous is not None
+            and previous.role == "user"
+            and content_text.strip()
+            and content_text.strip() == previous.content.strip()
+        ):
+            return
         self._append_history_message(
-            LLMMessage(role="user", content=str(content)),
+            LLMMessage(role="user", content=content_text),
             raw_content=content,
         )
 
@@ -292,10 +347,88 @@ class ContextBuilder:
             raw_content=content,
         )
 
-    def append_assistant_tool_calls(self, tool_calls: list[ToolCallEvent]) -> None:
+    def append_assistant_tool_calls(self, tool_calls: list[ToolCallEvent], content: str = "") -> None:
+        """Append assistant message with tool_calls. Optionally preserve preceding text."""
         self._append_history_message(
-            LLMMessage(role="assistant", content="", tool_calls=tool_calls)
+            LLMMessage(role="assistant", content=content, tool_calls=tool_calls)
         )
+
+    def reconcile_dangling_tool_calls(self) -> int:
+        """Keep tool messages valid for OpenAI-compatible providers.
+
+        Tool result messages are only legal as replies to the immediately
+        preceding assistant message's tool_calls. Interrupted streams and older
+        snapshots can leave either dangling assistant tool_calls or orphan tool
+        messages. Insert placeholders for the former and drop the latter before
+        the next provider request.
+
+        Returns the number of placeholders inserted.
+        """
+
+        def make_placeholder(call_id: str, tool_name: str) -> LLMMessage:
+            return LLMMessage(
+                role="tool",
+                content=(
+                    f"[Tool call '{tool_name}' did not complete. "
+                    "Do not retry the same call; use the information you already have or try a different approach.]"
+                ),
+                name=tool_name,
+                tool_call_id=call_id,
+            )
+
+        repaired: list[LLMMessage] = []
+        pending_ids: dict[str, str] = {}
+        pending_order: list[str] = []
+        inserted = 0
+        dropped = 0
+
+        def flush_pending() -> None:
+            nonlocal inserted
+            if not pending_order:
+                return
+            for call_id in list(pending_order):
+                tool_name = pending_ids.get(call_id, "unknown")
+                repaired.append(make_placeholder(call_id, tool_name))
+                inserted += 1
+                logger.debug(
+                    "Synthesized placeholder for dangling tool_call_id=%s (%s)",
+                    call_id,
+                    tool_name,
+                )
+            pending_ids.clear()
+            pending_order.clear()
+
+        for msg in self._history:
+            if msg.role == "assistant":
+                flush_pending()
+                repaired.append(msg)
+                if msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        pending_ids[tc.id] = tc.name
+                        pending_order.append(tc.id)
+                continue
+
+            if msg.role == "tool":
+                call_id = str(msg.tool_call_id or "").strip()
+                if call_id and call_id in pending_ids:
+                    repaired.append(msg)
+                    pending_ids.pop(call_id, None)
+                    pending_order = [pending for pending in pending_order if pending != call_id]
+                else:
+                    dropped += 1
+                    logger.debug("Dropped orphan tool message tool_call_id=%s", call_id or "<missing>")
+                continue
+
+            flush_pending()
+            repaired.append(msg)
+
+        flush_pending()
+
+        if inserted or dropped:
+            self._history = repaired
+            self._rebuild_history_token_cache()
+
+        return inserted
 
     def append_system_note(self, content: str) -> None:
         self._append_history_message(
@@ -308,7 +441,7 @@ class ContextBuilder:
         "read_file", "list_files", "grep_files", "glob_files", "fuzzy_search",
         "git_status", "git_diff", "git_log", "web_fetch", "web_search",
         "run_command", "task", "read_artifact", "go_to_definition",
-        "find_references", "list_mcp_resources", "read_mcp_resource",
+        "find_references", "write_file", "edit_file",
     })
     _MICRO_COMPACT_THRESHOLD = 1500  # 默认阈值
     # 模型主动请求的内容（read_file, git_diff）用更高阈值，避免丢失关键上下文
@@ -376,25 +509,107 @@ class ContextBuilder:
 
     @property
     def token_usage(self) -> int:
-        total = len(BASE_SYSTEM_PROMPT) // 4
-        project_guidelines = load_project_guidelines()
+        total = len(build_stable_prompt()) // 4
+        project_guidelines = self._get_project_guidelines()
         if project_guidelines:
-            total += len(project_guidelines) // 4
-        total += sum(len(str(note.get("content", ""))) // 4 for note in self._persistent_notes)
-        return total + self._history_tokens_total
+            total += _estimate_content_tokens(project_guidelines)
+        total += sum(_estimate_content_tokens(str(note.get("content", ""))) for note in self._persistent_notes)
+        estimated = total + self._history_tokens_total
+        return max(estimated, self._last_actual_prompt_tokens)
+
+    def record_actual_usage(self, usage: UsageInfo | None) -> None:
+        """Fold provider-reported prompt usage back into budget checks.
+
+        Character estimates are still needed before the first request and after
+        compaction, but real provider counts are a better floor once available.
+        """
+        if usage is None:
+            return
+        observed = int(getattr(usage, "input_tokens", 0) or 0)
+        cached = int(getattr(usage, "cache_creation_input_tokens", 0) or 0) + int(
+            getattr(usage, "cache_read_input_tokens", 0) or 0
+        )
+        if observed <= 0 and cached > 0:
+            observed = cached
+        if observed > 0:
+            self._last_actual_prompt_tokens = observed
+
+    def apply_tool_result_budget(self, max_tokens: int | None = None) -> int:
+        """Enforce a global budget on tool result tokens.
+
+        Truncates the oldest tool results first (time-decay order) until the total
+        is within budget. Recent results (last 5) are never truncated.
+
+        Returns the number of results truncated.
+        """
+        budget = (
+            max_tokens
+            or getattr(self, "TOKEN_BUDGET_TOOL_RESULTS", None)
+            or TOOL_RESULT_BUDGET_TOKENS
+        )
+
+        # Collect tool result messages with their indices
+        tool_results: list[tuple[int, int, str]] = []
+        for i, msg in enumerate(self._history):
+            if msg.role == "tool":
+                content_str = str(msg.content) if msg.content else ""
+                tokens = len(content_str) // 4  # Rough token estimate
+                tool_results.append((i, tokens, content_str))
+
+        if not tool_results:
+            return 0
+
+        total_tokens = sum(t[1] for t in tool_results)
+        if total_tokens <= budget:
+            return 0
+
+        # Keep the last 5 results untouched, truncate from oldest
+        keep_recent = 5
+        truncatable = tool_results[:-keep_recent] if len(tool_results) > keep_recent else []
+
+        truncated = 0
+        for idx, tokens, content in truncatable:
+            if total_tokens <= budget:
+                break
+            # Replace content with a summary
+            summary = f"[Tool result truncated — was {len(content)} chars]"
+            self._history[idx] = LLMMessage(
+                role="tool",
+                content=summary,
+                name=self._history[idx].name,
+                tool_call_id=self._history[idx].tool_call_id,
+            )
+            total_tokens -= tokens
+            total_tokens += len(summary) // 4
+            truncated += 1
+
+        if truncated > 0:
+            self._rebuild_history_token_cache()
+            logger.info(
+                "[ToolBudget] Truncated %d/%d tool results (saved ~%d tokens)",
+                truncated,
+                len(tool_results),
+                budget,
+            )
+
+        return truncated
 
     def get_budget_snapshot(
         self,
         state: AgentState,
         tool_schemas: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        system_tokens = len(BASE_SYSTEM_PROMPT) // 4
-        project_guidelines = load_project_guidelines()
+        workspace_root = self._workspace_root_for_state(state)
+        system_tokens = len(build_stable_prompt(workspace_root)) // 4
+        project_guidelines = self._get_project_guidelines(workspace_root)
         if project_guidelines:
-            system_tokens += len(project_guidelines) // 4
+            system_tokens += _estimate_content_tokens(project_guidelines)
+        harness_guidance = str(getattr(state, "harness_guidance", "") or "")
+        if harness_guidance:
+            system_tokens += _estimate_content_tokens(harness_guidance)
 
         notes_tokens = sum(
-            len(str(note.get("content", ""))) // 4 for note in self._persistent_notes
+            _estimate_content_tokens(str(note.get("content", ""))) for note in self._persistent_notes
         )
         skills_tokens = 0
         rag_tokens = 0
@@ -438,6 +653,9 @@ class ContextBuilder:
             + history_tokens
             + tools_tokens
         )
+        observed_actual = self._last_actual_prompt_tokens
+        if observed_actual > used:
+            used = observed_actual
         return {
             "used": used,
             "total": self._budget.total,
@@ -447,6 +665,7 @@ class ContextBuilder:
                 "rag": rag_tokens,
                 "history": history_tokens,
                 "tools": tools_tokens,
+                "observed_actual": observed_actual,
             },
         }
 
@@ -470,174 +689,343 @@ class ContextBuilder:
             or self._history_tokens_total > history_budget * threshold
         )
 
-    async def compact(self, focus: str = "") -> str:
+    def _restore_recent_files_after_compaction(self, state: AgentState | None = None) -> None:
+        if state is None:
+            return
+        workspace_root = self._workspace_root_for_state(state)
+        if workspace_root is None:
+            return
+
+        try:
+            root = Path(workspace_root).resolve()
+        except OSError:
+            return
+
+        restored_blocks: list[str] = []
+        used_chars = 0
+        for path in self._recent_workspace_file_paths(state, root):
+            block = self._build_restored_file_block(path, root)
+            if not block:
+                continue
+            if used_chars + len(block) > POST_COMPACTION_TOTAL_CHARS:
+                break
+            restored_blocks.append(block)
+            used_chars += len(block)
+
+        self._persistent_notes[:] = [
+            note for note in self._persistent_notes
+            if note.get("kind") != "post_compaction_restore"
+        ]
+        if not restored_blocks:
+            return
+        self._persistent_notes.append(
+            {
+                "kind": "post_compaction_restore",
+                "title": "Post-compaction restored file context",
+                "content": "\n\n".join(restored_blocks),
+            }
+        )
+
+    def _recent_workspace_file_paths(self, state: AgentState, root: Path) -> list[Path]:
+        paths: list[Path] = []
+        seen: set[str] = set()
+        for record in reversed(state.tool_calls):
+            if record.status != "success" or record.tool_name not in POST_COMPACTION_RESTORE_TOOLS:
+                continue
+            raw_path = self._tool_record_path(record.tool_input)
+            if not raw_path:
+                continue
+            try:
+                candidate = Path(raw_path)
+                resolved = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+                resolved.relative_to(root)
+            except (OSError, ValueError):
+                continue
+            key = resolved.as_posix().lower()
+            if key in seen or not resolved.is_file():
+                continue
+            seen.add(key)
+            paths.append(resolved)
+            if len(paths) >= POST_COMPACTION_MAX_FILES_TO_RESTORE:
+                break
+        return paths
+
+    @staticmethod
+    def _tool_record_path(args: dict[str, Any]) -> str:
+        for key in ("file_path", "path", "target", "filename"):
+            value = args.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    @staticmethod
+    def _build_restored_file_block(path: Path, root: Path) -> str:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            return ""
+        rel = path.relative_to(root).as_posix()
+        lines = text.splitlines()
+        numbered: list[str] = []
+        used = 0
+        for index, line in enumerate(lines, 1):
+            next_line = f"{index}: {line}"
+            if used + len(next_line) + 1 > POST_COMPACTION_MAX_CHARS_PER_FILE:
+                break
+            numbered.append(next_line)
+            used += len(next_line) + 1
+        if len(numbered) < len(lines):
+            numbered.append(f"... [{len(lines) - len(numbered)} lines omitted after post-compaction restore limit]")
+        content = "\n".join(numbered)
+        return f"### {rel}\n```text\n{content}\n```"
+
+    async def compact(self, focus: str = "", restore_state: AgentState | None = None) -> str:
+        """Time-decay compaction: compress old history, preserve recent context.
+
+        Creates new compacted messages instead of mutating originals in-place
+        (Hermes pattern: never irreversibly destroy information).
+        """
         self._compaction_count += 1
         keep_recent = self._agent_settings.history_keep_recent
 
         if len(self._history) <= keep_recent:
             return "对话较短，无需压缩"
 
-        # 分层时间衰减压缩（参考 Claude Code timeBasedMCConfig.ts）
-        # 越旧的消息压缩得越狠
         total = len(self._history)
-        for idx, message in enumerate(self._history):
-            if message.role != "tool" or not message.content:
-                continue
-            age_ratio = 1.0 - (idx / max(total, 1))  # 0=最新, 1=最旧
-            if age_ratio > 0.7 and len(message.content) > 100:
-                # 远期：仅保留工具名称和简短结果
-                tool_name = message.name or "unknown"
-                message.content = f"[{tool_name} 结果已清除]"
-            elif age_ratio > 0.4 and len(message.content) > 200:
-                # 中期：截断到 200 字符
-                message.content = (
-                    message.content[:200]
-                    + "\n... [已压缩，使用 read_artifact 获取完整内容]"
-                )
-            elif len(message.content) > 500:
-                # 近期：截断到 500 字符
-                message.content = (
-                    message.content[:500]
-                    + "\n... [已压缩]"
-                )
 
-        early = self._history[:-keep_recent]
-        recent = self._history[-keep_recent:]
-        compressed_summary = await self._summarize_early(early, focus=focus)
+        # Build compacted versions of old messages — create new objects,
+        # do NOT mutate the originals in-place.
+        early_messages: list[LLMMessage] = []
+        for idx, message in enumerate(self._history[:-keep_recent]):
+            age_ratio = 1.0 - (idx / max(total, 1))  # 0=最新, 1=最旧
+
+            if message.role == "tool" and message.content:
+                tool_name = message.name or "unknown"
+                content_len = len(message.content)
+
+                if age_ratio > 0.7 and content_len > 100:
+                    # Far history: keep tool name + brief summary
+                    compacted = f"[{tool_name} 结果已压缩]"
+                    # Preserve artifact reference if present
+                    if "artifact" in message.content[:200].lower():
+                        compacted += "（如需完整内容请使用 read_artifact）"
+                    early_messages.append(LLMMessage(
+                        role=message.role,
+                        content=compacted,
+                        name=message.name,
+                        tool_call_id=message.tool_call_id,
+                    ))
+                elif age_ratio > 0.4 and content_len > 200:
+                    # Mid history: truncate to 400 chars (enough for key info)
+                    compacted = (
+                        message.content[:400]
+                        + "\n... [已压缩；使用 read_artifact 查看完整内容]"
+                    )
+                    early_messages.append(LLMMessage(
+                        role=message.role,
+                        content=compacted,
+                        name=message.name,
+                        tool_call_id=message.tool_call_id,
+                    ))
+                elif content_len > 800:
+                    # Near history: truncate to 800 chars (preserve most context)
+                    compacted = (
+                        message.content[:800]
+                        + "\n... [已压缩]"
+                    )
+                    early_messages.append(LLMMessage(
+                        role=message.role,
+                        content=compacted,
+                        name=message.name,
+                        tool_call_id=message.tool_call_id,
+                    ))
+                else:
+                    early_messages.append(message)
+            else:
+                early_messages.append(message)
+
+        compressed_summary = await self._summarize_early(early_messages, focus=focus)
         summary_message = LLMMessage(
             role="user",
             content=(
+                f"{SUMMARY_PREFIX}\n\n"
                 f"[对话历史摘要 - 第 {self._compaction_count} 次压缩]\n"
                 f"{compressed_summary}"
             ),
         )
+        recent = self._history[-keep_recent:]
         self._history = [summary_message] + recent
         self._rebuild_history_token_cache()
+        self._last_actual_prompt_tokens = 0
+        self._restore_recent_files_after_compaction(restore_state)
         return compressed_summary
 
-    def full_compact(self) -> str:
-        """Emergency local-only compaction for near-exhausted context windows."""
+    async def full_compact(self, restore_state: AgentState | None = None) -> str:
+        """Emergency compaction for near-exhausted context windows.
+
+        When the context window is ≥95% full, this method fires as a last resort.
+        It first tries LLM-based summarization (same as compact()); if the LLM call
+        fails or times out, it falls back to rule-based fact extraction.
+        """
+        import asyncio as _asyncio
+
         self._compaction_count += 1
-        keep_recent = max(4, min(self._agent_settings.history_keep_recent, 10))
+        keep_recent = max(2, min(self._agent_settings.history_keep_recent, 6))
         original_len = len(self._history)
         original_tokens = self._history_tokens_total
 
         if original_len <= keep_recent:
+            # Short history: rule-based truncation (no LLM needed)
+            new_history: list[LLMMessage] = []
             for message in self._history:
                 if message.role == "tool" and message.content and len(message.content) > 240:
-                    message.content = (
-                        f"[{message.name or 'tool'} result locally compacted; "
-                        "rerun the tool or use read_artifact if the full result is needed.] "
+                    compacted = (
+                        f"[{message.name or 'tool'} 结果已压缩；"
+                        "如需完整结果请重新调用或使用 read_artifact] "
                         f"{message.content[:160]}"
                     )
+                    new_history.append(LLMMessage(
+                        role=message.role,
+                        content=compacted,
+                        name=message.name,
+                        tool_call_id=message.tool_call_id,
+                    ))
+                else:
+                    new_history.append(message)
+            self._history = new_history
             self._rebuild_history_token_cache()
+            self._restore_recent_files_after_compaction(restore_state)
             saved = max(0, original_tokens - self._history_tokens_total)
-            return f"Emergency local compaction trimmed old tool results and saved about {saved} tokens."
+            return f"紧急压缩：截断了旧工具结果，节省约 {saved} tokens"
 
         early = self._history[:-keep_recent]
         recent = self._history[-keep_recent:]
-        facts: list[str] = []
-        for message in early[-12:]:
-            text = (message.content or "").strip().replace("\n", " ")
-            if not text:
-                continue
-            if message.role == "user":
-                facts.append(f"User asked: {text[:100]}")
-            elif message.role == "assistant":
-                facts.append(f"Assistant replied: {text[:100]}")
-            elif message.role == "tool":
-                facts.append(f"Tool {message.name or 'unknown'} returned: {text[:90]}")
 
-        summary = "\n".join(f"- {fact}" for fact in facts[-6:]) or "- Earlier conversation was removed to protect the context window."
-        summary_message = LLMMessage(
-            role="user",
-            content=(
-                f"[Emergency local context compaction #{self._compaction_count}]\n"
-                "Older messages were locally summarized because the context window was nearly full.\n"
-                f"{summary}"
-            ),
-        )
-        self._history = [summary_message] + recent
-        for message in self._history:
-            if message.role == "tool" and message.content and len(message.content) > 360:
-                message.content = (
-                    f"[{message.name or 'tool'} result locally compacted; full output omitted.] "
-                    f"{message.content[:260]}"
+        # Try LLM-based summarization first (30s timeout)
+        llm_summary = ""
+        if self._llm is not None:
+            try:
+                llm_summary = await _asyncio.wait_for(
+                    self._summarize_early(early, focus="紧急压缩，保留关键事实"),
+                    timeout=30.0,
                 )
+            except (_asyncio.TimeoutError, Exception) as exc:
+                logger.debug("Emergency LLM summarization failed, using fallback: %s", exc)
+
+        # Fall back to rule-based extraction if LLM failed
+        if not llm_summary:
+            facts: list[str] = []
+            for message in early[-12:]:
+                text = (message.content or "").strip().replace("\n", " ")
+                if not text:
+                    continue
+                if message.role == "user":
+                    facts.append(f"用户问了：{text[:100]}")
+                elif message.role == "assistant":
+                    facts.append(f"助手回答了：{text[:100]}")
+                elif message.role == "tool":
+                    facts.append(f"工具 {message.name or 'unknown'} 返回了：{text[:90]}")
+            llm_summary = (
+                "\n".join(f"- {fact}" for fact in facts[-6:])
+                or "- 早期对话已被移除以保护上下文窗口。"
+            )
+
+        summary_content = (
+            f"{SUMMARY_PREFIX}\n\n"
+            f"[紧急上下文压缩 第 {self._compaction_count} 次]\n"
+            "因上下文窗口接近满载，较早的消息已被压缩为摘要。\n"
+            f"{llm_summary}"
+        )
+        summary_message = LLMMessage(role="user", content=summary_content)
+
+        # Build compacted history from [summary + recent] without mutating originals
+        compacted_history: list[LLMMessage] = []
+        prefix_block = f"{SUMMARY_PREFIX}\n\n"
+
+        # Truncate summary if too long
+        if len(summary_message.content) > 900:
+            body = summary_message.content[len(prefix_block):]
+            compacted_history.append(LLMMessage(
+                role=summary_message.role,
+                content=f"{prefix_block}{body[:700]}... [已截断]",
+                name=summary_message.name,
+                tool_call_id=summary_message.tool_call_id,
+            ))
+        else:
+            compacted_history.append(summary_message)
+
+        # Truncate recent messages if needed
+        for message in recent:
+            if message.role in {"user", "assistant"} and message.content and len(message.content) > 220:
+                compacted_history.append(LLMMessage(
+                    role=message.role,
+                    content=f"{message.content[:180]}... [已压缩]",
+                    name=message.name,
+                    tool_call_id=message.tool_call_id,
+                ))
+            elif message.role == "tool" and message.content and len(message.content) > 360:
+                compacted_history.append(LLMMessage(
+                    role=message.role,
+                    content=(
+                        f"[{message.name or 'tool'} 结果已压缩；完整输出已省略] "
+                        f"{message.content[:260]}"
+                    ),
+                    name=message.name,
+                    tool_call_id=message.tool_call_id,
+                ))
+            else:
+                compacted_history.append(message)
+
+        self._history = compacted_history
         self._rebuild_history_token_cache()
+        self._last_actual_prompt_tokens = 0
+        self._restore_recent_files_after_compaction(restore_state)
         saved = max(0, original_tokens - self._history_tokens_total)
-        return f"Emergency local compaction kept {len(self._history)}/{original_len} messages and saved about {saved} tokens."
+        return f"紧急压缩保留了 {len(self._history)}/{original_len} 条消息，节省约 {saved} tokens"
 
     async def _summarize_early(self, early: list[LLMMessage], focus: str = "") -> str:
-        summary_parts: list[str] = []
-        for message in early:
-            if message.role == "user":
-                summary_parts.append(f"用户: {message.content[:100]}")
-            elif message.role == "assistant" and message.content:
-                summary_parts.append(f"助手: {message.content[:100]}")
-            elif message.role == "tool":
-                summary_parts.append(
-                    f"工具结果({message.name}): {message.content[:80]}"
-                )
-
-        raw_text = "\n".join(summary_parts[-10:])
-        focus_instruction = f"\n\nFocus: preserve details related to: {focus}" if focus else ""
+        raw_text = format_compaction_history(early)
         if self._llm is not None and raw_text:
             try:
-                if self._memory_manager:
-                    prompt = (
-                        "请将以下对话历史进行压缩和信息提取(AutoCompact & MemDir)。\n"
-                        "要求：\n"
-                        "1. 在 <summary> 标签内输出简洁的对话摘要（保留关键决策和约束，不要超过200字）。\n"
-                        "2. 如果其中含有关于 codebase 环境、架构、项目偏好的重要新上下文事实，\n"
-                        "请在 <memdir> 标签内分别用一条条事实列出（每行一条，没有则留空）。我们将持久化它们。\n\n"
-                        "格式示例：\n"
-                        "<summary>这里是摘要</summary>\n"
-                        "<memdir>\n- 事实1\n- 事实2\n</memdir>\n\n"
-                        "对话历史：\n"
-                        + raw_text
-                        + focus_instruction
-                    )
-                else:
-                    prompt = (
-                        "请将以下对话历史压缩成简洁摘要，保留关键决策、用户约束和重要结论，\n"
-                        "不要超过 200 字：\n\n"
-                        + raw_text
-                        + focus_instruction
-                    )
+                prompt = build_compaction_prompt(
+                    raw_text,
+                    focus=focus,
+                    include_memory_directives=bool(self._memory_manager),
+                )
 
                 output = await simple_chat_cache.simple_chat(
                     self._llm,
                     [LLMMessage(role="user", content=prompt)],
                 )
                 if output:
-                    if self._memory_manager and ("<summary>" in output or "<memdir>" in output):
-                        import re
-                        summary_match = re.search(r"<summary>(.*?)</summary>", output, re.DOTALL)
-                        memdir_match = re.search(r"<memdir>(.*?)</memdir>", output, re.DOTALL)
-
-                        summary = summary_match.group(1).strip() if summary_match else output
-                        memdir_text = memdir_match.group(1).strip() if memdir_match else ""
-
-                        if memdir_text:
-                            lines_fact = [line.strip("- *") for line in memdir_text.split("\n") if line.strip("- *")]
-                            for line_fact in lines_fact:
-                                if line_fact:
-                                    self._memory_manager.remember(line_fact, tags=["autocompact", "memdir"], importance=3)
-                                    logger.info("AutoCompact extracted MemDir fact: %s", line_fact)
-
-                            v_mem = getattr(self._memory_manager, "_vector_memory", None)
-                            if v_mem and hasattr(v_mem, "flush"):
-                                v_mem.flush()
-                        return summary
-                    else:
-                        return output
+                    return self._consume_compaction_output(output)
             except Exception as exc:
                 logger.debug("LLM summarization failed, using fallback: %s", exc)
         return raw_text
 
+    def _consume_compaction_output(self, output: str) -> str:
+        parsed = parse_compaction_output(
+            output,
+            parse_memory_directives=bool(self._memory_manager),
+        )
+        if parsed.memdir_facts:
+            self._remember_memdir_facts(parsed.memdir_facts)
+        return parsed.summary
+
+    def _remember_memdir_facts(self, facts: list[str]) -> None:
+        for fact in facts:
+            if not fact:
+                continue
+            self._memory_manager.remember(fact, tags=["autocompact", "memdir"], importance=3)
+            logger.info("AutoCompact extracted MemDir fact: %s", fact)
+
+        v_mem = getattr(self._memory_manager, "_vector_memory", None)
+        if v_mem and hasattr(v_mem, "flush"):
+            v_mem.flush()
+
     def _get_history_within_budget(self) -> list[LLMMessage]:
-        return [self._history[index] for index in self._get_history_within_budget_indices()]
+        selected = [self._history[index] for index in self._get_history_within_budget_indices()]
+        return self._repair_provider_tool_sequence(selected)
 
     @property
     def history_length(self) -> int:
@@ -657,11 +1045,11 @@ class ContextBuilder:
             if message.role == "tool" and content and len(content) > 1200:
                 content = (
                     f"{content[:700]}\n"
-                    f"... [snapshot truncated {len(content) - 1000} chars; use artifact/read_artifact for full output] ...\n"
+                    f"... [快照截断了 {len(content) - 1000} 字符；使用 artifact/read_artifact 查看完整输出] ...\n"
                     f"{content[-300:]}"
                 )
             elif len(content) > 4000:
-                content = f"{content[:2800]}\n... [snapshot truncated {len(content) - 2800} chars] ..."
+                content = f"{content[:2800]}\n... [快照截断了 {len(content) - 2800} 字符] ..."
             history.append(
                 {
                     "role": message.role,
@@ -679,7 +1067,7 @@ class ContextBuilder:
                 }
             )
         return {
-            "history": history,
+            "history": self.sanitize_snapshot_history(history),
             "persistent_notes": [dict(note) for note in self._persistent_notes],
             "compaction_count": self._compaction_count,
         }
@@ -690,7 +1078,9 @@ class ContextBuilder:
             return
 
         self._load_snapshot_metadata(snapshot)
-        self._history = self.deserialize_snapshot_history(snapshot.get("history", []))
+        self._history = self.deserialize_snapshot_history(
+            self.sanitize_snapshot_history(snapshot.get("history", []))
+        )
         self._rebuild_history_token_cache()
 
     def load_snapshot_partial(
@@ -704,7 +1094,7 @@ class ContextBuilder:
             return []
 
         self._load_snapshot_metadata(snapshot)
-        raw_history = list(snapshot.get("history", []))
+        raw_history = self.sanitize_snapshot_history(snapshot.get("history", []))
         if recent_history_count <= 0:
             recent_history: list[dict[str, Any]] = []
             pending_history = raw_history
@@ -723,9 +1113,37 @@ class ContextBuilder:
         self._rebuild_history_token_cache()
 
     @staticmethod
+    def sanitize_snapshot_history(raw_history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        sanitized: list[dict[str, Any]] = []
+        for raw in raw_history:
+            if not isinstance(raw, dict):
+                continue
+            role = str(raw.get("role", "user"))
+            content = str(raw.get("content", ""))
+            if role == "user" and _is_internal_control_prompt(content):
+                continue
+            if (
+                role == "assistant"
+                and content.strip() == INTERNAL_EMPTY_ASSISTANT_MARKER
+                and not raw.get("tool_calls")
+            ):
+                continue
+            previous = sanitized[-1] if sanitized else None
+            if (
+                role == "user"
+                and previous is not None
+                and str(previous.get("role", "")) == "user"
+                and content.strip()
+                and content.strip() == str(previous.get("content", "")).strip()
+            ):
+                continue
+            sanitized.append(raw)
+        return sanitized
+
+    @staticmethod
     def deserialize_snapshot_history(raw_history: list[dict[str, Any]]) -> list[LLMMessage]:
         parsed_history: list[LLMMessage] = []
-        for raw in raw_history:
+        for raw in ContextBuilder.sanitize_snapshot_history(raw_history):
             tool_calls = raw.get("tool_calls") or None
             parsed_tool_calls = None
             if tool_calls:
@@ -796,10 +1214,58 @@ class ContextBuilder:
         selected.reverse()
         return selected
 
+    @staticmethod
+    def _repair_provider_tool_sequence(messages: list[LLMMessage]) -> list[LLMMessage]:
+        repaired: list[LLMMessage] = []
+        pending_ids: dict[str, str] = {}
+        pending_order: list[str] = []
+
+        def make_placeholder(call_id: str, tool_name: str) -> LLMMessage:
+            return LLMMessage(
+                role="tool",
+                content=(
+                    f"[Tool call '{tool_name}' did not complete. "
+                    "Use available context; do not repeat the same call unless necessary.]"
+                ),
+                name=tool_name,
+                tool_call_id=call_id,
+            )
+
+        def flush_pending() -> None:
+            if not pending_order:
+                return
+            for call_id in list(pending_order):
+                repaired.append(make_placeholder(call_id, pending_ids.get(call_id, "unknown")))
+            pending_ids.clear()
+            pending_order.clear()
+
+        for message in messages:
+            if message.role == "assistant":
+                flush_pending()
+                repaired.append(message)
+                for tool_call in message.tool_calls or []:
+                    pending_ids[tool_call.id] = tool_call.name
+                    pending_order.append(tool_call.id)
+                continue
+
+            if message.role == "tool":
+                call_id = str(message.tool_call_id or "").strip()
+                if call_id and call_id in pending_ids:
+                    repaired.append(message)
+                    pending_ids.pop(call_id, None)
+                    pending_order = [pending for pending in pending_order if pending != call_id]
+                continue
+
+            flush_pending()
+            repaired.append(message)
+
+        flush_pending()
+        return repaired
+
     def _effective_compaction_threshold(self, state: AgentState | None = None) -> float:
         threshold = self._agent_settings.compaction_threshold
         if state is not None and state.iterations < 3:
-            threshold = max(threshold, 0.85)
+            threshold = max(threshold, 0.75)  # was 0.85 — compact earlier
         if self._compaction_count > 0:
             threshold = min(threshold, 0.70)
         if state is not None and len(state.tool_calls) > 10:
@@ -815,8 +1281,9 @@ class ContextBuilder:
 
     @staticmethod
     def _estimate_content_tokens(content: Any) -> int:
+        if isinstance(content, str):
+            return _estimate_content_tokens(content)
         try:
-            content_length = len(content)
+            return len(content) // 4
         except TypeError:
-            content_length = len(str(content))
-        return content_length // 4
+            return _estimate_content_tokens(str(content))

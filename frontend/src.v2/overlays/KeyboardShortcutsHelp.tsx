@@ -1,3 +1,5 @@
+import { X } from "lucide-react";
+import { useEffect, useRef } from "react";
 import { useAppStore } from "../stores";
 
 const SHORTCUTS = [
@@ -15,26 +17,80 @@ const SHORTCUTS = [
   { keys: "@", action: "Open mentions" },
 ];
 
+const getFocusable = (root: HTMLElement | null): HTMLElement[] => {
+  if (!root) return [];
+  return Array.from(
+    root.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter((element) => !element.hasAttribute("disabled") && element.offsetParent !== null);
+};
+
 export const KeyboardShortcutsHelp = () => {
   const shortcutsHelpOpen = useAppStore((s) => s.shortcutsHelpOpen);
   const toggleShortcutsHelp = useAppStore((s) => s.toggleShortcutsHelp);
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!shortcutsHelpOpen) return;
+    const previousActive = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusFirst = () => {
+      const focusable = getFocusable(dialogRef.current);
+      (focusable[0] ?? dialogRef.current)?.focus();
+    };
+    window.setTimeout(focusFirst, 0);
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        toggleShortcutsHelp();
+      } else if (event.key === "Tab") {
+        const focusable = getFocusable(dialogRef.current);
+        if (focusable.length === 0) {
+          event.preventDefault();
+          dialogRef.current?.focus();
+          return;
+        }
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      previousActive?.focus();
+    };
+  }, [shortcutsHelpOpen, toggleShortcutsHelp]);
 
   if (!shortcutsHelpOpen) return null;
 
   return (
     <div
+      className="overlay-backdrop"
       onClick={toggleShortcutsHelp}
       style={{
         position: "fixed",
         inset: 0,
-        background: "rgba(0,0,0,0.5)",
+        background: "var(--backdrop-overlay)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        zIndex: 100,
+        zIndex: "var(--z-modal)",
+        pointerEvents: "auto",
       }}
     >
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Keyboard shortcuts"
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
         style={{
           width: "min(440px, 90vw)",
@@ -45,15 +101,17 @@ export const KeyboardShortcutsHelp = () => {
           boxShadow: "var(--shadow-strong, var(--shadow-md))",
           overflow: "auto",
           padding: 20,
+          pointerEvents: "auto",
         }}
       >
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
           <h2 style={{ margin: 0, fontSize: "var(--text-lg)", color: "var(--text-primary)" }}>Keyboard Shortcuts</h2>
           <button
             onClick={toggleShortcutsHelp}
-            style={{ background: "transparent", border: 0, color: "var(--text-muted)", fontSize: 20, cursor: "pointer" }}
+            className="btn-ghost"
+            style={{ border: 0, cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 4 }}
           >
-            x
+            <X size={18} />
           </button>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 16px" }}>

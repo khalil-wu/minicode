@@ -80,20 +80,17 @@ export const SideChatPanel = () => {
   if (!thread) return null;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+    <div className="flex flex-col flex-1 min-h-0">
       <div
+        className="px-2.5 py-1.5 flex items-center gap-2"
         style={{
-          padding: "6px 10px",
           borderBottom: "1px solid var(--border-subtle)",
           background: "var(--surface-page)",
           fontSize: "var(--text-xs)",
           color: "var(--text-muted)",
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
         }}
       >
-        <span style={{ flex: 1 }}>
+        <span className="flex-1">
           Side chat / inherited context /{" "}
           <span style={{ fontFamily: "var(--font-mono)" }}>{id}</span>
         </span>
@@ -108,40 +105,29 @@ export const SideChatPanel = () => {
 
       <div
         ref={listRef}
-        style={{
-          flex: 1,
-          overflowY: "auto",
-          padding: "12px 14px",
-          display: "flex",
-          flexDirection: "column",
-          gap: 12,
-        }}
+        className="flex-1 overflow-y-auto px-3.5 py-3 flex flex-col gap-3"
       >
         {thread.messages.length === 0 ? (
           <div
+            className="text-center p-5"
             style={{
               color: "var(--text-muted)",
               fontSize: "var(--text-sm)",
-              textAlign: "center",
-              padding: 20,
             }}
           >
             This side chat inherits a compact summary of the current thread, then stays separate.
             {thread.inheritedContext && (
-              <div style={{
-                marginTop: 10,
-                padding: 10,
-                border: "1px solid var(--border-subtle)",
-                borderRadius: "var(--radius-sm, 6px)",
-                background: "var(--surface-page)",
-                color: "var(--text-muted)",
-                fontFamily: "var(--font-mono)",
-                fontSize: "var(--text-xs)",
-                textAlign: "left",
-                whiteSpace: "pre-wrap",
-                maxHeight: 120,
-                overflow: "auto",
-              }}>
+              <div
+                className="mt-2.5 p-2.5 text-left whitespace-pre-wrap max-h-30 overflow-auto"
+                style={{
+                  border: "1px solid var(--border-subtle)",
+                  borderRadius: "var(--radius-sm, 6px)",
+                  background: "var(--surface-page)",
+                  color: "var(--text-muted)",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: "var(--text-xs)",
+                }}
+              >
                 {thread.inheritedContext}
               </div>
             )}
@@ -149,32 +135,23 @@ export const SideChatPanel = () => {
         ) : (
           thread.messages.map((m) =>
             m.role === "user" ? (
-              <div
-                key={m.id}
-                style={{ display: "flex", justifyContent: "flex-end" }}
-              >
+              <div key={m.id} className="flex justify-end">
                 <div
+                  className="max-w-[85%] px-2.5 py-1.5 whitespace-pre-wrap break-words"
                   style={{
-                    maxWidth: "85%",
                     background: "var(--surface-raised)",
                     color: "var(--text-primary)",
-                    padding: "6px 10px",
                     borderRadius: "var(--radius-md, 10px)",
                     fontSize: "var(--text-sm)",
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-word",
                   }}
                 >
                   {m.content}
                 </div>
               </div>
             ) : (
-              <div
-                key={m.id}
-                style={{ display: "flex", flexDirection: "column", gap: 6 }}
-              >
+              <div key={m.id} className="flex flex-col gap-1.5">
                 {getToolCallsFromMessage(m).length > 0 && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <div className="flex flex-col gap-1">
                     {getToolCallsFromMessage(m).map((tc) => (
                       <ToolCallCard key={tc.id} record={tc} />
                     ))}
@@ -199,13 +176,10 @@ export const SideChatPanel = () => {
       </div>
 
       <div
+        className="p-2.5 flex flex-col gap-1.5"
         style={{
-          padding: 10,
           borderTop: "1px solid var(--border-subtle)",
           background: "var(--surface-page)",
-          display: "flex",
-          flexDirection: "column",
-          gap: 6,
         }}
       >
         <textarea
@@ -219,31 +193,26 @@ export const SideChatPanel = () => {
           }}
           placeholder="Side-chat message..."
           rows={2}
+          className="px-2 py-1.5 resize-none outline-none"
           style={{
             background: "var(--surface-base)",
             border: "1px solid var(--border-subtle)",
             borderRadius: "var(--radius-sm, 6px)",
-            padding: "6px 8px",
             color: "var(--text-primary)",
             fontFamily: "var(--font-ui)",
             fontSize: "var(--text-sm)",
-            resize: "none",
-            outline: 0,
           }}
         />
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
+        <div className="flex justify-end gap-1.5">
           {thread.isStreaming && (
             <button
               onClick={stop}
+              className="border-0 px-2.5 py-1 cursor-pointer font-semibold"
               style={{
                 background: "var(--state-danger)",
                 color: "var(--text-primary)",
-                border: 0,
                 borderRadius: "var(--radius-sm, 6px)",
-                padding: "4px 10px",
-                cursor: "pointer",
                 fontSize: "var(--text-xs)",
-                fontWeight: 600,
               }}
             >
               Stop
@@ -252,17 +221,15 @@ export const SideChatPanel = () => {
           <button
             onClick={submit}
             disabled={sendDisabled}
+            className="border-0 px-3 py-1 font-semibold"
             style={{
               background: sendDisabled
                 ? "var(--surface-soft)"
                 : "var(--accent-primary)",
               color: sendDisabled ? "var(--text-muted)" : "var(--text-primary)",
-              border: 0,
               borderRadius: "var(--radius-sm, 6px)",
-              padding: "4px 12px",
               cursor: sendDisabled ? "not-allowed" : "pointer",
               fontSize: "var(--text-xs)",
-              fontWeight: 600,
             }}
           >
             Send

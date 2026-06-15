@@ -1,32 +1,41 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
-import { ExternalLink } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ExternalLink, Code2 } from "lucide-react";
 import { useAppStore } from "../stores";
 import { getWebSocket } from "../hooks/useWebSocket";
+import { buildApprovalResponseCommand } from "../protocol/prompt-responses";
+import { pendingPromptTargetsConversation } from "../lib/pending-prompts";
+import { MonacoDiffView } from "../components/MonacoDiffView";
+import { guessLanguageFromPath } from "../lib/monaco-colorize";
 
 export const DiffReviewModal = () => {
   const pendingDiffReview = useAppStore((s) => s.pendingDiffReview);
+  const activeConversationId = useAppStore((s) => s.conversationId);
+  const visibleDiffReview = pendingPromptTargetsConversation(pendingDiffReview, activeConversationId, activeConversationId)
+    ? pendingDiffReview
+    : null;
   const containerRef = useRef<HTMLDivElement>(null);
+  const [useMonaco, setUseMonaco] = useState(false);
 
   const respond = useCallback((accepted: boolean) => {
-    if (!pendingDiffReview) return;
+    if (!visibleDiffReview) return;
     const ws = getWebSocket();
-    ws?.send({
-      type: "approval",
-      tool_call_id: pendingDiffReview.requestId,
-      action: accepted ? "approve" : "reject",
-    });
+    ws?.send(buildApprovalResponseCommand(
+      visibleDiffReview.requestId,
+      accepted ? "approve" : "reject",
+      visibleDiffReview.protocol,
+    ));
     const current = useAppStore.getState().diffReview;
-    if (current?.requestId === pendingDiffReview.requestId) {
+    if (current?.requestId === visibleDiffReview.requestId) {
       useAppStore.getState().setDiffReviewState({
         ...current,
         status: accepted ? "approved" : "rejected",
       });
     }
     useAppStore.getState().clearDiffReview();
-  }, [pendingDiffReview]);
+  }, [visibleDiffReview]);
 
   useEffect(() => {
-    if (!pendingDiffReview) return;
+    if (!visibleDiffReview) return;
     const previousActive = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const focusFirst = () => {
       const focusable = getFocusable(containerRef.current);
@@ -63,9 +72,9 @@ export const DiffReviewModal = () => {
       window.removeEventListener("keydown", handler);
       previousActive?.focus();
     };
-  }, [pendingDiffReview, respond]);
+  }, [visibleDiffReview, respond]);
 
-  if (!pendingDiffReview) return null;
+  if (!visibleDiffReview) return null;
 
   const openDiffPanel = () => {
     useAppStore.getState().addPanel({
@@ -76,7 +85,7 @@ export const DiffReviewModal = () => {
   };
 
   const { lines, stats } = useMemo(() => {
-    const raw = pendingDiffReview.diff;
+    const raw = visibleDiffReview.diff;
     const ls = raw.split("\n");
     let plus = 0, minus = 0;
     for (const l of ls) {
@@ -84,25 +93,19 @@ export const DiffReviewModal = () => {
       else if (l.startsWith("-") && !l.startsWith("---")) minus++;
     }
     return { lines: ls, stats: { plus, minus } };
-  }, [pendingDiffReview.diff]);
+  }, [visibleDiffReview.diff]);
 
   return (
     <div
-      className="overlay-backdrop"
+      className="overlay-backdrop fixed inset-0 flex items-center justify-center backdrop-blur-sm"
       style={{
-        position: "fixed",
-        inset: 0,
         background: "rgba(0,0,0,0.6)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 110,
-        backdropFilter: "blur(4px)",
+        zIndex: "var(--z-approval)",
       }}
       onClick={() => respond(false)}
     >
       <div
-        className="modal-content"
+        className="modal-content border shadow-lg p-5 flex flex-col gap-3"
         ref={containerRef}
         role="dialog"
         aria-modal="true"
@@ -113,21 +116,17 @@ export const DiffReviewModal = () => {
           width: "min(780px, 92vw)",
           maxHeight: "82vh",
           background: "var(--surface-raised)",
-          border: "1px solid var(--border-subtle)",
+          borderColor: "var(--border-subtle)",
           borderRadius: "var(--radius-md, 12px)",
           boxShadow: "var(--shadow-strong, var(--shadow-md))",
-          padding: 20,
-          display: "flex",
-          flexDirection: "column",
-          gap: 12,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <h3 id="diff-review-title" style={{ margin: 0, color: "var(--text-primary)", fontSize: "var(--text-md)", flex: 1 }}>
+        <div className="flex items-center gap-3">
+          <h3 id="diff-review-title" className="m-0 flex-1" style={{ color: "var(--text-primary)", fontSize: "var(--text-md)" }}>
             Diff Review
-            {pendingDiffReview.filePath && (
-              <span style={{ marginLeft: 10, fontSize: "var(--text-sm)", color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontWeight: 400 }}>
-                {pendingDiffReview.filePath}
+            {visibleDiffReview.filePath && (
+              <span className="ml-2.5 font-normal" style={{ fontSize: "var(--text-sm)", color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
+                {visibleDiffReview.filePath}
               </span>
             )}
           </h3>
@@ -136,58 +135,83 @@ export const DiffReviewModal = () => {
             {" "}
             <span style={{ color: "var(--state-danger)" }}>-{stats.minus}</span>
           </span>
+          <button
+            onClick={() => setUseMonaco((v) => !v)}
+            title={useMonaco ? "Switch to simple view" : "Switch to Monaco diff view"}
+            className="border rounded cursor-pointer inline-flex items-center gap-1.5 px-2 py-1"
+            style={{
+              background: "var(--surface-soft)",
+              color: "var(--text-primary)",
+              borderColor: "var(--border-subtle)",
+              borderRadius: "var(--radius-sm, 6px)",
+              fontSize: "var(--text-xs)",
+              opacity: useMonaco ? 1 : 0.7,
+            }}
+          >
+            <Code2 size={13} />
+            Monaco
+          </button>
         </div>
-        <div
-          style={{
-            flex: 1,
-            overflow: "auto",
-            background: "var(--surface-base)",
-            borderRadius: "var(--radius-sm, 6px)",
-            border: "1px solid var(--border-subtle)",
-            fontFamily: "var(--font-mono)",
-            fontSize: "var(--text-xs)",
-            lineHeight: 1.7,
-          }}
-        >
-          {lines.map((line, i) => {
-            let color = "var(--text-secondary)";
-            let bg = "transparent";
-            if (line.startsWith("+") && !line.startsWith("+++")) {
-              color = "var(--state-success)";
-              bg = "color-mix(in oklch, var(--state-success) 8%, transparent)";
-            } else if (line.startsWith("-") && !line.startsWith("---")) {
-              color = "var(--state-danger)";
-              bg = "color-mix(in oklch, var(--state-danger) 8%, transparent)";
-            } else if (line.startsWith("@@")) {
-              color = "var(--accent-primary)";
-              bg = "color-mix(in oklch, var(--accent-primary) 5%, transparent)";
-            } else if (line.startsWith("diff ") || line.startsWith("index ") || line.startsWith("---") || line.startsWith("+++")) {
-              color = "var(--text-muted)";
-            }
-            return (
-              <div key={i} style={{ display: "flex", background: bg }}>
-                <span style={{ width: 40, flexShrink: 0, textAlign: "right", padding: "0 8px 0 0", color: "var(--text-muted)", opacity: 0.5, userSelect: "none" }}>
-                  {i + 1}
-                </span>
-                <span style={{ color, padding: "0 8px", whiteSpace: "pre", flex: 1 }}>
-                  {line}
-                </span>
-              </div>
-            );
-          })}
-        </div>
-        <div style={{ display: "flex", gap: 8, justifyContent: "space-between", alignItems: "center" }}>
+        {useMonaco ? (
+          <div className="flex-1 min-h-0 overflow-hidden">
+            <MonacoDiffView
+              patch={visibleDiffReview.diff}
+              filePath={visibleDiffReview.filePath}
+              language={visibleDiffReview.filePath ? guessLanguageFromPath(visibleDiffReview.filePath) : "plaintext"}
+              height="100%"
+            />
+          </div>
+        ) : (
+          <div
+            className="flex-1 overflow-auto border rounded leading-[1.7]"
+            style={{
+              background: "var(--surface-base)",
+              borderRadius: "var(--radius-sm, 6px)",
+              borderColor: "var(--border-subtle)",
+              fontFamily: "var(--font-mono)",
+              fontSize: "var(--text-xs)",
+            }}
+          >
+            {lines.map((line, i) => {
+              let color = "var(--text-secondary)";
+              let bg = "transparent";
+              if (line.startsWith("+") && !line.startsWith("+++")) {
+                color = "var(--state-success)";
+                bg = "color-mix(in oklch, var(--state-success) 8%, transparent)";
+              } else if (line.startsWith("-") && !line.startsWith("---")) {
+                color = "var(--state-danger)";
+                bg = "color-mix(in oklch, var(--state-danger) 8%, transparent)";
+              } else if (line.startsWith("@@")) {
+                color = "var(--accent-primary)";
+                bg = "color-mix(in oklch, var(--accent-primary) 5%, transparent)";
+              } else if (line.startsWith("diff ") || line.startsWith("index ") || line.startsWith("---") || line.startsWith("+++")) {
+                color = "var(--text-muted)";
+              }
+              return (
+                <div key={i} className="flex" style={{ background: bg }}>
+                  <span className="w-10 shrink-0 text-right pr-2 select-none opacity-50" style={{ color: "var(--text-muted)" }}>
+                    {i + 1}
+                  </span>
+                  <span className="px-2 whitespace-pre flex-1" style={{ color }}>
+                    {line}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <div className="flex gap-2 justify-between items-center">
           <span style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)" }}>
             Enter accepts, Esc rejects
           </span>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={openDiffPanel} style={openBtn}>
+          <div className="flex gap-2">
+            <button onClick={openDiffPanel} className="border rounded cursor-pointer inline-flex items-center gap-1.5 py-2 px-3" style={openBtn}>
               <ExternalLink size={14} /> Open in Diff
             </button>
-            <button onClick={() => respond(false)} style={rejectBtn}>
+            <button onClick={() => respond(false)} className="border rounded py-2 px-5 cursor-pointer" style={rejectBtn}>
               Reject
             </button>
-            <button onClick={() => respond(true)} style={acceptBtn}>
+            <button onClick={() => respond(true)} className="border-0 rounded py-2 px-5 font-semibold cursor-pointer" style={acceptBtn}>
               Accept
             </button>
           </div>
@@ -217,31 +241,21 @@ const acceptBtn: React.CSSProperties = {
   color: "var(--text-on-accent)",
   border: 0,
   borderRadius: "var(--radius-sm, 6px)",
-  padding: "8px 20px",
-  fontWeight: 600,
-  cursor: "pointer",
   fontSize: "var(--text-sm)",
 };
 
 const rejectBtn: React.CSSProperties = {
   background: "var(--surface-soft)",
   color: "var(--text-primary)",
-  border: "1px solid var(--border-subtle)",
+  borderColor: "var(--border-subtle)",
   borderRadius: "var(--radius-sm, 6px)",
-  padding: "8px 20px",
-  cursor: "pointer",
   fontSize: "var(--text-sm)",
 };
 
 const openBtn: React.CSSProperties = {
   background: "var(--surface-soft)",
   color: "var(--text-primary)",
-  border: "1px solid var(--border-subtle)",
+  borderColor: "var(--border-subtle)",
   borderRadius: "var(--radius-sm, 6px)",
-  padding: "8px 12px",
-  cursor: "pointer",
   fontSize: "var(--text-sm)",
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 6,
 };

@@ -79,7 +79,9 @@ export const ToolCallTimeline = () => {
                         ? "var(--state-danger)"
                         : c.status === "blocked"
                           ? "var(--state-warning)"
-                          : "var(--accent-primary)",
+                          : c.status === "partial"
+                            ? "var(--state-warning)"
+                            : "var(--accent-primary)",
                   opacity: 0.8,
                 }}
               />

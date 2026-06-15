@@ -65,8 +65,6 @@ def build_provider_adapter(
                 if not custom["api_key"]:
                     return None
                 if custom["wire_api"] == "anthropic":
-                    from backend.llm.anthropic_adapter import AnthropicAdapter
-
                     return AnthropicAdapter(
                         api_key=custom["api_key"],
                         model=(model_override or custom["model"]).strip(),

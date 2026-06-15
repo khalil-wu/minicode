@@ -36,8 +36,8 @@ const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment
       borderRadius: "var(--radius-sm, 6px)",
       border: `1px solid ${a.status === "error" ? "var(--state-danger)" : "var(--border-subtle)"}`,
       overflow: "hidden",
-      flexShrink: 0,
     }}
+    className="shrink-0"
   >
     <img
       src={a.dataUrl}
@@ -49,10 +49,10 @@ const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment
         style={{
           position: "absolute",
           inset: 0,
-          background: "rgba(0,0,0,0.5)",
+          background: "var(--backdrop-overlay)",
           display: "grid",
           placeItems: "center",
-          color: "white",
+          color: "var(--text-on-accent)",
           fontSize: "var(--text-xs)",
         }}
       >
@@ -69,8 +69,8 @@ const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment
         width: 18,
         height: 18,
         borderRadius: "50%",
-        background: "rgba(0,0,0,0.6)",
-        color: "white",
+        background: "var(--backdrop-strong)",
+        color: "var(--text-on-accent)",
         border: 0,
         cursor: "pointer",
         display: "inline-flex",
@@ -83,6 +83,17 @@ const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment
     </button>
   </div>
 );
+
+const truncateFilename = (name: string): string => {
+  if (name.length <= 25) return name;
+  const lastDotIndex = name.lastIndexOf(".");
+  if (lastDotIndex === -1 || lastDotIndex === 0) {
+    return `${name.slice(0, 22)}...`;
+  }
+  const ext = name.slice(lastDotIndex);
+  const base = name.slice(0, Math.max(0, 22 - ext.length));
+  return `${base}...${ext}`;
+};
 
 const FileChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment; onRemove: () => void }) => (
   <div
@@ -101,21 +112,22 @@ const FileChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment;
       minWidth: 0,
     }}
   >
-    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.name}</span>
-    <span style={{ color: "var(--text-muted)", flexShrink: 0 }}>
+    <span className="shrink-0">{truncateFilename(a.name)}</span>
+    <span className="shrink-0" style={{ color: "var(--text-muted)" }}>
       {(a.size / 1024).toFixed(1)} KB
     </span>
-    <span style={{ color: statusColor(a), flexShrink: 0, fontWeight: 600 }}>
+    <span className="shrink-0" style={{ color: statusColor(a), fontWeight: 600 }}>
       {attachmentStatusLabel(a)}
     </span>
     {a.error && (
-      <span style={{ color: a.status === "error" ? "var(--state-danger)" : "var(--state-warning)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+      <span className="truncate" style={{ color: a.status === "error" ? "var(--state-danger)" : "var(--state-warning)", minWidth: 0 }}>
         {a.error}
       </span>
     )}
     <button
       onClick={onRemove}
       aria-label={`Remove ${a.name}`}
+      className="shrink-0"
       style={{
         background: "transparent",
         color: "var(--text-muted)",
@@ -124,7 +136,6 @@ const FileChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment;
         padding: 0,
         display: "inline-flex",
         alignItems: "center",
-        flexShrink: 0,
       }}
     >
       <X size={13} />

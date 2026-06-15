@@ -2,6 +2,8 @@ import { Menu, Minus, Moon, PanelLeft, PanelRight, Plus, Search, Square, Sun, X 
 import type { CSSProperties, ReactNode } from "react";
 import { desktop, isDesktop } from "../desktop/runtime";
 import { useAppStore } from "../stores";
+import { ContextBudgetIndicator } from "../chat/components/ContextBudgetIndicator";
+import "../chat/components/context-budget.css";
 
 export const HeaderBar = () => {
   const isConnected = useAppStore((s) => s.isConnected);
@@ -41,10 +43,11 @@ export const HeaderBar = () => {
       >
         {themeMode === "light" ? <Moon size={16} /> : <Sun size={16} />}
       </IconButton>
+      <ContextBudgetIndicator />
       <IconButton label={rightPanelOpen ? "Close right panel" : "Open right panel"} onClick={toggleRightPanel} active={rightPanelOpen}>
         <PanelRight size={17} />
       </IconButton>
-      <span aria-label={isConnected ? "Connected" : "Disconnected"} title={isConnected ? "Backend connected" : "Backend disconnected"} style={connectionDotStyle(isConnected)} />
+      <span aria-label={isConnected ? "Backend connected" : "Backend disconnected"} title={isConnected ? "Backend connected" : "Backend disconnected"} style={connectionDotStyle(isConnected)} />
 
       {isDesktop() && (
         <>
@@ -81,6 +84,7 @@ const IconButton = ({
     type="button"
     title={label}
     aria-label={label}
+    className="btn-ghost"
     onClick={onClick}
     style={{
       width: 36,
@@ -90,8 +94,8 @@ const IconButton = ({
       justifyContent: "center",
       border: "1px solid transparent",
       borderRadius: "var(--radius-sm, 7px)",
-      background: active ? "var(--surface-page)" : "transparent",
-      color: active ? "var(--text-primary)" : "var(--text-muted)",
+      background: active ? "var(--surface-page)" : undefined,
+      color: active ? "var(--text-primary)" : undefined,
       cursor: "pointer",
       padding: 0,
       WebkitAppRegion: "no-drag",
@@ -102,7 +106,7 @@ const IconButton = ({
 );
 
 const headerStyle: CSSProperties & { WebkitAppRegion?: string } = {
-  height: "40px",
+  height: "var(--header-height)",
   display: "flex",
   alignItems: "center",
   gap: 8,

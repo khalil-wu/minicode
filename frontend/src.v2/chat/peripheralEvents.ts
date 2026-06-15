@@ -6,6 +6,7 @@ import type {
   SchedulerListEvent,
   ServerEvent,
 } from "../protocol/events";
+import type { McpServerStatus } from "../stores/types";
 import { pushToast } from "../overlays/ToastContainer";
 
 export const handlePeripheralEvent = (e: ServerEvent): boolean => {
@@ -28,6 +29,13 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
         s.setWorkingDirectory(rootPath);
         s.bumpFileTreeVersion();
         s.requestGitChanges();
+        useAppStore.setState((state) => ({
+          conversations: state.conversations.map((conversation) =>
+            conversation.id === state.conversationId
+              ? { ...conversation, workspaceRoot: rootPath, worktreePath: "" }
+              : conversation,
+          ),
+        }));
         pushToast(`Workspace opened: ${ev.project?.name ?? rootPath}`, "success", 3000);
       }
       return true;
@@ -80,6 +88,36 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
       }
       return true;
     }
+    case "terminal.snapshot": {
+      const ev = e as unknown as {
+        session_id?: string;
+        pid?: number | null;
+        shell?: string;
+        cwd?: string;
+        is_alive?: boolean;
+        output?: string;
+        output_chars?: number;
+        total_output_chars?: number;
+        truncated?: boolean;
+        error?: string;
+      };
+      const id = ev.session_id ?? "";
+      if (!id) return true;
+      s.upsertTerminalSnapshot({
+        id,
+        pid: ev.pid,
+        shell: ev.shell ?? "",
+        cwd: ev.cwd ?? "",
+        status: ev.is_alive === false ? "exited" : "running",
+        output: ev.output ?? "",
+        outputChars: ev.output_chars,
+        totalOutputChars: ev.total_output_chars,
+        truncated: ev.truncated,
+        capturedAt: Date.now(),
+        error: ev.error,
+      });
+      return true;
+    }
     case "mcp_status": {
       if (e.servers) {
         const prev = useAppStore.getState().mcpServers;
@@ -87,8 +125,13 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
           name: srv.name,
           status: srv.status as "connected" | "disconnected" | "error" | "reconnecting",
           tools: srv.tools_count ?? srv.tools,
-          transport: srv.transport as "stdio" | "sse" | "streamable-http" | undefined,
+          transport: srv.transport as "stdio" | "http" | "sse" | "streamable-http" | undefined,
           lastError: srv.error || undefined,
+          phase: srv.phase as McpServerStatus["phase"],
+          recoverable: srv.recoverable,
+          requiresUserAction: srv.requires_user_action,
+          setupHint: srv.setup_hint,
+          docsUrl: srv.docs_url,
         })));
         for (const srv of e.servers) {
           const was = prev.find((p) => p.name === srv.name);

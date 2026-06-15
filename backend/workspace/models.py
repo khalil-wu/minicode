@@ -108,6 +108,37 @@ class WorkspaceGitWorktreeRemoveResponse(BaseModel):
     removed: bool
     path: str
     branch: str = ""
+    snapshot_id: str | None = None
+    snapshot_ref: str | None = None
+    error: str | None = None
+
+
+class WorktreeSnapshotEntryResponse(BaseModel):
+    id: str
+    conversation_id: str = ""
+    branch: str = ""
+    original_path: str = ""
+    snapshot_sha: str = ""
+    snapshot_ref: str = ""
+    label: str = ""
+    created_at: str = ""
+
+
+class WorkspaceGitWorktreeSnapshotsResponse(BaseModel):
+    snapshots: list[WorktreeSnapshotEntryResponse] = Field(default_factory=list)
+    error: str | None = None
+
+
+class WorkspaceGitWorktreeRestoreRequest(BaseModel):
+    snapshot_id: str = Field(min_length=1)
+    dest: str | None = None
+
+
+class WorkspaceGitWorktreeRestoreResponse(BaseModel):
+    restored: bool
+    snapshot_id: str
+    path: str = ""
+    branch: str = ""
     error: str | None = None
 
 

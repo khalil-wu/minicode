@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import inspect
+import os
 import re
 import shutil
 import time
@@ -12,7 +13,7 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 
-USER_SKILLS_DIR = Path.home() / ".mini-code" / "skills"
+USER_SKILLS_DIR = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")) / "skills"
 
 OPENAI_SKILLS_CONTENTS_URL = "https://api.github.com/repos/openai/skills/contents/skills/.curated?ref=main"
 OPENAI_SKILL_RAW_URL = "https://raw.githubusercontent.com/openai/skills/main/skills/.curated/{name}/SKILL.md"

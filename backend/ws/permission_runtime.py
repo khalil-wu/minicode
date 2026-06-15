@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 from backend.agent.message import AgentEvent
+from backend.conversations.models import DEFAULT_CONVERSATION_PERMISSION_MODE
+from backend.permissions.profiles import workspace_scope_for
 from backend.tools.base import PermissionLevel
 from backend.ws.utils import (
     normalize_permission_mode,
@@ -22,7 +24,10 @@ class SessionPermissionRuntimeMixin:
         source: str,
     ) -> bool:
         current = self.permission_context
-        normalized_mode = normalize_permission_mode(mode if mode is not None else current.mode) or "default"
+        normalized_mode = (
+            normalize_permission_mode(mode if mode is not None else current.mode)
+            or DEFAULT_CONVERSATION_PERMISSION_MODE
+        )
         normalized_overrides = dict(session_overrides if session_overrides is not None else current.session_overrides)
         normalized_deny_rules = list(tool_deny_rules if tool_deny_rules is not None else current.tool_deny_rules)
 
@@ -39,6 +44,7 @@ class SessionPermissionRuntimeMixin:
             session_overrides=normalized_overrides,
             tool_deny_rules=normalized_deny_rules,
             filesystem_constraints=current.filesystem_constraints,
+            workspace_scope=getattr(current, "workspace_scope", "project"),
             source=source,
         )
         return True
@@ -61,13 +67,28 @@ class SessionPermissionRuntimeMixin:
 
     def _sync_permission_mode_with_active_conversation(self, *, source: str) -> str:
         active = self.active_conversation
-        requested = normalize_permission_mode(str(getattr(active, "permission_mode", "default"))) or "default"
+        requested = (
+            normalize_permission_mode(str(getattr(active, "permission_mode", DEFAULT_CONVERSATION_PERMISSION_MODE)))
+            or DEFAULT_CONVERSATION_PERMISSION_MODE
+        )
         deny_rules = normalize_tool_patterns(getattr(active, "permission_deny_rules", []))
         overrides = normalize_permission_overrides(getattr(active, "permission_overrides", {}))
+        scope = workspace_scope_for(
+            workspace_root=getattr(active, "workspace_root", "") if active is not None else "",
+            worktree_path=getattr(active, "worktree_path", "") if active is not None else "",
+        )
         self._set_permission_context(
             mode=requested,
             session_overrides=overrides,
             tool_deny_rules=deny_rules,
+            source=source,
+        )
+        self.permission_context = self.permission_checker.build_context(
+            mode=self.permission_context.mode,
+            session_overrides=self.permission_context.session_overrides,
+            tool_deny_rules=self.permission_context.tool_deny_rules,
+            filesystem_constraints=self.permission_context.filesystem_constraints,
+            workspace_scope=scope,
             source=source,
         )
         return requested
@@ -81,7 +102,10 @@ class SessionPermissionRuntimeMixin:
         if conversation is not None:
             conversation_id = str(getattr(conversation, "id", "")).strip()
             if conversation_id and conversation_id != str(self.active_conversation_id or ""):
-                mode = normalize_permission_mode(str(getattr(conversation, "permission_mode", "default"))) or "default"
+                mode = (
+                    normalize_permission_mode(str(getattr(conversation, "permission_mode", DEFAULT_CONVERSATION_PERMISSION_MODE)))
+                    or DEFAULT_CONVERSATION_PERMISSION_MODE
+                )
                 context_source = "conversation.record"
                 deny_rules = normalize_tool_patterns(getattr(conversation, "permission_deny_rules", []))
                 overrides = normalize_permission_overrides(getattr(conversation, "permission_overrides", {}))

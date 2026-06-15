@@ -12,7 +12,7 @@ export const useWorkspaceGit = () => {
       setWorkspaceGit(null);
       return;
     }
-    fetchWorkspaceGitWorktree().then((result) => {
+    fetchWorkspaceGitWorktree(workingDirectory).then((result) => {
       if (cancelled) return;
       if (!result) {
         setWorkspaceGit(null);

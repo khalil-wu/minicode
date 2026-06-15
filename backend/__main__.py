@@ -6,6 +6,7 @@ import sys
 
 logger = logging.getLogger(__name__)
 DEFAULT_WS_MAX_SIZE_BYTES = 1024 * 1024
+DEFAULT_WS_PING_INTERVAL_SECONDS: float | None = None
 
 
 def _should_enable_reload() -> bool:
@@ -24,6 +25,15 @@ def _resolve_backend_host() -> str:
     return requested
 
 
+def _resolve_ws_ping_interval() -> float | None:
+    raw = os.environ.get("MINICODE_WS_PING_INTERVAL_SECONDS", "").strip()
+    if not raw:
+        return DEFAULT_WS_PING_INTERVAL_SECONDS
+    if raw.lower() in {"0", "none", "off", "disabled", "false"}:
+        return None
+    return float(raw)
+
+
 if __name__ == "__main__":
     # Windows 上必须使用 ProactorEventLoop 才能支持 asyncio.create_subprocess_exec
     # 必须在 uvicorn.run() 之前设置，否则 uvicorn 可能用 SelectorEventLoop
@@ -35,6 +45,7 @@ if __name__ == "__main__":
     host = _resolve_backend_host()
     port = int(os.environ.get("MINICODE_BACKEND_PORT", "8000"))
     ws_max_size = int(os.environ.get("MINICODE_WS_MAX_SIZE_BYTES", str(DEFAULT_WS_MAX_SIZE_BYTES)))
+    ws_ping_interval = _resolve_ws_ping_interval()
 
     uvicorn.run(
         "backend.main:app",
@@ -42,4 +53,5 @@ if __name__ == "__main__":
         port=port,
         reload=_should_enable_reload(),
         ws_max_size=ws_max_size,
+        ws_ping_interval=ws_ping_interval,
     )

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import inspect
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -14,6 +14,7 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from backend.permissions.checker import PermissionChecker
     from backend.permissions.context import PermissionContext
+    from backend.agent.harness.toolsets import ToolsetPolicy
 
 from backend.permissions.context import ToolExecutionContext
 from backend.tools.base import BaseTool, ToolResult, PermissionLevel
@@ -96,11 +97,117 @@ class CapabilityRegistry:
     def get_skills(self) -> dict[str, dict[str, Any]]:
         return {name: dict(definition) for name, definition in self._skills.items()}
 
-    def build_snapshot(self, budget: int = 6000) -> dict[str, Any]:
+    def build_schema_views(
+        self,
+        *,
+        toolset_policy: 'ToolsetPolicy | None' = None,
+        permission_checker: 'PermissionChecker | None' = None,
+        permission_context: 'PermissionContext | None' = None,
+    ) -> list[Any]:
+        """Return one ToolSchemaView per registered tool (Phase 1.2).
+
+        Single source of truth for exposure (direct/deferred/hidden) and the
+        model-vs-runtime split. ``schema`` is populated for every non-hidden
+        tool; ``direct`` marks those that belong in this turn's direct list.
+        Deferred tools keep their schema so the deferred catalog can reuse it.
+        """
+        from backend.agent.harness.contracts import ToolSchemaView
+        from backend.agent.harness.toolsets import ToolsetPolicy
+
+        active_policy = toolset_policy or ToolsetPolicy.default()
+        views: list[ToolSchemaView] = []
+        for name, tool in self._tools.items():
+            spec = self.get_tool_spec(name)
+            direct = active_policy.is_directly_visible(spec)
+            denied = False
+            level = None
+            if permission_checker and permission_context:
+                from backend.permissions.checker import check_permission_level
+
+                level = check_permission_level(
+                    permission_checker, name, context=permission_context, tool=tool
+                )
+                denied = level == PermissionLevel.ALWAYS_DENY
+            exposure = spec.exposure if spec else "core"
+            if denied:
+                exposure = "hidden"
+            direct = direct and not denied
+            schema = tool.get_schema().to_openai_tool() if exposure != "hidden" else None
+            meta = tool.to_runtime_metadata()
+            if level is not None and not denied:
+                meta = {**meta, "permission": level.value}
+            views.append(
+                ToolSchemaView(
+                    name=name,
+                    exposure=exposure,
+                    schema=schema,
+                    direct=direct,
+                    search_hint=getattr(tool, "search_hint", "") or "",
+                    short_description=(tool.model_description() or "").split(".")[0],
+                    runtime_metadata=meta,
+                )
+            )
+        return views
+
+    def get_schema_view(
+        self,
+        name: str,
+        *,
+        toolset_policy: 'ToolsetPolicy | None' = None,
+        permission_checker: 'PermissionChecker | None' = None,
+        permission_context: 'PermissionContext | None' = None,
+    ) -> Any | None:
+        """Return the current ToolSchemaView for one registered tool."""
+        for view in self.build_schema_views(
+            toolset_policy=toolset_policy,
+            permission_checker=permission_checker,
+            permission_context=permission_context,
+        ):
+            if view.name == name:
+                return view
+        return None
+
+    def get_runtime_metadata(
+        self,
+        *,
+        permission_checker: 'PermissionChecker | None' = None,
+        permission_context: 'PermissionContext | None' = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Per-tool non-model-facing metadata (permission, capability hints).
+
+        Keeps permission/UI info out of the model schema (Phase 1.3) while still
+        giving UI/event consumers the data that used to be appended to the
+        function description.
+        """
+        out: dict[str, dict[str, Any]] = {}
+        for name, tool in self._tools.items():
+            meta = tool.to_runtime_metadata()
+            if permission_checker and permission_context:
+                from backend.permissions.checker import check_permission_level
+
+                level = check_permission_level(
+                    permission_checker, name, context=permission_context, tool=tool
+                )
+                meta = {**meta, "permission": level.value}
+            out[name] = meta
+        return out
+
+    def build_snapshot(
+        self,
+        budget: int = 6000,
+        *,
+        toolset_policy: 'ToolsetPolicy | None' = None,
+    ) -> dict[str, Any]:
         """Return a stable capability snapshot for UI/runtime consumers."""
+        views = self.build_schema_views(toolset_policy=toolset_policy)
         return {
             "version": self._version,
-            "tools": deepcopy(self.get_schemas(budget)),
+            "tools": deepcopy(self.get_schemas(budget, toolset_policy=toolset_policy)),
+            "tool_views": [
+                self._build_tool_view_metadata(view)
+                for view in sorted(views, key=lambda item: item.name)
+            ],
+            "tool_runtime_metadata": self.get_runtime_metadata(),
             "commands": [
                 self._build_named_metadata(name, metadata)
                 for name, metadata in sorted(self._commands.items())
@@ -109,6 +216,7 @@ class CapabilityRegistry:
                 self._build_named_metadata(name, definition)
                 for name, definition in sorted(self._skills.items())
             ],
+            "summary": self._build_capability_summary(views),
         }
 
     def has_tool(self, name: str) -> bool:
@@ -117,84 +225,60 @@ class CapabilityRegistry:
     def get_tool(self, name: str) -> BaseTool | None:
         return self._tools.get(name)
 
+    def get_tool_spec(self, name: str):
+        from backend.agent.harness.catalog import tool_spec_for
+
+        return tool_spec_for(name, self)
+
     def get_tools(self) -> list[BaseTool]:
         return list(self._tools.values())
-
-    # 核心工具列表 — 始终获得完整 schema（参考 Claude Code 核心工具优先级）
-    _CORE_TOOLS = frozenset({
-        "read_file", "write_file", "edit_file", "list_files",
-        "run_command", "ask_user", "grep_files", "glob_files",
-        "todo_write", "task", "tool_search",
-        "go_to_definition", "find_references",
-        "web_search",
-    })
 
     def get_schemas(
         self,
         budget: int = 6000,
         permission_checker: 'PermissionChecker | None' = None,
         permission_context: 'PermissionContext | None' = None,
+        toolset_policy: 'ToolsetPolicy | None' = None,
+        mcp_registry_version: int = 0,
     ) -> list[dict[str, Any]]:
-        # 生成缓存键，包含权限拦截配置的模式
-        cache_key = f"{budget}_{self._version}"
+        from backend.agent.harness.toolsets import ToolsetPolicy
+
+        active_policy = toolset_policy or ToolsetPolicy.default()
+        # mcp_registry_version is folded into the cache key so an MCP
+        # connect/disconnect (Phase 3.3) invalidates stale tool schemas even
+        # when the registry instance itself is unchanged.
+        mcp_v = f"_mcp{mcp_registry_version}"
+        cache_key = f"{budget}_{self._version}_{active_policy.cache_key()}{mcp_v}"
         if permission_checker and permission_context:
             overrides_hash = hash(frozenset(permission_context.session_overrides.items())) if permission_context.session_overrides else 0
             cache_key = (
                 f"{budget}_{self._version}_{permission_context.mode}"
                 f"_{hash(frozenset(permission_context.tool_deny_rules))}"
                 f"_{overrides_hash}"
+                f"_{active_policy.cache_key()}{mcp_v}"
             )
 
         cached = self._schema_cache.get(cache_key)
         if cached is not None:
             return cached
 
-        # 将工具分为核心工具和普通工具，核心工具优先获得完整 schema
-        core_tools: list[BaseTool] = []
-        other_tools: list[BaseTool] = []
-        for tool in self._tools.values():
-            if permission_checker and permission_context:
-                level = permission_checker.check(tool.name, context=permission_context)
-                if level == PermissionLevel.ALWAYS_DENY:
-                    continue
-            if tool.name in self._CORE_TOOLS:
-                core_tools.append(tool)
-            else:
-                other_tools.append(tool)
+        # Single source of truth: derive direct schemas from ToolSchemaView.
+        # A view has a non-None schema iff it is directly visible and not denied.
+        from backend.agent.harness.schema import postprocess_tool_schema
 
-        schemas: list[dict[str, Any]] = []
-        estimated_tokens = 0
-
-        # 第一轮：核心工具完整 schema
-        for tool in core_tools:
-            schema = tool.get_schema()
-            full_schema = schema.to_openai_tool()
-            schema_tokens = len(str(full_schema)) // 4
-            schemas.append(full_schema)
-            estimated_tokens += schema_tokens
-
-        # 第二轮：普通工具在预算内尽量给完整 schema，超出则精简
-        for tool in other_tools:
-            schema = tool.get_schema()
-            full_schema = schema.to_openai_tool()
-            schema_tokens = len(str(full_schema)) // 4
-
-            if estimated_tokens + schema_tokens <= budget:
-                schemas.append(full_schema)
-                estimated_tokens += schema_tokens
-                continue
-
-            schemas.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": schema.name,
-                        "description": schema.description.split(".")[0],
-                        "parameters": {"type": "object", "properties": {}},
-                    },
-                }
-            )
-            estimated_tokens += 20
+        views = self.build_schema_views(
+            toolset_policy=active_policy,
+            permission_checker=permission_checker,
+            permission_context=permission_context,
+        )
+        direct_views = [v for v in views if v.direct and v.schema is not None]
+        visible_names = {v.name for v in direct_views}
+        schemas: list[dict[str, Any]] = [
+            # Model-facing schema stays free of permission/UI noise (Phase 1.3);
+            # permission lives in view.runtime_metadata for UI consumers.
+            postprocess_tool_schema(dict(v.schema), visible_tool_names=visible_names)
+            for v in direct_views
+        ]
 
         self._schema_cache[cache_key] = schemas
         return schemas
@@ -236,10 +320,24 @@ class CapabilityRegistry:
 
         if cache_key is not None and not result.is_error:
             self._store_result_cache(cache_key, args, result)
-        elif name in _MUTATING_TOOL_NAMES and not result.is_error:
+        elif not result.is_error and self._tool_mutates(name):
             self._invalidate_result_cache(args)
 
         return result
+
+    def _tool_mutates(self, name: str) -> bool:
+        """Whether a tool mutates state — tool metadata first, then legacy set.
+
+        Lets any write/external-effect tool (run_command, git_commit, MCP
+        proxies) invalidate the read cache, not just write_file/edit_file.
+        """
+        tool = self._tools.get(name)
+        if tool is not None and (
+            getattr(tool, "mutates_workspace", False)
+            or getattr(tool, "mutates_external_state", False)
+        ):
+            return True
+        return name in _MUTATING_TOOL_NAMES
 
     def list_tools(self) -> list[str]:
         return list(self._tools.keys())
@@ -312,6 +410,40 @@ class CapabilityRegistry:
         except (TypeError, ValueError):
             return False
 
+    def _annotate_schema_permission(
+        self,
+        schema: dict[str, Any],
+        level: PermissionLevel | None,
+    ) -> dict[str, Any]:
+        if level is None:
+            return schema
+        function = schema.get("function")
+        if not isinstance(function, dict):
+            return schema
+        function["description"] = self._description_with_permission(
+            str(function.get("description") or ""),
+            level,
+        )
+        return schema
+
+    def _description_with_permission(
+        self,
+        description: str,
+        level: PermissionLevel | None,
+    ) -> str:
+        if level is None:
+            return description
+        label = {
+            PermissionLevel.AUTO: "auto",
+            PermissionLevel.CONFIRM: "requires confirmation",
+            PermissionLevel.DIFF_REVIEW: "diff review",
+            PermissionLevel.ALWAYS_DENY: "denied",
+        }[level]
+        marker = f"Permission: {label}."
+        if marker in description:
+            return description
+        return f"{description.rstrip()} {marker}".strip()
+
     def _build_named_metadata(self, name: str, metadata: Any) -> dict[str, Any]:
         if isinstance(metadata, dict):
             payload = dict(metadata)
@@ -321,6 +453,41 @@ class CapabilityRegistry:
             payload = {"handler": getattr(metadata, "__name__", metadata.__class__.__name__)}
         payload["name"] = name
         return payload
+
+    def _build_tool_view_metadata(self, view: Any) -> dict[str, Any]:
+        spec = self.get_tool_spec(str(view.name))
+        runtime_metadata = dict(getattr(view, "runtime_metadata", {}) or {})
+        return {
+            "name": str(view.name),
+            "exposure": str(view.exposure),
+            "direct": bool(view.direct),
+            "schema_available": view.schema is not None,
+            "toolset": str(getattr(spec, "toolset", "") or ""),
+            "capability": str(getattr(spec, "capability", "") or ""),
+            "permission": str(runtime_metadata.get("permission") or "auto"),
+            "read_only": bool(runtime_metadata.get("read_only", False)),
+            "short_description": str(getattr(view, "short_description", "") or ""),
+        }
+
+    def _build_capability_summary(self, views: list[Any]) -> dict[str, Any]:
+        tool_names = {str(view.name) for view in views}
+        exposure_counts = Counter(str(view.exposure) for view in views)
+        mcp_resource_bridge = {"list_mcp_resources", "read_mcp_resource"} <= tool_names
+        deferred_bridge = {"tool_search", "tool_describe", "tool_call"} <= tool_names
+        skill_bridge = {"load_skill", "unload_skill", "list_skills"} <= tool_names
+        return {
+            "tools_total": len(views),
+            "direct_tools": sum(1 for view in views if bool(view.direct) and view.schema is not None),
+            "core_tools": exposure_counts.get("core", 0),
+            "deferred_tools": exposure_counts.get("deferred", 0),
+            "hidden_tools": exposure_counts.get("hidden", 0),
+            "mcp_proxy_tools": sum(1 for name in tool_names if name.startswith("mcp__")),
+            "commands": len(self._commands),
+            "skills": len(self._skills),
+            "mcp_resource_bridge": mcp_resource_bridge,
+            "deferred_bridge": deferred_bridge,
+            "skill_bridge": skill_bridge,
+        }
 
     def _touch(self) -> None:
         self._version += 1

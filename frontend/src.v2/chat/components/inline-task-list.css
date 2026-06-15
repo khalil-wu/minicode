@@ -1,0 +1,208 @@
+/* ════════════════════════════════════════════════════════
+   Inline Task List Styles
+   ════════════════════════════════════════════════════════ */
+
+.inline-task-list {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+  padding: 12px 16px;
+  margin: 16px 0;
+  box-shadow: 0 1px 3px color-mix(in oklch, var(--text-primary) 5%, transparent);
+  transition: border-color var(--transition-fast);
+}
+
+.inline-task-list:hover {
+  border-color: var(--border-soft);
+}
+
+.inline-task-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.inline-task-title {
+  font-size: var(--text-sm);
+  font-weight: 650;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+}
+
+.inline-task-progress-bar {
+  flex: 1;
+  min-width: 56px;
+  max-width: 120px;
+  height: 4px;
+  background: var(--surface-base);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-left: 12px;
+}
+
+.inline-task-progress-fill {
+  height: 100%;
+  background: var(--accent-primary);
+  transition: width 300ms cubic-bezier(0.4, 0, 0.2, 1);
+  border-radius: 2px;
+}
+
+.inline-task-progress-text {
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.inline-task-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.inline-task-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  transition: background-color var(--transition-fast);
+  min-height: 28px;
+}
+
+.inline-task-row:hover {
+  background: color-mix(in oklch, var(--accent-primary) 3%, transparent);
+}
+
+.inline-task-id {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  width: 20px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.inline-task-icon {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  flex-shrink: 0;
+  transition: transform var(--transition-fast), color var(--transition-fast);
+}
+
+.inline-task-icon svg {
+  display: block;
+  stroke-width: 2.2;
+}
+
+.inline-task-icon-completed {
+  color: var(--state-success);
+  animation: checkmark-appear 150ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes checkmark-appear {
+  0% {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  50% {
+    transform: scale(1.1);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.inline-task-icon-in-progress {
+  color: var(--accent-primary);
+  animation: inline-task-spin 1s linear infinite;
+}
+
+@keyframes inline-task-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.inline-task-icon-pending {
+  color: var(--text-muted);
+  opacity: 0.5;
+}
+
+.inline-task-icon-blocked {
+  color: var(--state-warning);
+}
+
+.inline-task-content {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-sm);
+  line-height: 1.4;
+  transition: color var(--transition-fast);
+  overflow-wrap: anywhere;
+}
+
+.inline-task-content-completed {
+  color: var(--text-muted);
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+
+.inline-task-content-in-progress {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.inline-task-content-pending {
+  color: var(--text-secondary);
+}
+
+.inline-task-content-blocked {
+  color: var(--text-secondary);
+  opacity: 0.8;
+}
+
+.inline-task-active-form {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  font-style: italic;
+  margin-left: 6px;
+  flex: 0 1 auto;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inline-task-divider {
+  height: 1px;
+  margin: 8px 0;
+  background: var(--border-subtle);
+}
+
+.inline-task-done-header {
+  font-size: var(--text-xs);
+  color: var(--state-success);
+  font-weight: 650;
+  padding: 6px 0;
+  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}

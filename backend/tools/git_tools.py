@@ -46,9 +46,10 @@ class GitStatusTool(BaseTool):
     name = "git_status"
     read_only = True
     description = (
-        "查看 Git 工作区状态，显示修改、新增、删除的文件。"
-        "示例: git_status() 查看当前状态。"
-        "示例: git_status(path='./backend') 查看特定目录状态。"
+        "Show the Git working tree status: modified, added, deleted, and untracked files. "
+        "Use this before commits to review what changed, or at the start of a task to understand the current state. "
+        "Returns a structured list of changed files with their status (M/A/D/??). "
+        "For actual diffs, use git_diff instead."
     )
     permission = PermissionLevel.AUTO
 
@@ -122,10 +123,10 @@ class GitDiffTool(BaseTool):
     name = "git_diff"
     read_only = True
     description = (
-        "查看 Git 文件差异，显示具体的代码变更。"
-        "示例: git_diff() 查看工作区所有变更。"
-        "示例: git_diff(file_path='src/main.py') 查看特定文件变更。"
-        "示例: git_diff(staged=True) 查看暂存区变更。"
+        "Show the actual code changes (diff) in the working tree or for a specific file. "
+        "Use this to review what you've changed before committing, or to understand a teammate's changes. "
+        "For staged changes, set staged=true. For a specific file, pass file_path. "
+        "Use git_status first for a quick overview, then git_diff for details."
     )
     permission = PermissionLevel.AUTO
 
@@ -211,10 +212,10 @@ class GitLogTool(BaseTool):
     name = "git_log"
     read_only = True
     description = (
-        "查看 Git 提交历史，显示提交信息、作者、时间。"
-        "示例: git_log() 查看最近 10 条提交。"
-        "示例: git_log(limit=20) 查看最近 20 条提交。"
-        "示例: git_log(file_path='src/main.py') 查看特定文件的提交历史。"
+        "Show Git commit history with messages, authors, and timestamps. "
+        "Use this to understand recent changes, find when a bug was introduced, or review a file's evolution. "
+        "Defaults to 10 recent commits. Pass file_path to see history for a specific file. "
+        "Use git_diff for the actual code changes; git_log shows the commit metadata only."
     )
     permission = PermissionLevel.AUTO
 
@@ -300,10 +301,13 @@ class GitCommitTool(BaseTool):
     """
 
     name = "git_commit"
+    mutates_external_state = True
     description = (
-        "创建 Git 提交，将暂存区的更改保存到仓库。"
-        "示例: git_commit(message='feat: add new feature') 创建提交。"
-        "注意: 需要先使用 git add 将文件添加到暂存区。"
+        "Create a Git commit with the staged changes. "
+        "Before committing: (1) run git_status to review changes, (2) run git_diff to verify the code, "
+        "(3) use run_command('git add ...') to stage files. "
+        "Write concise commit messages in conventional format (e.g., 'feat: add login page', 'fix: handle null pointer'). "
+        "Do NOT commit without reviewing the diff first."
     )
     permission = PermissionLevel.CONFIRM
 

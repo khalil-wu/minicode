@@ -17,6 +17,7 @@ def _utc_now_iso() -> str:
 
 ApprovalKind = Literal["approval_request", "control_request"]
 RiskLevel = Literal["low", "medium", "high"]
+ApprovalStatus = Literal["pending", "approved", "rejected"]
 
 
 @dataclass
@@ -110,6 +111,7 @@ class ProductApproval:
     risk_level: RiskLevel | None
     summary: str
     requested_at: str
+    status: ApprovalStatus = "pending"
     session_id: str | None = None
     conversation_id: str | None = None
     task_id: str | None = None
@@ -125,6 +127,7 @@ class ProductApproval:
             "risk_level": self.risk_level,
             "summary": self.summary,
             "requested_at": self.requested_at,
+            "status": self.status,
             "session_id": self.session_id,
             "conversation_id": self.conversation_id,
             "task_id": self.task_id,
@@ -154,11 +157,14 @@ class ApprovalSummary:
     @classmethod
     def from_approvals(cls, approvals: list[ProductApproval]) -> ApprovalSummary:
         """从审批列表生成摘要"""
+        pending = sum(1 for approval in approvals if getattr(approval, "status", "pending") == "pending")
+        approved = sum(1 for approval in approvals if getattr(approval, "status", "pending") == "approved")
+        rejected = sum(1 for approval in approvals if getattr(approval, "status", "pending") == "rejected")
         return cls(
             total=len(approvals),
-            pending=len(approvals),  # 所有在列表中的都是待处理
-            approved=0,
-            rejected=0,
+            pending=pending,
+            approved=approved,
+            rejected=rejected,
         )
 
     def to_dict(self) -> dict[str, Any]:

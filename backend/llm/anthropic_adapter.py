@@ -330,7 +330,7 @@ class AnthropicAdapter(LLMAdapter):
         if stop_reason == "max_tokens":
             logger.warning("Claude 响应因 max_tokens 截断")
 
-        yield StreamEvent(type=StreamEventType.DONE, usage=usage)
+        yield StreamEvent(type=StreamEventType.DONE, usage=usage, finish_reason=stop_reason)
 
     def _messages_url(self) -> str:
         endpoint = (self._base_url or "https://api.anthropic.com/v1").rstrip("/")
@@ -474,7 +474,7 @@ class AnthropicAdapter(LLMAdapter):
             yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=pending_tool_calls)
         if stop_reason == "max_tokens":
             logger.warning("Claude 响应因 max_tokens 截断")
-        yield StreamEvent(type=StreamEventType.DONE, usage=usage)
+        yield StreamEvent(type=StreamEventType.DONE, usage=usage, finish_reason=stop_reason)
 
     async def simple_chat(self, messages: list[LLMMessage]) -> str:
         """非流式调用。"""

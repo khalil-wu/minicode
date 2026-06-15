@@ -161,7 +161,7 @@ export const PreviewPanel = () => {
   };
 
   return (
-    <div style={{ flex: 1, minHeight: 0, minWidth: 0, display: "flex", flexDirection: "column" }}>
+    <div className="flex flex-col flex-1 min-h-0 min-w-0">
       <ModeBar mode={mode} setMode={setMode} hasArtifact={!!previewArtifact} hasUrl={!!livePreviewUrl} />
       {mode === "live" ? (
         <LiveView
@@ -227,11 +227,9 @@ const ModeBar = ({
   hasUrl: boolean;
 }) => (
   <div
+    className="flex gap-1 px-2 py-1 border-b text-xs"
     style={{
-      display: "flex",
-      gap: 4,
-      padding: "4px 8px",
-      borderBottom: "1px solid var(--border-subtle)",
+      borderColor: "var(--border-subtle)",
       background: "var(--surface-page)",
       fontSize: "var(--text-xs)",
     }}
@@ -257,16 +255,11 @@ const ModeTab = ({
   <button
     type="button"
     onClick={onClick}
+    className="inline-flex items-center gap-1 px-2 py-0.5 border-0 cursor-pointer text-xs"
     style={{
-      display: "inline-flex",
-      alignItems: "center",
-      gap: 4,
-      padding: "3px 8px",
-      border: 0,
       borderRadius: "var(--radius-sm, 4px)",
       background: active ? "var(--surface-soft)" : "transparent",
       color: active ? "var(--text-primary)" : "var(--text-muted)",
-      cursor: "pointer",
       fontSize: "var(--text-xs)",
     }}
   >
@@ -345,15 +338,10 @@ const LiveView = ({
   return (
   <>
     <div
+      className="flex items-center flex-wrap gap-1.5 px-2 py-1.5 border-b overflow-hidden"
       style={{
-        display: "flex",
-        alignItems: "center",
-        flexWrap: "wrap",
-        gap: 6,
-        padding: "6px 8px",
-        borderBottom: "1px solid var(--border-subtle)",
+        borderColor: "var(--border-subtle)",
         background: "var(--surface-page)",
-        overflow: "hidden",
       }}
     >
       <button
@@ -375,18 +363,15 @@ const LiveView = ({
           if (e.key === "Enter") onNavigate(urlInput);
         }}
         spellCheck={false}
+        className="flex-1 min-w-0 h-6 px-2 border outline-none text-xs"
         style={{
-          flex: "1 1 150px",
-          minWidth: 0,
-          height: 24,
-          padding: "0 8px",
-          border: "1px solid var(--border-subtle)",
+          flexBasis: "150px",
+          borderColor: "var(--border-subtle)",
           borderRadius: "var(--radius-sm, 4px)",
           background: "var(--surface-base)",
           color: "var(--text-primary)",
           fontSize: "var(--text-xs)",
           fontFamily: "var(--font-mono)",
-          outline: "none",
         }}
       />
       <button type="button" onClick={() => onNavigate(urlInput)} style={primaryBtnStyle}>
@@ -395,15 +380,13 @@ const LiveView = ({
       <select
         value={String(zoom)}
         onChange={(e) => onZoom(e.target.value === "fit" ? "fit" : Number(e.target.value))}
+        className="h-6 px-1 border outline-none text-xs"
         style={{
-          height: 24,
-          padding: "0 4px",
-          border: "1px solid var(--border-subtle)",
+          borderColor: "var(--border-subtle)",
           borderRadius: "var(--radius-sm, 4px)",
           background: "var(--surface-base)",
           color: "var(--text-primary)",
           fontSize: "var(--text-xs)",
-          outline: "none",
         }}
       >
         <option value="fit">Fit</option>
@@ -858,7 +841,7 @@ const ExpandedLivePreview = ({
         inset: 18,
         insetInline: "clamp(8px, 2vw, 18px)",
         insetBlock: "clamp(8px, 2vh, 18px)",
-        zIndex: 120,
+        zIndex: "var(--z-modal)",
         display: "flex",
         flexDirection: "column",
         overflow: "hidden",

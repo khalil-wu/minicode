@@ -39,10 +39,15 @@ export const uploadComposerFiles = (files: File[]) => {
     return;
   }
 
+  // Track active uploads for cleanup
+  const activeUploads = new Set<string>();
+
   for (const file of files) {
     const id = `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const isImage = file.type.startsWith("image/");
     const dataUrl = isImage ? URL.createObjectURL(file) : undefined;
+
+    activeUploads.add(id);
 
     useAppStore.getState().addAttachment({
       id,
@@ -55,6 +60,12 @@ export const uploadComposerFiles = (files: File[]) => {
 
     uploadAttachment(sessionId, file)
       .then((result) => {
+        // Check if upload was cancelled (component unmounted)
+        if (!activeUploads.has(id)) {
+          // Clean up dataUrl if upload was cancelled
+          if (dataUrl) URL.revokeObjectURL(dataUrl);
+          return;
+        }
         useAppStore.getState().updateAttachment(id, {
           status: "ready",
           artifactId: result.artifact_id,
@@ -63,12 +74,24 @@ export const uploadComposerFiles = (files: File[]) => {
           attachment: result.attachment,
           error: uploadWarning(file, result),
         });
+        activeUploads.delete(id);
       })
       .catch((error: unknown) => {
+        // Check if upload was cancelled
+        if (!activeUploads.has(id)) {
+          if (dataUrl) URL.revokeObjectURL(dataUrl);
+          return;
+        }
         const message = error && typeof error === "object" && "message" in error
           ? String((error as { message?: unknown }).message)
           : "Upload failed";
         useAppStore.getState().updateAttachment(id, { status: "error", error: shortUploadError(message) });
+        activeUploads.delete(id);
       });
   }
+
+  // Return cleanup function
+  return () => {
+    activeUploads.clear();
+  };
 };

@@ -80,6 +80,22 @@ class PreviewServerTool(BaseTool):
         try:
             proc = await start_preview_launch(self._workspace_root, name=name)
         except RuntimeError as exc:
+            if str(exc) == "No preview launch configuration found":
+                return ToolResult(
+                    content=json.dumps(
+                        {
+                            "status": "skipped",
+                            "reason": "no_launch_config",
+                            "message": "No preview launch configuration found",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    is_error=False,
+                    display_summary="No preview launch configuration found",
+                    result_kind="preview",
+                    limitation="no preview launch configuration",
+                    status="success",
+                )
             return self._error_result(str(exc))
 
         verification = await wait_until_ready(proc.effective_url, timeout=timeout)

@@ -1,34 +1,44 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
-  Code2,
   ExternalLink,
   FileDiff,
-  FileText,
-  Globe,
   MessageSquare,
-  Search,
-  TerminalSquare,
-  Wrench,
   X,
 } from "lucide-react";
 import { getWebSocket } from "../hooks/useWebSocket";
 import { useAppStore } from "../stores";
+import { buildApprovalResponseCommand, buildAskUserResponseCommand } from "../protocol/prompt-responses";
 import type { PendingApproval, PendingAskUser, PendingDiffReview } from "../stores/types";
+import { pendingPromptTargetsConversation } from "../lib/pending-prompts";
+import { ToolGlyph, toolDisplayName, summarizeArgs, humanizeKey } from "./toolUtils";
 
 export const InlineAgentPrompt = () => {
   const pendingApproval = useAppStore((s) => s.pendingApproval);
   const approvalQueue = useAppStore((s) => s.approvalQueue);
   const pendingDiffReview = useAppStore((s) => s.pendingDiffReview);
   const pendingAskUser = useAppStore((s) => s.pendingAskUser);
+  const activeConversationId = useAppStore((s) => s.conversationId);
+  const visibleApproval = pendingPromptTargetsConversation(pendingApproval, activeConversationId, activeConversationId)
+    ? pendingApproval
+    : null;
+  const visibleDiffReview = pendingPromptTargetsConversation(pendingDiffReview, activeConversationId, activeConversationId)
+    ? pendingDiffReview
+    : null;
+  const visibleAskUser = pendingPromptTargetsConversation(pendingAskUser, activeConversationId, activeConversationId)
+    ? pendingAskUser
+    : null;
+  const visibleApprovalQueue = approvalQueue.filter((item) =>
+    pendingPromptTargetsConversation(item, activeConversationId, activeConversationId),
+  );
 
-  if (!pendingApproval && !pendingDiffReview && !pendingAskUser) return null;
+  if (!visibleApproval && !visibleDiffReview && !visibleAskUser) return null;
 
   return (
     <div style={shellStyle} aria-label="Agent is waiting for input">
-      {pendingDiffReview && <DiffApprovalCard request={pendingDiffReview} />}
-      {pendingApproval && <ToolApprovalCard request={pendingApproval} queue={approvalQueue} />}
-      {pendingAskUser && <AskUserCard request={pendingAskUser} />}
+      {visibleDiffReview && <DiffApprovalCard request={visibleDiffReview} />}
+      {visibleApproval && <ToolApprovalCard request={visibleApproval} queue={visibleApprovalQueue} />}
+      {visibleAskUser && <AskUserCard request={visibleAskUser} />}
     </div>
   );
 };
@@ -42,11 +52,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
   const respond = (allowed: boolean) => {
     if (responding) return;
     setResponding(true);
-    getWebSocket()?.send({
-      type: "approval",
-      tool_call_id: request.requestId,
-      action: allowed ? "approve" : "reject",
-    });
+    getWebSocket()?.send(buildApprovalResponseCommand(request.requestId, allowed ? "approve" : "reject", request.protocol));
     useAppStore.getState().clearApproval(request.requestId);
   };
 
@@ -54,11 +60,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
     const store = useAppStore.getState();
     const all = [request, ...store.approvalQueue];
     for (const item of all) {
-      getWebSocket()?.send({
-        type: "approval",
-        tool_call_id: item.requestId,
-        action: "approve",
-      });
+      getWebSocket()?.send(buildApprovalResponseCommand(item.requestId, "approve", item.protocol));
     }
     store.clearApprovals(all.map((item) => item.requestId));
   };
@@ -111,39 +113,12 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
   );
 };
 
-const ToolGlyph = ({ name }: { name: string }) => {
-  const props = { size: 15, color: "var(--state-warning)" };
-  if (name.includes("web")) return <Globe {...props} />;
-  if (name.includes("command") || name.includes("terminal") || name.includes("bash")) return <TerminalSquare {...props} />;
-  if (name.includes("write") || name.includes("edit") || name.includes("patch")) return <Code2 {...props} />;
-  if (name.includes("read") || name.includes("file")) return <FileText {...props} />;
-  if (name.includes("grep") || name.includes("glob") || name.includes("search")) return <Search {...props} />;
-  return <Wrench {...props} />;
-};
-
-const toolDisplayName = (name: string): string => {
-  if (name === "web_search" || name === "search_web") return "Search web";
-  if (name === "web_fetch") return "Fetch page";
-  if (name === "run_command") return "Run command";
-  if (name === "read_file") return "Read file";
-  if (name === "write_file") return "Write file";
-  if (name === "edit_file") return "Edit file";
-  if (name === "apply_patch") return "Apply patch";
-  if (name === "grep_files" || name === "grep") return "Search files";
-  if (name === "glob_files" || name === "glob") return "Scan files";
-  if (name === "git_status") return "Check git";
-  return name.replace(/_/g, " ");
-};
 const DiffApprovalCard = ({ request }: { request: PendingDiffReview }) => {
   const diffReview = useAppStore((s) => s.diffReview);
   const stats = useMemo(() => diffStats(request.diff), [request.diff]);
 
   const respond = (allowed: boolean) => {
-    getWebSocket()?.send({
-      type: "approval",
-      tool_call_id: request.requestId,
-      action: allowed ? "approve" : "reject",
-    });
+    getWebSocket()?.send(buildApprovalResponseCommand(request.requestId, allowed ? "approve" : "reject", request.protocol));
     const current = useAppStore.getState().diffReview;
     if (current?.requestId === request.requestId) {
       useAppStore.getState().setDiffReviewState({
@@ -213,11 +188,7 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
   }, [request.requestId]);
 
   const respond = (text: string) => {
-    getWebSocket()?.send({
-      type: "answer",
-      tool_call_id: request.requestId,
-      answer: text,
-    });
+    getWebSocket()?.send(buildAskUserResponseCommand(request.requestId, text, request.protocol));
     useAppStore.getState().clearAskUser();
   };
 
@@ -266,24 +237,6 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
     </section>
   );
 };
-
-const summarizeArgs = (args: Record<string, unknown>): { label: string; value: string }[] => {
-  const preferred = ["command", "cmd", "path", "file_path", "target", "filename", "query", "pattern", "url", "cwd"];
-  const rows: { label: string; value: string }[] = [];
-  for (const key of preferred) {
-    const value = args[key];
-    if (typeof value === "string" && value.trim()) rows.push({ label: humanizeKey(key), value });
-    else if (typeof value === "number" || typeof value === "boolean") rows.push({ label: humanizeKey(key), value: String(value) });
-  }
-  if (rows.length > 0) return rows.slice(0, 4);
-  const fallback = Object.entries(args)
-    .filter(([, value]) => typeof value === "string" || typeof value === "number" || typeof value === "boolean")
-    .slice(0, 4)
-    .map(([key, value]) => ({ label: humanizeKey(key), value: String(value) }));
-  return fallback.length > 0 ? fallback : [{ label: "request", value: "No concise parameters available" }];
-};
-
-const humanizeKey = (key: string) => key.replace(/_/g, " ");
 
 const diffStats = (diff: string) => {
   const lines = diff.split("\n");

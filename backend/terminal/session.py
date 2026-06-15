@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import logging
 import os
 import platform
@@ -11,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Coroutine
 
 from backend.runtime_env import sanitized_subprocess_env
+from backend.terminal.shell_commands import windows_powershell_native_tool_alias_prelude
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +20,17 @@ MAX_OUTPUT_LENGTH = 20_000
 DEFAULT_TIMEOUT_MS = 120_000
 MAX_TIMEOUT_MS = 600_000
 MAX_SESSIONS = 5
+
+
+def _windows_powershell_init_command() -> str:
+    return (
+        "$__minicodeUtf8 = [System.Text.UTF8Encoding]::new($false); "
+        "[Console]::InputEncoding = $__minicodeUtf8; "
+        "[Console]::OutputEncoding = $__minicodeUtf8; "
+        "chcp 65001 | Out-Null; "
+        f"{windows_powershell_native_tool_alias_prelude()}"
+        "Clear-Host\n"
+    )
 
 
 @dataclass
@@ -28,6 +41,7 @@ class TerminalSessionInfo:
     shell: str = ""
     started_at: float = 0.0
     is_alive: bool = False
+    conversation_id: str = ""
 
 
 class TerminalSession:
@@ -37,8 +51,10 @@ class TerminalSession:
         cwd: str | None = None,
         on_output: Callable[[str, str], Coroutine[Any, Any, None]] | None = None,
         on_exit: Callable[[str, int], Coroutine[Any, Any, None]] | None = None,
+        conversation_id: str = "",
     ) -> None:
         self.session_id = session_id
+        self.conversation_id = conversation_id
         self._initial_cwd = cwd or os.getcwd()
         self._on_output = on_output
         self._on_exit = on_exit
@@ -53,14 +69,18 @@ class TerminalSession:
         self._waiter_task: asyncio.Task[None] | None = None
         self._is_windows = platform.system() == "Windows"
         self._exit_notified = False
+        self._external_pid: int | None = None
+        self._external_alive: bool | None = None
 
     @property
     def is_alive(self) -> bool:
-        return self._process is not None and self._process.returncode is None
+        if self._process is not None:
+            return self._process.returncode is None
+        return bool(self._external_alive)
 
     @property
     def pid(self) -> int | None:
-        return self._process.pid if self._process else None
+        return self._process.pid if self._process else self._external_pid
 
     @property
     def shell(self) -> str:
@@ -75,7 +95,51 @@ class TerminalSession:
             shell=self.shell,
             started_at=self._started_at,
             is_alive=self.is_alive,
+            conversation_id=self.conversation_id,
         )
+
+    def snapshot(self, *, max_chars: int = 20_000) -> dict[str, Any]:
+        limit = max(0, min(int(max_chars or 0), self._MAX_OUTPUT_BUFFER_CHARS))
+        output = "".join(self._output_buffer)
+        truncated = limit > 0 and len(output) > limit
+        bounded_output = output[-limit:] if limit > 0 else ""
+        return {
+            "session_id": self.session_id,
+            "pid": self.pid,
+            "cwd": self._initial_cwd,
+            "shell": self.shell,
+            "started_at": self._started_at,
+            "is_alive": self.is_alive,
+            "output": bounded_output,
+            "output_chars": len(bounded_output),
+            "total_output_chars": len(output),
+            "truncated": truncated,
+        }
+
+    def update_external_metadata(
+        self,
+        *,
+        cwd: str | None = None,
+        shell: str | None = None,
+        pid: int | None = None,
+        is_alive: bool = True,
+    ) -> None:
+        """Mirror metadata for a desktop PTY owned by the Electron process."""
+        if cwd:
+            self._initial_cwd = cwd
+        if shell:
+            self._shell_cmd = [shell]
+        if pid is not None:
+            self._external_pid = pid
+        self._external_alive = is_alive
+        if not self._started_at:
+            self._started_at = time.time()
+
+    def append_external_output(self, data: str) -> None:
+        if not data:
+            return
+        self._output_buffer.append(str(data))
+        self._trim_output_buffer()
 
     async def start(self) -> None:
         if self.is_alive:
@@ -108,16 +172,12 @@ class TerminalSession:
         self._waiter_task = asyncio.create_task(self._wait_for_exit())
 
         if self._is_windows and self._process.stdin:
-            init_cmd = (
-                "[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false); "
-                "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
-                "chcp 65001 > $null\n"
-            )
+            init_cmd = _windows_powershell_init_command()
             try:
                 self._process.stdin.write(init_cmd.encode("utf-8"))
                 await self._process.stdin.drain()
             except Exception:
-                pass
+                logger.debug("Terminal %s PowerShell init command failed", self.session_id, exc_info=True)
 
         logger.info(
             "Terminal session %s started (PID %s, shell: %s, cwd: %s)",
@@ -311,12 +371,17 @@ class TerminalSession:
         if not self._process or not self._process.stdout:
             return
 
+        # Incremental decoder: a multibyte UTF-8 char split across two 4096-byte
+        # reads must not be replaced with U+FFFD garbage.
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         try:
             while True:
                 chunk = await self._process.stdout.read(4096)
                 if not chunk:
                     break
-                decoded = chunk.decode("utf-8", errors="replace")
+                decoded = decoder.decode(chunk)
+                if not decoded:
+                    continue
                 self._output_buffer.append(decoded)
                 self._trim_output_buffer()
                 if self._on_output:
@@ -333,12 +398,15 @@ class TerminalSession:
         if not self._process or not self._process.stderr:
             return
 
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         try:
             while True:
                 chunk = await self._process.stderr.read(4096)
                 if not chunk:
                     break
-                decoded = chunk.decode("utf-8", errors="replace")
+                decoded = decoder.decode(chunk)
+                if not decoded:
+                    continue
                 self._output_buffer.append(decoded)
                 self._trim_output_buffer()
                 if self._on_output:
@@ -362,6 +430,7 @@ class TerminalSessionManager:
         cwd: str | None = None,
         on_output: Callable[[str, str], Coroutine[Any, Any, None]] | None = None,
         on_exit: Callable[[str, int], Coroutine[Any, Any, None]] | None = None,
+        conversation_id: str = "",
     ) -> TerminalSession:
         dead_ids = [sid for sid, session in self._sessions.items() if not session.is_alive]
         for sid in dead_ids:
@@ -376,6 +445,7 @@ class TerminalSessionManager:
             cwd=cwd,
             on_output=on_output,
             on_exit=on_exit,
+            conversation_id=conversation_id,
         )
         await session.start()
         self._sessions[session_id] = session
@@ -391,13 +461,93 @@ class TerminalSessionManager:
         await session.kill()
         return True
 
+    async def destroy_sessions_for_conversation(self, conversation_id: str) -> int:
+        """Kill all terminal sessions belonging to a conversation. Returns count killed."""
+        to_kill = [
+            sid for sid, session in self._sessions.items()
+            if session.conversation_id == conversation_id
+        ]
+        for sid in to_kill:
+            session = self._sessions.pop(sid, None)
+            if session is not None:
+                await session.kill()
+        return len(to_kill)
+
     async def destroy_all(self) -> None:
         for session in list(self._sessions.values()):
             await session.kill()
         self._sessions.clear()
 
-    def list_sessions(self) -> list[TerminalSessionInfo]:
+    def list_sessions(self, conversation_id: str = "") -> list[TerminalSessionInfo]:
+        """List terminal sessions, optionally filtered by conversation_id."""
+        if conversation_id:
+            return [
+                session.info for session in self._sessions.values()
+                if session.conversation_id == conversation_id
+            ]
         return [session.info for session in self._sessions.values()]
+
+    def list_sessions_for_conversation(self, conversation_id: str) -> list[TerminalSessionInfo]:
+        """List terminal sessions belonging to a specific conversation."""
+        return self.list_sessions(conversation_id=conversation_id)
+
+    def snapshot(self, session_id: str, *, max_chars: int = 20_000) -> dict[str, Any] | None:
+        session = self.get_session(session_id)
+        if session is None:
+            return None
+        return session.snapshot(max_chars=max_chars)
+
+    def upsert_external_session(
+        self,
+        session_id: str,
+        *,
+        cwd: str | None = None,
+        shell: str | None = None,
+        pid: int | None = None,
+        is_alive: bool = True,
+    ) -> TerminalSession:
+        session = self._sessions.get(session_id)
+        if session is None:
+            dead_ids = [sid for sid, existing in self._sessions.items() if not existing.is_alive]
+            for sid in dead_ids:
+                self._sessions.pop(sid, None)
+            if len(self._sessions) >= self._max_sessions:
+                raise RuntimeError(f"Too many terminal sessions (max {self._max_sessions})")
+            session = TerminalSession(session_id, cwd=cwd)
+            self._sessions[session_id] = session
+        session.update_external_metadata(
+            cwd=cwd,
+            shell=shell,
+            pid=pid,
+            is_alive=is_alive,
+        )
+        return session
+
+    def append_external_output(
+        self,
+        session_id: str,
+        data: str,
+        *,
+        cwd: str | None = None,
+        shell: str | None = None,
+        pid: int | None = None,
+    ) -> TerminalSession:
+        session = self.upsert_external_session(
+            session_id,
+            cwd=cwd,
+            shell=shell,
+            pid=pid,
+            is_alive=True,
+        )
+        session.append_external_output(data)
+        return session
+
+    def mark_external_exit(self, session_id: str) -> bool:
+        session = self._sessions.get(session_id)
+        if session is None:
+            return False
+        session.update_external_metadata(is_alive=False)
+        return True
 
     @property
     def count(self) -> int:

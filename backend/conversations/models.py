@@ -9,6 +9,7 @@ ConversationMemoryMode = Literal["none", "summary", "profile"]
 ConversationCompactionState = Literal["clean", "compacted", "retrieved"]
 ConversationPermissionMode = Literal["default", "plan", "confirm", "bypass", "auto", "accept_edits"]
 ConversationPermissionRuleLevel = Literal["auto", "confirm", "diff", "deny"]
+DEFAULT_CONVERSATION_PERMISSION_MODE: ConversationPermissionMode = "confirm"
 
 
 def normalize_permission_mode(value: Any) -> ConversationPermissionMode:
@@ -74,7 +75,7 @@ class ConversationSummary:
     created_at: str
     updated_at: str
     memory_mode: ConversationMemoryMode = "none"
-    permission_mode: ConversationPermissionMode = "default"
+    permission_mode: ConversationPermissionMode = DEFAULT_CONVERSATION_PERMISSION_MODE
     summary: str = ""
     compaction_state: ConversationCompactionState = "clean"
     message_count: int = 0
@@ -84,6 +85,7 @@ class ConversationSummary:
     git_branch: str = ""
     worktree_path: str = ""
     git_isolated: bool = False
+    goal: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -96,7 +98,9 @@ class ConversationSummary:
             created_at=str(payload.get("created_at") or utc_now_iso()),
             updated_at=str(payload.get("updated_at") or utc_now_iso()),
             memory_mode=payload.get("memory_mode", "none"),
-            permission_mode=normalize_permission_mode(payload.get("permission_mode", "default")),
+            permission_mode=normalize_permission_mode(
+                payload.get("permission_mode", DEFAULT_CONVERSATION_PERMISSION_MODE)
+            ),
             summary=str(payload.get("summary") or ""),
             compaction_state=payload.get("compaction_state", "clean"),
             message_count=int(payload.get("message_count") or 0),
@@ -106,6 +110,7 @@ class ConversationSummary:
             git_branch=str(payload.get("git_branch") or ""),
             worktree_path=str(payload.get("worktree_path") or ""),
             git_isolated=bool(payload.get("git_isolated") or False),
+            goal=dict(payload.get("goal") or {}),
         )
 
 
@@ -116,7 +121,7 @@ class ConversationRecord:
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
     memory_mode: ConversationMemoryMode = "none"
-    permission_mode: ConversationPermissionMode = "default"
+    permission_mode: ConversationPermissionMode = DEFAULT_CONVERSATION_PERMISSION_MODE
     permission_deny_rules: list[str] = field(default_factory=list)
     permission_overrides: dict[str, ConversationPermissionRuleLevel] = field(default_factory=dict)
     summary: str = ""
@@ -133,6 +138,7 @@ class ConversationRecord:
     git_branch: str = ""
     worktree_path: str = ""
     git_isolated: bool = False
+    goal: dict[str, Any] = field(default_factory=dict)
 
     def to_summary(self) -> ConversationSummary:
         return ConversationSummary(
@@ -151,6 +157,7 @@ class ConversationRecord:
             git_branch=self.git_branch,
             worktree_path=self.worktree_path,
             git_isolated=self.git_isolated,
+            goal=dict(self.goal or {}),
         )
 
     def to_meta_dict(self) -> dict[str, Any]:
@@ -158,6 +165,7 @@ class ConversationRecord:
         payload.pop("transcript", None)
         payload.pop("context_snapshot", None)
         payload["message_count"] = self.message_count or len(self.transcript)
+        payload["encoding_version"] = "utf-8-v1"  # Mark all new writes as UTF-8
         return payload
 
     def to_dict(self) -> dict[str, Any]:
@@ -173,7 +181,9 @@ class ConversationRecord:
             created_at=str(payload.get("created_at") or utc_now_iso()),
             updated_at=str(payload.get("updated_at") or utc_now_iso()),
             memory_mode=payload.get("memory_mode", "none"),
-            permission_mode=normalize_permission_mode(payload.get("permission_mode", "default")),
+            permission_mode=normalize_permission_mode(
+                payload.get("permission_mode", DEFAULT_CONVERSATION_PERMISSION_MODE)
+            ),
             permission_deny_rules=normalize_permission_deny_rules(payload.get("permission_deny_rules", [])),
             permission_overrides=normalize_permission_overrides(payload.get("permission_overrides", {})),
             summary=str(payload.get("summary") or ""),
@@ -190,4 +200,5 @@ class ConversationRecord:
             git_branch=str(payload.get("git_branch") or ""),
             worktree_path=str(payload.get("worktree_path") or ""),
             git_isolated=bool(payload.get("git_isolated") or False),
+            goal=dict(payload.get("goal") or {}),
         )

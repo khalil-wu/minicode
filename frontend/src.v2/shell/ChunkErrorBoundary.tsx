@@ -45,6 +45,8 @@ export class ChunkErrorBoundary extends React.Component<ChunkErrorBoundaryProps,
   }
 }
 
+export const SafeBoundary = ChunkErrorBoundary;
+
 const fallbackStyle: React.CSSProperties = {
   display: "grid",
   alignContent: "center",

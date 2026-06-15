@@ -1,0 +1,103 @@
+/**
+ * breakpoints.css - Responsive breakpoint system
+ *
+ * Standard breakpoints for responsive design
+ */
+
+:root {
+  --breakpoint-sm: 640px;
+  --breakpoint-md: 768px;
+  --breakpoint-lg: 1024px;
+  --breakpoint-xl: 1280px;
+  --breakpoint-2xl: 1536px;
+}
+
+/* Utility classes for responsive visibility */
+@media (max-width: 639px) {
+  .hide-sm {
+    display: none !important;
+  }
+}
+
+@media (max-width: 767px) {
+  .hide-md {
+    display: none !important;
+  }
+}
+
+@media (max-width: 1023px) {
+  .hide-lg {
+    display: none !important;
+  }
+}
+
+@media (max-width: 1279px) {
+  .hide-xl {
+    display: none !important;
+  }
+}
+
+/* Show only on specific sizes */
+@media (min-width: 640px) {
+  .show-sm-only {
+    display: none !important;
+  }
+}
+
+@media (min-width: 768px) {
+  .show-md-only {
+    display: none !important;
+  }
+}
+
+/* Responsive text sizing */
+@media (max-width: 639px) {
+  :root {
+    --text-xs: 11px;
+    --text-sm: 12px;
+    --text-md: 14px;
+    --text-lg: 16px;
+  }
+}
+
+/* Responsive spacing */
+@media (max-width: 639px) {
+  .container {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+}
+
+/* Mobile-specific optimizations */
+@media (max-width: 767px) {
+  /* Prevent iOS zoom on input focus */
+  input,
+  textarea,
+  select {
+    font-size: max(16px, var(--text-md)) !important;
+  }
+
+  /* Improve touch targets */
+  button,
+  a,
+  .clickable {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  /* Reduce animations on mobile */
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  /* But keep essential UI animations */
+  .keep-animation,
+  .modal,
+  .drawer,
+  .toast {
+    animation-duration: revert !important;
+    transition-duration: revert !important;
+  }
+}

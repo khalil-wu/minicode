@@ -57,9 +57,15 @@ const ws = (path: string): string =>
 export const readWorkspaceFile = async (path: string): Promise<WorkspaceFileResponse | null> => {
   try {
     const r = await fetch(`${ws("/file")}?path=${encodeURIComponent(path)}`, { headers: authHeaders() });
-    if (!r.ok) return null;
+    if (!r.ok) {
+      const detail = await errorMessageFromWorkspaceResponse(r);
+      throw new Error(detail || `Workspace file request failed (${r.status} ${r.statusText || "error"}).`);
+    }
     return (await r.json()) as WorkspaceFileResponse;
-  } catch {
+  } catch (err) {
+    if (err instanceof Error && /workspace folder is missing|too large|only utf-8|permission denied|outside workspace/i.test(err.message)) {
+      throw err;
+    }
     return null;
   }
 };
@@ -174,11 +180,49 @@ export const listWorkspaceTree = async (
 ): Promise<WorkspaceTreeNode | null> => {
   try {
     const r = await fetch(`${ws("/tree")}?path=${encodeURIComponent(path)}`, { headers: authHeaders() });
-    if (!r.ok) return null;
-    return normalizeWorkspaceTree(await r.json(), path);
-  } catch {
-    return null;
+    if (!r.ok) {
+      const detail = await errorMessageFromWorkspaceResponse(r);
+      throw new Error(detail || `Workspace tree request failed (${r.status} ${r.statusText || "error"}).`);
+    }
+    const tree = normalizeWorkspaceTree(await r.json(), path);
+    if (!tree) throw new Error("Workspace API returned an invalid tree payload.");
+    return tree;
+  } catch (err) {
+    if (err instanceof Error) {
+      if (err.name === "TypeError") {
+        throw new Error(`Could not load file tree: API request failed. ${err.message}`);
+      }
+      if (/^Could not load file tree:/i.test(err.message)) throw err;
+      throw new Error(`Could not load file tree: ${err.message}`);
+    }
+    throw new Error("Could not load file tree: API request failed.");
   }
+};
+
+const errorMessageFromWorkspaceResponse = async (response: Response): Promise<string> => {
+  const fallback = `Workspace tree request failed (${response.status} ${response.statusText || "error"}).`;
+  const text = await response.text().catch(() => "");
+  const trimmed = text.trim();
+  if (!trimmed) return fallback;
+  try {
+    const payload = JSON.parse(trimmed) as unknown;
+    if (payload && typeof payload === "object") {
+      const detail = (payload as { detail?: unknown; message?: unknown; error?: unknown }).detail
+        ?? (payload as { message?: unknown }).message
+        ?? (payload as { error?: unknown }).error;
+      if (Array.isArray(detail)) {
+        const messages = detail.map((item) => {
+          if (item && typeof item === "object" && "msg" in item) return String((item as { msg?: unknown }).msg);
+          return String(item);
+        }).filter(Boolean);
+        return messages.join("; ") || fallback;
+      }
+      if (detail != null) return String(detail);
+    }
+  } catch {
+    /* not json */
+  }
+  return trimmed || fallback;
 };
 
 const normalizeWorkspaceTree = (payload: unknown, fallbackPath: string): WorkspaceTreeNode | null => {
@@ -266,9 +310,9 @@ export interface WorkspaceGitWorktreeResponse {
   error?: string;
 }
 
-export const fetchWorkspaceGitWorktree = async (): Promise<WorkspaceGitWorktreeResponse | null> => {
+export const fetchWorkspaceGitWorktree = async (path = ""): Promise<WorkspaceGitWorktreeResponse | null> => {
   try {
-    const r = await fetch(`${ws("/git/worktree")}`, { headers: authHeaders() });
+    const r = await fetch(`${ws("/git/worktree")}?path=${encodeURIComponent(path)}`, { headers: authHeaders() });
     if (!r.ok) return null;
     return (await r.json()) as WorkspaceGitWorktreeResponse;
   } catch {
@@ -284,9 +328,9 @@ export interface WorkspaceGitStatusResponse {
   error?: string;
 }
 
-export const fetchWorkspaceGitStatus = async (): Promise<WorkspaceGitStatusResponse | null> => {
+export const fetchWorkspaceGitStatus = async (path = ""): Promise<WorkspaceGitStatusResponse | null> => {
   try {
-    const r = await fetch(`${ws("/git/status")}`, { headers: authHeaders() });
+    const r = await fetch(`${ws("/git/status")}?path=${encodeURIComponent(path)}`, { headers: authHeaders() });
     if (!r.ok) return null;
     return (await r.json()) as WorkspaceGitStatusResponse;
   } catch {
@@ -294,9 +338,12 @@ export const fetchWorkspaceGitStatus = async (): Promise<WorkspaceGitStatusRespo
   }
 };
 
-export const fetchWorkspaceGitDiff = async (file = ""): Promise<{ diff: string; error?: string } | null> => {
+export const fetchWorkspaceGitDiff = async (file = "", path = ""): Promise<{ diff: string; error?: string } | null> => {
   try {
-    const r = await fetch(`${ws("/git/diff")}?file=${encodeURIComponent(file)}`, { headers: authHeaders() });
+    const r = await fetch(
+      `${ws("/git/diff")}?file=${encodeURIComponent(file)}&path=${encodeURIComponent(path)}`,
+      { headers: authHeaders() },
+    );
     if (!r.ok) return null;
     return (await r.json()) as { diff: string; error?: string };
   } catch {

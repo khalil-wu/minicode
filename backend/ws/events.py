@@ -23,10 +23,15 @@ from typing import Any, Literal, TypedDict
 ServerEventType = Literal[
     # Streaming text + tool execution
     "text_chunk",
+    "final_answer_started",
+    "final_answer_delta",
+    "final_answer_retracted",
+    "final_answer_committed",
     "image_chunk",
     "thinking_delta",
     "thinking",
     "tool_call",
+    "tool_output_delta",
     "tool_result",
     "agent.progress",
     "task.update",
@@ -53,6 +58,8 @@ ServerEventType = Literal[
     "stream_resume",
     # MCP
     "mcp_status",
+    "mcp.lifecycle",
+    "mcp.progress",
     # Environment / Git status
     "env.list",
     "git.pr_status",
@@ -71,6 +78,8 @@ ServerEventType = Literal[
     "terminal.created",
     "terminal.killed",
     "terminal.list",
+    "terminal.snapshot",
+    "terminal.resized",
     # Background commands
     "background.completed",
     # Guidelines / permissions
@@ -81,6 +90,7 @@ ServerEventType = Literal[
     "conversation.hydration.updated",
     "conversation.compaction.updated",
     "conversation.summary.updated",
+    "goal.updated",
     "conversation.list",
     "conversation.switched",
     # LLM settings
@@ -91,12 +101,15 @@ ServerEventType = Literal[
     # Session / control plane
     "session.restored",
     "session.synced",
+    "client.command.ack",
     "pong",
     "control_request",
-    # Wave 1+ new: Plan Mode + Subagents + Inspector + Citations
-    "plan.update",
+    # Wave 1+ new: Subagents + Inspector + Citations
+    "plan_step_updated",
+    "plan_updated",
     "subagent.start",
     "subagent.event",
+    "subagent.progress",
     "subagent.done",
     "citation.add",
     "inspector.update",
@@ -124,6 +137,9 @@ ServerEventType = Literal[
     "diff.git_staged",
     "diff.git_stage_file",
     "diff.git_unstage_file",
+    "diff.git_stage_all",
+    "diff.git_unstage_all",
+    "diff.git_revert_file",
 ]
 
 
@@ -158,6 +174,7 @@ ClientCommandType = Literal[
     "conversation.rename",
     "conversation.memory_mode.set",
     "conversation.permission_mode.set",
+    "conversation.goal.set",
     "conversation.worktree.cleanup",
     # Session inspection
     "session.tasks.inspect",
@@ -179,6 +196,10 @@ ClientCommandType = Literal[
     "terminal.resize",
     "terminal.kill",
     "terminal.list",
+    "terminal.snapshot.request",
+    "terminal.mirror.created",
+    "terminal.mirror.output",
+    "terminal.mirror.exit",
     # Workspace
     "workspace.import",
     "workspace.switch",
@@ -187,7 +208,6 @@ ClientCommandType = Literal[
     "session.restore",
     "session.sync",
     # Wave 1+ new
-    "plan.edit",                 # legacy plan-state edit command
     "task.edit",                 # legacy todo-state edit command
     "task.stop",
     "subagent.cancel",           # user kills a subagent
@@ -213,6 +233,9 @@ ClientCommandType = Literal[
     "diff.git_staged",
     "diff.git_stage_file",
     "diff.git_unstage_file",
+    "diff.git_stage_all",
+    "diff.git_unstage_all",
+    "diff.git_revert_file",
     # MCP / Environment / Git status
     "mcp.list",
     "mcp.add",
@@ -239,22 +262,6 @@ ClientCommandType = Literal[
 # ──────────────────────────────────────────────────────────────────
 
 
-class PlanStep(TypedDict, total=False):
-    id: str
-    title: str
-    detail: str
-    status: Literal["pending", "running", "done", "skipped", "failed"]
-    tool_hint: str
-
-
-class PlanUpdateData(TypedDict, total=False):
-    plan_id: str
-    status: Literal["draft", "accepted", "executing", "completed", "cancelled"]
-    steps: list[PlanStep]
-    current_step: int
-    note: str
-
-
 class TaskUpdateData(TypedDict, total=False):
     todo_id: str
     status: Literal["pending", "in_progress", "completed", "blocked"]
@@ -265,7 +272,7 @@ class TaskUpdateData(TypedDict, total=False):
 class AgentProgressData(TypedDict, total=False):
     id: str
     stage: Literal["status", "planning", "tool", "approval", "verification", "final"]
-    phase: Literal["orienting", "planning", "model", "tool", "approval", "verify", "final", "recover", "status"]
+    phase: Literal["orienting", "planning", "model", "tool", "approval", "verify", "final", "recover", "status", "iteration"]
     status: Literal["running", "completed", "failed", "info"]
     message: str
     label: str
@@ -279,6 +286,35 @@ class AgentProgressData(TypedDict, total=False):
     count: int
 
 
+class ThinkingDeltaData(TypedDict, total=False):
+    content: str
+    source: Literal["provider", "model_preamble", "runtime"]
+    visibility: Literal["debug", "timeline", "compact"]
+    is_raw_provider_reasoning: bool
+
+
+class ToolCallData(TypedDict, total=False):
+    id: str
+    name: str
+    args: dict[str, Any]
+    status: str
+    started_at: int
+    display_hint: str
+    input_summary: str
+    result_kind: str
+    activity_kind: str
+    group_id: str
+    step_id: str
+    iteration_id: str
+    phase: str
+
+
+class ToolOutputDeltaData(TypedDict, total=False):
+    id: str
+    output: str
+    stream: Literal["stdout", "stderr"]
+
+
 class ToolResultData(TypedDict, total=False):
     id: str
     summary: str
@@ -289,6 +325,23 @@ class ToolResultData(TypedDict, total=False):
     extraction_status: Literal["ok", "partial", "failed"]
     content_preview: str
     evidence_type: Literal["candidate", "fetched", "artifact", "command", "file"]
+    status: str
+    duration_ms: int
+    display_summary: str
+    result_kind: str
+    group_id: str
+    step_id: str
+    limitation: str
+    provider: str
+    provider_error_type: str
+    error_info: dict[str, Any]
+    error_kind: str
+    user_summary: str
+    developer_detail: str
+    recoverable: bool
+    projection: Literal["silent", "status", "warning", "error", "approval"]
+    iteration_id: str
+    phase: str
 
 
 class SubagentStartData(TypedDict, total=False):
@@ -336,13 +389,6 @@ class BudgetWarningData(TypedDict, total=False):
     percent: float
     will_compact: bool
     threshold: float
-
-
-class PlanEditCommand(TypedDict, total=False):
-    plan_id: str
-    steps: list[PlanStep]
-    accept: bool
-    regenerate: bool
 
 
 class TaskEditCommand(TypedDict, total=False):
@@ -412,6 +458,27 @@ class PreviewVerifiedData(TypedDict, total=False):
     error: str
 
 
+class McpLifecycleData(TypedDict, total=False):
+    server_name: str
+    status: str
+    phase: Literal[
+        "connecting", "connected", "reconnecting",
+        "auth_required", "expired", "failed", "stopped",
+    ]
+    message: str
+    recoverable: bool
+    requires_user_action: bool
+
+
+class McpProgressData(TypedDict, total=False):
+    server_name: str
+    operation: str
+    message: str
+    progress: float  # optional 0-1; omitted when the transport reports no fraction
+    status: Literal["running", "completed", "failed"]
+
+
+
 # ──────────────────────────────────────────────────────────────────
 # Convenience: full sets for runtime validation
 # ──────────────────────────────────────────────────────────────────
@@ -435,10 +502,11 @@ __all__ = [
     "CLIENT_COMMAND_TYPES",
     "is_server_event",
     "is_client_command",
-    "PlanStep",
-    "PlanUpdateData",
     "TaskUpdateData",
     "AgentProgressData",
+    "ThinkingDeltaData",
+    "ToolCallData",
+    "ToolOutputDeltaData",
     "ToolResultData",
     "SubagentStartData",
     "SubagentEventData",
@@ -447,7 +515,6 @@ __all__ = [
     "ArtifactPreviewData",
     "InspectorUpdateData",
     "BudgetWarningData",
-    "PlanEditCommand",
     "TaskEditCommand",
     "PreviewServerDetectedData",
     "PreviewServersUpdatedData",
@@ -458,4 +525,6 @@ __all__ = [
     "PreviewServerOutputData",
     "PreviewServerCrashedData",
     "PreviewVerifiedData",
+    "McpLifecycleData",
+    "McpProgressData",
 ]

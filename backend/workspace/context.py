@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -79,26 +78,25 @@ class WorkspaceContext:
         # 3. 加载 .gitignore
         self._gitignore_patterns = self._load_gitignore()
 
-        # 4. 构建文件索引
-        await self._build_file_index()
-
-        # 5. 计算统计信息
-        total_size = sum(entry.size for entry in self.file_index.values())
-        file_count = len(self.file_index)
-
+        # 先就位 metadata（CLAUDE.md / 项目类型立即可用），文件统计在索引完成后回填
         self.metadata = ProjectMetadata(
             root_path=self.root_path,
             project_type=project_type,
             name=project_name,
             claude_md_content=claude_md_content,
             gitignore_patterns=self._gitignore_patterns,
-            file_count=file_count,
-            total_size=total_size,
         )
+
+        # 4. 构建文件索引
+        await self._build_file_index()
+
+        # 5. 计算统计信息
+        self.metadata.total_size = sum(entry.size for entry in self.file_index.values())
+        self.metadata.file_count = len(self.file_index)
 
         logger.info(
             f"工作区初始化完成: {project_name} ({project_type}), "
-            f"{file_count} 文件, {total_size / 1024 / 1024:.2f} MB"
+            f"{self.metadata.file_count} 文件, {self.metadata.total_size / 1024 / 1024:.2f} MB"
         )
 
         return self.metadata
@@ -149,8 +147,9 @@ class WorkspaceContext:
             return []
 
     async def _build_file_index(self) -> None:
-        """构建文件索引（尊重 .gitignore）"""
+        """构建文件索引（尊重 .gitignore，遍历时剪枝忽略目录）"""
         import asyncio
+        import os
         self.file_index.clear()
 
         def scan_filesystem() -> dict[str, FileIndexEntry]:
@@ -162,41 +161,39 @@ class WorkspaceContext:
                 "dist", "build", "target",
                 ".idea", ".vscode", ".claude",
             }
+            patterns = self._gitignore_patterns
+            # 无通配符的 gitignore 目录规则可直接用于剪枝
+            prunable = {p.rstrip("/").lstrip("/") for p in patterns if "*" not in p and "/" not in p.rstrip("/")}
 
-            def should_ignore(path: Path) -> bool:
-                """检查是否应该忽略"""
-                for part in path.parts:
-                    if part in default_ignore:
+            def file_ignored(rel_path: str, name: str) -> bool:
+                for pattern in patterns:
+                    if pattern in rel_path or name == pattern:
                         return True
-
-                rel_path = str(path.relative_to(self.root_path))
-                for pattern in self._gitignore_patterns:
-                    if pattern in rel_path or path.name == pattern:
-                        return True
-
                 return False
 
-            # 在线程池中执行同步的递归扫描
-            for path in self.root_path.rglob("*"):
-                if not path.is_file():
-                    continue
-
-                if should_ignore(path):
-                    continue
-
-                try:
-                    stat = path.stat()
-                    is_text = self._is_text_file(path)
-                    rel_path = str(path.relative_to(self.root_path))
-                    results[rel_path] = FileIndexEntry(
-                        path=path,
-                        relative_path=rel_path,
-                        size=stat.st_size,
-                        mtime=stat.st_mtime,
-                        is_text=is_text,
-                    )
-                except Exception as e:
-                    logger.debug(f"跳过文件 {path}: {e}")
+            # 在线程池中执行同步的递归扫描；剪枝避免走入 node_modules/.git 等大目录
+            for dirpath, dirnames, filenames in os.walk(self.root_path):
+                dirnames[:] = [
+                    d for d in dirnames
+                    if d not in default_ignore and d not in prunable
+                ]
+                rel_dir = os.path.relpath(dirpath, self.root_path)
+                for name in filenames:
+                    rel_path = name if rel_dir == "." else f"{rel_dir}{os.sep}{name}"
+                    if file_ignored(rel_path, name):
+                        continue
+                    path = Path(dirpath) / name
+                    try:
+                        stat = path.stat()
+                        results[rel_path] = FileIndexEntry(
+                            path=path,
+                            relative_path=rel_path,
+                            size=stat.st_size,
+                            mtime=stat.st_mtime,
+                            is_text=self._is_text_file(path),
+                        )
+                    except Exception as e:
+                        logger.debug(f"跳过文件 {path}: {e}")
             return results
 
         results = await asyncio.to_thread(scan_filesystem)

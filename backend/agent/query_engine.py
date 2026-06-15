@@ -8,6 +8,7 @@ from typing import Any, Awaitable
 from backend.agent.context import ContextBuilder
 from backend.agent.loop import AgentLoopSessionContext, run_agent_loop
 from backend.agent.message import AgentEvent
+from backend.agent.run_events import should_emit_event
 from backend.agent.state import AgentState
 from backend.artifact.store import ArtifactStore
 from backend.config import AgentSettings, TokenBudget
@@ -38,9 +39,10 @@ class QuerySubmission:
     task_id: str = ""
     task_manager: TaskManager | None = None
     background_manager: Any | None = None
+    terminal_manager: Any | None = None
     emit_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None
     metadata: dict[str, Any] | None = None
-    stream_callback: Callable[[str], Awaitable[None]] | None = None
+    stream_callback: Callable[..., Awaitable[None]] | None = None
 
     def to_session_context(self) -> AgentLoopSessionContext:
         return AgentLoopSessionContext(
@@ -52,6 +54,7 @@ class QuerySubmission:
             task_id=self.task_id,
             task_manager=self.task_manager,
             background_manager=self.background_manager,
+            terminal_manager=self.terminal_manager,
             emit_event=self.emit_event,
             metadata=dict(self.metadata or {}),
             stream_callback=self.stream_callback,
@@ -65,12 +68,13 @@ class QueryEngine:
         self._runner = runner or run_agent_loop
 
     async def submit(self, submission: QuerySubmission) -> AsyncIterator[AgentEvent]:
+        permission_checker = submission.permission_checker.with_workspace_root(submission.workspace_root)
         async for event in self._runner(
             user_message=submission.user_message,
             llm=submission.llm,
             tool_registry=submission.tool_registry,
             artifact_store=submission.artifact_store,
-            permission_checker=submission.permission_checker,
+            permission_checker=permission_checker,
             agent_settings=submission.agent_settings,
             token_budget=submission.token_budget,
             context_builder=submission.context_builder,
@@ -79,3 +83,14 @@ class QueryEngine:
             session_context=submission.to_session_context(),
         ):
             yield event
+
+    async def submit_filtered(self, submission: QuerySubmission) -> AsyncIterator[AgentEvent]:
+        """Submit one query and emit the filtered event stream.
+
+        Adapter-only events (``tool_call_start``, ``tool_call_delta``) and
+        tool-lifecycle progress noise are silently dropped so that the UI
+        receives only stable, meaningful events.
+        """
+        async for event in self.submit(submission):
+            if should_emit_event(event):
+                yield event

@@ -1,5 +1,5 @@
 import { AlertCircle, Camera, Check, ChevronDown, ChevronRight, Copy, ExternalLink, Globe, RefreshCw } from "lucide-react";
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   browserCaptureScreenshot,
   browserClick,
@@ -13,6 +13,8 @@ import {
   type BrowserScreenshotResult,
   type BrowserTargetInfo,
 } from "../desktop/runtime";
+import { assessNetworkTargetUrl } from "../lib/network-target";
+import { useAppStore } from "../stores";
 
 const DEFAULT_ENDPOINT = "http://127.0.0.1:9222";
 const ENDPOINT_STORAGE_KEY = "minicode.browser.endpoint";
@@ -36,6 +38,7 @@ const writeStoredValue = (key: string, value: string | null) => {
 };
 
 export const BrowserPanel = () => {
+  const permissionMode = useAppStore((s) => s.permissionMode);
   const [endpoint, setEndpoint] = useState(() => readStoredValue(ENDPOINT_STORAGE_KEY) || DEFAULT_ENDPOINT);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<BrowserDiscoveryResult | null>(null);
@@ -162,7 +165,22 @@ export const BrowserPanel = () => {
         if (!navigateUrl.trim()) {
           throw new Error("URL is required.");
         }
-        next = await browserNavigate(endpoint, selectedTargetId, navigateUrl.trim());
+        const target = assessNetworkTargetUrl(navigateUrl.trim());
+        if (target.risk === "invalid") {
+          throw new Error(target.reason);
+        }
+        if (permissionMode !== "bypass" && target.requiresReview) {
+          const { showConfirm } = await import("../overlays/DialogService");
+          const ok = await showConfirm({
+            title: target.risk === "local" ? "Open local browser target" : "Open private network target",
+            message: `${target.host} is a ${target.risk} address. Continue with Chrome navigation?`,
+            confirmLabel: "Open",
+          });
+          if (!ok) return;
+        }
+        next = await browserNavigate(endpoint, selectedTargetId, target.normalizedUrl, {
+          allowPrivateNetwork: target.requiresReview && (permissionMode === "bypass" || target.risk === "local" || target.risk === "private"),
+        });
       } else if (action === "click") {
         if (!selector.trim()) {
           throw new Error("CSS selector is required.");
@@ -190,7 +208,7 @@ export const BrowserPanel = () => {
 
   if (!isDesktop()) {
     return (
-      <div style={emptyWrapStyle}>
+      <div className="flex-1 grid place-items-center gap-2 text-[var(--text-muted)] text-sm">
         <Globe size={20} style={{ opacity: 0.7 }} />
         <div>Browser panel is desktop-only.</div>
       </div>
@@ -198,14 +216,14 @@ export const BrowserPanel = () => {
   }
 
   return (
-    <div style={panelStyle}>
-      <div style={toolbarStyle}>
+    <div className="flex-1 min-h-0 flex flex-col">
+      <div className="flex items-center gap-1.5 px-2.5 py-2 border-b border-[var(--border-subtle)]">
         <button
           type="button"
           title="Refresh browser targets"
           aria-label="Refresh browser targets"
           onClick={() => void refresh()}
-          style={iconButtonStyle}
+          className="w-6 h-6 inline-flex items-center justify-center rounded border border-[var(--border-subtle)] bg-[var(--surface-page)] text-[var(--text-secondary)] cursor-pointer p-0"
         >
           <RefreshCw size={13} />
         </button>
@@ -218,23 +236,23 @@ export const BrowserPanel = () => {
           }}
           spellCheck={false}
           placeholder={DEFAULT_ENDPOINT}
-          style={inputStyle}
+          className="flex-1 min-w-0 h-[26px] px-2 rounded border border-[var(--border-subtle)] bg-[var(--surface-base)] text-[var(--text-primary)] text-xs font-mono outline-none"
         />
-        <button type="button" onClick={() => void refresh()} style={primaryButtonStyle}>
+        <button type="button" onClick={() => void refresh()} className="border-0 px-2.5 py-1 rounded bg-[var(--accent-primary)] text-[var(--surface-base)] text-xs font-bold cursor-pointer">
           {loading ? "Checking..." : "Connect"}
         </button>
       </div>
 
-      <div style={bodyStyle}>
-        <div style={statusCardStyle}>
-          <div style={statusHeaderStyle}>
-            <div style={{ minWidth: 0 }}>
-              <div style={sectionTitleStyle}>Browser</div>
-              <div style={browserNameStyle}>{result?.browser || "External Chrome"}</div>
+      <div className="flex-1 overflow-y-auto grid gap-2.5 p-3">
+        <div className="grid gap-2 p-2.5 bg-[var(--surface-soft)] border border-[var(--border-subtle)] rounded-[var(--radius-sm,6px)]">
+          <div className="flex items-center justify-between gap-2.5">
+            <div className="min-w-0">
+              <div className="text-xs uppercase font-bold text-[var(--text-muted)]">Browser</div>
+              <div className="mt-0.5 text-[var(--text-primary)] text-sm font-semibold overflow-hidden text-ellipsis whitespace-nowrap">{result?.browser || "External Chrome"}</div>
             </div>
             <span
+              className="shrink-0 px-2 py-0.5 rounded-[var(--radius-sm,4px)] bg-[var(--surface-page)] border border-[var(--border-subtle)] text-xs font-bold"
               style={{
-                ...statusPillStyle,
                 color:
                   result?.status === "connected"
                     ? "var(--accent-primary)"
@@ -246,7 +264,7 @@ export const BrowserPanel = () => {
               {result?.status === "connected" ? "Connected" : result?.status === "error" ? "Unavailable" : "Idle"}
             </span>
           </div>
-          <div style={compactInfoGridStyle}>
+          <div className="grid gap-1">
             <InfoRow label="Endpoint" value={result?.endpoint ?? endpoint} mono />
             <InfoRow label="Pages" value={String(pageTargets.length)} />
             <InfoRow label="Targets" value={String(result?.targets.length ?? 0)} />
@@ -254,18 +272,18 @@ export const BrowserPanel = () => {
         </div>
 
         {selectedTarget ? (
-          <div style={currentPageStyle}>
-            <div style={currentPageHeaderStyle}>
+          <div className="grid gap-2.5 p-2.5 bg-[var(--surface-soft)] border border-[var(--border-subtle)] rounded-[var(--radius-sm,6px)]">
+            <div className="flex items-center gap-2 min-w-0">
               <Globe size={16} style={{ color: "var(--accent-primary)", flexShrink: 0 }} />
-              <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={currentPageTitleStyle}>{selectedTarget.title || "Untitled page"}</div>
-                <div title={selectedTarget.url || ""} style={currentPageUrlStyle}>
+              <div className="min-w-0 flex-1">
+                <div className="text-[var(--text-primary)] text-sm font-bold overflow-hidden text-ellipsis whitespace-nowrap">{selectedTarget.title || "Untitled page"}</div>
+                <div title={selectedTarget.url || ""} className="mt-0.5 text-[var(--text-muted)] font-mono text-xs overflow-hidden text-ellipsis whitespace-nowrap">
                   {selectedTarget.url || "--"}
                 </div>
               </div>
-              <span style={targetTypeBadgeStyle}>{selectedTarget.type}</span>
+              <span className="shrink-0 text-[var(--accent-primary)] bg-[var(--surface-page)] border border-[var(--border-subtle)] rounded-[var(--radius-sm,4px)] px-1.5 py-0.5 text-[10px] font-extrabold uppercase">{selectedTarget.type}</span>
             </div>
-            <div style={primaryActionsStyle}>
+            <div className="flex gap-1.5 flex-wrap">
               <TinyButton
                 icon={<Camera size={12} />}
                 label={screenshotLoading ? "Capturing..." : "Capture"}
@@ -290,7 +308,7 @@ export const BrowserPanel = () => {
               />
             </div>
             {selectedTarget.type === "page" && (
-              <div style={primaryNavigateStyle}>
+              <div className="flex gap-1.5 items-center">
                 <input
                   type="text"
                   value={navigateUrl}
@@ -300,13 +318,13 @@ export const BrowserPanel = () => {
                   }}
                   spellCheck={false}
                   placeholder="https://example.com"
-                  style={fieldInputStyle}
+                  className="flex-1 min-w-0 h-7 px-2 rounded-[var(--radius-sm,4px)] border border-[var(--border-subtle)] bg-[var(--surface-page)] text-[var(--text-primary)] text-xs font-mono outline-none"
                 />
                 <button
                   type="button"
                   onClick={() => void runAction("navigate")}
                   disabled={actionLoading != null}
-                  style={secondaryButtonStyle}
+                  className="border border-[var(--border-subtle)] px-2.5 py-1 rounded-[var(--radius-sm,4px)] bg-[var(--surface-page)] text-[var(--text-secondary)] text-xs font-semibold cursor-pointer"
                 >
                   {actionLoading === "navigate" ? "Opening..." : "Navigate"}
                 </button>
@@ -315,34 +333,38 @@ export const BrowserPanel = () => {
           </div>
         ) : (
           <InfoCard>
-            <div style={sectionTitleStyle}>Current Page</div>
-            <div style={hintStyle}>No browser page selected.</div>
+            <div className="text-xs uppercase font-bold text-[var(--text-muted)]">Current Page</div>
+            <div className="text-[var(--text-secondary)] text-xs leading-relaxed">No browser page selected.</div>
           </InfoCard>
         )}
 
         {result?.error && (
-          <div style={errorStyle}>
+          <div className="flex items-center gap-2 text-[var(--state-danger)] bg-[var(--state-danger-soft)] border border-[var(--state-danger)] rounded-[var(--radius-sm,4px)] p-2 text-xs">
             <AlertCircle size={14} />
             <span>{result.error}</span>
           </div>
         )}
 
         {screenshotError && (
-          <div style={errorStyle}>
+          <div className="flex items-center gap-2 text-[var(--state-danger)] bg-[var(--state-danger-soft)] border border-[var(--state-danger)] rounded-[var(--radius-sm,4px)] p-2 text-xs">
             <AlertCircle size={14} />
             <span>{screenshotError}</span>
           </div>
         )}
 
         {actionError && (
-          <div style={errorStyle}>
+          <div className="flex items-center gap-2 text-[var(--state-danger)] bg-[var(--state-danger-soft)] border border-[var(--state-danger)] rounded-[var(--radius-sm,4px)] p-2 text-xs">
             <AlertCircle size={14} />
             <span>{actionError}</span>
           </div>
         )}
 
         {actionMessage && (
-          <div style={successStyle}>
+          <div className="flex items-center gap-2 text-xs p-2 rounded-[var(--radius-sm,4px)]" style={{
+            color: "var(--state-success, var(--accent-primary))",
+            background: "color-mix(in oklch, var(--accent-primary) 12%, transparent)",
+            border: "1px solid color-mix(in oklch, var(--accent-primary) 55%, transparent)",
+          }}>
             <Check size={14} />
             <span>{actionMessage}</span>
           </div>
@@ -350,63 +372,62 @@ export const BrowserPanel = () => {
 
         {selectedScreenshot && (
           <InfoCard>
-            <div style={sectionTitleStyle}>Latest Screenshot</div>
-            <div style={hintStyle}>
+            <div className="text-xs uppercase font-bold text-[var(--text-muted)]">Latest Screenshot</div>
+            <div className="text-[var(--text-secondary)] text-xs leading-relaxed">
               {new Date(selectedScreenshot.capturedAt).toLocaleString()}
               {selectedScreenshot.width && selectedScreenshot.height ? ` · ${selectedScreenshot.width}×${selectedScreenshot.height}` : ""}
             </div>
-            <div style={imageWrapStyle}>
+            <div className="mt-1.5 rounded-[var(--radius-sm,6px)] overflow-hidden border border-[var(--border-subtle)] bg-[var(--surface-page)]">
               <img
                 src={`data:${selectedScreenshot.mimeType};base64,${selectedScreenshot.data}`}
                 alt={selectedScreenshot.title || selectedScreenshot.url || "Browser screenshot"}
-                style={imageStyle}
+                className="block w-full h-auto max-h-[420px] object-contain"
               />
             </div>
           </InfoCard>
         )}
 
-        <div style={advancedWrapStyle}>
+        <div className="grid gap-2">
           <button
             type="button"
             onClick={() => setAdvancedOpen((current) => !current)}
-            style={advancedToggleStyle}
+            className="w-full flex items-center gap-1 px-2 py-1.5 rounded-[var(--radius-sm,4px)] border border-[var(--border-subtle)] bg-[var(--surface-page)] text-[var(--text-secondary)] cursor-pointer text-xs font-bold"
             aria-expanded={advancedOpen}
           >
             {advancedOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
             <span>Advanced</span>
           </button>
           {advancedOpen && (
-            <div style={advancedContentStyle}>
-              {selectedTarget?.type === "page" && (
+            <div className="grid gap-2.5">{selectedTarget?.type === "page" && (
                 <InfoCard>
-                  <div style={sectionTitleStyle}>Selector Actions</div>
-                  <div style={actionGridStyle}>
-                    <div style={actionSectionStyle}>
-                      <div style={actionLabelStyle}>Selector</div>
+                  <div className="text-xs uppercase font-bold text-[var(--text-muted)]">Selector Actions</div>
+                  <div className="grid gap-2 mt-2">
+                    <div className="grid gap-1.5">
+                      <div className="text-[10px] font-bold tracking-wide uppercase text-[var(--text-muted)]">Selector</div>
                       <input
                         type="text"
                         value={selector}
                         onChange={(event) => setSelector(event.target.value)}
                         spellCheck={false}
                         placeholder="#app button.primary"
-                        style={fieldInputStyle}
+                        className="flex-1 min-w-0 h-7 px-2 rounded-[var(--radius-sm,4px)] border border-[var(--border-subtle)] bg-[var(--surface-page)] text-[var(--text-primary)] text-xs font-mono outline-none"
                       />
                     </div>
-                    <div style={actionSectionStyle}>
-                      <div style={actionLabelStyle}>Type text</div>
+                    <div className="grid gap-1.5">
+                      <div className="text-[10px] font-bold tracking-wide uppercase text-[var(--text-muted)]">Type text</div>
                       <textarea
                         value={inputText}
                         onChange={(event) => setInputText(event.target.value)}
                         placeholder="Hello from MiniCode"
-                        style={textAreaStyle}
+                        className="min-h-16 resize-y p-2 rounded-[var(--radius-sm,4px)] border border-[var(--border-subtle)] bg-[var(--surface-page)] text-[var(--text-primary)] text-xs font-mono outline-none"
                       />
                     </div>
-                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    <div className="flex gap-1.5 flex-wrap">
                       <button
                         type="button"
                         onClick={() => void runAction("click")}
                         disabled={actionLoading != null}
-                        style={secondaryButtonStyle}
+                        className="border border-[var(--border-subtle)] px-2.5 py-1 rounded-[var(--radius-sm,4px)] bg-[var(--surface-page)] text-[var(--text-secondary)] text-xs font-semibold cursor-pointer"
                       >
                         {actionLoading === "click" ? "Clicking..." : "Click Selector"}
                       </button>
@@ -414,7 +435,7 @@ export const BrowserPanel = () => {
                         type="button"
                         onClick={() => void runAction("type")}
                         disabled={actionLoading != null}
-                        style={secondaryButtonStyle}
+                        className="border border-[var(--border-subtle)] px-2.5 py-1 rounded-[var(--radius-sm,4px)] bg-[var(--surface-page)] text-[var(--text-secondary)] text-xs font-semibold cursor-pointer"
                       >
                         {actionLoading === "type" ? "Typing..." : "Type Into Selector"}
                       </button>
@@ -423,11 +444,11 @@ export const BrowserPanel = () => {
                 </InfoCard>
               )}
               <InfoCard>
-                <div style={sectionTitleStyle}>Connection</div>
+                <div className="text-xs uppercase font-bold text-[var(--text-muted)]">Connection</div>
                 <InfoRow label="Mode" value="External Chrome / CDP" />
                 <InfoRow label="Endpoint" value={result?.endpoint ?? endpoint} mono />
                 <InfoRow label="WebSocket" value={selectedTarget?.webSocketDebuggerUrl || "--"} mono />
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
+                <div className="flex gap-1.5 flex-wrap mt-1">
                   <TinyButton
                     icon={<Copy size={12} />}
                     label="Copy WS"
@@ -437,7 +458,7 @@ export const BrowserPanel = () => {
                     disabled={!selectedTarget?.webSocketDebuggerUrl}
                   />
                 </div>
-                <pre style={codeStyle}>chrome.exe --remote-debugging-port=9222</pre>
+                <pre className="m-0 p-2 text-xs font-mono text-[var(--text-secondary)] bg-[var(--surface-page)] border border-[var(--border-subtle)] rounded-[var(--radius-sm,4px)] whitespace-pre-wrap break-words">chrome.exe --remote-debugging-port=9222</pre>
               </InfoCard>
               <TargetSection
                 title={`Pages (${pageTargets.length})`}
@@ -478,28 +499,28 @@ const TargetSection = ({
   onCapture: (target: BrowserTargetInfo) => void;
   captureLoading: boolean;
 }) => (
-  <div style={sectionStyle}>
-    <div style={sectionTitleStyle}>{title}</div>
+  <div className="grid gap-2">
+    <div className="text-xs uppercase font-bold text-[var(--text-muted)]">{title}</div>
     {targets.length === 0 ? (
-      <div style={emptyLineStyle}>No targets available.</div>
+      <div className="text-[var(--text-muted)] text-xs">No targets available.</div>
     ) : (
-      <div style={{ display: "grid", gap: 8 }}>
+      <div className="grid gap-2">
         {targets.map((target) => (
           <div
             key={target.id || `${target.type}-${target.url}`}
+            className="grid gap-2 p-2 bg-[var(--surface-soft)] border rounded-[var(--radius-sm,6px)]"
             style={{
-              ...targetCardStyle,
               borderColor: selectedTargetId === target.id ? "var(--accent-primary)" : "var(--border-subtle)",
               boxShadow: selectedTargetId === target.id ? "inset 0 0 0 1px color-mix(in oklch, var(--accent-primary) 45%, transparent)" : "none",
             }}
           >
-            <div style={{ minWidth: 0 }}>
-              <div style={targetTitleStyle}>{target.title || target.url || "Untitled target"}</div>
-              <div style={targetMetaStyle}>{target.type}</div>
-              {target.url && <div style={monoLineStyle}>{target.url}</div>}
-              {target.webSocketDebuggerUrl && <div style={monoMutedStyle}>{target.webSocketDebuggerUrl}</div>}
+            <div className="min-w-0">
+              <div className="text-xs font-bold text-[var(--text-primary)] overflow-hidden text-ellipsis whitespace-nowrap">{target.title || target.url || "Untitled target"}</div>
+              <div className="text-[10px] text-[var(--accent-primary)] uppercase mt-0.5">{target.type}</div>
+              {target.url && <div className="mt-1.5 text-xs text-[var(--text-secondary)] font-mono overflow-hidden text-ellipsis whitespace-nowrap">{target.url}</div>}
+              {target.webSocketDebuggerUrl && <div className="mt-1 text-[10px] text-[var(--text-muted)] font-mono overflow-hidden text-ellipsis whitespace-nowrap">{target.webSocketDebuggerUrl}</div>}
             </div>
-            <div style={targetActionsStyle}>
+            <div className="flex gap-1.5 flex-wrap">
               <TinyButton
                 icon={<Check size={12} />}
                 label={selectedTargetId === target.id ? "Selected" : "Select"}
@@ -550,18 +571,10 @@ const TinyButton = ({
     type="button"
     disabled={disabled}
     onClick={onClick}
+    className="inline-flex items-center gap-1 px-2 py-1 rounded-[var(--radius-sm,4px)] border border-[var(--border-subtle)] bg-[var(--surface-page)] text-xs whitespace-nowrap"
     style={{
-      display: "inline-flex",
-      alignItems: "center",
-      gap: 5,
-      padding: "4px 7px",
-      borderRadius: "var(--radius-sm, 4px)",
-      border: "1px solid var(--border-subtle)",
-      background: "var(--surface-page)",
       color: disabled ? "var(--text-muted)" : "var(--text-secondary)",
       cursor: disabled ? "not-allowed" : "pointer",
-      fontSize: "var(--text-xs)",
-      whiteSpace: "nowrap",
     }}
   >
     {icon}
@@ -569,7 +582,7 @@ const TinyButton = ({
   </button>
 );
 
-const InfoCard = ({ children }: { children: ReactNode }) => <div style={infoCardStyle}>{children}</div>;
+const InfoCard = ({ children }: { children: ReactNode }) => <div className="grid gap-1.5 p-2 bg-[var(--surface-soft)] border border-[var(--border-subtle)] rounded-[var(--radius-sm,6px)]">{children}</div>;
 
 const InfoRow = ({
   label,
@@ -591,409 +604,18 @@ const InfoRow = ({
           ? "var(--text-muted)"
           : "var(--text-secondary)";
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "88px minmax(0, 1fr)", gap: 8, fontSize: "var(--text-xs)" }}>
-      <span style={{ color: "var(--text-muted)" }}>{label}</span>
+    <div className="grid gap-2 text-xs" style={{ gridTemplateColumns: "88px minmax(0, 1fr)" }}>
+      <span className="text-[var(--text-muted)]">{label}</span>
       <span
         title={value}
+        className="overflow-hidden text-ellipsis whitespace-nowrap"
         style={{
           color,
           fontFamily: mono ? "var(--font-mono)" : undefined,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
         }}
       >
         {value}
       </span>
     </div>
   );
-};
-
-const panelStyle: CSSProperties = {
-  flex: 1,
-  minHeight: 0,
-  display: "flex",
-  flexDirection: "column",
-};
-
-const toolbarStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 6,
-  padding: "8px 10px",
-  borderBottom: "1px solid var(--border-subtle)",
-};
-
-const bodyStyle: CSSProperties = {
-  flex: 1,
-  overflowY: "auto",
-  display: "grid",
-  gap: 10,
-  padding: 12,
-};
-
-const statusCardStyle: CSSProperties = {
-  display: "grid",
-  gap: 8,
-  padding: 10,
-  background: "var(--surface-soft)",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 6px)",
-};
-
-const statusHeaderStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  gap: 10,
-};
-
-const browserNameStyle: CSSProperties = {
-  marginTop: 3,
-  color: "var(--text-primary)",
-  fontSize: "var(--text-sm)",
-  fontWeight: 650,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
-
-const statusPillStyle: CSSProperties = {
-  flexShrink: 0,
-  padding: "3px 7px",
-  borderRadius: "var(--radius-sm, 4px)",
-  background: "var(--surface-page)",
-  border: "1px solid var(--border-subtle)",
-  fontSize: "var(--text-xs)",
-  fontWeight: 700,
-};
-
-const compactInfoGridStyle: CSSProperties = {
-  display: "grid",
-  gap: 5,
-};
-
-const currentPageStyle: CSSProperties = {
-  display: "grid",
-  gap: 10,
-  padding: 10,
-  background: "var(--surface-soft)",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 6px)",
-};
-
-const currentPageHeaderStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-  minWidth: 0,
-};
-
-const currentPageTitleStyle: CSSProperties = {
-  color: "var(--text-primary)",
-  fontSize: "var(--text-sm)",
-  fontWeight: 700,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
-
-const currentPageUrlStyle: CSSProperties = {
-  marginTop: 3,
-  color: "var(--text-muted)",
-  fontFamily: "var(--font-mono)",
-  fontSize: "var(--text-xs)",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
-
-const targetTypeBadgeStyle: CSSProperties = {
-  flexShrink: 0,
-  color: "var(--accent-primary)",
-  background: "var(--surface-page)",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 4px)",
-  padding: "2px 6px",
-  fontSize: 10,
-  fontWeight: 750,
-  textTransform: "uppercase",
-};
-
-const primaryActionsStyle: CSSProperties = {
-  display: "flex",
-  gap: 6,
-  flexWrap: "wrap",
-};
-
-const primaryNavigateStyle: CSSProperties = {
-  display: "flex",
-  gap: 6,
-  alignItems: "center",
-};
-
-const advancedWrapStyle: CSSProperties = {
-  display: "grid",
-  gap: 8,
-};
-
-const advancedToggleStyle: CSSProperties = {
-  width: "100%",
-  display: "flex",
-  alignItems: "center",
-  gap: 5,
-  padding: "6px 8px",
-  borderRadius: "var(--radius-sm, 4px)",
-  border: "1px solid var(--border-subtle)",
-  background: "var(--surface-page)",
-  color: "var(--text-secondary)",
-  cursor: "pointer",
-  fontSize: "var(--text-xs)",
-  fontWeight: 700,
-};
-
-const advancedContentStyle: CSSProperties = {
-  display: "grid",
-  gap: 10,
-};
-
-const iconButtonStyle: CSSProperties = {
-  width: 24,
-  height: 24,
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  borderRadius: "var(--radius-sm, 4px)",
-  border: "1px solid var(--border-subtle)",
-  background: "var(--surface-page)",
-  color: "var(--text-secondary)",
-  cursor: "pointer",
-  padding: 0,
-};
-
-const inputStyle: CSSProperties = {
-  flex: 1,
-  minWidth: 0,
-  height: 26,
-  padding: "0 8px",
-  borderRadius: "var(--radius-sm, 4px)",
-  border: "1px solid var(--border-subtle)",
-  background: "var(--surface-base)",
-  color: "var(--text-primary)",
-  fontSize: "var(--text-xs)",
-  fontFamily: "var(--font-mono)",
-  outline: "none",
-};
-
-const primaryButtonStyle: CSSProperties = {
-  border: 0,
-  padding: "5px 10px",
-  borderRadius: "var(--radius-sm, 4px)",
-  background: "var(--accent-primary)",
-  color: "var(--surface-base)",
-  fontSize: "var(--text-xs)",
-  fontWeight: 700,
-  cursor: "pointer",
-};
-
-const secondaryButtonStyle: CSSProperties = {
-  border: "1px solid var(--border-subtle)",
-  padding: "5px 10px",
-  borderRadius: "var(--radius-sm, 4px)",
-  background: "var(--surface-page)",
-  color: "var(--text-secondary)",
-  fontSize: "var(--text-xs)",
-  fontWeight: 600,
-  cursor: "pointer",
-};
-
-const sectionStyle: CSSProperties = {
-  display: "grid",
-  gap: 8,
-};
-
-const sectionTitleStyle: CSSProperties = {
-  fontSize: "var(--text-xs)",
-  textTransform: "uppercase",
-  fontWeight: 700,
-  color: "var(--text-muted)",
-};
-
-const hintStyle: CSSProperties = {
-  color: "var(--text-secondary)",
-  fontSize: "var(--text-xs)",
-  lineHeight: 1.5,
-};
-
-const targetCardStyle: CSSProperties = {
-  display: "grid",
-  gap: 8,
-  padding: 8,
-  background: "var(--surface-soft)",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 6px)",
-};
-
-const targetTitleStyle: CSSProperties = {
-  fontSize: "var(--text-xs)",
-  fontWeight: 700,
-  color: "var(--text-primary)",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
-
-const targetMetaStyle: CSSProperties = {
-  fontSize: "10px",
-  color: "var(--accent-primary)",
-  textTransform: "uppercase",
-  marginTop: 2,
-};
-
-const targetActionsStyle: CSSProperties = {
-  display: "flex",
-  gap: 6,
-  flexWrap: "wrap",
-};
-
-const monoLineStyle: CSSProperties = {
-  marginTop: 6,
-  fontSize: "var(--text-xs)",
-  color: "var(--text-secondary)",
-  fontFamily: "var(--font-mono)",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
-
-const monoMutedStyle: CSSProperties = {
-  marginTop: 4,
-  fontSize: "10px",
-  color: "var(--text-muted)",
-  fontFamily: "var(--font-mono)",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
-
-const errorStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-  color: "var(--state-danger)",
-  background: "var(--state-danger-soft)",
-  border: "1px solid var(--state-danger)",
-  borderRadius: "var(--radius-sm, 4px)",
-  padding: 8,
-  fontSize: "var(--text-xs)",
-};
-
-const successStyle: CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-  color: "var(--state-success, var(--accent-primary))",
-  background: "color-mix(in oklch, var(--accent-primary) 12%, transparent)",
-  border: "1px solid color-mix(in oklch, var(--accent-primary) 55%, transparent)",
-  borderRadius: "var(--radius-sm, 4px)",
-  padding: 8,
-  fontSize: "var(--text-xs)",
-};
-
-const emptyWrapStyle: CSSProperties = {
-  flex: 1,
-  display: "grid",
-  placeItems: "center",
-  gap: 8,
-  color: "var(--text-muted)",
-  fontSize: "var(--text-sm)",
-};
-
-const emptyLineStyle: CSSProperties = {
-  color: "var(--text-muted)",
-  fontSize: "var(--text-xs)",
-};
-
-const codeStyle: CSSProperties = {
-  margin: 0,
-  padding: 8,
-  fontSize: "var(--text-xs)",
-  fontFamily: "var(--font-mono)",
-  color: "var(--text-secondary)",
-  background: "var(--surface-page)",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 4px)",
-  whiteSpace: "pre-wrap",
-  wordBreak: "break-word",
-};
-
-const infoCardStyle: CSSProperties = {
-  display: "grid",
-  gap: 6,
-  padding: 8,
-  background: "var(--surface-soft)",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 6px)",
-};
-
-const imageWrapStyle: CSSProperties = {
-  marginTop: 6,
-  borderRadius: "var(--radius-sm, 6px)",
-  overflow: "hidden",
-  border: "1px solid var(--border-subtle)",
-  background: "var(--surface-page)",
-};
-
-const imageStyle: CSSProperties = {
-  display: "block",
-  width: "100%",
-  height: "auto",
-  maxHeight: 420,
-  objectFit: "contain",
-};
-
-const actionGridStyle: CSSProperties = {
-  display: "grid",
-  gap: 8,
-  marginTop: 8,
-};
-
-const actionSectionStyle: CSSProperties = {
-  display: "grid",
-  gap: 6,
-};
-
-const actionLabelStyle: CSSProperties = {
-  fontSize: "10px",
-  fontWeight: 700,
-  letterSpacing: "0.04em",
-  textTransform: "uppercase",
-  color: "var(--text-muted)",
-};
-
-const fieldInputStyle: CSSProperties = {
-  flex: 1,
-  minWidth: 0,
-  height: 28,
-  padding: "0 8px",
-  borderRadius: "var(--radius-sm, 4px)",
-  border: "1px solid var(--border-subtle)",
-  background: "var(--surface-page)",
-  color: "var(--text-primary)",
-  fontSize: "var(--text-xs)",
-  fontFamily: "var(--font-mono)",
-  outline: "none",
-};
-
-const textAreaStyle: CSSProperties = {
-  minHeight: 64,
-  resize: "vertical",
-  padding: 8,
-  borderRadius: "var(--radius-sm, 4px)",
-  border: "1px solid var(--border-subtle)",
-  background: "var(--surface-page)",
-  color: "var(--text-primary)",
-  fontSize: "var(--text-xs)",
-  fontFamily: "var(--font-mono)",
-  outline: "none",
 };

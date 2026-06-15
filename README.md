@@ -1,247 +1,277 @@
-<div align="center">
+# MiniCode
 
-# 🚀 MiniCode
+> 本地运行的 AI 编程助手桌面端 — 自主 Agent Loop + MCP 生态 + RAG 知识库
 
-**The Ultimate Open-Source AI Coding Agent Environment**<br>
-**终极开源 AI 编程智能体环境**
+MiniCode 是一个全栈 AI 编程助手，通过自主编码代理（Agent Loop）在本地开发环境中执行代码阅读、修改、搜索、Git 操作等任务。后端基于 Python/FastAPI，前端基于 React/Electron，支持 OpenAI、Anthropic 及兼容 OpenAI 协议的多种 LLM 后端。
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Python Version](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
-[![Node Version](https://img.shields.io/badge/node-18%2B-green.svg)](https://nodejs.org/)
-[![Platform](https://img.shields.io/badge/platform-Web%20%7C%20Desktop-lightgrey.svg)](https://electronjs.org/)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
+## 架构概览
 
-[**🇺🇸 English**](#english) | [**🇨🇳 简体中文**](#中文)
-
-</div>
-
----
-
-<span id="english"></span>
-# 🇺🇸 English Documentation
-
-**MiniCode** is a powerful open-source AI coding assistant and agentic environment. Built around a `FastAPI + React + WebSocket` stack, it provides an AI engine that fully masters your local workspace. It runs as a lightweight Web UI or a deeply integrated native Electron Desktop application, seamlessly connecting with your local development workflow.
-
-## ✨ Key Features
-
-- 🤖 **Native Multi-Model Integration**: Full compatibility with LLMs like Anthropic Claude, OpenAI GPT, and Google Gemini, including native multimodal support for images and PDFs.
-- 🔌 **Model Context Protocol (MCP)**: Complete MCP lifecycle support to infinitely expand the AI's capabilities, allowing seamless interaction with external APIs, tools, and databases.
-- 🛡️ **Intelligent Permission Control**: Built-in granular **Approval Rules** ensure the AI agent operates securely and safely when modifying files or executing terminal commands.
-- 💻 **Dual Runtime (Web & Desktop)**: Run as a local web service for lightweight access, or as a standalone Electron app with deep system integrations.
-- ⚡ **RAG & Context-Aware Conversations**: Automatic local codebase indexing (Vector DB) fuels Retrieval-Augmented Generation (RAG). The AI instantly understands your exact workspace context.
-- ⌨️ **Immersive Slash Commands**: Highly extensible built-in command system. Type `/plan`, `/review`, or `/debug` to instantly trigger specialized AI agent workflows.
-
-## 🏗️ Architecture Overview
-
-MiniCode relies on a high-performance WebSocket architecture to maintain persistent connections, ensuring ultra-smooth streaming and real-time tool execution feedback.
-
-```mermaid
-graph TD
-    subgraph Client
-        Web[Web UI \nReact + Zustand]
-        Desktop[Desktop App\nElectron]
-    end
-
-    subgraph Server
-        API[FastAPI Server\nWebSocket / HTTP]
-        Handler[Session & Event Handler]
-        Agent[Agent Run Loop\nQueryEngine]
-        Context[Context & RAG Engine]
-        Commands[Slash Commands]
-    end
-
-    subgraph LLM Providers
-        Claude[Anthropic Claude]
-        OpenAI[OpenAI / Gateways]
-        Gemini[Google Gemini]
-    end
-
-    Web <-->|WebSocket| API
-    Desktop <-->|WebSocket IPC| API
-
-    API --> Handler
-    Handler --> Agent
-    Agent --> Context
-    Agent --> Commands
-
-    Agent <-->|API Calls| Claude
-    Agent <-->|API Calls| OpenAI
-    Agent <-->|API Calls| Gemini
+```
+┌─────────────────────────────────────────────┐
+│  前端 (React 18 + TypeScript + Vite 6)       │
+│  Electron 桌面壳                             │
+├─────────────────────────────────────────────┤
+│  后端 (Python 3.11+ / FastAPI)               │
+│    ├── Agent Loop       自主编码代理           │
+│    ├── LLM Adapters     OpenAI/Anthropic      │
+│    ├── MCP Client       外部工具服务器集成      │
+│    ├── RAG Pipeline     文档检索增强生成        │
+│    ├── Tool System      20+ 内置工具           │
+│    ├── Security         权限控制与沙箱          │
+│    └── Terminal         远程终端管理            │
+└─────────────────────────────────────────────┘
 ```
 
-## 📂 Project Structure
+## 技术栈
 
-A clean, modular design decouples the UI, backend logic, and desktop shell:
+### 后端
 
-```text
-MiniCode/
-├── backend/            # Python FastAPI core
-│   ├── agent/          # Agent loop, Context builder, QueryEngine
-│   ├── commands/       # Slash commands & registry
-│   ├── mcp/            # Model Context Protocol integration
-│   ├── ws/             # WebSocket real-time snapshots
-│   └── tools/          # Built-in OS & File tools
-├── frontend/           # React + Zustand web application
-│   ├── src.v2/         # Core UI components
-│   ├── stores/         # Zustand state management
-│   └── styles/         # Tailwind CSS styling
-├── desktop/            # Electron desktop wrapper
-│   ├── main.js         # Main process
-│   └── preload.js      # Secure context bridge
-├── data/               # Local runtime data
-│   ├── chroma/         # Vector DB for RAG
-│   └── conversations/  # Persistent chat histories
-├── skills/             # Pluggable expert workflows
-│   ├── code-review/
-│   └── frontend-dev/
-└── docs/               # Architecture and design docs
+| 模块 | 技术 | 说明 |
+|---|---|---|
+| 框架 | FastAPI + Uvicorn | REST API + WebSocket |
+| LLM | OpenAI / Anthropic SDK | Chat API、Responses API、Anthropic Messages API |
+| 向量库 | ChromaDB | RAG 文档嵌入与检索 |
+| MCP | MCP Python SDK | 动态加载外部工具服务器 |
+| 搜索 | ripgrep + Tree-sitter | 代码搜索与 AST 分析 |
+| 解析 | PyMuPDF + python-docx + trafilatura | 文档解析 |
+
+### 前端
+
+| 技术 | 用途 |
+|---|---|
+| React 18 + TypeScript | UI 框架 |
+| Vite 6 | 构建与热更新 |
+| Tailwind CSS 3 | 样式 |
+| Monaco Editor | 代码编辑器 |
+| Xterm.js | 终端仿真 |
+| zustand | 状态管理 |
+| react-grid-layout | 可拖拽面板布局 |
+| react-markdown + remark-gfm | Markdown 渲染 |
+| dnd-kit | 拖拽排序 |
+
+### 桌面
+
+- **Electron** — 跨平台打包（macOS / Windows / Linux）
+- **electron-builder** — NSIS（Windows）、DMG（macOS）、AppImage（Linux）
+
+## 项目结构
+
+```
+MINICODE/
+├── backend/               # Python 后端
+│   ├── agent/             # Agent Loop 核心
+│   │   ├── loop.py        # 主循环（ReAct 模式）
+│   │   ├── context.py     # 上下文构建与管理
+│   │   ├── message.py     # 消息模型
+│   │   ├── state.py       # Agent 状态管理
+│   │   └── tool_execution.py  # 工具执行引擎
+│   ├── llm/               # LLM 适配层
+│   │   ├── openai_adapter.py   # OpenAI API 适配器
+│   │   ├── anthropic_adapter.py # Anthropic API 适配器
+│   │   └── model_registry.py   # 模型注册中心
+│   ├── tools/             # 工具系统（20+ 工具）
+│   │   ├── file_tools.py  # 文件读写
+│   │   ├── search_tools.py # 网络搜索
+│   │   ├── git_tools.py   # Git 操作
+│   │   ├── command_tool.py # 命令执行
+│   │   ├── web_tools.py   # 网页抓取
+│   │   └── ...
+│   ├── api/               # FastAPI 端点
+│   │   ├── routes_chat.py     # 聊天 API
+│   │   ├── routes_llm.c      # LLM 配置 API
+│   │   ├── routes_skills.py   # Skills 管理 API
+│   │   └── routes_health.py   # 健康检查 API
+│   ├── mcp/               # MCP 客户端与管理
+│   ├── rag/               # RAG 流水线
+│   ├── workspace/         # 工作区管理
+│   ├── terminal/          # 终端会话管理
+│   ├── security/          # 安全与权限
+│   ├── skills/            # Skills 加载与执行
+│   ├── conversations/     # 对话记录
+│   ├── memory/            # 记忆系统
+│   ├── config.py          # 统一配置中心
+│   └── main.py            # FastAPI 入口
+├── frontend/              # React 前端
+│   ├── src.v2/            # 核心源码
+│   │   ├── App.tsx        # 根组件
+│   │   ├── main.tsx       # 入口
+│   │   ├── chat/          # 聊天界面
+│   │   ├── composer/      # Composer 组件
+│   │   ├── panels/        # 面板系统
+│   │   ├── desktop/       # 桌面集成
+│   │   ├── stores/        # zustand 状态
+│   │   ├── hooks/         # React Hooks
+│   │   └── shell/         # Workbench 布局
+│   ├── styles/            # 全局样式
+│   └── vite.config.ts     # Vite 配置
+├── desktop/               # Electron 桌面壳
+│   ├── main.js            # 主进程
+│   ├── preload.js         # 预加载脚本
+│   ├── window-manager.js  # 窗口管理
+│   └── pty-manager.js     # PTY 终端管理
+├── data/                  # 运行时数据
+│   ├── chroma/            # 向量数据库
+│   ├── conversations/     # 对话存档
+│   ├── memory/            # 记忆存储
+│   └── artifacts/         # 文件快照
+├── docs/                  # 设计文档
+├── tests/                 # 测试（pytest）
+├── scripts/               # 开发脚本
+├── pyproject.toml         # Python 依赖
+└── start.bat / start.sh   # 开发启动脚本
 ```
 
-## 🚀 Quick Start
+## 快速开始
 
-### 1. Prerequisites
-- **Python >= 3.9** (Conda/Virtualenv recommended)
-- **Node.js >= 18**
+### 前置条件
 
-### 2. Start the Backend
+- Python 3.11+
+- Node.js 18+
+- npm 9+
 
-Open a terminal and run:
+### 安装
 
 ```bash
-cd MiniCode
-pip install -e .
-./start-backend.bat
-# Or manually: uvicorn backend.main:app --host 127.0.0.1 --port 8000
+# 克隆仓库
+git clone <repo-url>
+cd minicode
+
+# 安装 Python 依赖
+pip install -e ".[dev,search,docparse]"
+
+# 安装前端依赖
+cd frontend && npm install && cd ..
+
+# 安装桌面依赖
+cd desktop && npm install && cd ..
 ```
 
-### 3. Start the Frontend / Desktop
+### 配置
 
-Open a new terminal to start the UI:
+在项目根目录创建 `.env` 文件，或直接配置 `settings.json`：
+
+```env
+# LLM 配置（至少配置一个）
+OPENAI_API_KEY=sk-your-key
+# 或
+ANTHROPIC_API_KEY=sk-ant-your-key
+
+# 可选：自定义 OpenAI 兼容提供商
+# LLM_PROVIDER=custom
+# OPENAI_BASE_URL=https://your-custom-endpoint/v1
+# CUSTOM_API_KEY=your-custom-key
+```
+
+### 启动开发环境
+
+**Windows：**
+```bash
+.\start.bat
+```
+
+**macOS/Linux：**
+```bash
+./start.sh
+```
+
+或分别启动：
 
 ```bash
-cd frontend
-npm install
+# 终端 1：启动后端（端口 8000）
+python -m backend
 
-# Option A: Run lightweight Web UI
-npm run dev
-
-# Option B: Run native Electron application
-cd ../desktop
-npm install
-npm run start
+# 终端 2：启动前端（端口 5173）
+cd frontend && npm run dev
 ```
 
-*For more details, check out [QUICKSTART.md](./QUICKSTART.md).*
+启动后访问 http://localhost:5173 即可使用。
 
-## 🛠️ Contributing
+## 核心功能
 
-We welcome contributions! To build alongside us:
-1. Fork the repository.
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`).
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`).
-4. Push to the branch (`git push origin feature/AmazingFeature`).
-5. Open a Pull Request.
+### 🤖 自主 Agent Loop
 
-Make sure your code passes local Pytest and Playwright tests before submitting.
+MiniCode 的核心是一个自主 AI 代理，采用 **ReAct** 模式运作：
 
----
+1. **上下文构建** — 自动收集项目文件、Git 状态、工具列表构成提示词
+2. **流式执行** — 模型多步推理 → 调用工具 → 观察结果 → 继续推理，直至任务完成
+3. **恢复机制** — LLM 错误自动降级重试、工具调用修复、停顿检测
+4. **终止条件** — 无更多工具调用时自动收敛
 
-<span id="中文"></span>
-# 🇨🇳 简体中文文档
+### 🔧 工具系统
 
-**MiniCode** 是一个强大的开源 AI 编程助手和智能体环境。以 `FastAPI + React + WebSocket` 为核心，构建了能够完全掌控本地工作区的 AI 引擎。不仅支持纯 Web 界面运行，还提供了基于 Electron 的原生桌面端应用，无缝连接您的本地开发工作流。
+20+ 内置工具，覆盖开发全流程：
 
-## ✨ 核心特性
+- **文件操作**: `read_file`, `write_file`, `edit_file`, `list_files`
+- **代码搜索**: `grep_files`, `glob_files`, `fuzzy_search`, AST 分析
+- **Web 搜索**: `web_search`, `web_fetch`
+- **Git**: `git_status`, `git_diff`, `git_commit`, `git_push`
+- **终端**: `run_command`（带沙箱执行）
+- **记忆**: `remember`, `recall`, `forget`
+- **MCP**: 通过 MCP 协议动态加载外部工具
 
-- 🤖 **多模型支持原生集成**：全面兼容大语言模型（如 Claude, GPT, Gemini）。原生支持多模态输入（图片、PDF 文档等直接解析）。
-- 🔌 **模型上下文协议 (MCP)**：完整的 MCP 生命周期支持，可无限扩展 AI 的能力边界，实现和外部 API、工具、数据库的无缝交互。
-- 🛡️ **智能权限控制**：内置细粒度权限模式和授权系统（Approval Rules），确保 AI Agent 在进行文件修改、终端执行时的绝对安全可控。
-- 💻 **双端运行 (Web & Desktop)**：支持以本地 Web 服务启动进行轻量级访问，也支持构建为具有深度系统集成的独立 Electron 桌面应用。
-- ⚡ **RAG 与上下文感知的对话**：自动索引本地代码库结构并接入向量数据库引擎支持检索增强生成（RAG），AI 将准确理解您的工作区上下文与最新动态。
-- ⌨️ **Slash Commands (沉浸式斜杠指令)**：高度可扩展的内置指令系统。输入 `/plan`, `/review`, `/debug` 等即可让 AI 执行特定专家工作流。
+### 🔌 MCP 工具生态
 
-## 🏗️ 架构概览
+支持 [Model Context Protocol](https://modelcontextprotocol.io/) 标准，可挂载任意 MCP 服务器作为外部工具，与社区工具生态无缝集成。
 
-MiniCode 采用高性能的 WebSocket 架构处理双向通信，极大提升了模型流式输出以及实时工具调用的 UI 渲染体验。
+### 📚 RAG 知识库
 
-*(架构图请参考上方英文部分的 Mermaid 插图)*
+基于 ChromaDB 的文档检索增强生成，支持：
+- PDF、Word、Markdown 文档索引
+- 语义分块与向量嵌入
+- 会话关联检索
 
-## 📂 项目结构
+### 🛡️ 安全体系
 
-清晰的模块化设计，使前端 UI、后端逻辑与桌面端外壳彼此解耦：
+四层权限模型：
 
-```text
-MiniCode/
-├── backend/            # FastAPI 核心后端
-│   ├── agent/          # Agent 运行循环、Context 组装、QueryEngine
-│   ├── commands/       # 斜杠命令与功能目录注册
-│   ├── mcp/            # Model Context Protocol 支持实现
-│   ├── ws/             # WebSocket 实时通信与状态快照
-│   └── tools/          # 内置系统级工具集合
-├── frontend/           # React + Zustand 前端交互界面
-│   ├── src.v2/         # 核心 UI 与组件库
-│   ├── stores/         # Zustand 前端状态管理
-│   └── styles/         # Tailwind CSS 与样式系统
-├── desktop/            # Electron 桌面端外壳
-│   ├── main.js         # 主进程控制
-│   └── preload.js      # 安全桥接与渲染层 API
-├── data/               # 本地运行时数据存储
-│   ├── chroma/         # 向量数据库（用于 RAG 存储）
-│   └── conversations/  # 持久化的对话历史与状态
-├── skills/             # 高级可插拔工作流与专家经验预设
-└── docs/               # 架构说明与系统开发文档
-```
+| 级别 | 说明 |
+|---|---|
+| ✅ 自动允许 | 只读操作（读文件、搜索、Git 查看等） |
+| 🔍 需审查 Diff | 写操作（创建/编辑文件） |
+| ❓ 需确认 | 命令执行、Git 推送、终端操作等 |
+| 🚫 永远拒绝 | 敏感路径和环境变量 |
 
-## 🚀 快速开始
+### 💾 持久化
 
-### 1. 环境准备
-确保您的本地环境中已安装：
-- **Python >= 3.9** (推荐使用 Conda 等虚拟环境)
-- **Node.js >= 18**
+- **对话记录** — 自动保存，支持 Checkpoint 恢复
+- **记忆系统** — 跨会话持久化关键信息
+- **工作区缓存** — 文件状态、代码索引
+- **用户偏好** — UI 布局、主题、快捷键设置（持久化至磁盘）
 
-### 2. 启动后端服务
-
-在独立终端内启动后台运行环境：
+## 测试
 
 ```bash
-cd MiniCode
-pip install -e .
-./start-backend.bat
-# 开发环境亦可手动执行：uvicorn backend.main:app --host 127.0.0.1 --port 8000
+# 运行全部测试
+pytest
+
+# 运行指定测试
+pytest tests/test_smoke_api.py
+pytest tests/test_tool_execution.py
+
+# 带覆盖率
+pytest --cov=backend
 ```
 
-### 3. 前端与桌面端启动
-
-在另一个独立的终端中运行用户界面：
+## 桌面打包
 
 ```bash
-cd frontend
-npm install
-
-# 选项 A: 启动网页端进行轻量级访问
-npm run dev
-
-# 选项 B: 启动 Electron 桌面应用
-cd ../desktop
-npm install
-npm run start
+cd desktop
+npm run build    # 构建前端
+npm run dist     # 打包当前平台
 ```
 
-*详细指令及进阶说明请参阅 [QUICKSTART.md](./QUICKSTART.md)*。
+## 文档
 
-## 🛠️ 参与贡献
+项目设计文档位于 `docs/` 目录，涵盖：
+- 系统架构设计 (`current-system-design.md`)
+- Agent Loop 实现方案 (`codex-desktop-agent-design.md`)
+- UI/UX v2 设计 (`ui-design-v2.md`)
+- Claude Code 对齐方案 (`cc-alignment-implementation-record.md`)
 
-我们非常欢迎开发者加入到 MiniCode 的建设中来！如果您有好的建议或者要提交 Bug 修复：
-1. Fork 本仓库。
-2. 创建您的特性分支 (`git checkout -b feature/AmazingFeature`)。
-3. 提交您的修改 (`git commit -m 'Add some AmazingFeature'`)。
-4. 将您的修改推送到分支 (`git push origin feature/AmazingFeature`)。
-5. 开启一个 Pull Request。
+## 项目状态
 
-请确保在提交代码前，能够在本地通过相关的 Pytest 和 TypeScript/Playwright 自动化测试。
+**版本**: 0.2.0 — 早期开发阶段，核心 Agent Loop 已验证并与真实 LLM 对接，前端 UI/UX 正在快速迭代。
 
----
+## 许可
 
-<div align="center">
-  <p>Licensed under the <a href="LICENSE">MIT License</a>. Made with ❤️ by the MiniCode community.</p>
-</div>
+[MIT](LICENSE)

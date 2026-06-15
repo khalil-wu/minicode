@@ -11,7 +11,7 @@ from pydantic import BaseModel
 import subprocess
 import os
 
-from backend.runtime_env import sanitized_subprocess_env
+from backend.runtime_env import sanitized_git_env
 from backend.workspace.state import get_active_workspace_root
 
 router = APIRouter(prefix="/api/git", tags=["git"])
@@ -41,11 +41,10 @@ def _resolve_git_cwd(workspace_path: str | None) -> Path:
 
 
 def _git_env_for_workspace(cwd: Path) -> dict[str, str]:
-    env = sanitized_subprocess_env()
-    env.pop("GIT_DIR", None)
-    env.pop("GIT_WORK_TREE", None)
-    env["GIT_CEILING_DIRECTORIES"] = str(cwd.parent)
-    return env
+    # Repo discovery may ascend (opening a subdirectory of a repo must find the
+    # enclosing repo) but stops at the user's home directory so a stray ~/.git
+    # never masquerades as the workspace repo.
+    return sanitized_git_env(cwd)
 
 
 def _is_inside_git_worktree(cwd: Path) -> bool:

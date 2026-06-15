@@ -41,17 +41,25 @@ def _write_persisted_workspace_root(root: Path | None) -> None:
 def get_active_workspace_root(default_root: str | Path | None = None) -> Path:
     global _active_workspace_root
     if _active_workspace_root is not None:
-        return _active_workspace_root
+        if _active_workspace_root.exists() and _active_workspace_root.is_dir():
+            return _active_workspace_root
+        set_active_workspace_root(None)
+        if default_root is not None:
+            return Path(default_root).resolve()
+        return Path.cwd().resolve()
+
+    fallback = Path(default_root).resolve() if default_root is not None else Path.cwd().resolve()
+    if not fallback.exists() or not fallback.is_dir():
+        fallback = Path.cwd().resolve()
 
     persisted = _read_persisted_workspace_root()
     if persisted is not None:
-        _active_workspace_root = persisted
-        return persisted
+        if persisted.exists() and persisted.is_dir():
+            _active_workspace_root = persisted
+            return persisted
+        _write_persisted_workspace_root(None)
 
-    if default_root is not None:
-        return Path(default_root).resolve()
-    return Path.cwd().resolve()
-
+    return fallback
 
 def set_active_workspace_root(root: str | Path | None) -> Path | None:
     global _active_workspace_root

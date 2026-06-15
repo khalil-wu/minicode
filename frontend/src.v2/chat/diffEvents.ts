@@ -40,6 +40,17 @@ export const handleDiffEvent = (e: ServerEvent): boolean => {
       });
       return true;
     }
+    case "diff.git_stage_file":
+    case "diff.git_unstage_file":
+    case "diff.git_stage_all":
+    case "diff.git_unstage_all":
+    case "diff.git_revert_file": {
+      const ev = e as unknown as { ok?: boolean };
+      if (ev.ok !== false) {
+        s.requestGitChanges();
+      }
+      return true;
+    }
     default:
       return false;
   }

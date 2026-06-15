@@ -3,7 +3,10 @@ import { pushToast } from "../overlays/ToastContainer";
 import type { UserMessageCommand } from "../protocol/events";
 import { toBackendPermissionMode } from "../protocol/permissions";
 import { useAppStore } from "../stores";
-import type { MessageAttachmentRef, MessageContextRef } from "../stores/types";
+import type { ChatMessage, MessageAttachmentRef, MessageContextRef } from "../stores/types";
+import { hasRuntimePendingUserAction, hasRuntimePendingUserActionForConversation } from "../lib/runtime-session";
+import { hasLocalPendingPromptForConversation } from "../lib/pending-prompts";
+import { normalizeAgentErrorMessage } from "./errorMessages";
 
 interface SendChatMessageOptions {
   displayContent?: string;
@@ -18,6 +21,15 @@ interface SendChatMessageOptions {
 
 let lastSendSignature = "";
 let lastSendAt = 0;
+const DUPLICATE_SEND_WINDOW_MS = 250;
+
+export const resetSendDeduplication = () => {
+  lastSendSignature = "";
+  lastSendAt = 0;
+};
+
+const localMessageId = (prefix = "m"): string =>
+  `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
 const addSystemNotice = (content: string) => {
   useAppStore.setState((state) => ({
@@ -58,12 +70,115 @@ const attachmentRefFromPayload = (payload: Record<string, unknown>): MessageAtta
   };
 };
 
-export const getChatSendBlockReason = (): string | null => {
+const appendLocalUserTurn = ({
+  content,
+  conversationId,
+  contextRefs,
+  attachmentRefs,
+}: {
+  content: string;
+  conversationId?: string;
+  contextRefs: MessageContextRef[];
+  attachmentRefs: MessageAttachmentRef[];
+}) => {
+  useAppStore.setState((state) => {
+    const targetId = conversationId || state.conversationId || undefined;
+    const timestamp = Date.now();
+    const userMessage: ChatMessage = {
+      id: localMessageId("u"),
+      role: "user",
+      content,
+      contextRefs,
+      attachmentRefs,
+      artifacts: [],
+      timestamp,
+    };
+    const assistantMessage: ChatMessage = {
+      id: localMessageId("a"),
+      role: "assistant",
+      content: "",
+      blocks: [],
+      artifacts: [],
+      timestamp,
+      isStreaming: true,
+    };
+
+    if (targetId && state.sideChats[targetId]) {
+      const thread = state.sideChats[targetId];
+      return {
+        sideChats: {
+          ...state.sideChats,
+          [targetId]: {
+            ...thread,
+            isStreaming: true,
+            messages: [...thread.messages, userMessage, assistantMessage],
+          },
+        },
+      };
+    }
+
+    if (!targetId || targetId === state.conversationId) {
+      const nextMessages = [...state.messages, userMessage, assistantMessage];
+      return {
+        messages: nextMessages,
+        isStreaming: true,
+        ...(state.conversationId
+          ? {
+              conversationMessages: {
+                ...state.conversationMessages,
+                [state.conversationId]: nextMessages,
+              },
+              conversationStreaming: {
+                ...state.conversationStreaming,
+                [state.conversationId]: true,
+              },
+            }
+          : {}),
+      };
+    }
+
+    const nextMessages = [
+      ...(state.conversationMessages[targetId] ?? []),
+      userMessage,
+      assistantMessage,
+    ];
+    return {
+      conversationMessages: {
+        ...state.conversationMessages,
+        [targetId]: nextMessages,
+      },
+      conversationStreaming: {
+        ...state.conversationStreaming,
+        [targetId]: true,
+      },
+    };
+  });
+};
+
+export const getChatSendBlockReason = (conversationId?: string): string | null => {
   const state = useAppStore.getState();
-  if (state.pendingApproval || state.pendingDiffReview || state.pendingAskUser) {
+  const targetConversationId = conversationId ?? state.conversationId ?? state.runtimeSession?.active_conversation_id ?? undefined;
+  if (
+    hasLocalPendingPromptForConversation(
+      [state.pendingApproval, state.pendingDiffReview, state.pendingAskUser],
+      targetConversationId,
+      state.conversationId,
+    )
+  ) {
     return "Resolve the pending approval or question first.";
   }
-  if (state.isStreaming) {
+  const hasRuntimePending = targetConversationId
+    ? hasRuntimePendingUserActionForConversation(state.runtimeSession, targetConversationId)
+    : hasRuntimePendingUserAction(state.runtimeSession);
+  if (hasRuntimePending) {
+    return "Resolve the pending approval or question first.";
+  }
+  const targetStreaming = conversationId
+    ? conversationId === state.conversationId
+      ? state.isStreaming
+      : state.sideChats[conversationId]?.isStreaming ?? state.conversationStreaming[conversationId] ?? false
+    : state.isStreaming;
+  if (targetStreaming) {
     return "A response is already running. Stop it before sending another message.";
   }
   if (!state.isConnected) {
@@ -74,7 +189,12 @@ export const getChatSendBlockReason = (): string | null => {
 
 const recoverStaleStreamingState = (conversationId?: string): boolean => {
   const state = useAppStore.getState();
-  if (!state.isStreaming) return false;
+  const targetStreaming = conversationId
+    ? conversationId === state.conversationId
+      ? state.isStreaming
+      : state.sideChats[conversationId]?.isStreaming ?? state.conversationStreaming[conversationId] ?? false
+    : state.isStreaming;
+  if (!targetStreaming) return false;
   const activeMessages = conversationId && conversationId !== state.conversationId
     ? state.conversationMessages[conversationId] ?? []
     : state.messages;
@@ -124,7 +244,7 @@ export const sendChatMessage = ({
         skipLocalAppend,
       });
     }
-    const reason = getChatSendBlockReason();
+    const reason = getChatSendBlockReason(conversationId);
     if (reason) {
       addSystemNotice(reason);
       pushToast(reason, "warning");
@@ -140,14 +260,20 @@ export const sendChatMessage = ({
     return false;
   }
 
+  const targetConversationId = conversationId || state.conversationId || "";
+  const targetConversation = targetConversationId
+    ? state.conversations.find((item) => item.id === targetConversationId)
+    : undefined;
+  const targetWorkspaceRoot = targetConversation?.worktreePath || targetConversation?.workspaceRoot || "";
+
   const sendSignature = JSON.stringify({
-    conversationId: conversationId || state.conversationId || "",
-    workspaceRoot: state.workingDirectory || "",
+    conversationId: targetConversationId,
+    workspaceRoot: targetWorkspaceRoot,
     content: contentForBackend,
     attachments: attachments.map((item) => String(item.artifact_id ?? item.artifactId ?? item.id ?? "")).filter(Boolean),
   });
   const now = Date.now();
-  if (sendSignature === lastSendSignature && now - lastSendAt < 1000) {
+  if (sendSignature === lastSendSignature && now - lastSendAt < DUPLICATE_SEND_WINDOW_MS) {
     pushToast("Duplicate send ignored.", "warning");
     return false;
   }
@@ -155,14 +281,20 @@ export const sendChatMessage = ({
   const command: UserMessageCommand = {
     type: "user_message",
     content: contentForBackend,
-    ...(state.workingDirectory ? { workspace_root: state.workingDirectory } : {}),
+    ...(targetWorkspaceRoot ? { workspace_root: targetWorkspaceRoot } : {}),
+    ...(targetWorkspaceRoot && state.activeTabPath ? { primaryFile: state.activeTabPath, activeTabPath: state.activeTabPath } : {}),
     permission_mode: toBackendPermissionMode(state.permissionMode),
-    ...(conversationId ? { conversation_id: conversationId } : {}),
+    ...(targetConversationId ? { conversation_id: targetConversationId } : {}),
     ...(attachments.length > 0 ? { attachments } : {}),
   };
 
-  if (!skipLocalAppend && !conversationId) {
-    useAppStore.getState().sendMessage(contentForDisplay || contentForBackend, { contextRefs, attachmentRefs: displayAttachmentRefs });
+  if (!skipLocalAppend) {
+    appendLocalUserTurn({
+      content: contentForDisplay || contentForBackend,
+      conversationId,
+      contextRefs,
+      attachmentRefs: displayAttachmentRefs,
+    });
   }
 
   try {
@@ -173,7 +305,7 @@ export const sendChatMessage = ({
   } catch (err) {
     useAppStore.getState().removeEmptyStreamingAssistant(conversationId);
     useAppStore.getState().finishStreaming(conversationId);
-    const message = err instanceof Error ? err.message : "Failed to send message.";
+    const message = normalizeAgentErrorMessage(err instanceof Error ? err.message : "Failed to send message.");
     addSystemNotice(`Error: ${message}`);
     pushToast(message, "error");
     return false;

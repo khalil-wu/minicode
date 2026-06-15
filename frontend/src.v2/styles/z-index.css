@@ -1,0 +1,116 @@
+/**
+ * Unified z-index system for MiniCode
+ *
+ * This file defines a centralized z-index hierarchy to prevent overlay conflicts.
+ * All overlays, modals, and floating elements should use these CSS variables.
+ */
+
+:root {
+  /* Base layers */
+  --z-base: 0;
+  --z-below: -1;
+  --z-content: 1;
+  --z-sticky: 10;
+
+  /* UI elements */
+  --z-header: 100;
+  --z-sidebar: 200;
+  --z-dock: 250;
+  --z-fab: 300;
+
+  /* Overlays */
+  --z-dropdown: 500;
+  --z-popover: 550;
+  --z-tooltip: 600;
+
+  /* Drawers and modals */
+  --z-drawer: 800;
+  --z-modal-backdrop: 900;
+  --z-modal: 1000;
+  --z-approval: 1050;        /* Critical approval prompts */
+  --z-toast: 1100;
+  --z-dialog: 1200;          /* System dialogs */
+  --z-context-menu: 1250;
+
+  /* System */
+  --z-loading: 1500;
+  --z-debug: 9999;
+}
+
+/**
+ * Z-index hierarchy explanation:
+ *
+ * -1   - Below base (backgrounds, underlays)
+ * 0    - Base content (normal flow)
+ * 1    - Content layer
+ * 10   - Sticky headers/footers
+ *
+ * 100  - Header bar
+ * 200  - Sidebars (left/right)
+ * 250  - Bottom dock
+ * 300  - Floating action buttons
+ *
+ * 500  - Dropdowns and selects
+ * 550  - Popovers
+ * 600  - Tooltips
+ *
+ * 800  - Drawers (slide-in panels)
+ * 900  - Modal backdrop
+ * 1000 - Regular modals (Settings, CommandPalette, QuickOpen, etc.)
+ * 1050 - Critical approval prompts (ApprovalModal, AskUserPrompt, DiffReviewModal)
+ * 1100 - Toast notifications
+ * 1200 - System dialogs (confirm/alert from DialogService)
+ * 1250 - Context menus (right-click menus)
+ *
+ * 1500 - Full-screen loading overlays
+ * 9999 - Debug tools
+ */
+
+/* Apply to specific components */
+.header-bar {
+  z-index: var(--z-header);
+}
+
+.sidebar-left,
+.sidebar-right {
+  z-index: var(--z-sidebar);
+}
+
+.bottom-dock {
+  z-index: var(--z-dock);
+}
+
+.dropdown-menu,
+.select-dropdown {
+  z-index: var(--z-dropdown);
+}
+
+.popover {
+  z-index: var(--z-popover);
+}
+
+.tooltip {
+  z-index: var(--z-tooltip);
+}
+
+.drawer {
+  z-index: var(--z-drawer);
+}
+
+.modal-backdrop,
+.dialog-backdrop {
+  z-index: var(--z-modal-backdrop);
+}
+
+.modal,
+.dialog {
+  z-index: var(--z-modal);
+}
+
+.toast-container {
+  z-index: var(--z-toast);
+}
+
+.loading-overlay {
+  z-index: var(--z-loading);
+}

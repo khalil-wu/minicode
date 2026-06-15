@@ -7,7 +7,7 @@
         "backend.mcp.servers.websearch"
       ],
       "env": {},
-      "autoStart": false,
+      "autoStart": true,
       "transport": "stdio"
     },
     "docparse": {

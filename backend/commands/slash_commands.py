@@ -452,6 +452,24 @@ async def _handle_effort(
     if effort is None:
         await _emit_usage_warning(ws, "effort", "Usage: /effort [low|medium|high|max]")
         return True, ""
+    from backend.config import active_provider_supports_reasoning_effort
+
+    if not active_provider_supports_reasoning_effort():
+        await _dispatch_command(
+            ws,
+            "llm.config.set",
+            {
+                "reasoning_effort": effort,
+                "source": "slash:/effort",
+            },
+        )
+        await ws._emit_command_result(
+            "effort",
+            "Reasoning effort is not applied by the active Chat Completions provider.",
+            level="warning",
+            data={"reasoning_effort": effort, "applied": False},
+        )
+        return True, ""
     handled = await _dispatch_command(
         ws,
         "llm.config.set",
@@ -599,7 +617,10 @@ async def _handle_compact(
     await ws._send_event(
         AgentEvent(
             type="context_compacted",
-            data={"summary": short or "Context compacted."},
+            data={
+                "summary": short or "Context compacted.",
+                **({"conversation_id": ws.active_conversation_id} if ws.active_conversation_id else {}),
+            },
         )
     )
     after_used = before_used
@@ -608,14 +629,24 @@ async def _handle_compact(
         budget_snapshot = _build_compact_budget_snapshot(ws, builder)
         after_used = int(budget_snapshot.get("used") or 0)
         after_total = int(budget_snapshot.get("total") or 0)
+        if ws.active_conversation_id:
+            budget_snapshot = {**budget_snapshot, "conversation_id": ws.active_conversation_id}
         await ws._send_event(AgentEvent(type="budget_update", data=budget_snapshot))
         await ws._send_event(
-            AgentEvent(type="context_usage", data={"used": after_used, "limit": after_total})
+            AgentEvent(
+                type="context_usage",
+                data={
+                    "used": after_used,
+                    "limit": after_total,
+                    **({"conversation_id": ws.active_conversation_id} if ws.active_conversation_id else {}),
+                },
+            )
         )
     except Exception:
         if before_snapshot:
+            if ws.active_conversation_id:
+                before_snapshot = {**before_snapshot, "conversation_id": ws.active_conversation_id}
             await ws._send_event(AgentEvent(type="budget_update", data=before_snapshot))
-        pass
     saved = max(0, before_used - after_used)
     suffix = f" Saved about {saved} tokens." if saved > 0 else " No measurable reduction; recent context was already compact."
     await ws._emit_command_result(
@@ -628,6 +659,92 @@ async def _handle_compact(
             "saved_tokens": saved,
             "total": after_total or before_total,
         },
+    )
+    return True, ""
+
+
+async def _handle_goal(
+    ws: "WebSocketSession", arg: str, attachments: Any
+) -> tuple[bool, str]:
+    _ = attachments
+    raw = str(arg or "").strip()
+    conversation_id = _active_conversation_id(ws)
+    if not conversation_id:
+        await _emit_command_unavailable(ws, "goal")
+        return True, ""
+
+    action = "set"
+    text = raw
+    if not raw:
+        action = "show"
+        text = ""
+    else:
+        first = raw.split(maxsplit=1)[0].strip().lower()
+        if first in {"show", "status", "inspect", "pause", "resume", "clear", "delete", "reset"}:
+            action = first
+            text = raw.split(maxsplit=1)[1].strip() if len(raw.split(maxsplit=1)) > 1 else ""
+
+    handled = await _dispatch_command(
+        ws,
+        "conversation.goal.set",
+        {
+            "conversation_id": conversation_id,
+            "action": action,
+            "text": text,
+            "source": "slash:/goal",
+        },
+    )
+    if not handled:
+        await _emit_command_unavailable(ws, "goal")
+    return True, ""
+
+
+async def _handle_resume(
+    ws: "WebSocketSession", arg: str, attachments: Any
+) -> tuple[bool, str]:
+    """Resume from the latest checkpoint (if any)."""
+    _ = arg, attachments
+    from backend.agent.checkpoint import load_latest_checkpoint
+
+    session_id = ws.session_id
+    if not session_id:
+        await ws._emit_command_result(
+            "resume",
+            "No active session ID. Cannot resume.",
+            level="error",
+        )
+        return True, ""
+
+    checkpoint = load_latest_checkpoint(session_id)
+    if checkpoint is None:
+        await ws._emit_command_result(
+            "resume",
+            "No incomplete checkpoint found. The last task completed successfully or no checkpoint exists yet.",
+            level="info",
+        )
+        return True, ""
+
+    # Directly trigger agent run with resume metadata
+    conversation_id = _active_conversation_id(ws)
+    if not conversation_id:
+        await ws._emit_command_result(
+            "resume",
+            "No active conversation. Cannot resume.",
+            level="error",
+        )
+        return True, ""
+
+    await ws._emit_command_result(
+        "resume",
+        f"Resuming from iteration {checkpoint.iterations}. Previous stop: {checkpoint.stopped_reason}",
+        level="success",
+    )
+
+    # Trigger agent run with resume_from_checkpoint metadata
+    await ws._run_agent(
+        user_message=checkpoint.user_message,
+        conversation_id=conversation_id,
+        metadata={"resume_from_checkpoint": True},
     )
     return True, ""
 
@@ -664,6 +781,8 @@ _LOCAL_COMMAND_HANDLERS: dict[str, SlashHandler] = {
     "help": _handle_help,
     "skills": _handle_skills,
     "compact": _handle_compact,
+    "goal": _handle_goal,
+    "resume": _handle_resume,
 }
 
 _PERMISSION_MODE_ALIAS_COMMANDS = {

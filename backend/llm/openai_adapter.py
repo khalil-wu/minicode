@@ -1,3 +1,4 @@
+
 """
 OpenAI 适配器（DESIGN.md §一 LLM Adapter）。
 
@@ -17,11 +18,13 @@ import logging
 import os
 import re
 from typing import Any, AsyncIterator
+from urllib.parse import urlparse
 
 import httpx
 from openai import AsyncOpenAI
 
 from backend.config import LLMSettings
+from backend.llm.errors import classify_llm_error
 from backend.llm.base import (
     LLMAdapter,
     LLMMessage,
@@ -37,6 +40,106 @@ logger = logging.getLogger(__name__)
 
 _DELTA_DEBOUNCE_BYTES = 128
 
+
+class _ToolCallAccumulator:
+    """Accumulates streamed tool-call deltas, keyed by (id, index) to handle
+    gateways that reuse index=0 for multiple calls."""
+
+    def __init__(self) -> None:
+        self._slots: dict[str, dict[str, Any]] = {}
+        self._order: list[str] = []
+
+    def feed(self, tool_call: dict[str, Any], index: int) -> tuple[bool, str, dict[str, Any]]:
+        """Feed a delta chunk. Returns (is_new, slot_key, slot_data)."""
+        call_id = tool_call.get("id") or ""
+        function = tool_call.get("function") or {}
+        name = function.get("name") or ""
+
+        # In OpenAI-compatible streaming the `index` field is the stable
+        # per-delta identifier: `id` and `name` arrive only in the first delta
+        # of a call, while later deltas carry argument fragments with `index`
+        # alone (DeepSeek behaves this way). Keying by `id` would split a single
+        # call across an `id:<id>` slot (id+name, empty args) and an `idx:<n>`
+        # slot (args, no id/name) — the former then fails arg validation and the
+        # latter is dropped. Key by index so every fragment lands in one slot.
+        key = f"idx:{index}"
+
+        # Parallel tool calls can reuse an index after the prior one completed;
+        # a different id (or changed name) on an existing index slot is a new call.
+        existing = self._slots.get(key)
+        if existing is not None:
+            existing_id = str(existing.get("id") or "")
+            existing_name = str(existing.get("name") or "")
+            if call_id and existing_id and call_id != existing_id:
+                key = f"idx:{index}:{call_id}"
+            elif not call_id and name and existing_name and existing_name != name:
+                key = f"idx:{index}:{name}"
+
+        is_new = key not in self._slots
+        if is_new:
+            self._slots[key] = {
+                "id": call_id,
+                "name": name,
+                "arguments": "",
+                "_delta_bytes": 0,
+            }
+            self._order.append(key)
+
+        slot = self._slots[key]
+        if call_id:
+            slot["id"] = call_id
+        if name:
+            slot["name"] = name
+        if function.get("arguments"):
+            slot["arguments"] += str(function["arguments"])
+            slot["_delta_bytes"] += len(str(function["arguments"]))
+
+        return is_new, key, slot
+
+    def finalize(self) -> list[ToolCallEvent]:
+        """Parse accumulated arguments and return final ToolCallEvent list."""
+        events: list[ToolCallEvent] = []
+        for key in self._order:
+            slot = self._slots[key]
+            call_id = str(slot.get("id") or "").strip()
+            name = str(slot.get("name") or "").strip()
+            raw_args = str(slot.get("arguments") or "")
+            raw_arg_len = len(raw_args)
+            if not call_id or not name:
+                logger.debug(
+                    "Dropping incomplete streamed tool call key=%s id=%r name=%r args=%r",
+                    key,
+                    call_id,
+                    name,
+                    raw_args[:200],
+                )
+                continue
+            parse_status = "ok"
+            try:
+                arguments = json.loads(raw_args or "{}")
+            except (json.JSONDecodeError, TypeError):
+                from backend.llm.json_repair import repair_tool_json
+                arguments = repair_tool_json(raw_args) or {"_raw": raw_args}
+                parse_status = "repaired" if "_raw" not in arguments else "raw"
+            if not isinstance(arguments, dict):
+                arguments = {"value": arguments}
+                parse_status = "wrapped"
+            log = logger.warning if name and not arguments else logger.debug
+            log(
+                "Finalized streamed tool call key=%s id=%s name=%s raw_arg_len=%d parse_status=%s",
+                key,
+                call_id,
+                name,
+                raw_arg_len,
+                parse_status,
+            )
+            events.append(ToolCallEvent(
+                id=call_id,
+                name=name,
+                arguments=arguments,
+            ))
+        return events
+
 _TRANSIENT_ERROR_SUBSTRINGS = (
     "concurrency limit exceeded",
     "retry later",
@@ -48,6 +151,108 @@ _TRANSIENT_ERROR_SUBSTRINGS = (
 )
 _ADAPTER_RETRY_DELAY_SECONDS = 0.8
 _CHAT_HTTP_TIMEOUT_SECONDS = 120.0
+_PROVIDER_ERROR_BODY_LOG_LIMIT = 1200
+
+
+def _provider_host(base_url: str) -> str:
+    parsed = urlparse(base_url or "https://api.openai.com/v1")
+    return parsed.netloc or parsed.path.split("/")[0] or "unknown"
+
+
+def _response_finish_reason(response_obj: Any) -> str:
+    if response_obj is None:
+        return ""
+    details = getattr(response_obj, "incomplete_details", None)
+    reason = getattr(details, "reason", "") if details is not None else ""
+    if reason:
+        return str(reason)
+    status = getattr(response_obj, "status", "")
+    if status and str(status) != "completed":
+        return str(status)
+    return ""
+
+
+def _provider_response_body(exc: Exception) -> str:
+    response = getattr(exc, "response", None)
+    for owner in (response, exc):
+        if owner is None:
+            continue
+        for attr in ("text", "body", "content"):
+            value = getattr(owner, attr, None)
+            if value:
+                if isinstance(value, bytes):
+                    return value.decode("utf-8", errors="replace")
+                if isinstance(value, (dict, list)):
+                    try:
+                        return json.dumps(value, ensure_ascii=False)
+                    except (TypeError, ValueError):
+                        return str(value)
+                return str(value)
+    return ""
+
+
+def _provider_error_fields(exc: Exception, body: str) -> tuple[str, str]:
+    code = str(getattr(exc, "code", "") or "")
+    error_type = str(getattr(exc, "type", "") or "")
+    if code and error_type:
+        return code, error_type
+    try:
+        payload = json.loads(body) if body else {}
+    except (TypeError, ValueError):
+        payload = {}
+    if isinstance(payload, dict):
+        error_obj = payload.get("error") if isinstance(payload.get("error"), dict) else payload
+        if isinstance(error_obj, dict):
+            code = code or str(error_obj.get("code") or "")
+            error_type = error_type or str(error_obj.get("type") or "")
+    return code, error_type
+
+
+def _truncate_provider_body(body: str) -> str:
+    compact = re.sub(r"\s+", " ", body or "").strip()
+    if len(compact) > _PROVIDER_ERROR_BODY_LOG_LIMIT:
+        return compact[:_PROVIDER_ERROR_BODY_LOG_LIMIT] + "..."
+    return compact
+
+
+def _log_chat_provider_error(settings: LLMSettings, context: str, exc: Exception) -> None:
+    body = _provider_response_body(exc)
+    code, error_type = _provider_error_fields(exc, body)
+    logger.error(
+        "%s failed provider_host=%s model=%s wire_api=%s status=%s provider_error_type=%s provider_error_code=%s response_body=%s",
+        context,
+        _provider_host(settings.base_url),
+        settings.model,
+        settings.wire_api,
+        _error_status_code(exc) or "",
+        error_type or "",
+        code or "",
+        _truncate_provider_body(body),
+        exc_info=True,
+    )
+
+
+def _provider_error_hint(exc: Exception) -> str:
+    classification = classify_llm_error(exc)
+    status = _error_status_code(exc)
+    body = _provider_response_body(exc)
+    code, error_type = _provider_error_fields(exc, body)
+    parts = []
+    if classification.provider_error_type != "unknown":
+        parts.append(f"provider_error_type={classification.provider_error_type}")
+    if status is not None:
+        parts.append(f"status={status}")
+    if code:
+        parts.append(f"provider_error_code={code}")
+    if error_type:
+        parts.append(f"provider_error_schema_type={error_type}")
+    return " ".join(parts)
+
+
+def _adapter_error_content(prefix: str, exc: Exception) -> str:
+    hint = _provider_error_hint(exc)
+    suffix = f" ({hint})" if hint else ""
+    return f"{prefix}: {_clean_error_message(exc)}{suffix}"
 
 
 def _is_image_model(model: str) -> bool:
@@ -192,9 +397,12 @@ def _clean_error_message(exc: Exception) -> str:
     msg = re.sub(r'<[^>]+>', ' ', msg)
     # 压缩多余空白
     msg = re.sub(r'\s+', ' ', msg).strip()
+    # NOTE: do NOT translate/rewrite the message here. Error classification
+    # (classify_llm_error) runs on this text downstream; rewriting "connection
+    # error" to Chinese strips the English keyword and forces an `unknown`
+    # (non-retryable) verdict. Keep the raw text and let
+    # sanitize_llm_error_message produce the final user-facing wording.
     # 截断过长错误
-    if msg.lower() in {"connection error", "connection error."}:
-        return "上游模型服务连接失败，请检查网络、Base URL/API Key 后重试。"
     if len(msg) > 200:
         msg = msg[:200] + '...'
     return msg
@@ -414,7 +622,7 @@ class OpenAIAdapter(LLMAdapter):
             logger.error("Responses API 调用失败: %s", exc)
             yield StreamEvent(
                 type=StreamEventType.ERROR,
-                content=f"LLM API 调用失败: {_clean_error_message(exc)}",
+                content=_adapter_error_content("LLM API 调用失败", exc),
             )
             return
 
@@ -422,6 +630,7 @@ class OpenAIAdapter(LLMAdapter):
         full_text = ""
         pending_tool_calls: list[ToolCallEvent] = []
         usage = UsageInfo()
+        finish_reason = ""
 
         try:
             async for event in stream:
@@ -472,6 +681,7 @@ class OpenAIAdapter(LLMAdapter):
                 elif event_type == "response.completed":
                     response_obj = getattr(event, "response", None)
                     if response_obj:
+                        finish_reason = _response_finish_reason(response_obj)
                         for image_data in _extract_response_images(response_obj):
                             yield StreamEvent(
                                 type=StreamEventType.IMAGE_CHUNK,
@@ -485,6 +695,9 @@ class OpenAIAdapter(LLMAdapter):
                                 output_tokens=_get_usage_field(usage_obj, "output_tokens"),
                                 cache_read_input_tokens=_get_cached_prompt_tokens(usage_obj),
                             )
+                elif event_type == "response.incomplete":
+                    response_obj = getattr(event, "response", None)
+                    finish_reason = _response_finish_reason(response_obj) or "incomplete"
         except Exception as exc:
             logger.error("Responses API 流式解析异常: %s", exc)
             yield StreamEvent(
@@ -500,7 +713,7 @@ class OpenAIAdapter(LLMAdapter):
                 tool_calls=pending_tool_calls,
             )
 
-        yield StreamEvent(type=StreamEventType.DONE, usage=usage)
+        yield StreamEvent(type=StreamEventType.DONE, usage=usage, finish_reason=finish_reason)
 
     async def _simple_responses_api(self, messages: list[LLMMessage]) -> str:
         """Responses API 非流式调用。"""
@@ -666,8 +879,9 @@ class OpenAIAdapter(LLMAdapter):
             raise RuntimeError("Chat HTTP client is not initialized")
 
         full_text = ""
-        pending_tool_calls: dict[int, dict[str, Any]] = {}
+        accumulator = _ToolCallAccumulator()
         usage = UsageInfo()
+        finish_reason = ""
 
         async with self._raw_http_client.stream(
             "POST",
@@ -719,63 +933,37 @@ class OpenAIAdapter(LLMAdapter):
 
                 for tool_call in delta.get("tool_calls") or []:
                     idx = int(tool_call.get("index") or 0)
-                    is_new = idx not in pending_tool_calls
-                    if is_new:
-                        pending_tool_calls[idx] = {
-                            "id": tool_call.get("id") or "",
-                            "name": "",
-                            "arguments": "",
-                            "_delta_bytes": 0,
-                        }
-                    if tool_call.get("id"):
-                        pending_tool_calls[idx]["id"] = str(tool_call["id"])
-                    function = tool_call.get("function") or {}
-                    if function.get("name"):
-                        pending_tool_calls[idx]["name"] = str(function["name"])
-                    if function.get("arguments"):
-                        pending_tool_calls[idx]["arguments"] += str(function["arguments"])
-                        pending_tool_calls[idx]["_delta_bytes"] += len(str(function["arguments"]))
-                    # Emit TOOL_CALL_START when we first see a tool call with id+name
-                    tc_data = pending_tool_calls[idx]
-                    if is_new and tc_data["id"] and tc_data["name"]:
+                    is_new, _key, slot = accumulator.feed(tool_call, idx)
+                    if is_new and slot["id"] and slot["name"]:
                         yield StreamEvent(
                             type=StreamEventType.TOOL_CALL_START,
                             tool_call_start=ToolCallStartEvent(
-                                id=tc_data["id"], name=tc_data["name"], index=idx,
+                                id=slot["id"], name=slot["name"], index=idx,
                             ),
                         )
-                    elif not is_new and tc_data["_delta_bytes"] >= _DELTA_DEBOUNCE_BYTES:
-                        tc_data["_delta_bytes"] = 0
+                    elif not is_new and slot["_delta_bytes"] >= _DELTA_DEBOUNCE_BYTES:
+                        slot["_delta_bytes"] = 0
                         yield StreamEvent(
                             type=StreamEventType.TOOL_CALL_DELTA,
                             tool_call_delta=ToolCallDeltaEvent(
-                                id=tc_data["id"],
-                                partial_arguments=tc_data["arguments"],
+                                id=slot["id"],
+                                partial_arguments=slot["arguments"],
                             ),
                         )
 
+                # NOTE: do not break here. With stream_options.include_usage the
+                # gateway sends the token counts in a trailing chunk (choices: [])
+                # AFTER the finish_reason chunk. Breaking on finish_reason would
+                # drop it and leave usage at zero. The loop ends on [DONE] / EOF.
                 if choice.get("finish_reason"):
-                    break
+                    finish_reason = str(choice.get("finish_reason") or "")
+                    continue
 
-        if pending_tool_calls:
-            tool_call_events = []
-            for idx in sorted(pending_tool_calls.keys()):
-                tc_data = pending_tool_calls[idx]
-                try:
-                    arguments = json.loads(tc_data["arguments"] or "{}")
-                except (json.JSONDecodeError, TypeError):
-                    from backend.llm.json_repair import repair_tool_json
-                    arguments = repair_tool_json(tc_data["arguments"]) or {"_raw": tc_data["arguments"]}
-                tool_call_events.append(
-                    ToolCallEvent(
-                        id=tc_data["id"],
-                        name=tc_data["name"],
-                        arguments=arguments,
-                    )
-                )
+        tool_call_events = accumulator.finalize()
+        if tool_call_events:
             yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=tool_call_events)
 
-        yield StreamEvent(type=StreamEventType.DONE, usage=usage)
+        yield StreamEvent(type=StreamEventType.DONE, usage=usage, finish_reason=finish_reason)
 
     async def _stream_chat_completions_http(
         self,
@@ -830,10 +1018,10 @@ class OpenAIAdapter(LLMAdapter):
                 except Exception as minimal_exc:
                     exc = minimal_exc
 
-            logger.error("Chat Completions HTTP API 调用失败: %s", exc)
+            _log_chat_provider_error(self._settings, "Chat Completions HTTP API", exc)
             yield StreamEvent(
                 type=StreamEventType.ERROR,
-                content=f"LLM API 调用失败: {_clean_error_message(exc)}",
+                content=_adapter_error_content("LLM API 调用失败", exc),
             )
 
     async def _simple_chat_completions_http(self, messages: list[LLMMessage]) -> str:
@@ -860,7 +1048,7 @@ class OpenAIAdapter(LLMAdapter):
             )
             response.raise_for_status()
         except Exception as exc:
-            logger.error("Chat Completions HTTP simple_chat 失败: %s", exc)
+            _log_chat_provider_error(self._settings, "Chat Completions HTTP simple_chat", exc)
             raise RuntimeError(f"LLM 调用失败: {exc}") from exc
 
         data = response.json()
@@ -893,6 +1081,10 @@ class OpenAIAdapter(LLMAdapter):
             "messages": openai_messages,
             "stream": True,
             "max_tokens": self._settings.max_tokens,
+            # Ask the gateway to emit a trailing usage-only chunk (choices: [],
+            # usage: {...}) after generation. Without this the Chat Completions
+            # wire API sends no token counts at all and usage stays at zero.
+            "stream_options": {"include_usage": True},
         }
 
         if tools:
@@ -934,17 +1126,17 @@ class OpenAIAdapter(LLMAdapter):
                         try:
                             stream = await create_minimal_stream(retry_exc)
                         except Exception as minimal_exc:
-                            logger.error("Chat Completions API 调用失败: %s", minimal_exc)
+                            _log_chat_provider_error(self._settings, "Chat Completions API minimal retry", minimal_exc)
                             yield StreamEvent(
                                 type=StreamEventType.ERROR,
-                                content=f"LLM API 调用失败: {_clean_error_message(minimal_exc)}",
+                                content=_adapter_error_content("LLM API 调用失败", minimal_exc),
                             )
                             return
                     else:
-                        logger.error("Chat Completions API 调用失败: %s", retry_exc)
+                        _log_chat_provider_error(self._settings, "Chat Completions API tool-free retry", retry_exc)
                         yield StreamEvent(
                             type=StreamEventType.ERROR,
-                            content=f"LLM API 调用失败: {_clean_error_message(retry_exc)}",
+                            content=_adapter_error_content("LLM API 调用失败", retry_exc),
                         )
                         return
             else:
@@ -952,22 +1144,22 @@ class OpenAIAdapter(LLMAdapter):
                     try:
                         stream = await create_minimal_stream(exc)
                     except Exception as minimal_exc:
-                        logger.error("Chat Completions API 调用失败: %s", minimal_exc)
+                        _log_chat_provider_error(self._settings, "Chat Completions API minimal retry", minimal_exc)
                         yield StreamEvent(
                             type=StreamEventType.ERROR,
-                            content=f"LLM API 调用失败: {_clean_error_message(minimal_exc)}",
+                            content=_adapter_error_content("LLM API 调用失败", minimal_exc),
                         )
                         return
                 else:
-                    logger.error("Chat Completions API 调用失败: %s", exc)
+                    _log_chat_provider_error(self._settings, "Chat Completions API", exc)
                     yield StreamEvent(
                         type=StreamEventType.ERROR,
-                        content=f"LLM API 调用失败: {_clean_error_message(exc)}",
+                        content=_adapter_error_content("LLM API 调用失败", exc),
                     )
                     return
 
         full_text = ""
-        pending_tool_calls: dict[int, dict[str, Any]] = {}
+        accumulator = _ToolCallAccumulator()
         usage = UsageInfo()
 
         try:
@@ -993,43 +1185,38 @@ class OpenAIAdapter(LLMAdapter):
 
                 if delta and delta.tool_calls:
                     for tc in delta.tool_calls:
-                        idx = tc.index
-                        is_new = idx not in pending_tool_calls
-                        if is_new:
-                            pending_tool_calls[idx] = {
-                                "id": tc.id or "",
-                                "name": "",
-                                "arguments": "",
-                                "_delta_bytes": 0,
-                            }
-                        if tc.id:
-                            pending_tool_calls[idx]["id"] = tc.id
-                        if tc.function:
-                            if tc.function.name:
-                                pending_tool_calls[idx]["name"] = tc.function.name
-                            if tc.function.arguments:
-                                pending_tool_calls[idx]["arguments"] += tc.function.arguments
-                                pending_tool_calls[idx]["_delta_bytes"] += len(tc.function.arguments)
-                        tc_data = pending_tool_calls[idx]
-                        if is_new and tc_data["id"] and tc_data["name"]:
+                        idx = int(tc.index) if tc.index is not None else 0
+                        tc_dict = {
+                            "id": tc.id or "",
+                            "function": {
+                                "name": tc.function.name if tc.function else "",
+                                "arguments": tc.function.arguments if tc.function else "",
+                            },
+                        }
+                        is_new, _key, slot = accumulator.feed(tc_dict, idx)
+                        if is_new and slot["id"] and slot["name"]:
                             yield StreamEvent(
                                 type=StreamEventType.TOOL_CALL_START,
                                 tool_call_start=ToolCallStartEvent(
-                                    id=tc_data["id"], name=tc_data["name"], index=idx,
+                                    id=slot["id"], name=slot["name"], index=idx,
                                 ),
                             )
-                        elif not is_new and tc_data["_delta_bytes"] >= _DELTA_DEBOUNCE_BYTES:
-                            tc_data["_delta_bytes"] = 0
+                        elif not is_new and slot["_delta_bytes"] >= _DELTA_DEBOUNCE_BYTES:
+                            slot["_delta_bytes"] = 0
                             yield StreamEvent(
                                 type=StreamEventType.TOOL_CALL_DELTA,
                                 tool_call_delta=ToolCallDeltaEvent(
-                                    id=tc_data["id"],
-                                    partial_arguments=tc_data["arguments"],
+                                    id=slot["id"],
+                                    partial_arguments=slot["arguments"],
                                 ),
                             )
 
+                # Do not break on finish_reason: the trailing usage-only chunk
+                # (choices: [], handled above) arrives afterward. Breaking here
+                # would skip it and leave usage at zero. Loop ends at stream EOF.
                 if choice.finish_reason:
-                    break
+                    finish_reason = str(choice.finish_reason or "")
+                    continue
         except Exception as exc:
             yield StreamEvent(
                 type=StreamEventType.ERROR,
@@ -1037,29 +1224,11 @@ class OpenAIAdapter(LLMAdapter):
             )
             return
 
-        if pending_tool_calls:
-            tool_call_events = []
-            for idx in sorted(pending_tool_calls.keys()):
-                tc_data = pending_tool_calls[idx]
-                try:
-                    arguments = json.loads(tc_data["arguments"] or "{}")
-                except (json.JSONDecodeError, TypeError):
-                    from backend.llm.json_repair import repair_tool_json
-                    arguments = repair_tool_json(tc_data["arguments"]) or {"_raw": tc_data["arguments"]}
-                tool_call_events.append(
-                    ToolCallEvent(
-                        id=tc_data["id"],
-                        name=tc_data["name"],
-                        arguments=arguments,
-                    )
-                )
+        tool_call_events = accumulator.finalize()
+        if tool_call_events:
+            yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=tool_call_events)
 
-            yield StreamEvent(
-                type=StreamEventType.TOOL_CALL,
-                tool_calls=tool_call_events,
-            )
-
-        yield StreamEvent(type=StreamEventType.DONE, usage=usage)
+        yield StreamEvent(type=StreamEventType.DONE, usage=usage, finish_reason=finish_reason)
 
     async def _simple_chat_completions(self, messages: list[LLMMessage]) -> str:
         """Chat Completions API 非流式调用。"""
@@ -1078,7 +1247,7 @@ class OpenAIAdapter(LLMAdapter):
                 max_tokens=self._settings.max_tokens,
             )
         except Exception as exc:
-            logger.error("Chat Completions simple_chat 失败: %s", exc)
+            _log_chat_provider_error(self._settings, "Chat Completions simple_chat", exc)
             raise RuntimeError(f"LLM 调用失败: {exc}") from exc
 
         choice = response.choices[0] if response.choices else None

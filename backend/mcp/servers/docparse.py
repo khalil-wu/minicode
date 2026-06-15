@@ -32,10 +32,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import re
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -180,19 +178,21 @@ def _parse_pdf(file_path: str) -> dict[str, Any]:
     try:
         import pymupdf
         doc = pymupdf.open(file_path)
-        pages_text = []
-        for page in doc:
-            pages_text.append(page.get_text())
-        doc.close()
-        full_text = "\n\n".join(pages_text)
-        if not full_text.strip():
-            raise RuntimeError("PDF contains no extractable text")
-        return {
-            "title": Path(file_path).stem,
-            "full_text": full_text,
-            "format": "pdf",
-            "pages": len(pages_text),
-        }
+        try:
+            pages_text = []
+            for page in doc:
+                pages_text.append(page.get_text())
+            full_text = "\n\n".join(pages_text)
+            if not full_text.strip():
+                raise RuntimeError("PDF contains no extractable text")
+            return {
+                "title": Path(file_path).stem,
+                "full_text": full_text,
+                "format": "pdf",
+                "pages": len(pages_text),
+            }
+        finally:
+            doc.close()
     except (ImportError, Exception) as exc:
         return {
             "title": Path(file_path).stem,
@@ -285,9 +285,10 @@ def _count_pdf_pages(file_path: str) -> int:
     try:
         import pymupdf
         doc = pymupdf.open(file_path)
-        count = len(doc)
-        doc.close()
-        return count
+        try:
+            return len(doc)
+        finally:
+            doc.close()
     except Exception:
         return 0
 

@@ -89,6 +89,9 @@ class StreamEvent:
     usage: UsageInfo = field(default_factory=UsageInfo)
     image_data: str = ""
     image_media_type: str = ""
+    # Provider-normalized terminal reason on DONE events, e.g. "stop",
+    # "tool_calls", "length", "max_tokens", or "max_output_tokens".
+    finish_reason: str = ""
 
 
 @dataclass
@@ -137,8 +140,8 @@ class LLMMessage:
                 })
             if parts:
                 msg["content"] = parts
-        elif self.content:
-            msg["content"] = self.content
+        else:
+            msg["content"] = self.content or ""
 
         if self.role == "assistant" and self.tool_calls:
             msg["tool_calls"] = [
@@ -152,9 +155,8 @@ class LLMMessage:
                 }
                 for tc in self.tool_calls
             ]
-            # OpenAI 要求 tool_calls 存在时 content 可以为 null
-            if not self.content:
-                msg["content"] = None
+            # OpenAI 允许 tool_calls 存在时 content 为 null，但 DeepSeek 强要求必须为 string 否则报 400 Bad Request
+            msg["content"] = self.content or ""
 
         if self.role == "tool":
             msg["tool_call_id"] = self.tool_call_id or ""

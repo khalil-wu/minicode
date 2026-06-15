@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 import hashlib
-import json
 
 logger = logging.getLogger(__name__)
 

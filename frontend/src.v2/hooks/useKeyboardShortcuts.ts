@@ -45,12 +45,27 @@ export const useKeyboardShortcuts = () => {
       if (e.key === "Escape") {
         if (!isInteractiveTarget(e.target)) {
           s.interrupt();
-          sendClientCommand({ type: "interrupt" });
+          sendClientCommand({
+            type: "interrupt",
+            ...(s.conversationId ? { conversation_id: s.conversationId } : {}),
+          });
         }
         return;
       }
 
       if (!mod) return;
+
+      // Ctrl/Cmd+1..9 jumps directly to the Nth non-archived conversation.
+      if (!e.shiftKey && !e.altKey && e.key >= "1" && e.key <= "9") {
+        e.preventDefault();
+        const convs = s.conversations.filter((c) => !c.archived);
+        const target = convs[Number(e.key) - 1];
+        if (target && target.id !== s.conversationId) {
+          s.requestConversationSwitch(target.id);
+        }
+        return;
+      }
+
       switch (e.key) {
         case "l":
           if (e.shiftKey) {
@@ -93,14 +108,13 @@ export const useKeyboardShortcuts = () => {
             s.setRightStackTab("preview");
           } else {
             e.preventDefault();
-            useAppStore.setState((st) => ({ quickOpenVisible: !st.quickOpenVisible }));
+            s.toggleQuickOpen();
           }
           break;
         case "m":
         case "M":
           if (e.shiftKey) {
             e.preventDefault();
-            // In a real app this would dispatch an event to open the permission menu in the FooterRow
             document.dispatchEvent(new CustomEvent("open-permission-menu"));
           }
           break;
@@ -220,8 +234,7 @@ case "b":
               ? convs[(idx - 1 + convs.length) % convs.length]
               : convs[(idx + 1) % convs.length];
             if (next) {
-              s.switchConversation(next.id);
-              sendClientCommand({ type: "conversation.switch", conversation_id: next.id });
+              s.requestConversationSwitch(next.id);
             }
           }
           break;

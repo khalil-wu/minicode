@@ -11,6 +11,8 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
+from backend.chroma_utils import create_chroma_persistent_client
+
 logger = logging.getLogger(__name__)
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "chroma"
@@ -60,7 +62,7 @@ class RAGPipeline:
             return False
 
         try:
-            client = chromadb.PersistentClient(path=str(DATA_DIR))
+            client = create_chroma_persistent_client(chromadb, DATA_DIR)
             for name in ("memory", "documents", "codebase"):
                 try:
                     collection = self._get_or_create_collection(client, name)

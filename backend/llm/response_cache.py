@@ -5,7 +5,6 @@ import json
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any
 
 from backend.llm.base import LLMAdapter, LLMMessage
 

@@ -6,7 +6,6 @@ Fetches from the MCP registry and merges with local curated entries.
 
 from __future__ import annotations
 
-import time
 from typing import Any
 
 CURATED_CONNECTORS: list[dict[str, Any]] = [
@@ -72,6 +71,33 @@ CURATED_CONNECTORS: list[dict[str, Any]] = [
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-puppeteer"],
         "tags": ["browser", "automation", "testing"],
+    },
+    {
+        "name": "playwright",
+        "title": "Playwright",
+        "description": "Official Playwright MCP server for browser automation, inspection, and UI testing.",
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@playwright/mcp@latest"],
+        "tags": ["browser", "automation", "testing", "playwright"],
+        "auth": "none",
+        "requiresUserAction": False,
+        "setupHint": "Installs and starts the official Playwright MCP package with npx.",
+        "docsUrl": "https://github.com/microsoft/playwright-mcp",
+    },
+    {
+        "name": "figma-desktop",
+        "title": "Figma Dev Mode",
+        "description": "Connect to the local Figma Desktop Dev Mode MCP server for design context.",
+        "transport": "http",
+        "url": "http://127.0.0.1:3845/mcp",
+        "autoStart": False,
+        "maxRetries": 1,
+        "tags": ["design", "figma", "mcp", "local-app"],
+        "auth": "local_app",
+        "requiresUserAction": True,
+        "setupHint": "Open Figma Desktop, enable the Dev Mode MCP server, then start or restart this connector.",
+        "docsUrl": "https://help.figma.com/hc/en-us/articles/32132100833559-Guide-to-the-Dev-Mode-MCP-Server",
     },
     {
         "name": "slack",

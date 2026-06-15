@@ -5,10 +5,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.workspace.fuzzy_search import get_global_fuzzy_search
+
+if TYPE_CHECKING:
+    from backend.permissions.context import ToolExecutionContext
 
 
 class FuzzySearchTool(BaseTool):
@@ -25,10 +28,20 @@ class FuzzySearchTool(BaseTool):
     name = "fuzzy_search"
     read_only = True
     description = (
-        "使用模糊匹配查找文件。"
-        "支持部分文件名、路径片段、CamelCase 缩写等。"
-        "示例: fuzzy_search(query='MainApp') 可以找到 'src/components/MainApp.tsx'。"
-        "示例: fuzzy_search(query='utils/str') 可以找到 'backend/utils/string_helper.py'。"
+        "Find files by partial name match using fuzzy scoring. "
+        "Supports partial filenames, path segments, CamelCase abbreviations.\n\n"
+        "WHEN TO USE:\n"
+        "- You know roughly what the file is called but not the exact name or path\n"
+        "- Searching for files by feature/component name (e.g. 'UserAuth' finds 'src/auth/UserAuthentication.tsx')\n"
+        "- Finding files across deep directory trees without knowing the full path\n\n"
+        "WHEN NOT TO USE:\n"
+        "- Finding files by content — use grep_files instead\n"
+        "- Listing all files in a directory — use list_files instead\n"
+        "- Pattern matching (*.py, **/*.test.ts) — use glob_files instead\n\n"
+        "Examples:\n"
+        "- fuzzy_search(query='MainApp') → finds 'src/components/MainApp.tsx'\n"
+        "- fuzzy_search(query='utils/str') → finds 'backend/utils/string_helper.py'\n"
+        "- fuzzy_search(query='UserSvc') → finds 'services/UserService.java'"
     )
     permission = PermissionLevel.AUTO
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 
 
 @dataclass
@@ -77,6 +76,17 @@ async def _run_git(workspace_root: str, *args: str) -> str:
     return stdout.decode("utf-8", errors="replace")
 
 
+async def _run_git_ok(workspace_root: str, *args: str) -> bool:
+    proc = await asyncio.create_subprocess_exec(
+        "git", *args,
+        cwd=workspace_root,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    await proc.communicate()
+    return proc.returncode == 0
+
+
 async def get_working_tree_diff(workspace_root: str) -> StructuredDiff:
     raw = await _run_git(workspace_root, "diff", "--no-color")
     return _parse_diff_output(raw)
@@ -93,22 +103,20 @@ async def get_untracked_files(workspace_root: str) -> list[str]:
 
 
 async def stage_file(workspace_root: str, path: str) -> bool:
-    proc = await asyncio.create_subprocess_exec(
-        "git", "add", "--", path,
-        cwd=workspace_root,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    await proc.communicate()
-    return proc.returncode == 0
+    return await _run_git_ok(workspace_root, "add", "--", path)
 
 
 async def unstage_file(workspace_root: str, path: str) -> bool:
-    proc = await asyncio.create_subprocess_exec(
-        "git", "reset", "HEAD", "--", path,
-        cwd=workspace_root,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    await proc.communicate()
-    return proc.returncode == 0
+    return await _run_git_ok(workspace_root, "reset", "HEAD", "--", path)
+
+
+async def stage_all(workspace_root: str) -> bool:
+    return await _run_git_ok(workspace_root, "add", "--all", "--", ".")
+
+
+async def unstage_all(workspace_root: str) -> bool:
+    return await _run_git_ok(workspace_root, "reset", "HEAD", "--", ".")
+
+
+async def revert_file(workspace_root: str, path: str) -> bool:
+    return await _run_git_ok(workspace_root, "restore", "--worktree", "--", path)

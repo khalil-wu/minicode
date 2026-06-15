@@ -75,19 +75,7 @@ class ConversationRuntime:
             if candidate is not None and not candidate.archived:
                 active = candidate
 
-        # 2. 如果没有 preferred，使用最近的未归档对话
-        if active is None:
-            conversations = [
-                conv
-                for conv in self._conversation_repo.list_conversations()
-                if not conv.archived
-            ]
-            if conversations:
-                # 按创建时间排序，使用最新的
-                conversations.sort(key=lambda c: c.created_at, reverse=True)
-                active = self._conversation_repo.get_conversation(conversations[0].id)
-
-        # 3. 只有在没有任何对话时才创建新的
+        # 2. 如果preferred_id无效，创建新会话（不再自动加载历史会话）
         if active is None:
             active = self._conversation_repo.create_conversation()
 

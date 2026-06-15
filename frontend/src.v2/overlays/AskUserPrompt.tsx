@@ -1,35 +1,49 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useAppStore } from "../stores";
 import { getWebSocket } from "../hooks/useWebSocket";
+import { buildAskUserResponseCommand } from "../protocol/prompt-responses";
+import { pendingPromptTargetsConversation } from "../lib/pending-prompts";
 
 export const AskUserPrompt = () => {
   const pendingAskUser = useAppStore((s) => s.pendingAskUser);
+  const activeConversationId = useAppStore((s) => s.conversationId);
+  const visibleAskUser = pendingPromptTargetsConversation(pendingAskUser, activeConversationId, activeConversationId)
+    ? pendingAskUser
+    : null;
   const [answer, setAnswer] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
-  const hasOptions = Boolean(pendingAskUser?.options && pendingAskUser.options.length > 0);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const hasOptions = Boolean(visibleAskUser?.options && visibleAskUser.options.length > 0);
 
   const respond = useCallback((text: string) => {
-    if (!pendingAskUser) return;
+    if (!visibleAskUser) return;
     const ws = getWebSocket();
-    ws?.send({
-      type: "answer",
-      tool_call_id: pendingAskUser.requestId,
-      answer: text,
-    });
+    ws?.send(buildAskUserResponseCommand(visibleAskUser.requestId, text, visibleAskUser.protocol));
     useAppStore.getState().clearAskUser();
-  }, [pendingAskUser]);
+  }, [visibleAskUser]);
+
+  const cancel = useCallback(() => {
+    if (!visibleAskUser) return;
+    useAppStore.getState().clearAskUser();
+  }, [visibleAskUser]);
 
   useEffect(() => {
-    if (pendingAskUser) {
+    if (visibleAskUser) {
       setAnswer("");
-      if (!pendingAskUser.options || pendingAskUser.options.length === 0) {
+      if (!visibleAskUser.options || visibleAskUser.options.length === 0) {
         setTimeout(() => inputRef.current?.focus(), 50);
       }
     }
-  }, [pendingAskUser]);
+  }, [visibleAskUser]);
 
   useEffect(() => {
-    if (!pendingAskUser) return;
+    if (!visibleAskUser) return;
+    const previousActive = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusFirst = () => {
+      const focusable = getFocusable(dialogRef.current);
+      (focusable[0] ?? dialogRef.current)?.focus();
+    };
+    window.setTimeout(focusFirst, 0);
     const handler = (e: KeyboardEvent) => {
       if (e.isComposing) return;
       if (e.key === "Enter" && !e.shiftKey && answer.trim()) {
@@ -37,14 +51,33 @@ export const AskUserPrompt = () => {
         respond(answer.trim());
       } else if (e.key === "Escape") {
         e.preventDefault();
-        respond("");
+        cancel();
+      } else if (e.key === "Tab") {
+        const focusable = getFocusable(dialogRef.current);
+        if (focusable.length === 0) {
+          e.preventDefault();
+          dialogRef.current?.focus();
+          return;
+        }
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
       }
     };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
-  }, [answer, pendingAskUser, respond]);
+    window.addEventListener("keydown", handler);
+    return () => {
+      window.removeEventListener("keydown", handler);
+      previousActive?.focus();
+    };
+  }, [answer, visibleAskUser, respond, cancel]);
 
-  if (!pendingAskUser) return null;
+  if (!visibleAskUser) return null;
 
   return (
     <div
@@ -52,16 +85,21 @@ export const AskUserPrompt = () => {
       style={{
         position: "fixed",
         inset: 0,
-        background: "rgba(0,0,0,0.5)",
+        background: "var(--backdrop-overlay)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        zIndex: 110,
+        zIndex: "var(--z-approval)",
         backdropFilter: "blur(4px)",
       }}
     >
       <div
+        ref={dialogRef}
         className="modal-content"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Agent needs input"
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
         style={{
           width: "min(520px, 90vw)",
@@ -79,11 +117,11 @@ export const AskUserPrompt = () => {
           Agent needs input
         </h3>
         <p style={{ margin: 0, color: "var(--text-secondary)", fontSize: "var(--text-sm)", lineHeight: 1.6 }}>
-          {pendingAskUser.question}
+          {visibleAskUser.question}
         </p>
         {hasOptions && (
           <div style={optionGridStyle}>
-            {pendingAskUser.options?.map((opt) => (
+            {visibleAskUser.options?.map((opt) => (
               <button
                 key={opt}
                 onClick={() => respond(opt)}
@@ -128,12 +166,36 @@ export const AskUserPrompt = () => {
             Send
           </button>
         </div>
-        <span style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)" }}>
-          Enter to send, Esc to dismiss
-        </span>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)" }}>
+            Enter to send
+          </span>
+          <button
+            onClick={cancel}
+            className="btn-ghost"
+            style={{
+              border: 0,
+              borderRadius: "var(--radius-sm, 6px)",
+              padding: "4px 10px",
+              cursor: "pointer",
+              fontSize: "var(--text-xs)",
+            }}
+          >
+            Cancel
+          </button>
+        </div>
       </div>
     </div>
   );
+};
+
+const getFocusable = (root: HTMLElement | null): HTMLElement[] => {
+  if (!root) return [];
+  return Array.from(
+    root.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ),
+  ).filter((element) => !element.hasAttribute("disabled") && element.offsetParent !== null);
 };
 
 const optionGridStyle: React.CSSProperties = {

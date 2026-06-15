@@ -7,7 +7,15 @@ AST 轻量代码分析工具（newplan.md §4. Phase 4 — 实验组）。
   - go_to_definition:  在工作区内查找名称的定义位置（函数/类/变量）
   - find_references:   在工作区内查找名称的所有引用出现位置
 
-  支持语言：Python（AST 精确解析），JS/TS/Go/Rust/Java（正则近似搜索）。
+  支持语言：
+    - Python: 使用内置 ast 模块精确解析
+    - JS/TS/Go/Rust/Java: 优先使用 tree-sitter AST 分析，
+      若 tree-sitter 未安装则回退至正则模式匹配
+
+  安装 tree-sitter（可选，推荐）:
+    pip install tree-sitter tree-sitter-javascript tree-sitter-typescript \\
+                tree-sitter-go tree-sitter-rust tree-sitter-java
+
   权限：AUTO（只读操作，无副作用）。
 """
 
@@ -21,6 +29,12 @@ from typing import Any
 
 from backend.permissions.context import ToolExecutionContext
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
+from backend.tools.tree_sitter_parser import (
+    find_definitions as _ts_find_definitions,
+    find_references as _ts_find_references,
+    is_available as _ts_is_available,
+    language_for_extension as _ts_language_for_ext,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +154,17 @@ def _find_definitions_in_file(path: Path, name: str) -> list[dict[str, Any]]:
     if ext == "py":
         line_nums = _python_ast_definitions(content, name)
     else:
-        line_nums = _regex_definitions(content, name, ext)
+        # Try tree-sitter first for non-Python languages
+        ts_lang = _ts_language_for_ext(ext)
+        ts_results: list[tuple[int, str]] = []
+        if ts_lang is not None and _ts_is_available():
+            ts_results = _ts_find_definitions(content, name, ts_lang)
+
+        if ts_results:
+            line_nums = [lineno for lineno, _ in ts_results]
+        else:
+            # Fall back to regex patterns
+            line_nums = _regex_definitions(content, name, ext)
 
     results = []
     source_lines = content.splitlines()
@@ -154,15 +178,32 @@ def _find_definitions_in_file(path: Path, name: str) -> list[dict[str, Any]]:
     return results
 
 
-# ── 引用查找（通用正则词边界匹配） ──────────────────────────────
+# ── 引用查找（通用正则词边界匹配 / tree-sitter 精确匹配） ──────────
 def _find_references_in_file(path: Path, name: str, include_defs: bool) -> list[dict[str, Any]]:
     content = _read_safe(path)
     if content is None:
         return []
 
+    ext = path.suffix.lower().lstrip(".")
+    results: list[dict[str, Any]] = []
+
+    # For non-Python files, try tree-sitter AST-based reference finding
+    if ext != "py":
+        ts_lang = _ts_language_for_ext(ext)
+        if ts_lang is not None and _ts_is_available():
+            ts_refs = _ts_find_references(content, name, ts_lang)
+            if ts_refs:
+                for lineno, line_text in ts_refs:
+                    results.append({
+                        "file": str(path),
+                        "line": lineno,
+                        "snippet": line_text.strip()[:200],
+                    })
+                return results
+
+    # Fall back to regex word-boundary matching (works for all languages)
     pattern = re.compile(r"\b" + re.escape(name) + r"\b")
     source_lines = content.splitlines()
-    results: list[dict[str, Any]] = []
 
     for lineno, line in enumerate(source_lines, 1):
         if pattern.search(line):
@@ -190,21 +231,39 @@ class GoToDefinitionTool(BaseTool):
     """
     在工作区中查找符号（函数/类/变量）的定义位置。
 
-    Python 文件使用 AST 精确解析；其余语言使用语言特定的
-    正则模式匹配，准确率约 85-95%。
+    Python 文件使用 AST 精确解析；JS/TS/Go/Rust/Java 优先使用
+    tree-sitter AST 分析，回退至正则模式匹配。
     权限: AUTO（只读）。
     """
 
     name = "go_to_definition"
     read_only = True
     description = (
-        "在工作区源码中查找函数、类或变量名称的定义位置。"
-        "Python 文件使用 AST 精确解析，其余语言使用正则模式匹配（准确率 ~90%）。"
-        "返回定义所在文件路径、行号和代码片段。"
-        "示例: go_to_definition(name='run_agent_loop')。"
-        "注意: 不依赖外部 LSP，适用于任何规模的工作区。"
+        "Locate where a function, class, or variable is defined in the workspace.\n\n"
+        "WHEN TO USE:\n"
+        "- You see a name referenced in code and need to find its origin.\n"
+        "- You want to understand what a function does by reading its implementation.\n"
+        "- You need to navigate to a symbol before modifying it.\n\n"
+        "WHEN NOT TO USE:\n"
+        "- The symbol is from an external library not in the workspace (use read_docs instead).\n"
+        "- You need all usages, not the definition (use find_references instead).\n"
+        "- You are searching for free-text, not a symbol name (use grep_files instead).\n\n"
+        "Analysis method:\n"
+        "- Python: precise AST parsing (ast module).\n"
+        "- JS/TS/Go/Rust/Java: tree-sitter AST when available, otherwise regex (~90% accuracy).\n\n"
+        "Returns file paths, line numbers, and code snippets. "
+        "Example: go_to_definition(name='run_agent_loop')."
     )
     permission = PermissionLevel.AUTO
+
+    def get_spec(self) -> Any | None:
+        """Return runtime metadata describing analysis capabilities."""
+        return {
+            "tool_name": self.name,
+            "analysis_backend": "tree-sitter" if _ts_is_available() else "regex",
+            "supported_languages": ["py", "js", "jsx", "ts", "tsx", "go", "rs", "java", "kt", "c", "cpp", "rb"],
+            "tree_sitter_available": _ts_is_available(),
+        }
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -282,7 +341,8 @@ class FindReferencesTool(BaseTool):
     """
     在工作区中查找符号名称的所有引用位置。
 
-    使用词边界正则匹配（\b name \b），避免误匹配子字符串。
+    JS/TS/Go/Rust/Java 优先使用 tree-sitter AST 精确匹配标识符节点；
+    其余情况使用词边界正则匹配（\\b name \\b），避免误匹配子字符串。
     返回出现该名称的文件路径、行号和代码片段。
     权限: AUTO（只读）。
     """
@@ -290,14 +350,34 @@ class FindReferencesTool(BaseTool):
     name = "find_references"
     read_only = True
     description = (
-        "在工作区源码中查找函数、类或变量名称的所有使用位置。"
-        "使用词边界正则匹配，避免误匹配子字符串（如 user 不会匹配 username）。"
-        "返回所有引用的文件路径、行号和代码片段，最多 60 条。"
-        "示例: find_references(name='ReadFileTool')。"
+        "Find all places where a function, class, or variable name is used in the workspace.\n\n"
+        "WHEN TO USE:\n"
+        "- You need to rename a symbol and want to find every occurrence first.\n"
+        "- You want to understand the call sites or usage patterns of a symbol.\n"
+        "- You are assessing the blast radius of changing a function's signature.\n\n"
+        "WHEN NOT TO USE:\n"
+        "- You need the definition, not usages (use go_to_definition instead).\n"
+        "- You are searching for a string literal or pattern, not a symbol (use grep_files).\n"
+        "- The symbol is too common (e.g. 'id', 'name') and will produce excessive results.\n\n"
+        "Analysis method:\n"
+        "- JS/TS/Go/Rust/Java: tree-sitter identifier matching when available (precise).\n"
+        "- All languages: word-boundary regex fallback (user won't match username).\n\n"
+        "Returns file paths, line numbers, and code snippets (max 60). "
+        "Example: find_references(name='ReadFileTool')."
     )
     permission = PermissionLevel.AUTO
 
     MAX_REFS = 60
+
+    def get_spec(self) -> Any | None:
+        """Return runtime metadata describing analysis capabilities."""
+        return {
+            "tool_name": self.name,
+            "analysis_backend": "tree-sitter" if _ts_is_available() else "regex",
+            "supported_languages": ["py", "js", "jsx", "ts", "tsx", "go", "rs", "java", "kt", "c", "cpp", "rb"],
+            "tree_sitter_available": _ts_is_available(),
+            "max_references": self.MAX_REFS,
+        }
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(

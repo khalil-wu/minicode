@@ -32,6 +32,7 @@ def agent_progress(
     count: int | None = None,
     group_id: str = "",
     step_id: str = "",
+    iteration_id: str = "",
 ) -> AgentEvent:
     return AgentEvent.progress(
         message,
@@ -46,4 +47,5 @@ def agent_progress(
         count=count,
         group_id=group_id,
         step_id=step_id,
+        iteration_id=iteration_id,
     )

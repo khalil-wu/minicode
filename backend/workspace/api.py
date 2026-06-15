@@ -17,6 +17,10 @@ from .models import (
     WorkspaceGitWorktreeRemoveResponse,
     WorkspaceGitWorktreeResponse,
     WorkspaceGitWorktreeSwitchRequest,
+    WorkspaceGitWorktreeSnapshotsResponse,
+    WorkspaceGitWorktreeRestoreRequest,
+    WorkspaceGitWorktreeRestoreResponse,
+    WorktreeSnapshotEntryResponse,
     WorkspaceFileUpdateRequest,
     WorkspacePathRenameRequest,
     WorkspacePathResponse,
@@ -106,6 +110,19 @@ def create_workspace_router(get_project_root: Callable[[], Path]) -> APIRouter:
     service = WorkspaceService(
         get_workspace_root=lambda: get_active_workspace_root(get_project_root().resolve())
     )
+
+    def _resolve_git_root(path: str) -> Path:
+        """git 端点优先使用调用方显式传入的目录，避免全局工作区切换的竞态。"""
+        candidate = str(path or "").strip()
+        if candidate:
+            resolved = Path(candidate).expanduser()
+            try:
+                resolved = resolved.resolve()
+            except OSError:
+                resolved = None
+            if resolved is not None and resolved.is_dir():
+                return resolved
+        return service.workspace_root_path()
 
     @router.get("/tree", response_model=WorkspaceTreeResponse)
     async def workspace_tree_api(path: str = Query(".", min_length=1)) -> WorkspaceTreeResponse:
@@ -259,14 +276,16 @@ def create_workspace_router(get_project_root: Callable[[], Path]) -> APIRouter:
         return {"removed": removed, "path": normalized_path}
 
     @router.get("/git/status")
-    async def git_status_api() -> dict:
+    async def git_status_api(path: str = Query("")) -> dict:
         """返回 git 状态：分支、已修改/暂存/未跟踪文件列表"""
-        root = service.workspace_root_path()
+        root = _resolve_git_root(path)
         try:
             import subprocess
+
+            from backend.runtime_env import sanitized_git_env
             result = subprocess.run(
                 ["git", "status", "--porcelain=v1", "--branch"],
-                cwd=root, capture_output=True, text=True, encoding="utf-8", timeout=5
+                cwd=root, env=sanitized_git_env(), capture_output=True, text=True, encoding="utf-8", timeout=5
             )
             lines = result.stdout.splitlines()
             branch = ""
@@ -287,24 +306,28 @@ def create_workspace_router(get_project_root: Callable[[], Path]) -> APIRouter:
             return {"branch": "", "modified": [], "staged": [], "untracked": [], "error": str(e)}
 
     @router.get("/git/diff")
-    async def git_diff_api(file: str = Query("")) -> dict:
+    async def git_diff_api(file: str = Query(""), path: str = Query("")) -> dict:
         """返回指定文件的 git diff"""
-        root = service.workspace_root_path()
+        root = _resolve_git_root(path)
         try:
             import subprocess
+
+            from backend.runtime_env import sanitized_git_env
             cmd = ["git", "diff", "HEAD", "--", file] if file else ["git", "diff", "HEAD"]
-            result = subprocess.run(cmd, cwd=root, capture_output=True, text=True, encoding="utf-8", timeout=10)
+            result = subprocess.run(cmd, cwd=root, env=sanitized_git_env(), capture_output=True, text=True, encoding="utf-8", timeout=10)
             return {"diff": result.stdout}
         except Exception as e:
             return {"diff": "", "error": str(e)}
 
     @router.get("/git/worktree", response_model=WorkspaceGitWorktreeResponse)
-    async def git_worktree_api() -> WorkspaceGitWorktreeResponse:
+    async def git_worktree_api(path: str = Query("")) -> WorkspaceGitWorktreeResponse:
         """Return linked worktree metadata for the active workspace."""
-        root = service.workspace_root_path()
+        root = _resolve_git_root(path)
 
         try:
             import subprocess
+
+            from backend.runtime_env import sanitized_git_env
 
             manager = WorktreeManager(root)
             worktrees = manager.list_worktrees()
@@ -313,6 +336,7 @@ def create_workspace_router(get_project_root: Callable[[], Path]) -> APIRouter:
             common_dir_result = subprocess.run(
                 ["git", "rev-parse", "--git-common-dir"],
                 cwd=root,
+                env=sanitized_git_env(),
                 capture_output=True,
                 text=True, encoding="utf-8",
                 timeout=5,
@@ -422,15 +446,71 @@ def create_workspace_router(get_project_root: Callable[[], Path]) -> APIRouter:
                     error="Only isolated worktrees under .claude/worktrees can be removed",
                 )
 
-            removed = manager.remove_worktree(target, force=force)
+            removal = manager.safe_remove_worktree(target, force=force)
+            if removal.needs_force:
+                return WorkspaceGitWorktreeRemoveResponse(
+                    removed=False,
+                    path=str(target),
+                    branch=target_entry.branch,
+                    error=removal.error or "Worktree has local changes; force is required",
+                )
             return WorkspaceGitWorktreeRemoveResponse(
-                removed=removed,
+                removed=removal.removed,
                 path=str(target),
                 branch=target_entry.branch,
-                error=None if removed else "git worktree remove failed",
+                snapshot_id=removal.snapshot.id if removal.snapshot else None,
+                snapshot_ref=removal.snapshot.snapshot_ref if removal.snapshot else None,
+                error=None if removal.removed else (removal.error or "git worktree remove failed"),
             )
         except Exception as e:
             return WorkspaceGitWorktreeRemoveResponse(removed=False, path=str(target), error=str(e))
+
+    @router.get("/git/worktree/snapshots", response_model=WorkspaceGitWorktreeSnapshotsResponse)
+    async def git_worktree_snapshots_api(
+        conversation_id: str | None = Query(None),
+    ) -> WorkspaceGitWorktreeSnapshotsResponse:
+        """List pre-deletion worktree snapshots, newest first."""
+        try:
+            manager = WorktreeManager(service.workspace_root_path())
+            records = manager.list_snapshots(conversation_id)
+            return WorkspaceGitWorktreeSnapshotsResponse(
+                snapshots=[
+                    WorktreeSnapshotEntryResponse(
+                        id=record.id,
+                        conversation_id=record.conversation_id,
+                        branch=record.branch,
+                        original_path=record.original_path,
+                        snapshot_sha=record.snapshot_sha,
+                        snapshot_ref=record.snapshot_ref,
+                        label=record.label,
+                        created_at=record.created_at,
+                    )
+                    for record in records
+                ],
+            )
+        except Exception as e:
+            return WorkspaceGitWorktreeSnapshotsResponse(error=str(e))
+
+    @router.post("/git/worktree/restore", response_model=WorkspaceGitWorktreeRestoreResponse)
+    async def git_worktree_restore_api(
+        request: WorkspaceGitWorktreeRestoreRequest,
+    ) -> WorkspaceGitWorktreeRestoreResponse:
+        """Restore a worktree snapshot to a detached worktree."""
+        try:
+            manager = WorktreeManager(service.workspace_root_path())
+            result = manager.restore_snapshot(
+                request.snapshot_id,
+                dest=Path(request.dest) if request.dest else None,
+            )
+            return WorkspaceGitWorktreeRestoreResponse(
+                restored=result.restored,
+                snapshot_id=request.snapshot_id,
+                path=str(result.path) if result.path else "",
+                branch=result.snapshot.branch if result.snapshot else "",
+                error=result.error,
+            )
+        except Exception as e:
+            return WorkspaceGitWorktreeRestoreResponse(restored=False, snapshot_id=request.snapshot_id, error=str(e))
 
     return router
 

@@ -1,6 +1,6 @@
-import type { ToolCallEvent, ToolResultEvent } from "../protocol/events";
+import type { ToolCallEvent, ToolErrorInfo, ToolResultEvent } from "../protocol/events";
 
-export type ToolCallStatus = "pending" | "running" | "success" | "failed" | "blocked";
+export type ToolCallStatus = "pending" | "running" | "success" | "failed" | "blocked" | "partial";
 
 export interface ToolCallRecord {
   id: string;
@@ -15,12 +15,28 @@ export interface ToolCallRecord {
   evidenceType?: string;
   displaySummary?: string;
   resultKind?: string;
+  activityKind?: string;
   limitation?: string;
+  provider?: string;
+  providerErrorType?: string;
+  errorInfo?: ToolErrorInfo;
+  errorKind?: string;
+  userSummary?: string;
+  developerDetail?: string;
+  recoverable?: boolean;
+  projection?: string;
   durationMs?: number;
   displayHint?: string;
   inputSummary?: string;
+  groupId?: string;
+  stepId?: string;
+  iterationId?: string;
+  phase?: string;
   startedAt: number;
   finishedAt?: number;
+  outputPreview?: string;
+  stdoutPreview?: string;
+  stderrPreview?: string;
   diff?: { plus: number; minus: number; patch?: string };
 }
 
@@ -29,17 +45,69 @@ const toFiniteNumber = (value: unknown): number => {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
 };
 
+export interface DiffBadge {
+  plus: number;
+  minus: number;
+}
+
+export const countUnifiedDiffLines = (patch: string): DiffBadge => {
+  let plus = 0;
+  let minus = 0;
+  let sawHunk = false;
+  let inHunk = false;
+  const fallbackLines = patch.split(/\r?\n/);
+
+  for (const line of fallbackLines) {
+    if (line.startsWith("diff --git ") || line.startsWith("Index: ")) {
+      inHunk = false;
+      continue;
+    }
+    if (line.startsWith("@@")) {
+      sawHunk = true;
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk || line.startsWith("\\ No newline")) continue;
+    if (line.startsWith("+")) plus += 1;
+    else if (line.startsWith("-")) minus += 1;
+  }
+
+  if (sawHunk) return { plus, minus };
+
+  plus = 0;
+  minus = 0;
+  for (const line of fallbackLines) {
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("+")) plus += 1;
+    else if (line.startsWith("-")) minus += 1;
+  }
+  return { plus, minus };
+};
+
+export const getToolDiffStats = (diff: NonNullable<ToolCallRecord["diff"]>): DiffBadge => {
+  if (diff.plus || diff.minus || !diff.patch) {
+    return { plus: diff.plus, minus: diff.minus };
+  }
+  const patchStats = countUnifiedDiffLines(diff.patch);
+  return patchStats.plus || patchStats.minus
+    ? patchStats
+    : { plus: diff.plus, minus: diff.minus };
+};
+
 export const normalizeToolDiff = (value: unknown): ToolCallRecord["diff"] | undefined => {
   if (!value || typeof value !== "object") return undefined;
   const raw = value as Record<string, unknown>;
 
   const directPlus = toFiniteNumber(raw.plus ?? raw.additions);
   const directMinus = toFiniteNumber(raw.minus ?? raw.deletions);
-  if (directPlus || directMinus || typeof raw.patch === "string") {
+  const directPatch = typeof raw.patch === "string" ? raw.patch : undefined;
+  if (directPlus || directMinus || directPatch) {
+    const patchStats = directPatch ? countUnifiedDiffLines(directPatch) : { plus: 0, minus: 0 };
+    const shouldUsePatchStats = directPlus === 0 && directMinus === 0;
     return {
-      plus: directPlus,
-      minus: directMinus,
-      patch: typeof raw.patch === "string" ? raw.patch : undefined,
+      plus: shouldUsePatchStats ? patchStats.plus : directPlus,
+      minus: shouldUsePatchStats ? patchStats.minus : directMinus,
+      patch: directPatch,
     };
   }
 
@@ -66,6 +134,12 @@ export const normalizeToolDiff = (value: unknown): ToolCallRecord["diff"] | unde
       ? raw.raw
       : undefined;
 
+  if (plus === 0 && minus === 0 && patch) {
+    const patchStats = countUnifiedDiffLines(patch);
+    plus = patchStats.plus;
+    minus = patchStats.minus;
+  }
+
   return plus || minus || patch ? { plus, minus, patch } : undefined;
 };
 
@@ -83,6 +157,12 @@ export const reduceToolCallStart = (
     startedAt: e.started_at ?? now,
     displayHint: e.display_hint,
     inputSummary: e.input_summary,
+    resultKind: e.result_kind,
+    activityKind: e.activity_kind,
+    groupId: e.group_id,
+    stepId: e.step_id,
+    iterationId: e.iteration_id,
+    phase: e.phase,
   });
   return next;
 };
@@ -97,7 +177,15 @@ export const reduceToolCallResult = (
   const next = new Map(prev);
   next.set(e.id, {
     ...existing,
-    status: e.status === "blocked" ? "blocked" : e.status === "failed" ? "failed" : e.is_error ? "failed" : "success",
+    status: e.status === "blocked"
+      ? "blocked"
+      : e.status === "failed"
+        ? "failed"
+        : e.status === "partial"
+          ? "partial"
+          : e.is_error
+            ? "failed"
+            : "success",
     summary: e.summary,
     artifactId: e.artifact_id,
     sourceUrl: e.source_url,
@@ -106,18 +194,25 @@ export const reduceToolCallResult = (
     evidenceType: e.evidence_type,
     displaySummary: e.display_summary,
     resultKind: e.result_kind,
+    groupId: e.group_id ?? existing.groupId,
+    stepId: e.step_id ?? existing.stepId,
     limitation: e.limitation,
+    provider: e.provider,
+    providerErrorType: e.provider_error_type,
+    errorInfo: e.error_info,
+    errorKind: e.error_kind ?? e.error_info?.error_kind ?? e.error_info?.code,
+    userSummary: e.user_summary ?? e.error_info?.user_summary ?? e.error_info?.user_message,
+    developerDetail: e.developer_detail ?? e.error_info?.developer_detail,
+    recoverable: e.recoverable ?? e.error_info?.recoverable,
+    projection: e.projection ?? e.error_info?.projection,
     durationMs: e.duration_ms,
+    iterationId: e.iteration_id ?? existing.iterationId,
+    phase: e.phase ?? existing.phase,
     diff: normalizeToolDiff(e.diff) ?? existing.diff,
     finishedAt: now,
   });
   return next;
 };
-
-export interface DiffBadge {
-  plus: number;
-  minus: number;
-}
 
 const DIFF_RE = /([+-])(\d+)/g;
 
@@ -126,8 +221,9 @@ export const aggregateDiffBadge = (records: Iterable<ToolCallRecord>): DiffBadge
   let minus = 0;
   for (const r of records) {
     if (r.diff) {
-      plus += r.diff.plus;
-      minus += r.diff.minus;
+      const diffStats = getToolDiffStats(r.diff);
+      plus += diffStats.plus;
+      minus += diffStats.minus;
       continue;
     }
     if (!r.summary) continue;

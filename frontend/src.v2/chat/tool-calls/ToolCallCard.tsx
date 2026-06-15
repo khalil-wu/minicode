@@ -27,16 +27,7 @@ const LOCAL_URL_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):\d+(?:[/?
 const InlineDiff = ({ patch }: { patch: string }) => {
   const lines = useMemo(() => patch.split("\n").slice(0, 200), [patch]);
   return (
-    <div
-      style={{
-        padding: "8px 0",
-        borderBottom: "1px solid var(--border-subtle)",
-        fontFamily: "var(--font-mono)",
-        fontSize: "var(--text-xs)",
-        lineHeight: 1.5,
-        overflowX: "auto",
-      }}
-    >
+    <div className="py-2 border-b border-[var(--border-subtle)] font-mono text-xs leading-normal overflow-x-auto">
       {lines.map((line, i) => {
         let bg = "transparent";
         let color = "var(--text-secondary)";
@@ -50,13 +41,13 @@ const InlineDiff = ({ patch }: { patch: string }) => {
           color = "var(--accent-primary)";
         }
         return (
-          <div key={i} style={{ padding: "0 14px", background: bg, color, whiteSpace: "pre" }}>
+          <div key={i} className="px-3.5 whitespace-pre" style={{ background: bg, color }}>
             {line}
           </div>
         );
       })}
       {patch.split("\n").length > 200 && (
-        <div style={{ padding: "4px 14px", color: "var(--text-muted)", fontStyle: "italic" }}>
+        <div className="py-1 px-3.5 text-[var(--text-muted)] italic">
           ... {patch.split("\n").length - 200} more lines
         </div>
       )}
@@ -70,18 +61,20 @@ const STATUS_COLOR: Record<ToolCallStatus, string> = {
   success: "var(--state-success)",
   failed: "var(--state-danger)",
   blocked: "var(--state-warning)",
+  partial: "var(--state-warning)",
 };
 
 const StatusIcon = ({ status }: { status: ToolCallStatus }) => {
-  const props = { size: 13, color: STATUS_COLOR[status], style: { flexShrink: 0 } };
+  const props = { size: 13, color: STATUS_COLOR[status], className: "shrink-0" };
   if (status === "success") return <CircleCheck {...props} />;
   if (status === "failed") return <CircleAlert {...props} />;
   if (status === "blocked") return <CircleDashed {...props} />;
+  if (status === "partial") return <CircleDashed {...props} />;
   return <Circle {...props} />;
 };
 
 const ToolIcon = ({ name }: { name: string }) => {
-  const props = { size: 14, style: { flexShrink: 0 } };
+  const props = { size: 14, className: "shrink-0" };
   if (name.includes("web")) return <Globe {...props} />;
   if (name.includes("read") || name.includes("file")) return <FileText {...props} />;
   if (name.includes("write") || name.includes("edit") || name.includes("patch") || name.includes("delete") || name.includes("create")) return <PencilLine {...props} />;
@@ -163,7 +156,7 @@ function evidenceLabel(record: ToolCallRecord): string {
   else if (record.evidenceType === "fetched") parts.push("Fetched evidence");
   else if (record.evidenceType) parts.push(record.evidenceType);
   if (record.extractionStatus) parts.push(`extraction: ${record.extractionStatus}`);
-  return parts.join(" · ");
+  return parts.join(" - ");
 }
 
 function parseCommandSummary(summary: string): {
@@ -202,25 +195,25 @@ const CommandResultView = ({
   const parsed = useMemo(() => parseCommandSummary(summary), [summary]);
   const output = parsed.output || fallback;
   return (
-    <div style={commandResultStyle}>
+    <div className="grid gap-1.5">
       {command && (
-        <div style={commandLineStyle}>
-          <span style={commandPromptStyle}>$</span>
+        <div className="grid grid-cols-[12px_minmax(0,1fr)] gap-1.5 px-2 py-1.5 border border-[var(--border-subtle)] rounded bg-[var(--surface-soft)] text-[var(--text-secondary)] overflow-hidden">
+          <span className="text-[var(--accent-primary)] font-bold">$</span>
           <span>{command}</span>
         </div>
       )}
       {output && (
-        <pre style={commandOutputStyle}>
+        <pre className="m-0 px-2 py-[7px] max-h-[220px] overflow-auto border border-[var(--border-subtle)] rounded bg-[var(--surface-base)] text-[var(--text-secondary)] font-mono text-xs leading-normal whitespace-pre-wrap break-words">
           {output}
         </pre>
       )}
       {parsed.stderr && (
-        <pre style={{ ...commandOutputStyle, color: "var(--state-danger)" }}>
+        <pre className="m-0 px-2 py-[7px] max-h-[220px] overflow-auto border border-[var(--border-subtle)] rounded bg-[var(--surface-base)] text-[var(--state-danger)] font-mono text-xs leading-normal whitespace-pre-wrap break-words">
           {parsed.stderr}
         </pre>
       )}
       {(parsed.exitCode || parsed.timedOut) && (
-        <div style={commandMetaStyle}>
+        <div className="flex gap-2 text-[var(--text-muted)] text-xs font-mono">
           {parsed.exitCode && <span>exit {parsed.exitCode}</span>}
           {parsed.timedOut && <span>timeout</span>}
         </div>
@@ -232,37 +225,29 @@ const CommandResultView = ({
 const RawJsonDetails = ({ args }: { args: Record<string, unknown> }) => {
   if (Object.keys(args).length === 0) return null;
   return (
-    <details style={{ borderTop: "1px solid var(--border-subtle)", paddingTop: 8 }}>
-      <summary
-        style={{
-          cursor: "pointer",
-          color: "var(--text-muted)",
-          fontSize: "var(--text-xs)",
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 5,
-        }}
-      >
+    <details className="border-t border-[var(--border-subtle)] pt-2">
+      <summary className="cursor-pointer text-[var(--text-muted)] text-xs inline-flex items-center gap-[5px]">
         Raw JSON
       </summary>
-      <pre style={{
-        margin: "7px 0 0",
-        padding: 8,
-        border: "1px solid var(--border-subtle)",
-        borderRadius: "var(--radius-sm, 4px)",
-        background: "var(--surface-soft)",
-        color: "var(--text-secondary)",
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-word",
-      }}>
+      <pre className="mt-[7px] mb-0 p-2 border border-[var(--border-subtle)] rounded bg-[var(--surface-soft)] text-[var(--text-secondary)] whitespace-pre-wrap break-words">
         {JSON.stringify(args, null, 2)}
       </pre>
     </details>
   );
 };
 
-const WebSearchResultsView = ({ text }: { text: string }) => {
+const WebSearchResultsView = ({ text, structured }: { text: string; structured?: string }) => {
   const items = useMemo(() => {
+    // Prefer structured JSON from backend (content_preview field)
+    if (structured) {
+      try {
+        const parsed = JSON.parse(structured) as { title: string; url: string; snippet?: string }[];
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed.map((r, i) => ({ index: i + 1, title: r.title, url: r.url, snippet: r.snippet ?? "" }));
+        }
+      } catch { /* fall through */ }
+    }
+    // Fallback: parse legacy text format "[1] Title\n    URL: ...\n    Snippet: ..."
     try {
       const parsedItems: { index: number; title: string; url: string; snippet: string }[] = [];
       const blocks = text.split(/\[\d+\]\s+/);
@@ -276,7 +261,7 @@ const WebSearchResultsView = ({ text }: { text: string }) => {
           const trimmed = line.trim();
           if (trimmed.startsWith("URL: ")) {
             url = trimmed.slice(5).trim();
-          } else if (trimmed.startsWith("片段: ") || trimmed.startsWith("摘要: ") || trimmed.startsWith("snippet: ")) {
+          } else if (trimmed.startsWith("片段: ") || trimmed.startsWith("摘要: ") || trimmed.startsWith("snippet: ") || trimmed.startsWith("Snippet: ")) {
             snippet = trimmed.replace(/^(?:片段|摘要|snippet):\s*/i, "").trim();
           }
         }
@@ -288,7 +273,7 @@ const WebSearchResultsView = ({ text }: { text: string }) => {
     } catch {
       return [];
     }
-  }, [text]);
+  }, [text, structured]);
 
   const openUrl = (url: string) => {
     useAppStore.getState().openLivePreview(url);
@@ -296,15 +281,15 @@ const WebSearchResultsView = ({ text }: { text: string }) => {
   };
 
   if (items.length === 0) {
-    return <div style={{ whiteSpace: "pre-wrap" }}>{text}</div>;
+    return <div className="whitespace-pre-wrap">{text}</div>;
   }
 
   return (
-    <div style={{ display: "grid", gap: 12, width: "100%", fontFamily: "var(--font-ui)", marginTop: 6 }}>
-      <div style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)", fontWeight: 500, fontFamily: "var(--font-mono)" }}>
+    <div className="grid gap-3 w-full font-[var(--font-ui)] mt-1.5">
+      <div className="text-[var(--text-muted)] text-xs font-medium font-mono">
         SEARCH RESULTS ({items.length})
       </div>
-      <div style={{ display: "grid", gap: 8 }}>
+      <div className="grid gap-2">
         {items.map((item) => {
           let hostname = "";
           try {
@@ -315,37 +300,15 @@ const WebSearchResultsView = ({ text }: { text: string }) => {
           return (
             <div
               key={item.index}
-              style={{
-                background: "var(--surface-soft)",
-                border: "1px solid var(--border-subtle)",
-                borderRadius: "var(--radius-sm, 6px)",
-                padding: "10px 12px",
-                display: "grid",
-                gap: 4,
-              }}
+              className="bg-[var(--surface-soft)] border border-[var(--border-subtle)] rounded p-2.5 grid gap-1"
             >
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, flex: 1 }}>
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-1.5 min-w-0 flex-1">
                   {hostname && <span style={domainGlyphStyle}>{hostname.slice(0, 1).toUpperCase()}</span>}
                   <button
                     type="button"
                     onClick={() => openUrl(item.url)}
-                    style={{
-                      background: "transparent",
-                      border: 0,
-                      padding: 0,
-                      cursor: "pointer",
-                      fontWeight: 600,
-                      fontSize: "var(--text-sm)",
-                      color: "var(--accent-primary)",
-                      textAlign: "left",
-                      lineHeight: 1.3,
-                      textDecoration: "underline",
-                      textUnderlineOffset: "2px",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
+                    className="bg-transparent border-0 p-0 cursor-pointer font-semibold text-sm text-[var(--accent-primary)] text-left leading-tight underline underline-offset-2 overflow-hidden text-ellipsis whitespace-nowrap"
                   >
                     {item.title}
                   </button>
@@ -353,24 +316,16 @@ const WebSearchResultsView = ({ text }: { text: string }) => {
                 <button
                   type="button"
                   onClick={() => openUrl(item.url)}
-                  style={{
-                    fontSize: "var(--text-xs)",
-                    padding: "2px 6px",
-                    borderRadius: "4px",
-                    background: "var(--surface-base)",
-                    border: "1px solid var(--border-subtle)",
-                    color: "var(--text-secondary)",
-                    cursor: "pointer",
-                  }}
+                  className="text-xs px-1.5 py-0.5 rounded bg-[var(--surface-base)] border border-[var(--border-subtle)] text-[var(--text-secondary)] cursor-pointer"
                 >
                   Open in Preview Pane
                 </button>
               </div>
-              <div style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)", fontFamily: "var(--font-mono)", wordBreak: "break-all" }}>
+              <div className="text-xs text-[var(--text-muted)] font-mono break-all">
                 {item.url}
               </div>
               {item.snippet && (
-                <div style={{ fontSize: "var(--text-xs)", color: "var(--text-secondary)", lineHeight: 1.45, marginTop: 2, fontFamily: "var(--font-ui)" }}>
+                <div className="text-xs text-[var(--text-secondary)] leading-normal mt-0.5 font-[var(--font-ui)]">
                   {item.snippet}
                 </div>
               )}
@@ -393,7 +348,7 @@ function normalizeLocalUrl(url: string): string {
 }
 
 const Spinner = () => (
-  <span className="spinner" style={{ width: 12, height: 12, flexShrink: 0 }} />
+  <span className="spinner w-3 h-3 shrink-0" />
 );
 
 function toolVerb(name: string): string {
@@ -425,27 +380,16 @@ const SmallAction = ({
       event.stopPropagation();
       onClick();
     }}
-    style={{
-      height: 22,
-      display: "inline-flex",
-      alignItems: "center",
-      gap: 5,
-      padding: "0 7px",
-      border: "1px solid var(--border-subtle)",
-      borderRadius: "var(--radius-sm, 4px)",
-      background: "var(--surface-base)",
-      color: "var(--text-secondary)",
-      cursor: "pointer",
-      fontSize: "var(--text-xs)",
-      flexShrink: 0,
-    }}
+    className="h-[22px] inline-flex items-center gap-[5px] px-[7px] border border-[var(--border-subtle)] rounded bg-[var(--surface-base)] text-[var(--text-secondary)] cursor-pointer text-xs shrink-0"
   >
     {children}
   </button>
 );
 
 export const ToolCallCard = memo(({ record, viewMode = "normal", compact = false }: { record: ToolCallRecord; viewMode?: ViewMode; compact?: boolean }) => {
-  const [open, setOpen] = useState(viewMode === "verbose" || (compact && record.status === "running"));
+  // Default collapsed for cleaner viewport (Codex-style). Only auto-expand in verbose mode.
+  const [open, setOpen] = useState(viewMode === "verbose");
+  const [outputExpanded, setOutputExpanded] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const userToggled = useRef(false);
   useEffect(() => {
@@ -453,8 +397,9 @@ export const ToolCallCard = memo(({ record, viewMode = "normal", compact = false
       setOpen(true);
       return;
     }
+    // Keep user's toggle preference; don't auto-expand running tools (prevents viewport spam)
     if (!userToggled.current) {
-      setOpen(compact && record.status === "running");
+      setOpen(false);
     }
   }, [compact, record.status, viewMode]);
   useEffect(() => {
@@ -520,28 +465,20 @@ export const ToolCallCard = memo(({ record, viewMode = "normal", compact = false
         },
       ],
       selectedPath: path,
-      status: "pending",
+      status: "viewing",
+      mode: "view",
       fileDecisions: {},
       lineComments: [],
     });
-    store.addPanel({ id: "approval-diff", kind: "diff", label: "Diff Review" });
+    store.addPanel({ id: "approval-diff", kind: "diff", label: "Diff" });
   };
 
   if (viewMode === "summary") {
     return (
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-          padding: "2px 0",
-          fontSize: "var(--text-xs)",
-          color: "var(--text-muted)",
-        }}
-      >
+      <div className="flex items-center gap-1.5 py-0.5 text-xs text-[var(--text-muted)]">
         <StatusIcon status={record.status} />
         <ToolIcon name={record.name} />
-        <span style={{ color: "var(--text-secondary)", fontWeight: 600 }}>
+        <span className="text-[var(--text-secondary)] font-semibold">
           {toolDisplayName(record.name)}
         </span>
         {filePath && (
@@ -555,22 +492,19 @@ export const ToolCallCard = memo(({ record, viewMode = "normal", compact = false
 
   return (
     <div
-      className="tool-call-enter"
+      className="tool-call-enter bg-[var(--surface-soft)] border border-[var(--border-subtle)] rounded overflow-hidden"
       data-testid={`tool-call-${record.id}`}
       style={{
-        background: "var(--surface-soft)",
-        border: "1px solid var(--border-subtle)",
-        borderRadius: "var(--radius-sm, 4px)",
-        overflow: "hidden",
         borderLeft: compact ? 0 : `3px solid ${STATUS_COLOR[record.status]}`,
       }}
     >
       {(record.status === "running" || record.status === "pending") && (
-        <div className="progress-bar" style={{ height: 2 }} />
+        <div className="progress-bar h-0.5" />
       )}
       <div
         role="button"
         tabIndex={0}
+        className={record.status === "running" ? "anim-tool-running" : undefined}
         onClick={() => {
           userToggled.current = true;
           setOpen((v) => !v);
@@ -597,7 +531,7 @@ export const ToolCallCard = memo(({ record, viewMode = "normal", compact = false
         }}
       >
         {(record.status === "running" || record.status === "pending") ? <Spinner /> : <ToolIcon name={record.name} />}
-        <span style={{ color: "var(--accent-primary)", fontWeight: 650 }}>
+        <span className="text-[var(--accent-primary)] font-semibold">
           {toolDisplayName(record.name)}
         </span>
         {inputSummary && (
@@ -605,7 +539,7 @@ export const ToolCallCard = memo(({ record, viewMode = "normal", compact = false
             {inputSummary}
           </span>
         )}
-        <span style={{ flex: 1 }} />
+        <span className="flex-1" />
         {record.artifactId && (
           <SmallAction label="Open artifact preview" onClick={openArtifact}>
             <FileText size={12} />
@@ -632,52 +566,52 @@ export const ToolCallCard = memo(({ record, viewMode = "normal", compact = false
         {record.diff && (record.diff.plus > 0 || record.diff.minus > 0) && (
           <SmallAction label="Open diff viewer" onClick={openDiff}>
             {record.diff.plus > 0 && (
-              <span style={{ color: "var(--state-success)" }}>+{record.diff.plus}</span>
+              <span className="text-[var(--state-success)]">+{record.diff.plus}</span>
             )}
             {record.diff.minus > 0 && (
-              <span style={{ color: "var(--state-danger)", marginLeft: 4 }}>
+              <span className="text-[var(--state-danger)] ml-1">
                 -{record.diff.minus}
               </span>
             )}
           </SmallAction>
         )}
         {duration && (
-          <span style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>
-            {record.status === "running" ? `${toolVerb(record.name)} · ${duration}` : record.status === "pending" ? "Preparing..." : duration}
+          <span className="text-[var(--text-muted)] text-xs">
+            {record.status === "running" ? `${toolVerb(record.name)} - ${duration}` : record.status === "pending" ? "Preparing..." : duration}
           </span>
         )}
         <StatusIcon status={record.status} />
-        <span style={{ color: "var(--text-muted)", display: "inline-flex" }}>
+        <span className="text-[var(--text-muted)] inline-flex">
           {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
         </span>
       </div>
       {open && (
-        <div
+        <div className="border-t border-[var(--border-subtle)] bg-[var(--surface-base)] overflow-y-auto"
           style={{
-            borderTop: "1px solid var(--border-subtle)",
-            background: "var(--surface-base)",
             maxHeight: compact ? 260 : 400,
-            overflowY: "auto",
           }}
         >
           {record.diff?.patch && (
-            <InlineDiff patch={record.diff.patch} />
+            <>
+              <div className="flex items-center pt-1 px-3.5 pb-0 gap-2 text-[var(--text-muted)] text-xs">
+                <span className="flex-1 min-w-0 font-semibold">Diff preview</span>
+                <button
+                  type="button"
+                  onClick={openDiff}
+                  className="border-0 bg-transparent text-[var(--accent-primary)] cursor-pointer text-xs font-semibold py-px px-0"
+                >
+                  Open full diff
+                </button>
+              </div>
+              <InlineDiff patch={record.diff.patch} />
+            </>
           )}
           {longRunning && (
             <div style={longRunningStyle}>
               Long running task. You can switch panels while it continues.
             </div>
           )}
-          <div style={{
-            display: "grid",
-            gap: 8,
-            padding: "10px 14px",
-            fontFamily: "var(--font-mono)",
-            fontSize: "var(--text-xs)",
-            color: "var(--text-secondary)",
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
-          }}>
+          <div className="grid gap-2 p-2.5 px-3.5 font-mono text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words">
             {inputSummary && (
               <div style={humanSummaryStyle}>
             {isCommandRecord(record) ? <TerminalSquare size={13} /> : <ToolIcon name={record.name} />}
@@ -692,7 +626,7 @@ export const ToolCallCard = memo(({ record, viewMode = "normal", compact = false
             {resultSummary && (
               <div>
                 {isWebRecord(record) ? (
-                  <WebSearchResultsView text={rawResultSummary || resultSummary} />
+                  <WebSearchResultsView text={rawResultSummary || resultSummary} structured={record.contentPreview} />
                 ) : isCommandRecord(record) ? (
                   <CommandResultView
                     command={typeof (record.args.command ?? record.args.cmd) === "string" ? String(record.args.command ?? record.args.cmd) : null}
@@ -701,8 +635,21 @@ export const ToolCallCard = memo(({ record, viewMode = "normal", compact = false
                   />
                 ) : (
                   <>
-                    <div style={{ color: "var(--text-muted)", marginBottom: 4, fontWeight: 500 }}>result</div>
-                    <div>{resultSummary}</div>
+                    <div className="text-[var(--text-muted)] mb-1 font-medium">result</div>
+                    {resultSummary.length > 500 && !outputExpanded ? (
+                      <>
+                        <div>{resultSummary.slice(0, 500)}...</div>
+                        <button
+                          type="button"
+                          onClick={() => setOutputExpanded(true)}
+                          className="mt-2 text-[var(--accent-primary)] text-xs font-medium cursor-pointer bg-transparent border-0 p-0"
+                        >
+                          Show more
+                        </button>
+                      </>
+                    ) : (
+                      <div>{resultSummary}</div>
+                    )}
                   </>
                 )}
               </div>
@@ -712,9 +659,9 @@ export const ToolCallCard = memo(({ record, viewMode = "normal", compact = false
                 source: {record.sourceUrl}
               </div>
             )}
-            {record.contentPreview && record.contentPreview !== resultSummary && (
+            {record.contentPreview && record.contentPreview !== resultSummary && !isWebRecord(record) && (
               <div>
-                <div style={{ color: "var(--text-muted)", marginBottom: 4, fontWeight: 500 }}>content preview</div>
+                <div className="text-[var(--text-muted)] mb-1 font-medium">content preview</div>
                 <div>{record.contentPreview}</div>
               </div>
             )}

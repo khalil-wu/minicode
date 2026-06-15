@@ -62,6 +62,51 @@ class ServerStatus(Enum):
     RECONNECTING = "reconnecting"
 
 
+# Lifecycle phase classification. The current MCP client has no real auth
+# protocol, so connection errors are conservatively classified by message text.
+_AUTH_ERROR_MARKERS = (
+    "401", "403", "unauthorized", "forbidden", "auth", "login", "token",
+    "credential", "permission denied", "api key", "apikey", "oauth",
+)
+_EXPIRED_MARKERS = ("expired", "expire", "renew", "re-auth", "reauth", "re-login")
+
+_PHASE_DEFAULT_MESSAGE = {
+    "connecting": "Connecting…",
+    "connected": "Connected",
+    "reconnecting": "Reconnecting…",
+    "auth_required": "Authentication required",
+    "expired": "Credentials expired; re-authentication required",
+    "failed": "Connection failed",
+    "stopped": "Stopped",
+}
+
+
+def classify_mcp_phase(status: "ServerStatus", last_error: str) -> tuple[str, bool, bool]:
+    """Map (status, last_error) to (phase, recoverable, requires_user_action).
+
+    phase ∈ {connecting, connected, reconnecting, auth_required, expired, failed,
+    stopped}. Auth/expiry is inferred conservatively from the error text and is
+    the only class flagged requires_user_action=True / recoverable=False — a bare
+    retry cannot fix expired or missing credentials. Network/unknown failures stay
+    recoverable so the UI/agent can offer a restart.
+    """
+    if status == ServerStatus.CONNECTED:
+        return ("connected", True, False)
+    if status == ServerStatus.STARTING:
+        return ("connecting", True, False)
+    if status == ServerStatus.RECONNECTING:
+        return ("reconnecting", True, False)
+    if status == ServerStatus.OFFLINE:
+        return ("stopped", True, False)
+    # ServerStatus.ERROR — classify by message text.
+    text = (last_error or "").lower()
+    if any(marker in text for marker in _AUTH_ERROR_MARKERS):
+        if any(marker in text for marker in _EXPIRED_MARKERS):
+            return ("expired", False, True)
+        return ("auth_required", False, True)
+    return ("failed", True, False)
+
+
 @dataclass
 class MCPServerConfig:
     name: str
@@ -74,6 +119,9 @@ class MCPServerConfig:
     max_retries: int = 3
     source: str = "local"
     priority: int = 1000
+    requires_user_action: bool = False
+    setup_hint: str = ""
+    docs_url: str = ""
 
 
 @dataclass
@@ -88,6 +136,10 @@ class MCPServerState:
     circuit_open: bool = False
 
     def to_status_dict(self) -> dict[str, Any]:
+        phase, recoverable, requires_user_action = classify_mcp_phase(self.status, self.last_error)
+        requires_user_action = requires_user_action or (
+            self.config.requires_user_action and self.status != ServerStatus.CONNECTED
+        )
         return {
             "name": self.config.name,
             "status": self.status.value,
@@ -96,7 +148,46 @@ class MCPServerState:
             "source": self.config.source,
             "priority": self.config.priority,
             "transport": self.config.transport,
+            "phase": phase,
+            "recoverable": recoverable,
+            "requires_user_action": requires_user_action,
+            "setup_hint": self.config.setup_hint,
+            "docs_url": self.config.docs_url,
         }
+
+    def to_lifecycle_dict(self) -> dict[str, Any]:
+        """Single-server lifecycle event payload (mcp.lifecycle)."""
+        phase, recoverable, requires_user_action = classify_mcp_phase(self.status, self.last_error)
+        requires_user_action = requires_user_action or (
+            self.config.requires_user_action and self.status != ServerStatus.CONNECTED
+        )
+        return {
+            "server_name": self.config.name,
+            "status": self.status.value,
+            "phase": phase,
+            "message": self.last_error or _PHASE_DEFAULT_MESSAGE.get(phase, ""),
+            "recoverable": recoverable,
+            "requires_user_action": requires_user_action,
+            "setup_hint": self.config.setup_hint,
+            "docs_url": self.config.docs_url,
+        }
+
+    def to_progress_dict(self) -> dict[str, Any] | None:
+        """Coarse progress for the connect/reconnect operation (mcp.progress).
+
+        Returns None when no operation is in flight (stopped/offline). No 0-1
+        fraction is reported because the transport exposes none yet.
+        """
+        if self.status == ServerStatus.STARTING:
+            return {"server_name": self.config.name, "operation": "connect", "message": "Connecting…", "status": "running"}
+        if self.status == ServerStatus.RECONNECTING:
+            return {"server_name": self.config.name, "operation": "reconnect", "message": "Reconnecting…", "status": "running"}
+        if self.status == ServerStatus.CONNECTED:
+            return {"server_name": self.config.name, "operation": "connect", "message": "Connected", "status": "completed"}
+        if self.status == ServerStatus.ERROR:
+            return {"server_name": self.config.name, "operation": "connect", "message": self.last_error or "Connection failed", "status": "failed"}
+        return None
+
 
 
 class MCPServerManager:
@@ -111,6 +202,14 @@ class MCPServerManager:
         self._servers: dict[str, MCPServerState] = {}
         self._on_status_change = on_status_change
         self._health_tasks: dict[str, asyncio.Task[Any]] = {}
+        # Monotonic counter bumped on every server status change. Consumers
+        # (tool registry schema cache) include it in their cache key so a
+        # connect/disconnect/reconnect invalidates stale tool schemas.
+        self._registry_version = 0
+
+    @property
+    def registry_version(self) -> int:
+        return self._registry_version
 
     def load_config(self) -> list[MCPServerConfig]:
         external_configs = self._load_openmcp_configs()
@@ -138,9 +237,12 @@ class MCPServerManager:
         servers_data = data.get("mcpServers", {})
         configs: list[MCPServerConfig] = []
         for index, (name, conf) in enumerate(servers_data.items()):
-            command = conf.get("command", "python")
+            transport = str(conf.get("transport") or "").strip().lower()
+            if not transport:
+                transport = "http" if _optional_str(conf.get("url")) else "stdio"
+            command = conf.get("command", "python" if transport == "stdio" else "")
             args = list(conf.get("args", []))
-            if not _is_safe_mcp_command(command):
+            if transport == "stdio" and not _is_safe_mcp_command(command):
                 logger.warning(
                     "MCP server '%s' blocked: command '%s' not in allowlist", name, command
                 )
@@ -160,12 +262,15 @@ class MCPServerManager:
                     command=command,
                     args=args,
                     env=resolved_env,
-                    transport=conf.get("transport", "stdio"),
+                    transport=transport,
                     url=_optional_str(_resolve_env_placeholders(conf.get("url"))),
                     auto_start=conf.get("autoStart", True),
                     max_retries=conf.get("maxRetries", 3),
                     source="local",
                     priority=1000 + index,
+                    requires_user_action=bool(conf.get("requiresUserAction", False)),
+                    setup_hint=str(conf.get("setupHint") or ""),
+                    docs_url=str(conf.get("docsUrl") or ""),
                 )
             )
         return configs
@@ -232,6 +337,9 @@ class MCPServerManager:
                     max_retries=_safe_int(resolved_item.get("maxRetries"), default=3),
                     source="external",
                     priority=priority,
+                    requires_user_action=bool(resolved_item.get("requiresUserAction", False)),
+                    setup_hint=str(resolved_item.get("setupHint") or ""),
+                    docs_url=str(resolved_item.get("docsUrl") or ""),
                 )
             )
 
@@ -260,6 +368,14 @@ class MCPServerManager:
         await self._notify_status(config.name, ServerStatus.STARTING)
         await self._attempt_connection(config.name, state)
 
+    async def register_config(self, config: MCPServerConfig) -> None:
+        """Track an installed MCP server without starting it."""
+        state = await self._prepare_state(config)
+        state.status = ServerStatus.OFFLINE
+        state.tools = []
+        state.last_error = ""
+        await self._notify_status(config.name, ServerStatus.OFFLINE)
+
     async def stop_server(self, name: str) -> None:
         state = self._servers.get(name)
         if state is None:
@@ -278,6 +394,11 @@ class MCPServerManager:
         state.consecutive_failures = 0
         state.circuit_open = False
         state.last_error = ""
+        await self._notify_status(name, ServerStatus.OFFLINE)
+
+    async def remove_server(self, name: str) -> None:
+        await self.stop_server(name)
+        self._servers.pop(name, None)
         await self._notify_status(name, ServerStatus.OFFLINE)
 
     async def stop_all(self) -> None:
@@ -306,8 +427,39 @@ class MCPServerManager:
             return state.client
         return None
 
+    def iter_connected_clients(self) -> list[tuple[str, Any]]:
+        """Return connected MCP clients using the manager's authoritative state."""
+        result: list[tuple[str, Any]] = []
+        for name, state in self._servers.items():
+            client = state.client
+            if state.status == ServerStatus.CONNECTED and client and client.connected:
+                result.append((name, client))
+        return result
+
+    def get_server_instructions(self) -> dict[str, str]:
+        """Return {server_name: instructions} for connected servers that declared any."""
+        result: dict[str, str] = {}
+        for name, state in self._servers.items():
+            if state.status != ServerStatus.CONNECTED or not state.client:
+                continue
+            text = (state.client.instructions or "").strip()
+            if text:
+                result[name] = text
+        return result
+
     def get_all_status(self) -> list[dict[str, Any]]:
         return [state.to_status_dict() for state in self._servers.values()]
+
+    def get_server_lifecycle(self, name: str) -> dict[str, Any] | None:
+        """Lifecycle payload for one server, or None if unknown."""
+        state = self._servers.get(name)
+        return state.to_lifecycle_dict() if state else None
+
+    def get_server_progress(self, name: str) -> dict[str, Any] | None:
+        """Connect/reconnect progress payload for one server, or None."""
+        state = self._servers.get(name)
+        return state.to_progress_dict() if state else None
+
 
     @property
     def connected_count(self) -> int:
@@ -377,6 +529,11 @@ class MCPServerManager:
             await self._notify_status(name, ServerStatus.CONNECTED)
             self._start_health_check(name)
         except Exception as exc:
+            try:
+                await client.close()
+            except Exception:
+                logger.debug("Failed to close MCP client after start failure", exc_info=True)
+            state.client = None
             state.status = ServerStatus.ERROR
             state.tools = []
             state.consecutive_failures += 1
@@ -429,6 +586,7 @@ class MCPServerManager:
         )
 
     async def _notify_status(self, name: str, status: ServerStatus) -> None:
+        self._registry_version += 1
         if self._on_status_change:
             try:
                 await self._on_status_change(name, status)
@@ -480,4 +638,7 @@ def _same_runtime_config(left: MCPServerConfig, right: MCPServerConfig) -> bool:
         and left.env == right.env
         and left.transport == right.transport
         and left.url == right.url
+        and left.requires_user_action == right.requires_user_action
+        and left.setup_hint == right.setup_hint
+        and left.docs_url == right.docs_url
     )

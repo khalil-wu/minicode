@@ -92,7 +92,7 @@ const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
     id,
     name,
     args,
-    status: (status === "pending" || status === "running" || status === "success" || status === "failed" || status === "blocked")
+    status: (status === "pending" || status === "running" || status === "success" || status === "failed" || status === "blocked" || status === "partial")
       ? status
       : "running",
     summary: typeof tool.summary === "string" ? tool.summary : undefined,
@@ -121,6 +121,39 @@ const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
       : typeof tool.evidence_type === "string"
         ? tool.evidence_type
         : undefined,
+    displaySummary: typeof tool.displaySummary === "string"
+      ? tool.displaySummary
+      : typeof tool.display_summary === "string"
+        ? tool.display_summary
+        : undefined,
+    resultKind: typeof tool.resultKind === "string"
+      ? tool.resultKind
+      : typeof tool.result_kind === "string"
+        ? tool.result_kind
+        : undefined,
+    limitation: typeof tool.limitation === "string" ? tool.limitation : undefined,
+    provider: typeof tool.provider === "string" ? tool.provider : undefined,
+    durationMs: typeof tool.durationMs === "number"
+      ? tool.durationMs
+      : typeof tool.duration_ms === "number"
+        ? tool.duration_ms
+        : undefined,
+    displayHint: typeof tool.displayHint === "string"
+      ? tool.displayHint
+      : typeof tool.display_hint === "string"
+        ? tool.display_hint
+        : undefined,
+    inputSummary: typeof tool.inputSummary === "string"
+      ? tool.inputSummary
+      : typeof tool.input_summary === "string"
+        ? tool.input_summary
+        : undefined,
+    iterationId: typeof tool.iterationId === "string"
+      ? tool.iterationId
+      : typeof tool.iteration_id === "string"
+        ? tool.iteration_id
+        : undefined,
+    phase: typeof tool.phase === "string" ? tool.phase : undefined,
     startedAt: toTimestamp(tool.startedAt ?? tool.started_at),
     finishedAt: tool.finishedAt != null || tool.finished_at != null
       ? toTimestamp(tool.finishedAt ?? tool.finished_at)

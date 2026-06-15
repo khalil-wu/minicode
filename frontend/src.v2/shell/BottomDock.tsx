@@ -1,7 +1,6 @@
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { useAppStore } from "../stores";
 import { ToolCallTimeline } from "../chat/tool-calls/ToolCallTimeline";
-import { getToolCallsFromMessage } from "../lib/content-blocks";
 import { GitPanel } from "../panels/GitPanel";
 
 const TABS = [
@@ -16,23 +15,25 @@ export const BottomDock = () => {
   const dockHeight = useAppStore((s) => s.dockHeight);
   const activeBottomTab = useAppStore((s) => s.activeBottomTab);
   const totalBudgetPercent = useAppStore((s) => s.totalBudgetPercent);
-  const toolCount = useAppStore((s) => s.messages.reduce((sum, m) => sum + getToolCallsFromMessage(m).length, 0));
+  const toolCount = useAppStore((s) => s.toolCallCount);
   const setActiveBottomTab = useAppStore((s) => s.setActiveBottomTab);
   const toggleDock = useAppStore((s) => s.toggleDock);
   const visibleTab = activeBottomTab === "terminal" || activeBottomTab === "tasks" ? "git" : activeBottomTab;
   return (
     <section
+      className="flex flex-col shrink-0"
       style={{
+        display: "flex",
+        flexDirection: "column",
+        flexShrink: 0,
         height: dockCollapsed ? 32 : dockHeight,
         background: "var(--surface-base)",
         borderTop: "1px solid var(--border-subtle)",
-        display: "flex",
-        flexDirection: "column",
-        flex: "0 0 auto",
         transition: "height var(--transition-md, 200ms cubic-bezier(0.4,0,0.2,1))",
       }}
     >
       <div
+        className="h-8 flex items-center px-2 gap-1"
         style={{
           height: 32,
           display: "flex",
@@ -57,32 +58,23 @@ export const BottomDock = () => {
                 setActiveBottomTab(t.id);
                 if (dockCollapsed) toggleDock();
               }}
+              className="border-0 px-2.5 py-1 cursor-pointer inline-flex items-center gap-1"
               style={{
                 background: visibleTab === t.id && !dockCollapsed ? "var(--surface-raised)" : "transparent",
                 color: visibleTab === t.id ? "var(--text-primary)" : "var(--text-muted)",
-                border: 0,
-                padding: "4px 10px",
                 borderRadius: "var(--radius-sm, 4px)",
-                cursor: "pointer",
                 fontSize: "var(--text-xs)",
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 4,
               }}
             >
               {t.label}
               {badge && (
-                <span style={{
+                <span className="rounded-full px-1.5 text-center font-semibold" style={{
                   fontSize: "var(--text-xs)",
                   fontFamily: "var(--font-mono)",
                   background: t.id === "budget" && totalBudgetPercent > 0.9 ? "var(--state-danger)" : "var(--surface-active)",
                   color: t.id === "budget" && totalBudgetPercent > 0.9 ? "var(--text-on-accent)" : "var(--text-secondary)",
-                  borderRadius: 999,
-                  padding: "0 5px",
                   lineHeight: "16px",
                   minWidth: 16,
-                  textAlign: "center",
-                  fontWeight: 600,
                 }}>
                   {badge}
                 </span>
@@ -90,21 +82,14 @@ export const BottomDock = () => {
             </button>
           );
         })}
-        <div style={{ flex: 1 }} />
+        <div className="flex-1" />
         <button
           onClick={toggleDock}
           aria-label={dockCollapsed ? "Expand bottom dock" : "Collapse bottom dock"}
           title={dockCollapsed ? "Expand bottom dock" : "Collapse bottom dock"}
+          className="bg-transparent border-0 cursor-pointer inline-flex items-center justify-center w-7 h-6"
           style={{
-            background: "transparent",
             color: "var(--text-muted)",
-            border: 0,
-            cursor: "pointer",
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            width: 28,
-            height: 24,
           }}
         >
           {dockCollapsed ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
@@ -112,9 +97,8 @@ export const BottomDock = () => {
       </div>
       <div
         aria-hidden={dockCollapsed}
+        className="flex-1 overflow-auto"
         style={{
-          flex: 1,
-          overflow: "auto",
           fontSize: "var(--text-sm)",
           background: "var(--surface-base)",
           opacity: dockCollapsed ? 0 : 1,
@@ -123,17 +107,17 @@ export const BottomDock = () => {
           transition: "opacity 140ms ease, transform var(--transition-md, 200ms cubic-bezier(0.4,0,0.2,1))",
         }}
       >
-          {visibleTab === "timeline" && <div style={{ padding: 12 }}><ToolCallTimeline /></div>}
+          {visibleTab === "timeline" && <div className="p-3"><ToolCallTimeline /></div>}
           {visibleTab === "budget" && (
-            <div style={{ padding: 12 }}>
-              <div style={{ marginBottom: 8, color: "var(--text-secondary)" }}>
+            <div className="p-3">
+              <div className="mb-2" style={{ color: "var(--text-secondary)" }}>
                 Total: {(totalBudgetPercent * 100).toFixed(1)}%
               </div>
               <BudgetBars />
             </div>
           )}
           {visibleTab === "git" && <GitPanel />}
-          {visibleTab === "debug" && <div style={{ padding: 12 }}><DebugLog /></div>}
+          {visibleTab === "debug" && <div className="p-3"><DebugLog /></div>}
       </div>
     </section>
   );
@@ -144,29 +128,27 @@ const BudgetBars = () => {
   if (budgetBuckets.length === 0)
     return <span style={{ color: "var(--text-muted)" }}>No budget data yet.</span>;
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 6 }}>
+    <div className="grid grid-cols-1 gap-1.5">
       {budgetBuckets.map((b) => {
         const pct = b.limit > 0 ? b.used / b.limit : 0;
         return (
           <div key={b.name}>
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: "var(--text-xs)" }}>
+            <div className="flex justify-between" style={{ fontSize: "var(--text-xs)" }}>
               <span style={{ color: "var(--text-secondary)" }}>{b.name}</span>
               <span style={{ color: "var(--text-muted)" }}>
                 {b.used} / {b.limit}
               </span>
             </div>
             <div
+              className="h-1 rounded-sm overflow-hidden"
               style={{
-                height: 4,
                 background: "var(--surface-soft)",
-                borderRadius: 2,
-                overflow: "hidden",
               }}
             >
               <div
+                className="h-full"
                 style={{
                   width: `${Math.min(100, pct * 100)}%`,
-                  height: "100%",
                   background:
                     pct > 0.9
                       ? "var(--state-danger)"
@@ -185,6 +167,7 @@ const BudgetBars = () => {
 
 const DebugLog = () => {
   const messages = useAppStore((s) => s.messages);
+  const toolCallCount = useAppStore((s) => s.toolCallCount);
   const isStreaming = useAppStore((s) => s.isStreaming);
   const isConnected = useAppStore((s) => s.isConnected);
   return (
@@ -192,7 +175,7 @@ const DebugLog = () => {
       <div>connected: {String(isConnected)}</div>
       <div>streaming: {String(isStreaming)}</div>
       <div>messages: {messages.length}</div>
-      <div>tool_calls: {messages.reduce((sum, m) => sum + getToolCallsFromMessage(m).length, 0)}</div>
+      <div>tool_calls: {toolCallCount}</div>
     </div>
   );
 };

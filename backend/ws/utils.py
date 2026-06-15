@@ -33,12 +33,17 @@ def uses_control_protocol(value: Any) -> bool:
 # ── Permission helpers ────────────────────────────────────
 
 def normalize_permission_mode(value: str) -> str | None:
-    normalized = str(value or "").strip().lower()
+    normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     if not normalized:
         return None
     aliases = {
         "on": "plan",
         "off": "default",
+        "ask": "confirm",
+        "ask_permissions": "confirm",
+        "full_access": "bypass",
+        "danger_full_access": "bypass",
+        "acceptedits": "accept_edits",
     }
     mode = aliases.get(normalized, normalized)
     if mode in {"default", "plan", "confirm", "bypass", "auto", "accept_edits"}:

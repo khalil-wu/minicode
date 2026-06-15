@@ -27,6 +27,8 @@ import asyncio
 import itertools
 import json
 import logging
+import subprocess
+import threading
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -40,6 +42,195 @@ RETRIABLE_TIMEOUT_TOOLS = {
     "mcp__websearch__search",
     "mcp__websearch__fetch_page",
 }
+
+
+def _fix_mcp_subprocess_env(env: dict[str, str]) -> dict[str, str]:
+    """Repair PYTHONPATH so the installed MCP SDK is not shadowed.
+
+    MiniCode's ``backend/mcp/`` package has the same top-level name as the
+    installed ``mcp`` SDK.  When PYTHONPATH or CWD includes the *backend*
+    directory, ``import mcp`` resolves to ``backend/mcp/__init__.py`` instead
+    of the SDK — breaking FastMCP-based servers like docparse and memory-rag.
+
+    The fix: (1) strip PYTHONPATH entries that point to the backend directory,
+    (2) replace them with the project root so ``backend.*`` imports still work,
+    (3) insert the real MCP SDK's site-packages directory at the front of
+    PYTHONPATH so it takes absolute precedence.
+    """
+    import os
+    import site
+    from backend.config import PROJECT_ROOT
+
+    old_paths = env.get("PYTHONPATH", "")
+    backend_dir = str(PROJECT_ROOT / "backend")
+    project_root = str(PROJECT_ROOT)
+
+    # Collect all site-packages directories (virtual-env + user + system).
+    sdk_paths: list[str] = []
+    for sp in site.getsitepackages():
+        sdk_paths.append(sp)
+    user_site = site.getusersitepackages()
+    if user_site:
+        sdk_paths.append(user_site)
+
+    new_parts: list[str] = []
+    # Site-packages first — ensures mcp SDK is found before any local package.
+    for sp in sdk_paths:
+        abs_sp = os.path.abspath(sp)
+        if abs_sp not in new_parts:
+            new_parts.append(abs_sp)
+
+    for entry in (old_paths.split(os.pathsep) if old_paths else []):
+        entry = entry.strip()
+        if not entry:
+            continue
+        abs_entry = os.path.abspath(entry)
+        # Drop entries that point to the backend dir (they shadow the SDK).
+        if abs_entry.lower() == os.path.abspath(backend_dir).lower():
+            continue
+        if abs_entry not in new_parts:
+            new_parts.append(abs_entry)
+
+    # Always include the project root so backend.* imports resolve.
+    abs_root = os.path.abspath(project_root)
+    if abs_root not in new_parts:
+        new_parts.append(abs_root)
+
+    if new_parts:
+        env["PYTHONPATH"] = os.pathsep.join(new_parts)
+    return env
+
+
+def _resolve_npm_command_to_node(
+    command: str, args: list[str],
+) -> tuple[str, list[str]] | None:
+    """Resolve an npx/npm invocation to a direct ``node`` call.
+
+    On Windows, ``npx`` and ``npm`` are ``.cmd`` batch scripts that execute
+    through ``cmd.exe``.  ``cmd.exe`` buffers stdin/stdout, which breaks the
+    MCP JSON-RPC protocol: the initialize request is sent, but the response
+    never reaches the parent process.
+
+    By finding the globally-installed package entry point and invoking it
+    with ``node`` directly, we bypass the ``cmd.exe`` wrapper and get
+    unbuffered, immediate I/O — exactly what MCP stdio transport requires.
+
+    Returns ``(node_executable, new_args)`` on success, or ``None`` if the
+    package cannot be resolved (fallback to original command).
+    """
+    import json
+    import os
+    import shutil
+
+    # Only applies to npx/npm with -y and a package name.
+    if command not in ("npx", "npm"):
+        return None
+
+    # Find node executable.
+    node_path = shutil.which("node")
+    if not node_path:
+        logger.debug("Cannot resolve npx → node: node not found in PATH")
+        return None
+
+    # Extract the npm package name from args.
+    # Common patterns:
+    #   npx -y @scope/package         → args = ["-y", "@scope/package"]
+    #   npx @scope/package             → args = ["@scope/package"]
+    #   npm exec @scope/package        → args = ["exec", "@scope/package"]
+    package_name: str | None = None
+    filtered_args: list[str] = []
+    for arg in args:
+        if arg in ("-y", "--yes", "-q", "--quiet"):
+            filtered_args.append(arg)  # keep for reference but skip
+            continue
+        if arg in ("exec", "--"):
+            filtered_args.append(arg)
+            continue
+        # First positional arg that looks like a package name.
+        if arg.startswith("@") or (arg and not arg.startswith("-")):
+            package_name = arg
+            break
+
+    if not package_name:
+        return None
+
+    # Locate the globally-installed package.
+    # On Windows, npm installs global packages under %APPDATA%\npm\node_modules,
+    # not next to the Node.js installation (D:\Nodejs\node_modules).
+    # We need to search multiple possible locations.
+    candidate_prefixes: list[str] = []
+    # 1. %APPDATA%\npm  (default npm global prefix on Windows)
+    appdata = os.environ.get("APPDATA", "")
+    if appdata:
+        candidate_prefixes.append(os.path.join(appdata, "npm", "node_modules"))
+    # 2. Next to npm executable (Linux/macOS typical)
+    npm_bin = shutil.which("npm")
+    if npm_bin:
+        candidate_prefixes.append(
+            os.path.join(os.path.dirname(npm_bin), "node_modules"),
+        )
+    # 3. ~/.npm-global/node_modules (custom npm prefix)
+    home = os.environ.get("USERPROFILE", "") or os.environ.get("HOME", "")
+    if home:
+        candidate_prefixes.append(
+            os.path.join(home, ".npm-global", "node_modules"),
+        )
+    # 4. /usr/local/lib/node_modules (Linux system install)
+    candidate_prefixes.append("/usr/local/lib/node_modules")
+    # 5. /usr/lib/node_modules (Linux system-wide)
+    candidate_prefixes.append("/usr/lib/node_modules")
+
+    # Find the first prefix that contains the target package.
+    package_dir: str | None = None
+    for prefix in candidate_prefixes:
+        candidate = os.path.join(prefix, package_name)
+        if os.path.isdir(candidate):
+            package_dir = candidate
+            break
+
+    if not package_dir:
+        logger.debug(
+            "Cannot resolve npx → node: package '%s' not found in any global prefix",
+            package_name,
+        )
+        return None
+
+    # Read package.json to find the bin entry point.
+    pkg_json_path = os.path.join(package_dir, "package.json")
+    if not os.path.isfile(pkg_json_path):
+        return None
+
+    try:
+        with open(pkg_json_path, encoding="utf-8") as f:
+            pkg_data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    # Resolve bin entry.  bin can be a string or a dict.
+    bin_field = pkg_data.get("bin")
+    entry_path: str | None = None
+
+    if isinstance(bin_field, str):
+        entry_path = bin_field
+    elif isinstance(bin_field, dict):
+        # Pick the first entry (or match the package bin name).
+        for _bin_name, bin_path in bin_field.items():
+            entry_path = bin_path
+            break
+
+    if not entry_path:
+        # Try main as fallback.
+        entry_path = pkg_data.get("main")
+
+    if not entry_path:
+        return None
+
+    entry_abs = os.path.normpath(os.path.join(package_dir, entry_path))
+    if not os.path.isfile(entry_abs):
+        logger.debug("Entry point not found: %s", entry_abs)
+        return None
+
+    return (node_path, [entry_abs])
 
 # ── 数据类型 ────────────────────────────────────────────────
 
@@ -56,6 +247,10 @@ class MCPToolDef:
     name: str
     description: str
     input_schema: dict[str, Any] = field(default_factory=dict)
+    # MCP tool annotations (readOnlyHint/destructiveHint/openWorldHint/title…)
+    # and _meta (e.g. anthropic/alwaysLoad). Used to derive local capability hints.
+    annotations: dict[str, Any] = field(default_factory=dict)
+    meta: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -93,6 +288,24 @@ class MCPServerCapabilities:
 
 
 # ── JSON-RPC 辅助 ─────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class _RpcError:
+    message: str
+    code: str = "?"
+
+    def to_text(self) -> str:
+        return f"MCP RPC error: {self.message} (code={self.code})"
+
+
+def _rpc_error_from_payload(error: Any) -> _RpcError:
+    if isinstance(error, dict):
+        return _RpcError(
+            message=str(error.get("message", "unknown") or "unknown"),
+            code=str(error.get("code", "?") or "?"),
+        )
+    return _RpcError(message=str(error or "unknown"), code="?")
 
 
 class _JsonRpcHelper:
@@ -188,6 +401,7 @@ class MCPClient:
         self._env = env or {}
         self._transport = transport
         self._url = url
+        self._http_endpoint = (url or "").strip() or None
         self._timeout = timeout
 
         # 运行时状态
@@ -195,11 +409,16 @@ class MCPClient:
         self._connected = False
         self._server_capabilities = MCPServerCapabilities()
         self._server_info: dict[str, Any] = {}
+        self._instructions: str = ""
 
         # 请求-响应关联
         self._pending: dict[int, asyncio.Future] = {}
         self._reader_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._sync_process: subprocess.Popen[bytes] | None = None
+        self._sync_stdout_thread: threading.Thread | None = None
+        self._sync_stderr_thread: threading.Thread | None = None
 
     @property
     def connected(self) -> bool:
@@ -208,6 +427,11 @@ class MCPClient:
     @property
     def server_capabilities(self) -> MCPServerCapabilities:
         return self._server_capabilities
+
+    @property
+    def instructions(self) -> str:
+        """Server-declared usage instructions from the initialize result."""
+        return self._instructions
 
     # ── 连接生命周期 ──────────────────────────────────
 
@@ -227,14 +451,39 @@ class MCPClient:
 
     async def _connect_stdio(self) -> None:
         """stdio 模式连接。"""
-        # 构建环境变量
-        env = sanitized_subprocess_env(self._env)
+        # 构建环境变量，并修复 PYTHONPATH 阴影冲突：
+        # MiniCode 的 backend/mcp 包会遮蔽已安装的 MCP SDK，
+        # 导致子进程 import mcp 时优先找到 MiniCode 的版本而非 SDK。
+        # 解决方案：在子进程环境中将 PYTHONPATH 从 backend 目录改为项目根目录，
+        # 这样 backend.mcp.* 仍然可导入，而 import mcp 则找到 SDK。
+        env = _fix_mcp_subprocess_env(sanitized_subprocess_env(self._env))
 
         # 确保在使用正确的 Python 环境（如虚拟环境）中启动
+        # 并将 npx 命令解析为直接 node 执行（避免 Windows 上 .cmd 批处理
+        # 脚本的 I/O 缓冲问题导致 MCP 握手失败）。
         cmd = self._command
+        args = list(self._args)
+
         if cmd == "python":
             import sys
             cmd = sys.executable
+        elif cmd == "npx" or cmd == "npm":
+            # Windows: npx.CMD / npm.CMD 是批处理脚本，由 cmd.exe 执行，
+            # 这会缓冲 stdin/stdout 导致 MCP JSON-RPC 握手永远无法完成。
+            # 解决方案：找到已安装的包入口脚本，直接用 node 运行。
+            resolved_cmd = _resolve_npm_command_to_node(cmd, args)
+            if resolved_cmd:
+                cmd, args = resolved_cmd
+                logger.info(
+                    "[MCP:%s] 将 npx/npm 命令解析为直接 node 执行: %s %s",
+                    self.server_name, cmd, " ".join(args),
+                )
+            else:
+                # 如果无法解析，仍尝试原始 npx/npm 命令
+                import shutil
+                resolved = shutil.which(cmd)
+                if resolved:
+                    cmd = resolved
         else:
             import shutil
             resolved = shutil.which(cmd)
@@ -243,21 +492,37 @@ class MCPClient:
 
         logger.info(
             "[MCP:%s] 启动子进程: %s %s",
-            self.server_name, cmd, " ".join(self._args),
+            self.server_name, cmd, " ".join(args),
         )
+
+        self._loop = asyncio.get_running_loop()
+
+        # Set CWD to project root to prevent ``backend/mcp`` shadowing the SDK.
+        # When CWD is the backend dir, Python adds it to sys.path and ``import mcp``
+        # finds MiniCode's ``backend/mcp/__init__.py`` before the installed SDK.
+        from backend.config import PROJECT_ROOT as _PROJECT_ROOT
+        subprocess_cwd = str(_PROJECT_ROOT)
 
         try:
             self._process = await asyncio.create_subprocess_exec(
-                cmd, *self._args,
+                cmd, *args,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                cwd=subprocess_cwd,
                 # Windows 上需要隐藏子进程窗口
-                creationflags=getattr(asyncio.subprocess, "CREATE_NO_WINDOW", 0),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
+        except NotImplementedError:
+            logger.warning(
+                "[MCP:%s] asyncio subprocess is unavailable on this event loop; "
+                "falling back to threaded stdio",
+                self.server_name,
+            )
+            self._connect_stdio_threaded(cmd, env)
         except FileNotFoundError:
-            raise ConnectionError(
+                raise ConnectionError(
                 f"MCP Server '{self.server_name}' 启动失败: "
                 f"命令 '{self._command}' 不存在"
             )
@@ -267,35 +532,67 @@ class MCPClient:
             )
 
         # 启动 stdout 读取协程
-        self._reader_task = asyncio.create_task(
-            self._read_stdout_loop(),
-            name=f"mcp-reader-{self.server_name}",
-        )
+        if self._process is not None:
+            self._reader_task = asyncio.create_task(
+                self._read_stdout_loop(),
+                name=f"mcp-reader-{self.server_name}",
+            )
 
         # 启动 stderr 日志协程
-        self._stderr_task = asyncio.create_task(
-            self._read_stderr_loop(),
-            name=f"mcp-stderr-{self.server_name}",
-        )
+            self._stderr_task = asyncio.create_task(
+                self._read_stderr_loop(),
+                name=f"mcp-stderr-{self.server_name}",
+            )
 
         # 短暂等待，检测子进程是否在启动阶段立即退出
-        try:
-            await asyncio.wait_for(
-                self._process.wait(),
-                timeout=0.5,
-            )
-            # 进程已退出 — 握手不可能成功，快速失败
-            exit_code = self._process.returncode
-            raise ConnectionError(
-                f"MCP Server '{self.server_name}' 启动后立即退出 (exit={exit_code})，"
-                "请检查依赖是否已安装（如 pip install 'mcp[cli]'）"
-            )
-        except asyncio.TimeoutError:
-            # 进程仍在运行，继续握手
-            pass
+        if self._process is not None:
+            try:
+                await asyncio.wait_for(self._process.wait(), timeout=0.5)
+                # 进程已退出 — 握手不可能成功，快速失败
+                exit_code = self._process.returncode
+                raise ConnectionError(
+                    f"MCP Server '{self.server_name}' 启动后立即退出 (exit={exit_code})，"
+                    "请检查依赖是否已安装（如 pip install 'mcp[cli]'）"
+                )
+            except asyncio.TimeoutError:
+                # 进程仍在运行，继续握手
+                pass
+        elif self._sync_process is not None:
+            await asyncio.sleep(0.5)
+            exit_code = self._sync_process.poll()
+            if exit_code is not None:
+                raise ConnectionError(
+                    f"MCP Server '{self.server_name}' exited immediately after start "
+                    f"(exit={exit_code}). Check whether its dependencies are installed."
+                )
 
         # 执行 MCP 握手
         await self._handshake()
+
+    def _connect_stdio_threaded(self, cmd: str, env: dict[str, str]) -> None:
+        """Fallback stdio transport for event loops without subprocess support."""
+        from backend.config import PROJECT_ROOT as _PROJECT_ROOT
+        self._sync_process = subprocess.Popen(
+            [cmd, *self._args],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            cwd=str(_PROJECT_ROOT),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        self._sync_stdout_thread = threading.Thread(
+            target=self._read_sync_stdout_loop,
+            name=f"mcp-sync-reader-{self.server_name}",
+            daemon=True,
+        )
+        self._sync_stdout_thread.start()
+        self._sync_stderr_thread = threading.Thread(
+            target=self._read_sync_stderr_loop,
+            name=f"mcp-sync-stderr-{self.server_name}",
+            daemon=True,
+        )
+        self._sync_stderr_thread.start()
 
     async def _connect_http(self) -> None:
         """HTTP SSE 模式连接（Phase 2 扩展）。"""
@@ -312,8 +609,8 @@ class MCPClient:
 
         # 对 HTTP 模式，不需要子进程，直接通过 HTTP 请求通信
         logger.info("[MCP:%s] HTTP SSE 连接: %s", self.server_name, self._url)
-        self._http_client = httpx.AsyncClient(base_url=self._url, timeout=self._timeout)
-        self._connected = True
+        self._http_endpoint = self._url.strip()
+        self._http_client = httpx.AsyncClient(timeout=self._timeout)
 
         # HTTP 模式下的 initialize
         await self._handshake_http()
@@ -342,6 +639,7 @@ class MCPClient:
                 logging="logging" in caps,
             )
             self._server_info = init_result.get("serverInfo", {})
+            self._instructions = str(init_result.get("instructions", "") or "")
             protocol = init_result.get("protocolVersion", "unknown")
             logger.info(
                 "[MCP:%s] 握手成功 — 协议: %s, 工具: %s, 资源: %s",
@@ -362,6 +660,11 @@ class MCPClient:
             "clientInfo": self.CLIENT_INFO,
         })
 
+        if not init_result:
+                raise ConnectionError(
+                f"MCP server '{self.server_name}' HTTP initialize returned no result"
+            )
+
         if init_result:
             caps = init_result.get("capabilities", {})
             self._server_capabilities = MCPServerCapabilities(
@@ -371,8 +674,10 @@ class MCPClient:
                 logging="logging" in caps,
             )
             self._server_info = init_result.get("serverInfo", {})
+            self._instructions = str(init_result.get("instructions", "") or "")
 
         await self._send_http_notification("notifications/initialized")
+        self._connected = True
         logger.info("[MCP:%s] HTTP 握手成功", self.server_name)
 
     # ── MCP 协议方法 ──────────────────────────────────
@@ -396,6 +701,8 @@ class MCPClient:
                 name=t.get("name", ""),
                 description=t.get("description", ""),
                 input_schema=t.get("inputSchema", {}),
+                annotations=t.get("annotations", {}) or {},
+                meta=t.get("_meta", {}) or {},
             ))
 
         logger.info(
@@ -410,19 +717,10 @@ class MCPClient:
         tool_name: str,
         arguments: dict[str, Any] | None = None,
     ) -> MCPCallResult:
-        """
-        调用 Server 的一个工具。
-
-        Args:
-            tool_name: 工具名称
-            arguments: 工具参数
-
-        Returns:
-            MCPCallResult 包含 content 列表和 is_error 标记
-        """
+        """Call one MCP tool and normalize the response."""
         if not self._connected:
             return MCPCallResult(
-                content=[{"type": "text", "text": f"MCP Server '{self.server_name}' 未连接"}],
+                content=[{"type": "text", "text": f"MCP server '{self.server_name}' is not connected"}],
                 is_error=True,
             )
 
@@ -430,14 +728,24 @@ class MCPClient:
             "name": tool_name,
             "arguments": arguments or {},
         }
-        result = await self._send_request_auto("tools/call", params)
+        result = await self._send_tool_call_request("tools/call", params)
+        if isinstance(result, _RpcError):
+            return MCPCallResult(
+                content=[{"type": "text", "text": result.to_text()}],
+                is_error=True,
+            )
         if result is None and tool_name in RETRIABLE_TIMEOUT_TOOLS:
-            logger.warning("[MCP:%s] 宸ュ叿璋冪敤瓒呮椂锛岄噸璇曚竴娆? %s", self.server_name, tool_name)
-            result = await self._send_request_auto("tools/call", params)
+            logger.warning("[MCP:%s] Tool call timed out, retrying once: %s", self.server_name, tool_name)
+            result = await self._send_tool_call_request("tools/call", params)
+            if isinstance(result, _RpcError):
+                return MCPCallResult(
+                    content=[{"type": "text", "text": result.to_text()}],
+                    is_error=True,
+                )
 
         if result is None:
             return MCPCallResult(
-                content=[{"type": "text", "text": "工具调用超时"}],
+                content=[{"type": "text", "text": "Tool call timed out"}],
                 is_error=True,
             )
 
@@ -445,6 +753,17 @@ class MCPClient:
             content=result.get("content", []),
             is_error=result.get("isError", False),
         )
+
+    async def _send_tool_call_request(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | _RpcError | None:
+        raw_helper_overridden = type(self)._send_request_auto_raw is not MCPClient._send_request_auto_raw
+        legacy_helper_overridden = type(self)._send_request_auto is not MCPClient._send_request_auto
+        if legacy_helper_overridden and not raw_helper_overridden:
+            return await self._send_request_auto(method, params)
+        return await self._send_request_auto_raw(method, params)
 
     async def list_resources(self) -> list[MCPResourceDef]:
         """获取 Server 提供的资源列表。"""
@@ -511,6 +830,22 @@ class MCPClient:
             finally:
                 self._process = None
 
+        if self._sync_process:
+            process = self._sync_process
+            try:
+                if process.stdin:
+                    process.stdin.close()
+                process.terminate()
+                await asyncio.to_thread(process.wait, 5.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+            except (ProcessLookupError, OSError, ValueError):
+                pass
+            finally:
+                self._sync_process = None
+                self._sync_stdout_thread = None
+                self._sync_stderr_thread = None
+
         # 关闭 HTTP 客户端
         if hasattr(self, "_http_client"):
             await self._http_client.aclose()
@@ -529,8 +864,15 @@ class MCPClient:
         self, method: str, params: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """自动选择传输方式发送请求。"""
+        result = await self._send_request_auto_raw(method, params)
+        return result if isinstance(result, dict) else None
+
+    async def _send_request_auto_raw(
+        self, method: str, params: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | _RpcError | None:
+        """Return raw JSON-RPC result/error for callers that need error details."""
         if self._transport == MCPTransport.HTTP:
-            return await self._send_http_request(method, params)
+            return await self._send_http_request_raw(method, params)
         return await self._send_request(method, params)
 
     async def _send_request(
@@ -541,7 +883,10 @@ class MCPClient:
 
         使用 id 字段关联请求和响应。
         """
-        if not self._process or not self._process.stdin:
+        if self._sync_process is not None:
+            if not self._sync_process.stdin:
+                return None
+        elif not self._process or not self._process.stdin:
             return None
 
         req_id, payload = _JsonRpcHelper.request(method, params)
@@ -553,9 +898,12 @@ class MCPClient:
 
         # 发送请求
         try:
-            self._process.stdin.write(payload)
-            await self._process.stdin.drain()
-        except (BrokenPipeError, ConnectionResetError) as exc:
+            if self._sync_process is not None:
+                await asyncio.to_thread(self._write_sync_stdin, payload)
+            else:
+                self._process.stdin.write(payload)
+                await self._process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError, OSError, ValueError) as exc:
             self._pending.pop(req_id, None)
             logger.error("[MCP:%s] 写入失败: %s", self.server_name, exc)
             self._connected = False
@@ -577,35 +925,61 @@ class MCPClient:
         self, method: str, params: dict[str, Any] | None = None,
     ) -> None:
         """发送 JSON-RPC 通知（不期望响应）。"""
-        if not self._process or not self._process.stdin:
+        if self._sync_process is not None:
+            if not self._sync_process.stdin:
+                return
+        elif not self._process or not self._process.stdin:
             return
 
         payload = _JsonRpcHelper.notification(method, params)
         try:
-            self._process.stdin.write(payload)
-            await self._process.stdin.drain()
-        except (BrokenPipeError, ConnectionResetError) as exc:
+            if self._sync_process is not None:
+                await asyncio.to_thread(self._write_sync_stdin, payload)
+            else:
+                self._process.stdin.write(payload)
+                await self._process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError, OSError, ValueError) as exc:
             logger.error("[MCP:%s] 通知发送失败: %s", self.server_name, exc)
+
+    def _write_sync_stdin(self, payload: bytes) -> None:
+        process = self._sync_process
+        if process is None or process.stdin is None:
+            raise BrokenPipeError("sync MCP process stdin is not available")
+        process.stdin.write(payload)
+        process.stdin.flush()
 
     async def _send_http_request(
         self, method: str, params: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
+        """Backward-compatible HTTP request helper returning only RPC results."""
+        result = await self._send_http_request_raw(method, params)
+        return result if isinstance(result, dict) else None
+
+    async def _send_http_request_raw(
+        self, method: str, params: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | _RpcError | None:
         """HTTP 模式发送请求。"""
         if not hasattr(self, "_http_client"):
             return None
 
-        _, payload_bytes = _JsonRpcHelper.request(method, params)
-        payload = json.loads(payload_bytes.decode("utf-8").strip())
+        req_id, payload_bytes = _JsonRpcHelper.request(method, params)
+        try:
+            payload = json.loads(payload_bytes.decode("utf-8").strip())
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            logger.error("[MCP:%s] Failed to decode request payload: %s", self.server_name, exc)
+            return _RpcError(code=-32700, message="Parse error in request payload")
 
         try:
             resp = await self._http_client.post(
-                "/mcp",
+                self._http_request_url(),
                 json=payload,
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                },
             )
             resp.raise_for_status()
-            data = resp.json()
-            return data.get("result")
+            return self._parse_http_rpc_result(resp, req_id)
         except Exception as exc:
             logger.error("[MCP:%s] HTTP 请求失败: %s", self.server_name, exc)
             return None
@@ -618,18 +992,172 @@ class MCPClient:
             return
 
         payload_bytes = _JsonRpcHelper.notification(method, params)
-        payload = json.loads(payload_bytes.decode("utf-8").strip())
+        try:
+            payload = json.loads(payload_bytes.decode("utf-8").strip())
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            logger.error("[MCP:%s] Failed to decode notification payload: %s", self.server_name, exc)
+            return
 
         try:
             await self._http_client.post(
-                "/mcp",
+                self._http_request_url(),
                 json=payload,
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                },
             )
         except Exception as exc:
             logger.error("[MCP:%s] HTTP 通知失败: %s", self.server_name, exc)
 
     # ── stdout 读取循环 ───────────────────────────────
+
+    def _http_request_url(self) -> str:
+        endpoint = self._http_endpoint or self._url
+        if not endpoint:
+            raise ConnectionError("HTTP MCP transport requires a url")
+        return endpoint
+
+    def _parse_http_rpc_result(self, resp: Any, req_id: int) -> dict[str, Any] | _RpcError | None:
+        data = self._parse_http_response_message(resp, expected_id=req_id)
+        if data is None:
+            return None
+        if data.get("id") not in (None, req_id):
+            return None
+        if "error" in data:
+            error = data.get("error") or {}
+            if isinstance(error, dict):
+                message = error.get("message", "unknown")
+                code = error.get("code", "?")
+            else:
+                message = str(error)
+                code = "?"
+            logger.warning(
+                "[MCP:%s] HTTP RPC error: %s (code=%s)",
+                self.server_name,
+                message,
+                code,
+            )
+            return _RpcError(message=str(message), code=str(code))
+        result = data.get("result")
+        return result if isinstance(result, dict) else None
+
+    def _parse_http_response_message(
+        self,
+        resp: Any,
+        *,
+        expected_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        headers = getattr(resp, "headers", {}) or {}
+        content_type = ""
+        if hasattr(headers, "get"):
+            content_type = str(headers.get("content-type", "") or "").lower()
+
+        if "text/event-stream" in content_type:
+            return self._parse_sse_json_rpc_message(
+                str(getattr(resp, "text", "") or ""),
+                expected_id=expected_id,
+            )
+
+        try:
+            data = resp.json()
+        except Exception:
+            return self._parse_sse_json_rpc_message(
+                str(getattr(resp, "text", "") or ""),
+                expected_id=expected_id,
+            )
+        return data if isinstance(data, dict) else None
+
+    def _parse_sse_json_rpc_message(
+        self,
+        text: str,
+        *,
+        expected_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        for frame in text.replace("\r\n", "\n").split("\n\n"):
+            data_lines: list[str] = []
+            for raw_line in frame.splitlines():
+                line = raw_line.strip()
+                if line.startswith("data:"):
+                    data_lines.append(line.removeprefix("data:").strip())
+            if not data_lines:
+                continue
+            try:
+                message = json.loads("\n".join(data_lines))
+            except json.JSONDecodeError:
+                logger.debug("[MCP:%s] Ignoring malformed SSE frame", self.server_name)
+                continue
+            if not isinstance(message, dict):
+                continue
+            if expected_id is not None and message.get("id") != expected_id:
+                continue
+            if "result" in message or "error" in message:
+                return message
+        return None
+
+    def _read_sync_stdout_loop(self) -> None:
+        process = self._sync_process
+        if process is None or process.stdout is None:
+            return
+        reader = process.stdout
+        try:
+            while True:
+                line = reader.readline()
+                if not line:
+                    self._call_soon_threadsafe(self._mark_disconnected_and_cancel_pending)
+                    break
+
+                line_str = line.decode("utf-8", errors="replace").strip()
+                if not line_str:
+                    continue
+
+                if line_str.startswith("Content-Length:"):
+                    try:
+                        content_length = int(line_str.split(":", 1)[1].strip())
+                    except ValueError:
+                        continue
+                    reader.readline()
+                    body = reader.read(content_length)
+                    line_str = body.decode("utf-8", errors="replace")
+
+                try:
+                    msg = json.loads(line_str)
+                except json.JSONDecodeError:
+                    logger.debug("[MCP:%s] non-JSON stdout: %s", self.server_name, line_str[:100])
+                    continue
+
+                if isinstance(msg, dict):
+                    self._call_soon_threadsafe(self._dispatch_message, msg)
+        except Exception as exc:
+            logger.error("[MCP:%s] threaded stdout read failed: %s", self.server_name, exc)
+            self._call_soon_threadsafe(self._mark_disconnected_and_cancel_pending)
+
+    def _read_sync_stderr_loop(self) -> None:
+        process = self._sync_process
+        if process is None or process.stderr is None:
+            return
+        try:
+            while True:
+                line = process.stderr.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace").strip()
+                if text:
+                    logger.debug("[MCP:%s:stderr] %s", self.server_name, text)
+        except Exception as exc:
+            logger.debug("[MCP:%s] threaded stderr read failed: %s", self.server_name, exc)
+
+    def _call_soon_threadsafe(self, callback: Any, *args: Any) -> None:
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(callback, *args)
+
+    def _mark_disconnected_and_cancel_pending(self) -> None:
+        self._connected = False
+        for future in self._pending.values():
+            if not future.done():
+                future.cancel()
+        self._pending.clear()
 
     async def _read_stdout_loop(self) -> None:
         """
@@ -683,7 +1211,7 @@ class MCPClient:
                 self._dispatch_message(msg)
 
         except asyncio.CancelledError:
-            pass
+                pass
         except Exception as exc:
             logger.error("[MCP:%s] 读取异常: %s", self.server_name, exc)
             self._connected = False

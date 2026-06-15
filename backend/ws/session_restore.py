@@ -6,7 +6,7 @@ import logging
 from typing import Any
 
 from backend.conversations.repository import ConversationRepository
-from backend.workspace.state import get_active_workspace_root
+from backend.workspace.path_utils import normalize_project_import_path
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +41,14 @@ class SessionRestoreManager:
             "error": None,
         }
 
+        bound_workspace_root = ""
+
         # Restore conversation
         if last_conversation_id:
             try:
                 conversation = self.conversation_repo.get_conversation(last_conversation_id)
                 if conversation:
+                    bound_workspace_root = str(conversation.worktree_path or conversation.workspace_root or "").strip()
                     result["conversation"] = {
                         "id": conversation.id,
                         "title": conversation.title,
@@ -53,6 +56,11 @@ class SessionRestoreManager:
                         "permission_mode": conversation.permission_mode,
                         "message_count": conversation.message_count,
                         "updated_at": conversation.updated_at,
+                        "workspace_root": conversation.workspace_root,
+                        "git_branch": conversation.git_branch,
+                        "worktree_path": conversation.worktree_path,
+                        "git_isolated": conversation.git_isolated,
+                        "goal": conversation.goal,
                     }
                     # Return last N messages for UI
                     result["messages"] = conversation.transcript[-50:] if conversation.transcript else []
@@ -62,18 +70,38 @@ class SessionRestoreManager:
                 logger.error(f"Failed to restore conversation {last_conversation_id}: {e}")
                 result["error"] = f"Failed to restore conversation: {str(e)}"
 
-        # Restore workspace
-        if last_workspace_root:
+        # Restore project workspace only from the conversation binding. A
+        # client-supplied workspace can be stale after deleting/switching into
+        # a global chat, and must not turn an unbound conversation back into a
+        # project workspace.
+        workspace_candidates = [
+            value
+            for value in (bound_workspace_root,)
+            if str(value or "").strip()
+        ]
+        seen_workspaces: set[str] = set()
+        workspace_errors: list[str] = []
+        for workspace_candidate in workspace_candidates:
+            candidate = str(workspace_candidate or "").strip()
+            if not candidate or candidate in seen_workspaces:
+                continue
+            seen_workspaces.add(candidate)
             try:
-                workspace_root = get_active_workspace_root(last_workspace_root)
+                workspace_root = normalize_project_import_path(candidate)
+                if not workspace_root.exists() or not workspace_root.is_dir():
+                    raise ValueError(f"Workspace does not exist: {candidate}")
                 result["workspace"] = {
                     "root_path": str(workspace_root),
                     "name": workspace_root.name,
                 }
                 logger.info(f"Restored workspace: {workspace_root}")
+                break
             except Exception as e:
-                logger.error(f"Failed to restore workspace {last_workspace_root}: {e}")
-                result["error"] = f"Failed to restore workspace: {str(e)}"
+                logger.error(f"Failed to restore workspace {candidate}: {e}")
+                workspace_errors.append(str(e))
+
+        if result["workspace"] is None and workspace_errors:
+            result["error"] = f"Failed to restore workspace: {workspace_errors[-1]}"
 
         return result
 
@@ -89,8 +117,23 @@ class SessionRestoreManager:
 
         Returns incremental changes since client_version.
         """
-        # For now, return full snapshot
-        # TODO: Implement incremental sync based on version
+        if client_version > 0 and session_snapshot:
+            # Incremental sync: client has a snapshot at client_version,
+            # only return what changed. For now we track message count as version.
+            messages = (session_snapshot.get("messages") or [])
+            new_messages = messages[client_version:] if client_version < len(messages) else []
+            if new_messages:
+                return {
+                    "session_id": session_id,
+                    "synced": True,
+                    "incremental": True,
+                    "from_version": client_version,
+                    "to_version": len(messages),
+                    "changes": [{"type": "messages_append", "messages": new_messages}],
+                    "session": None,
+                }
+
+        # Full snapshot (initial connect or client has no version)
         return {
             "session_id": session_id,
             "synced": True,

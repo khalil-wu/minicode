@@ -4,7 +4,6 @@ import logging
 from typing import Any, TYPE_CHECKING
 
 from backend.agent.message import AgentEvent
-from backend.config import get_available_models
 
 if TYPE_CHECKING:
     from backend.ws.handler import WebSocketSession
@@ -78,6 +77,9 @@ async def handle_session_usage_inspect(session: "WebSocketSession", data: dict[s
         from backend.agent.state import AgentState
         state = AgentState(user_message="")
 
+    # Surface MCP tools connected since this session started before snapshotting.
+    session.refresh_tool_registry_if_mcp_changed()
+
     tool_schemas = None
     try:
         tool_schemas = session.tool_registry.get_schemas(
@@ -110,17 +112,29 @@ async def handle_session_usage_inspect(session: "WebSocketSession", data: dict[s
         f"API tokens in {input_tokens} out {output_tokens} | "
         f"estimated cost ${cost:.4f}"
     )
-    await session._send_event(AgentEvent(type="budget_update", data=budget_snapshot))
-    await session._send_event(AgentEvent(type="context_usage", data={"used": used, "limit": total}))
-    await session._emit_command_result(
-        "usage",
-        message,
-        data={
-            "session_id": session.session_id,
-            "cost": tracker_summary,
-            "budget": budget_snapshot,
-        },
-    )
+    conversation_id = str(session.active_conversation_id or "").strip()
+    scoped_budget_snapshot = dict(budget_snapshot)
+    if conversation_id:
+        scoped_budget_snapshot["conversation_id"] = conversation_id
+    await session._send_event(AgentEvent(type="budget_update", data=scoped_budget_snapshot))
+    context_usage = {"used": used, "limit": total}
+    if conversation_id:
+        context_usage["conversation_id"] = conversation_id
+    await session._send_event(AgentEvent(type="context_usage", data=context_usage))
+    # `silent` callers (the usage ring's per-turn auto-refresh) only want the
+    # context_usage / budget_update events above to refresh the indicator —
+    # they must not append a visible "/usage" notice to the transcript.
+    if not data.get("silent"):
+        await session._emit_command_result(
+            "usage",
+            message,
+            data={
+                "session_id": session.session_id,
+                "conversation_id": conversation_id or None,
+                "cost": tracker_summary,
+                "budget": budget_snapshot,
+            },
+        )
     return True
 
 
@@ -146,8 +160,6 @@ async def handle_session_permissions_inspect(session: "WebSocketSession", data: 
 
 async def handle_session_restore(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     from backend.ws.session_restore import SessionRestoreManager
-    from backend.ws.handlers.conversation import handle_conversation_switch
-    from backend.ws.handlers.workspace import handle_workspace_import
 
     last_conversation_id = data.get("last_conversation_id")
     last_workspace_root = data.get("last_workspace_root")
@@ -158,25 +170,73 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
         last_conversation_id=last_conversation_id,
         last_workspace_root=last_workspace_root,
     )
+    restored_conversation = result.get("conversation") if isinstance(result.get("conversation"), dict) else None
+    restored_conversation_id = restored_conversation.get("id") if restored_conversation else None
+    restored_workspace = result.get("workspace") if isinstance(result.get("workspace"), dict) else None
+    active_payload = restored_conversation
+    is_hydrating = False
+    if restored_conversation_id:
+        target = session.conversation_repo.get_conversation(str(restored_conversation_id))
+        if target is not None:
+            session.active_conversation_id = target.id
+            await session._switch_workspace_for_conversation(target, announce=False)
+            is_hydrating = session._load_active_conversation_snapshot(target.id, target.context_snapshot)
+            session._sync_permission_mode_with_active_conversation(source="session.restore")
+            active_payload = target.to_dict()
+
+    runtime_snapshot = session.runtime_snapshot()
+    if restored_conversation_id:
+        runtime_snapshot = {
+            **runtime_snapshot,
+            "active_conversation_id": restored_conversation_id,
+            "active_conversation": active_payload,
+        }
+        restored_permission_mode = str((active_payload or {}).get("permission_mode") or "").strip()
+        if restored_permission_mode:
+            runtime_snapshot["permission_mode"] = restored_permission_mode
+    if restored_workspace:
+        runtime_snapshot = {
+            **runtime_snapshot,
+            "workspace_root": restored_workspace.get("root_path"),
+        }
 
     await session._send_ws_payload(
         {
             "type": "session.restored",
             "session_id": result["session_id"],
             "restored": result["restored"],
-            "conversation": result.get("conversation"),
-            "workspace": result.get("workspace"),
+            "active_conversation_id": restored_conversation_id,
+            "conversation_switched_follows": bool(restored_conversation_id and active_payload),
+            "conversation": active_payload,
+            "active_conversation": active_payload,
+            "workspace": restored_workspace,
+            "working_directory": (
+                restored_workspace.get("root_path")
+                if restored_workspace
+                else ""
+            ),
+            "model": session.selected_model,
+            "current_model": session.selected_model,
+            "provider": session.provider,
+            "available_models": session.available_models,
+            "session": runtime_snapshot,
             "messages": result.get("messages", []),
             "error": result.get("error"),
         },
         log_context="session.restored",
     )
 
-    if result.get("conversation") and last_conversation_id:
-        await handle_conversation_switch(session, {"conversation_id": last_conversation_id})
-
-    if result.get("workspace") and last_workspace_root:
-        await handle_workspace_import(session, {"path": last_workspace_root})
+    if restored_conversation_id and active_payload:
+        await session._send_ws_payload(
+            {
+                "type": "conversation.switched",
+                "conversation_id": restored_conversation_id,
+                "conversation": active_payload,
+                "is_hydrating": is_hydrating,
+                "session": runtime_snapshot,
+            },
+            log_context="conversation.switched",
+        )
 
     await session._reemit_pending_state()
     return True
@@ -193,6 +253,7 @@ async def handle_session_sync(session: "WebSocketSession", data: dict[str, Any])
         client_version=client_version,
         session_snapshot=session.runtime_snapshot(),
     )
+    workspace_root = session._workspace_root_for_conversation()
 
     await session._send_ws_payload(
         {
@@ -203,6 +264,15 @@ async def handle_session_sync(session: "WebSocketSession", data: dict[str, Any])
             "incremental": result["incremental"],
             "changes": result.get("changes", []),
             "session": result["session"],
+            "active_conversation_id": session.active_conversation_id,
+            "active_conversation": session.active_conversation.to_dict()
+            if session.active_conversation is not None
+            else None,
+            "working_directory": str(workspace_root) if workspace_root is not None else "",
+            "model": session.selected_model,
+            "current_model": session.selected_model,
+            "provider": session.provider,
+            "available_models": session.available_models,
         },
         log_context="session.synced",
     )

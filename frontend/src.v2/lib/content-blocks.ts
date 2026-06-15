@@ -57,7 +57,108 @@ export type RenderGroup =
   | { type: "text"; content: string }
   | { type: "todo_list"; records: ToolCallRecord[] }
   | { type: "progress_group"; records: Extract<ContentBlock, { type: "progress" }>[] }
-  | { type: "tool_call_group"; records: ToolCallRecord[] };
+  | { type: "tool_call_group"; records: ToolCallRecord[] }
+  | {
+    type: "phase_group";
+    iterationId: string;
+    phase: string;
+    activity: string;
+    entries: ContentBlock[];
+  };
+
+const toolActivity = (name: string): string => {
+  if (/^todo_(?:write|read)$/i.test(name)) return "tool";
+  if (/(?:web_search|web_fetch|browser|search_web|fetch)/i.test(name)) return "web";
+  if (/(?:run_command|terminal|shell|bash|powershell|cmd)/i.test(name)) return "command";
+  if (/(?:write|edit|patch|delete|remove|create|move|rename|save)/i.test(name)) return "edit";
+  if (/(?:read|file|grep|glob|search)/i.test(name)) return "file";
+  if (/^mcp__/i.test(name)) return "mcp";
+  return "tool";
+};
+
+const phaseKeyForBlock = (
+  block: ContentBlock,
+  currentPhase: Extract<RenderGroup, { type: "phase_group" }> | null,
+): { iterationId: string; phase: string; activity: string } | null => {
+  if (block.type === "progress") {
+    if (currentPhase && (block.phase ?? block.stage) === currentPhase.phase) {
+      return {
+        iterationId: currentPhase.iterationId,
+        phase: currentPhase.phase,
+        activity: currentPhase.activity,
+      };
+    }
+    return block.iterationId
+      ? { iterationId: block.iterationId, phase: block.phase ?? block.stage, activity: block.phase ?? block.stage }
+      : null;
+  }
+  if (block.type === "tool_call") {
+    return block.record.iterationId
+      ? {
+          iterationId: block.record.iterationId,
+          phase: block.record.phase ?? "tool",
+          activity: toolActivity(block.record.name),
+        }
+      : null;
+  }
+  return null;
+};
+
+export function groupBlocksByPhase(blocks: ContentBlock[]): RenderGroup[] {
+  const groups: RenderGroup[] = [];
+  let currentPhase: Extract<RenderGroup, { type: "phase_group" }> | null = null;
+  let legacyBuffer: ContentBlock[] = [];
+
+  const pushPhase = () => {
+    if (currentPhase && currentPhase.entries.length > 0) groups.push(currentPhase);
+    currentPhase = null;
+  };
+
+  const flushLegacyBuffer = () => {
+    if (legacyBuffer.length === 0) return;
+    groups.push(...groupBlocksForRender(legacyBuffer));
+    legacyBuffer = [];
+  };
+
+  for (const block of blocks) {
+    if (block.type === "text") {
+      pushPhase();
+      flushLegacyBuffer();
+      groups.push({ type: "text", content: block.content });
+      continue;
+    }
+    if (block.type === "thinking") {
+      if (!currentPhase) {
+        legacyBuffer.push(block);
+        continue;
+      }
+      currentPhase.entries.push(block);
+      continue;
+    }
+    const key = phaseKeyForBlock(block, currentPhase);
+    if (!key) {
+      pushPhase();
+      legacyBuffer.push(block);
+      continue;
+    }
+    flushLegacyBuffer();
+    if (!currentPhase || currentPhase.phase !== key.phase || currentPhase.activity !== key.activity) {
+      pushPhase();
+      currentPhase = {
+        type: "phase_group",
+        iterationId: key.iterationId,
+        phase: key.phase,
+        activity: key.activity,
+        entries: [],
+      };
+    }
+    currentPhase.entries.push(block);
+  }
+
+  pushPhase();
+  flushLegacyBuffer();
+  return groups;
+}
 
 export function groupBlocksForRender(blocks: ContentBlock[]): RenderGroup[] {
   const groups: RenderGroup[] = [];

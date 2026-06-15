@@ -1,5 +1,5 @@
 """UI preferences storage and retrieval."""
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from typing import Literal
 import json
 from pathlib import Path

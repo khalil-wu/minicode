@@ -1,17 +1,44 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
+import logging
+import os
 import re
+import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
 
 from backend.config import PROJECT_ROOT
+from backend.encoding_repair import repair_mojibake_payload
 
-from .models import ConversationRecord, ConversationSummary, utc_now_iso
+from .models import (
+    DEFAULT_CONVERSATION_PERMISSION_MODE,
+    ConversationRecord,
+    ConversationSummary,
+    utc_now_iso,
+)
+
+logger = logging.getLogger(__name__)
 
 CONVERSATION_DATA_DIR = PROJECT_ROOT / "data" / "conversations"
-_CONVERSATION_ID_PATTERN = re.compile(r"^(?:conv|side|local)_[A-Za-z0-9_-]{6,80}$|^side-[A-Za-z0-9_-]{6,80}$")
+_CONVERSATION_ID_PATTERN = re.compile(
+    r"^(?:conv|side|local)_[A-Za-z0-9_-]{6,80}$|^(?:conv|side)-[A-Za-z0-9_-]{6,80}$"
+)
+_FAILED_TOOL_STATUSES = {"error", "failed", "blocked"}
+_TOOL_DETAIL_FIELDS = (
+    "summary",
+    "displaySummary",
+    "display_summary",
+    "contentPreview",
+    "content_preview",
+    "outputPreview",
+    "output_preview",
+    "inputSummary",
+    "input_summary",
+)
 
 
 class ConversationRepository:
@@ -20,6 +47,8 @@ class ConversationRepository:
     def __init__(self, base_dir: Path | None = None) -> None:
         self._base_dir = Path(base_dir or CONVERSATION_DATA_DIR)
         self._base_dir.mkdir(parents=True, exist_ok=True)
+        self._process_lock = threading.RLock()
+        self._store_lock_path = self._base_dir / ".conversation-store.lock"
         self._summary_index: dict[str, ConversationSummary] | None = None
         self._record_cache: dict[str, ConversationRecord] = {}
         self._record_cache_order: list[str] = []
@@ -30,7 +59,7 @@ class ConversationRepository:
         conversation_id: str | None = None,
         title: str | None = None,
         memory_mode: str = "none",
-        permission_mode: str = "default",
+        permission_mode: str = DEFAULT_CONVERSATION_PERMISSION_MODE,
         permission_deny_rules: list[str] | None = None,
         permission_overrides: dict[str, str] | None = None,
         summary: str = "",
@@ -83,14 +112,15 @@ class ConversationRepository:
         return record
 
     def save_conversation(self, record: ConversationRecord) -> ConversationRecord:
-        record.updated_at = utc_now_iso()
-        record.message_count = len(record.transcript)
-        self._write_meta(record)
-        self._write_transcript(record.id, record.transcript)
-        self._write_snapshot(record.id, record.context_snapshot)
-        self._delete_legacy_file(record.id)
-        self._cache_record(record)
-        return record
+        with self._store_lock():
+            record.updated_at = utc_now_iso()
+            record.message_count = len(record.transcript)
+            self._write_meta(record)
+            self._write_transcript(record.id, record.transcript)
+            self._write_snapshot(record.id, record.context_snapshot)
+            self._delete_legacy_file(record.id)
+            self._cache_record(record)
+            return record
 
     def list_conversations(self) -> list[ConversationSummary]:
         self._ensure_summary_index_loaded()
@@ -99,62 +129,62 @@ class ConversationRepository:
         return conversations
 
     def delete_conversation(self, conversation_id: str) -> bool:
-        removed = False
-        for path in (
-            self._meta_path_for(conversation_id),
-            self._transcript_path_for(conversation_id),
-            self._snapshot_path_for(conversation_id),
-            self._legacy_path_for(conversation_id),
-        ):
-            if path.exists():
-                path.unlink()
-                removed = True
-        if not removed:
-            return False
-        self._record_cache.pop(conversation_id, None)
-        if self._summary_index is not None:
-            self._summary_index.pop(conversation_id, None)
-        return True
+        with self._store_lock():
+            removed = False
+            for path in (
+                self._meta_path_for(conversation_id),
+                self._transcript_path_for(conversation_id),
+                self._snapshot_path_for(conversation_id),
+                self._legacy_path_for(conversation_id),
+            ):
+                if path.exists():
+                    path.unlink()
+                    removed = True
+            if not removed:
+                return False
+            self._record_cache.pop(conversation_id, None)
+            if self._summary_index is not None:
+                self._summary_index.pop(conversation_id, None)
+            return True
 
     def append_transcript_message(
         self, conversation_id: str, message: dict[str, Any]
     ) -> ConversationRecord | None:
-        record = self.get_conversation(conversation_id)
-        if record is None:
-            return None
-        next_message = dict(message)
-        record.transcript.append(next_message)
-        record.message_count = len(record.transcript)
-        if record.title == "New chat" and next_message.get("role") == "user":
-            record.title = _derive_title(str(next_message.get("content", "")))
-        record.updated_at = utc_now_iso()
-        if self._requires_transcript_rewrite(conversation_id):
+        with self._store_lock():
+            record = self._record_cache.get(conversation_id) or self._load_record(conversation_id)
+            if record is None:
+                return None
+            next_message = dict(message)
+            record.transcript.append(next_message)
+            record.message_count = len(record.transcript)
+            if record.title == "New chat" and next_message.get("role") == "user":
+                record.title = _derive_title(str(next_message.get("content", "")))
+            record.updated_at = utc_now_iso()
             self._write_transcript(conversation_id, record.transcript)
-        else:
-            self._append_transcript_message(conversation_id, next_message)
-        if self._requires_snapshot_rewrite(conversation_id):
-            self._write_snapshot(conversation_id, record.context_snapshot)
-        self._write_meta(record)
-        self._delete_legacy_file(conversation_id)
-        self._cache_record(record)
-        return record
+            if self._requires_snapshot_rewrite(conversation_id):
+                self._write_snapshot(conversation_id, record.context_snapshot)
+            self._write_meta(record)
+            self._delete_legacy_file(conversation_id)
+            self._cache_record(record)
+            return record
 
     def replace_transcript(
         self, conversation_id: str, transcript: list[dict[str, Any]]
     ) -> ConversationRecord | None:
-        record = self.get_conversation(conversation_id)
-        if record is None:
-            return None
-        record.transcript = list(transcript)
-        record.message_count = len(record.transcript)
-        record.updated_at = utc_now_iso()
-        self._write_transcript(conversation_id, record.transcript)
-        if self._requires_snapshot_rewrite(conversation_id):
-            self._write_snapshot(conversation_id, record.context_snapshot)
-        self._write_meta(record)
-        self._delete_legacy_file(conversation_id)
-        self._cache_record(record)
-        return record
+        with self._store_lock():
+            record = self._record_cache.get(conversation_id) or self._load_record(conversation_id)
+            if record is None:
+                return None
+            record.transcript = list(transcript)
+            record.message_count = len(record.transcript)
+            record.updated_at = utc_now_iso()
+            self._write_transcript(conversation_id, record.transcript)
+            if self._requires_snapshot_rewrite(conversation_id):
+                self._write_snapshot(conversation_id, record.context_snapshot)
+            self._write_meta(record)
+            self._delete_legacy_file(conversation_id)
+            self._cache_record(record)
+            return record
 
     def update_summary(
         self, conversation_id: str, summary: str
@@ -234,6 +264,17 @@ class ConversationRepository:
             record.git_isolated = bool(git_isolated)
         return self._persist_meta_only(record)
 
+    def update_goal(
+        self,
+        conversation_id: str,
+        goal: dict[str, Any],
+    ) -> ConversationRecord | None:
+        record = self.get_conversation(conversation_id)
+        if record is None:
+            return None
+        record.goal = dict(goal)
+        return self._persist_meta_only(record)
+
     def rename_conversation(
         self, conversation_id: str, title: str
     ) -> ConversationRecord | None:
@@ -270,30 +311,32 @@ class ConversationRepository:
     def save_context_snapshot(
         self, conversation_id: str, context_snapshot: dict[str, Any]
     ) -> ConversationRecord | None:
-        record = self.get_conversation(conversation_id)
-        if record is None:
-            return None
-        record.context_snapshot = dict(context_snapshot)
-        record.updated_at = utc_now_iso()
-        if self._requires_transcript_rewrite(conversation_id):
-            self._write_transcript(conversation_id, record.transcript)
-        self._write_snapshot(conversation_id, record.context_snapshot)
-        self._write_meta(record)
-        self._delete_legacy_file(conversation_id)
-        self._cache_record(record)
-        return record
+        with self._store_lock():
+            record = self._record_cache.get(conversation_id) or self._load_record(conversation_id)
+            if record is None:
+                return None
+            record.context_snapshot = dict(context_snapshot)
+            record.updated_at = utc_now_iso()
+            if self._requires_transcript_rewrite(conversation_id):
+                self._write_transcript(conversation_id, record.transcript)
+            self._write_snapshot(conversation_id, record.context_snapshot)
+            self._write_meta(record)
+            self._delete_legacy_file(conversation_id)
+            self._cache_record(record)
+            return record
 
     def _persist_meta_only(self, record: ConversationRecord) -> ConversationRecord:
-        record.updated_at = utc_now_iso()
-        record.message_count = len(record.transcript)
-        if self._requires_transcript_rewrite(record.id):
-            self._write_transcript(record.id, record.transcript)
-        if self._requires_snapshot_rewrite(record.id):
-            self._write_snapshot(record.id, record.context_snapshot)
-        self._write_meta(record)
-        self._delete_legacy_file(record.id)
-        self._cache_record(record)
-        return record
+        with self._store_lock():
+            record.updated_at = utc_now_iso()
+            record.message_count = len(record.transcript)
+            if self._requires_transcript_rewrite(record.id):
+                self._write_transcript(record.id, record.transcript)
+            if self._requires_snapshot_rewrite(record.id):
+                self._write_snapshot(record.id, record.context_snapshot)
+            self._write_meta(record)
+            self._delete_legacy_file(record.id)
+            self._cache_record(record)
+            return record
 
     def _cache_record(self, record: ConversationRecord) -> None:
         self._record_cache[record.id] = record
@@ -312,13 +355,56 @@ class ConversationRepository:
     def _requires_snapshot_rewrite(self, conversation_id: str) -> bool:
         return self._legacy_path_for(conversation_id).exists() or not self._snapshot_path_for(conversation_id).exists()
 
-    def _safe_write_text(self, path: Path, text: str, encoding: str = "utf-8") -> None:
-        import time
-        for attempt in range(5):
+    @contextmanager
+    def _store_lock(self):
+        with self._process_lock:
+            fd: int | None = None
+            deadline = time.monotonic() + 5.0
+            while True:
+                try:
+                    fd = os.open(self._store_lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                    os.write(fd, f"{os.getpid()} {time.time():.6f}\n".encode("ascii", "ignore"))
+                    break
+                except FileExistsError:
+                    try:
+                        lock_age = time.time() - self._store_lock_path.stat().st_mtime
+                    except OSError:
+                        lock_age = 0.0
+                    if lock_age > 30.0:
+                        try:
+                            self._store_lock_path.unlink()
+                            continue
+                        except OSError:
+                            pass
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"Timed out waiting for conversation store lock: {self._store_lock_path}")
+                    time.sleep(0.05)
+
             try:
-                path.write_text(text, encoding=encoding)
+                yield
+            finally:
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                try:
+                    self._store_lock_path.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def _safe_write_text(self, path: Path, text: str, encoding: str = "utf-8") -> None:
+        for attempt in range(5):
+            tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                tmp_path.write_text(text, encoding=encoding)
+                os.replace(tmp_path, path)
                 return
             except (IOError, PermissionError) as e:
+                try:
+                    tmp_path.unlink()
+                except FileNotFoundError:
+                    pass
                 if attempt == 4:
                     logger.error("Failed to write text to %s after 5 attempts: %s", path, e)
                     raise e
@@ -340,7 +426,9 @@ class ConversationRepository:
         meta_path = self._meta_path_for(conversation_id)
         if meta_path.exists():
             try:
-                meta_payload = json.loads(self._safe_read_text(meta_path, encoding="utf-8"))
+                meta_payload = repair_mojibake_payload(
+                    json.loads(self._safe_read_text(meta_path, encoding="utf-8"))
+                )
             except Exception as e:
                 logger.error("Failed to read meta for %s: %s", conversation_id, e)
                 return None
@@ -378,6 +466,7 @@ class ConversationRepository:
                 except Exception as e:
                     logger.error("Failed to auto-heal transcript file for %s: %s", conversation_id, e)
 
+            transcript = _normalize_loaded_transcript(transcript)
             return ConversationRecord.from_dict(
                 {
                     **meta_payload,
@@ -390,7 +479,8 @@ class ConversationRepository:
         if not legacy_path.exists():
             return None
         try:
-            payload = json.loads(self._safe_read_text(legacy_path, encoding="utf-8"))
+            payload = repair_mojibake_payload(json.loads(self._safe_read_text(legacy_path, encoding="utf-8")))
+            payload["transcript"] = _normalize_loaded_transcript(list(payload.get("transcript") or []))
             return ConversationRecord.from_dict(payload)
         except Exception as e:
             logger.error("Failed to load legacy record for %s: %s", conversation_id, e)
@@ -400,7 +490,7 @@ class ConversationRepository:
         meta_path = self._meta_path_for(conversation_id)
         if meta_path.exists():
             try:
-                payload = json.loads(self._safe_read_text(meta_path, encoding="utf-8"))
+                payload = repair_mojibake_payload(json.loads(self._safe_read_text(meta_path, encoding="utf-8")))
                 return ConversationSummary.from_dict(payload)
             except Exception as e:
                 logger.error("Failed to load summary for %s: %s", conversation_id, e)
@@ -421,7 +511,7 @@ class ConversationRepository:
             for line in content.splitlines():
                 stripped = line.strip()
                 if stripped:
-                    transcript.append(json.loads(stripped))
+                    transcript.append(repair_mojibake_payload(json.loads(stripped)))
         except Exception as e:
             logger.error("Failed to read transcript for %s: %s", conversation_id, e)
         return transcript
@@ -432,7 +522,7 @@ class ConversationRepository:
             return {}
         try:
             content = self._safe_read_text(path, encoding="utf-8")
-            return dict(json.loads(content))
+            return dict(repair_mojibake_payload(json.loads(content)))
         except Exception as e:
             logger.error("Failed to read snapshot for %s: %s", conversation_id, e)
             return {}
@@ -525,6 +615,197 @@ class ConversationRepository:
                 continue
             conversation_ids.add(path.stem)
         return sorted(conversation_ids)
+
+
+def _normalize_loaded_transcript(
+    transcript: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for index, message in enumerate(transcript):
+        if not isinstance(message, dict):
+            normalized.append(message)
+            continue
+        if not _is_legacy_tool_only_assistant_needing_text(transcript, index):
+            normalized.append(message)
+            continue
+
+        records = _message_tool_records(message)
+        fallback = _format_legacy_tool_activity_without_final_reply(
+            records,
+            user_message=_previous_user_content(transcript, index),
+        )
+        if not fallback:
+            normalized.append(message)
+            continue
+
+        next_message = dict(message)
+        next_message["content"] = fallback
+        next_message["blocks"] = _blocks_with_text_fallback(message, records, fallback)
+        normalized.append(next_message)
+    return normalized
+
+
+def _is_legacy_tool_only_assistant_needing_text(
+    transcript: list[dict[str, Any]],
+    index: int,
+) -> bool:
+    message = transcript[index]
+    if str(message.get("role") or "") != "assistant":
+        return False
+    if _message_has_visible_text(message):
+        return False
+    if not _message_tool_records(message):
+        return False
+    return not _later_visible_assistant_before_next_user(transcript, index)
+
+
+def _later_visible_assistant_before_next_user(
+    transcript: list[dict[str, Any]],
+    index: int,
+) -> bool:
+    for candidate in transcript[index + 1:]:
+        if not isinstance(candidate, dict):
+            continue
+        role = str(candidate.get("role") or "")
+        if role == "user":
+            return False
+        if role == "assistant" and _message_has_visible_text(candidate):
+            return True
+    return False
+
+
+def _message_has_visible_text(message: dict[str, Any]) -> bool:
+    if str(message.get("content") or "").strip():
+        return True
+    blocks = message.get("blocks")
+    if not isinstance(blocks, list):
+        return False
+    return any(
+        isinstance(block, dict)
+        and str(block.get("type") or "") == "text"
+        and str(block.get("content") or "").strip()
+        for block in blocks
+    )
+
+
+def _message_tool_records(message: dict[str, Any]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add_record(value: Any) -> None:
+        if not isinstance(value, dict):
+            return
+        record_id = str(value.get("id") or "").strip()
+        name = str(value.get("name") or "").strip()
+        if not record_id or not name:
+            return
+        dedupe_key = record_id or f"{name}:{len(records)}"
+        if dedupe_key in seen:
+            return
+        seen.add(dedupe_key)
+        records.append(value)
+
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list):
+        for record in tool_calls:
+            add_record(record)
+
+    blocks = message.get("blocks")
+    if isinstance(blocks, list):
+        for block in blocks:
+            if not isinstance(block, dict) or str(block.get("type") or "") != "tool_call":
+                continue
+            add_record(block.get("record") or block)
+
+    return records
+
+
+def _blocks_with_text_fallback(
+    message: dict[str, Any],
+    records: list[dict[str, Any]],
+    fallback: str,
+) -> list[dict[str, Any]]:
+    raw_blocks = message.get("blocks")
+    blocks = [
+        dict(block)
+        for block in raw_blocks
+        if isinstance(block, dict)
+    ] if isinstance(raw_blocks, list) else []
+    if not blocks:
+        blocks = [{"type": "tool_call", "record": dict(record)} for record in records]
+    blocks.append({"type": "text", "content": fallback})
+    return blocks
+
+
+def _previous_user_content(transcript: list[dict[str, Any]], index: int) -> str:
+    for candidate in reversed(transcript[:index]):
+        if isinstance(candidate, dict) and str(candidate.get("role") or "") == "user":
+            return str(candidate.get("content") or "")
+    return ""
+
+
+def _contains_cjk(text: str) -> bool:
+    return any("\u3400" <= char <= "\u9fff" or "\uf900" <= char <= "\ufaff" for char in text)
+
+
+def _tool_record_detail(record: dict[str, Any], *, fallback: str) -> str:
+    for field in _TOOL_DETAIL_FIELDS:
+        detail = str(record.get(field) or "").strip()
+        if detail:
+            return detail[:700].rstrip() + ("..." if len(detail) > 700 else "")
+    return fallback
+
+
+def _format_legacy_tool_activity_without_final_reply(
+    records: list[dict[str, Any]],
+    *,
+    user_message: str,
+) -> str:
+    if not records:
+        return ""
+    failed = [
+        record
+        for record in records
+        if str(record.get("status") or "").strip().lower() in _FAILED_TOOL_STATUSES
+    ]
+    records_to_show = failed or records
+    if _contains_cjk(user_message):
+        if failed:
+            intro = (
+                "\u5de5\u5177\u8c03\u7528\u5931\u8d25\uff0c\u800c\u4e14\u6a21\u578b"
+                "\u6ca1\u6709\u751f\u6210\u6700\u7ec8\u56de\u590d\u3002\u8fd9\u8f6e"
+                "\u4e0d\u80fd\u5f53\u4f5c\u6210\u529f\u5b8c\u6210\uff0c\u5931\u8d25"
+                "\u70b9\u5982\u4e0b\uff1a"
+            )
+            no_details = "\u5de5\u5177\u672a\u8fd4\u56de\u53ef\u7528\u7684\u5931\u8d25\u7ec6\u8282\u3002"
+        else:
+            intro = (
+                "\u5de5\u5177\u5df2\u7ecf\u8fd4\u56de\u7ed3\u679c\uff0c\u4f46\u6a21"
+                "\u578b\u6ca1\u6709\u751f\u6210\u6700\u7ec8\u56de\u590d\u3002\u8fd9"
+                "\u8f6e\u4e0d\u80fd\u5f53\u4f5c\u6210\u529f\u5b8c\u6210\uff1b\u5df2"
+                "\u4fdd\u7559\u7684\u5de5\u5177\u7ed3\u679c\u5982\u4e0b\uff1a"
+            )
+            no_details = "\u5de5\u5177\u672a\u8fd4\u56de\u53ef\u7528\u7684\u6458\u8981\u3002"
+    elif failed:
+        intro = (
+            "Tool calls failed and the model did not produce a final reply. "
+            "This turn cannot be treated as completed; here is what failed:"
+        )
+        no_details = "The tool did not return usable failure details."
+    else:
+        intro = (
+            "Tool calls completed, but the model did not produce a final reply. "
+            "This turn cannot be treated as completed; the preserved tool results are:"
+        )
+        no_details = "The tool did not return a usable summary."
+
+    parts = [intro]
+    for item_index, record in enumerate(records_to_show[-3:], start=1):
+        name = str(record.get("name") or "tool")
+        status = str(record.get("status") or ("failed" if failed else "completed"))
+        detail = _tool_record_detail(record, fallback=no_details)
+        parts.append(f"{item_index}. {name} [{status}]\n{detail}")
+    return "\n\n".join(parts)
 
 
 def _derive_title(content: str) -> str:

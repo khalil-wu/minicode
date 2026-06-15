@@ -3,23 +3,43 @@ import { useAppStore } from "../stores";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { sendChatMessage } from "../chat/sendChatMessage";
 import { toBackendPermissionMode } from "../protocol/permissions";
+import { hasRuntimePendingUserAction, hasRuntimePendingUserActionForConversation } from "../lib/runtime-session";
+import { buildRuntimeSlashPaletteItems, executeRuntimeSlashCommand } from "../lib/runtime-commands";
+import { hasLocalPendingPromptForConversation } from "../lib/pending-prompts";
+import { workspaceDisplayName } from "../lib/workspace-display";
 
 interface PaletteAction {
   id: string;
   label: string;
   hint?: string;
-  run: () => void;
+  run: () => void | Promise<void>;
 }
+
+const hasPendingUserAction = (): boolean => {
+  const state = useAppStore.getState();
+  const activeConversationId = state.conversationId ?? state.runtimeSession?.active_conversation_id;
+  const hasRuntimePending = activeConversationId
+    ? hasRuntimePendingUserActionForConversation(state.runtimeSession, activeConversationId)
+    : hasRuntimePendingUserAction(state.runtimeSession);
+  return Boolean(
+    hasLocalPendingPromptForConversation(
+      [state.pendingApproval, state.pendingDiffReview, state.pendingAskUser],
+      activeConversationId,
+      state.conversationId,
+    ) ||
+    hasRuntimePending,
+  );
+};
 
 export const CommandPalette = () => {
   const commandPaletteOpen = useAppStore((s) => s.commandPaletteOpen);
   const themeMode = useAppStore((s) => s.themeMode);
   const panelSlots = useAppStore((s) => s.panelSlots);
+  const slashCommands = useAppStore((s) => s.slashCommands);
   const toggleCommandPalette = useAppStore((s) => s.toggleCommandPalette);
   const setThemeMode = useAppStore((s) => s.setThemeMode);
   const addPanel = useAppStore((s) => s.addPanel);
   const openLivePreview = useAppStore((s) => s.openLivePreview);
-  const toggleSkillsMarketplace = useAppStore((s) => s.toggleSkillsMarketplace);
   const focusPanel = useAppStore((s) => s.focusPanel);
   const togglePanelMaximized = useAppStore((s) => s.togglePanelMaximized);
   const removePanel = useAppStore((s) => s.removePanel);
@@ -27,14 +47,21 @@ export const CommandPalette = () => {
   const setActiveBottomTab = useAppStore((s) => s.setActiveBottomTab);
   const setRightStackTab = useAppStore((s) => s.setRightStackTab);
   const setAppMode = useAppStore((s) => s.setAppMode);
+  const conversations = useAppStore((s) => s.conversations);
+  const conversationId = useAppStore((s) => s.conversationId);
   const [query, setQuery] = useState("");
   const [activeIdx, setActiveIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const closePaletteIfIdle = () => {
+    if (hasPendingUserAction()) return;
+    toggleCommandPalette();
+  };
 
   useEffect(() => {
     if (commandPaletteOpen) {
       setQuery("");
       setActiveIdx(0);
+      sendClientCommand({ type: "commands.list" });
       requestAnimationFrame(() => inputRef.current?.focus());
     }
   }, [commandPaletteOpen]);
@@ -43,8 +70,7 @@ export const CommandPalette = () => {
     if (!commandPaletteOpen) return;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      const state = useAppStore.getState();
-      if (state.pendingApproval || state.pendingDiffReview || state.pendingAskUser) return;
+      if (hasPendingUserAction()) return;
       event.preventDefault();
       toggleCommandPalette();
     };
@@ -63,8 +89,48 @@ export const CommandPalette = () => {
     setAppMode("code");
     setRightStackTab(tab);
   };
+  const runRuntimeSlashCommand = async (commandLine: string) => {
+    await executeRuntimeSlashCommand(commandLine, {
+      getState: useAppStore.getState,
+      setState: useAppStore.setState,
+      sendClientCommand,
+      sendChatMessage,
+      confirmClear: async () => {
+        const { showConfirm } = await import("./DialogService");
+        return showConfirm({
+          title: "Clear conversation",
+          message: "Clear all messages in the current conversation view? This cannot be undone.",
+          confirmLabel: "Clear",
+          danger: true,
+        });
+      },
+    });
+  };
+  const runtimeSlashActions: PaletteAction[] = buildRuntimeSlashPaletteItems(slashCommands, {
+    exclude: ["clear", "skills", "compact", "new"],
+  }).map((command) => ({
+    id: command.id,
+    label: `Run ${command.name}`,
+    hint: command.description || "slash command",
+    run: () => runRuntimeSlashCommand(command.commandLine),
+  }));
+
+  const recentConversationActions: PaletteAction[] = conversations
+    .filter((c) => !c.archived && c.id !== conversationId)
+    .slice(0, 9)
+    .map((c, i) => {
+      const project = workspaceDisplayName(c.workspaceRoot || c.worktreePath, "Computer");
+      const branch = c.gitBranch ? ` · ${c.gitBranch}` : "";
+      return {
+        id: `conversation.switch.${c.id}`,
+        label: c.title || "Untitled",
+        hint: `${project}${branch} · Ctrl+${i + 1}`,
+        run: () => useAppStore.getState().requestConversationSwitch(c.id),
+      };
+    });
 
   const actions: PaletteAction[] = [
+    ...recentConversationActions,
     {
       id: "conversation.new",
       label: "New conversation",
@@ -240,7 +306,7 @@ export const CommandPalette = () => {
       id: "quick.open",
       label: "Quick open file",
       hint: "Ctrl+P",
-      run: () => useAppStore.setState({ quickOpenVisible: true }),
+      run: () => useAppStore.getState().toggleQuickOpen(),
     },
     {
       id: "sidebar.toggle",
@@ -253,10 +319,9 @@ export const CommandPalette = () => {
     },
     {
       id: "plan.request",
-      label: "Switch to Plan mode",
-      hint: "read-only",
+      label: "Open Plan",
+      hint: "steps",
       run: () => {
-        useAppStore.getState().setPermissionMode("plan");
         useAppStore.getState().setRightStackTab("plan");
       },
     },
@@ -265,71 +330,60 @@ export const CommandPalette = () => {
       label: "Interrupt streaming",
       hint: "Esc",
       run: () => {
-        sendClientCommand({ type: "interrupt" });
+        const conversationId = useAppStore.getState().conversationId;
+        sendClientCommand({
+          type: "interrupt",
+          ...(conversationId ? { conversation_id: conversationId } : {}),
+        });
       },
     },
     {
       id: "clear",
       label: "Clear conversation",
       hint: "/clear",
-      run: async () => {
-        const { showConfirm } = await import("./DialogService");
-        const ok = await showConfirm({
-          title: "Clear conversation",
-          message: "Clear all messages in the current conversation view? This cannot be undone.",
-          confirmLabel: "Clear",
-          danger: true,
-        });
-        if (!ok) return;
-        const state = useAppStore.getState();
-        if (state.conversationId) {
-          state.hydrateConversationMessages(state.conversationId, [], { activate: true, isStreaming: false });
-        } else {
-          useAppStore.setState({ messages: [], isStreaming: false });
-        }
-      },
+      run: () => runRuntimeSlashCommand("/clear"),
     },
     {
       id: "compact",
       label: "Compact context",
       hint: "/compact",
-      run: () => {
-        sendChatMessage({ displayContent: "/compact", backendContent: "/compact" });
-      },
+      run: () => runRuntimeSlashCommand("/compact"),
     },
     {
       id: "skills.marketplace",
       label: "Skills Marketplace",
       hint: "browse and install",
-      run: () => toggleSkillsMarketplace(),
+      run: () => runRuntimeSlashCommand("/skills"),
     },
+    ...runtimeSlashActions,
   ];
 
   const filtered = query
-    ? actions.filter((a) => a.label.toLowerCase().includes(query.toLowerCase()))
+    ? actions.filter((a) => `${a.label} ${a.hint ?? ""}`.toLowerCase().includes(query.toLowerCase()))
     : actions;
   const activeOptionId = filtered[activeIdx] ? `command-palette-option-${filtered[activeIdx].id}` : undefined;
 
   const runAction = (idx: number) => {
     if (filtered[idx]) {
       filtered[idx].run();
-      toggleCommandPalette();
+      useAppStore.setState({ commandPaletteOpen: false });
     }
   };
 
   return (
     <div
       className="overlay-backdrop"
-      onClick={toggleCommandPalette}
+      onClick={closePaletteIfIdle}
       style={{
         position: "fixed",
         inset: 0,
-        background: "rgba(0,0,0,0.5)",
+        background: "var(--backdrop-overlay)",
         display: "flex",
         alignItems: "flex-start",
         justifyContent: "center",
         padding: "12vh 16px 16px",
-        zIndex: 100,
+        zIndex: "var(--z-modal)",
+        pointerEvents: "auto",
       }}
     >
       <div
@@ -344,6 +398,7 @@ export const CommandPalette = () => {
           overflow: "hidden",
           display: "flex",
           flexDirection: "column",
+          pointerEvents: "auto",
         }}
       >
         <input
@@ -356,7 +411,7 @@ export const CommandPalette = () => {
           value={query}
           onChange={(e) => { setQuery(e.target.value); setActiveIdx(0); }}
           onKeyDown={(e) => {
-            if (e.key === "Escape") toggleCommandPalette();
+            if (e.key === "Escape") closePaletteIfIdle();
             else if (e.key === "ArrowDown") {
               e.preventDefault();
               setActiveIdx((i) => filtered.length ? (i + 1) % filtered.length : 0);

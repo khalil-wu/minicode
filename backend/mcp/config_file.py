@@ -89,13 +89,15 @@ def _validate_server(name: str, server: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"MCP server '{name}' transport must be 'stdio' or 'http'.")
     normalized["transport"] = transport
 
-    command = normalized.get("command", "python")
+    command = normalized.get("command", "python" if transport == "stdio" else None)
     if command is not None and not isinstance(command, str):
         raise ValueError(f"MCP server '{name}' command must be a string.")
     if transport == "stdio" and not str(command or "").strip():
         raise ValueError(f"MCP server '{name}' requires a command for stdio transport.")
-    if command is not None:
+    if command is not None and str(command).strip():
         normalized["command"] = command
+    elif "command" in normalized:
+        normalized.pop("command", None)
 
     args = normalized.get("args", [])
     if not isinstance(args, list) or any(not isinstance(item, str) for item in args):
@@ -124,6 +126,13 @@ def _validate_server(name: str, server: dict[str, Any]) -> dict[str, Any]:
         if max_retries < 0 or max_retries > 20:
             raise ValueError(f"MCP server '{name}' maxRetries must be between 0 and 20.")
         normalized["maxRetries"] = max_retries
+
+    if "requiresUserAction" in normalized and not isinstance(normalized["requiresUserAction"], bool):
+        raise ValueError(f"MCP server '{name}' requiresUserAction must be a boolean.")
+
+    for field in ("setupHint", "docsUrl"):
+        if field in normalized and not isinstance(normalized[field], str):
+            raise ValueError(f"MCP server '{name}' {field} must be a string.")
 
     return normalized
 

@@ -1,0 +1,216 @@
+/*
+ * animations.css — Keyframe animations & utility transition classes.
+ *
+ * Companion to reset.css (which holds component-specific animation
+ * classes like .message-enter, .tool-call-enter, .panel-fade).
+ *
+ * This file provides:
+ *   1. Reusable @keyframes for common motion patterns.
+ *   2. Utility animation classes  (.anim-*) that reference
+ *      --duration-* tokens from tokens.css.
+ *   3. Utility transition classes (.transition-*) for interactive
+ *      elements that need smooth state changes.
+ *
+ * Keep animations lightweight — prefer transform & opacity for
+ * GPU-composited properties to avoid layout thrash.
+ */
+
+/* ════════════════════════════════════════════════════════
+   @keyframes
+   ════════════════════════════════════════════════════════ */
+
+/* Message appear — subtle rise + fade for new chat messages */
+@keyframes message-appear {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Tool call running pulse — gentle opacity pulse for active tools */
+@keyframes tool-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+/* Panel slide from right — for right sidebar entrance */
+@keyframes slide-in-right {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* Panel slide from left — for left sidebar entrance */
+@keyframes slide-in-left {
+  from {
+    opacity: 0;
+    transform: translateX(-16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+
+
+/* ════════════════════════════════════════════════════════
+   Utility animation classes (.anim-*)
+   ════════════════════════════════════════════════════════ */
+
+/* New message entrance — applied to the last N turns in MessageList */
+.anim-message-appear {
+  animation: message-appear var(--duration-fast, 150ms) ease-out;
+}
+
+/* Running tool pulse — applied to ToolCallCard when status === "running" */
+.anim-tool-running {
+  animation: tool-pulse 1.5s ease-in-out infinite;
+}
+
+/* Right panel slide-in — applied to SidebarRight on mount */
+.anim-slide-right {
+  animation: slide-in-right var(--duration-base, 200ms) ease-out;
+}
+
+/* Left panel slide-in — applied to SidebarLeft on mount */
+.anim-slide-left {
+  animation: slide-in-left var(--duration-base, 200ms) ease-out;
+}
+
+/* Generic fade-in — uses the @keyframes fade-in from reset.css */
+.anim-fade-in {
+  animation: fade-in var(--duration-fast, 150ms) ease-out;
+}
+
+/* Success checkmark scale-in — when activity completes */
+@keyframes checkmark-appear {
+  0% {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  50% {
+    transform: scale(1.1);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Error shake — subtle shake for error states */
+@keyframes error-shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-2px); }
+  75% { transform: translateX(2px); }
+}
+
+/* Button press — subtle scale down on active */
+@keyframes button-press {
+  0% { transform: scale(1); }
+  100% { transform: scale(0.95); }
+}
+
+/* Status badge glow — for running/pending states */
+@keyframes status-glow {
+  0%, 100% {
+    box-shadow: 0 0 0 0 currentColor;
+    opacity: 1;
+  }
+  50% {
+    box-shadow: 0 0 0 2px color-mix(in oklch, currentColor 20%, transparent);
+    opacity: 0.8;
+  }
+}
+
+/* ════════════════════════════════════════════════════════
+   Utility animation classes (.anim-*)
+   ════════════════════════════════════════════════════════ */
+
+/* New message entrance — applied to the last N turns in MessageList */
+.anim-message-appear {
+  animation: message-appear var(--duration-fast, 150ms) ease-out;
+}
+
+/* Running tool pulse — applied to ToolCallCard when status === "running" */
+.anim-tool-running {
+  animation: tool-pulse 1.5s ease-in-out infinite;
+}
+
+/* Right panel slide-in — applied to SidebarRight on mount */
+.anim-slide-right {
+  animation: slide-in-right var(--duration-base, 200ms) ease-out;
+}
+
+/* Left panel slide-in — applied to SidebarLeft on mount */
+.anim-slide-left {
+  animation: slide-in-left var(--duration-base, 200ms) ease-out;
+}
+
+/* Generic fade-in — uses the @keyframes fade-in from reset.css */
+.anim-fade-in {
+  animation: fade-in var(--duration-fast, 150ms) ease-out;
+}
+
+/* Checkmark appear — when activity status changes to done */
+.anim-checkmark-appear {
+  animation: checkmark-appear var(--duration-fast, 150ms) cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* Error shake — when activity fails */
+.anim-error-shake {
+  animation: error-shake var(--duration-fast, 150ms) ease-in-out;
+}
+
+/* Status glow — for running/pending status badges */
+.anim-status-glow {
+  animation: status-glow 2s ease-in-out infinite;
+}
+
+/* ════════════════════════════════════════════════════════
+   Utility transition classes (.transition-*)
+   ════════════════════════════════════════════════════════ */
+
+/* Smooth color transitions for hover / active states */
+.transition-colors {
+  transition: background-color var(--duration-micro, 100ms) ease,
+              color var(--duration-micro, 100ms) ease,
+              border-color var(--duration-micro, 100ms) ease;
+}
+
+/* Smooth opacity transition for show/hide */
+.transition-opacity {
+  transition: opacity var(--duration-fast, 150ms) ease;
+}
+
+/* Smooth transform transition for interactive elements */
+.transition-transform {
+  transition: transform var(--duration-micro, 100ms) cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* Combined transition for buttons and interactive elements */
+.transition-interactive {
+  transition:
+    background-color var(--duration-micro, 100ms) ease,
+    color var(--duration-micro, 100ms) ease,
+    border-color var(--duration-micro, 100ms) ease,
+    transform var(--duration-micro, 100ms) cubic-bezier(0.2, 0.8, 0.2, 1),
+    box-shadow var(--duration-micro, 100ms) ease;
+}
+
+/* Smooth border transition for focus states */
+.transition-border {
+  transition: border-color var(--duration-micro, 100ms) ease,
+              border-width var(--duration-micro, 100ms) ease;
+}
+
+

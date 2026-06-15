@@ -6,7 +6,8 @@
 """
 from __future__ import annotations
 
-from typing import Any, Callable
+import logging
+from typing import Callable, Literal
 from uuid import uuid4
 
 from backend.approvals.models import (
@@ -14,8 +15,11 @@ from backend.approvals.models import (
     ApprovalSummary,
     ApprovalKind,
     RiskLevel,
+    ApprovalStatus,
     ApprovalDiffPayload,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ProductApprovalManager:
@@ -88,6 +92,7 @@ class ProductApprovalManager:
         *,
         kind_filter: ApprovalKind | None = None,
         task_id_filter: str | None = None,
+        status_filter: ApprovalStatus | None = None,
     ) -> list[ProductApproval]:
         """列出审批"""
         approvals = []
@@ -98,6 +103,10 @@ class ProductApprovalManager:
 
             # 任务过滤
             if task_id_filter and approval.task_id != task_id_filter:
+                continue
+
+            # 状态过滤
+            if status_filter and approval.status != status_filter:
                 continue
 
             approvals.append(approval)
@@ -113,7 +122,29 @@ class ProductApprovalManager:
 
     def get_pending_approvals(self) -> list[ProductApproval]:
         """获取待处理的审批"""
-        return self.list_approvals()
+        return self.list_approvals(status_filter="pending")
+
+    def resolve_approval(
+        self,
+        approval_id: str,
+        action: Literal["approve", "reject"],
+        *,
+        guidance: str | None = None,
+    ) -> ProductApproval | None:
+        """标记审批结果并保留历史记录"""
+        approval = self._approvals.get(approval_id)
+        if approval is None:
+            return None
+
+        if action == "approve":
+            approval.status = "approved"
+        elif action == "reject":
+            approval.status = "rejected"
+        else:
+            raise ValueError("action must be 'approve' or 'reject'")
+
+        self._notify_approval_update(approval)
+        return approval
 
     def remove_approval(self, approval_id: str) -> bool:
         """移除审批（审批完成后）"""
@@ -133,4 +164,8 @@ class ProductApprovalManager:
                 self._on_approval_update(approval)
             except Exception:
                 # 通知回调不应影响审批管理
-                pass
+                logger.exception(
+                    "Product approval update callback failed for approval %s (%s)",
+                    approval.id,
+                    approval.title,
+                )

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { lazy, Suspense } from "react";
-import { Check, Circle, Eye, EyeOff, FileCode2, FolderOpen, Image, Maximize2, Minimize2, RotateCcw, Save, Search, X } from "lucide-react";
+import { Circle, Edit3, Eye, FileCode2, FileWarning, Image, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useAppStore } from "../stores";
@@ -8,10 +8,10 @@ import { apiBase, withRuntimeToken } from "../protocol/api";
 import {
   compareWriteWorkspaceFile,
   readWorkspaceFile,
-  searchWorkspaceFiles,
 } from "../protocol/workspace";
-import { fsCompareWriteFile, fsReadFileInfo, fsSearchFiles, isDesktop, revealPath } from "../desktop/runtime";
+import { fsCompareWriteFile, fsReadFileInfo, isDesktop, revealPath } from "../desktop/runtime";
 import { pushToast } from "../overlays/ToastContainer";
+import { ContextMenu, type ContextMenuItem } from "../components/ContextMenu";
 
 const LazyMonacoEditor = lazy(() => import("@monaco-editor/react"));
 
@@ -19,9 +19,14 @@ type MonacoEditorInstance = {
   getSelection: () => unknown;
   executeEdits: (source: string, edits: Array<{ range: unknown; text: string; forceMoveMarkers?: boolean }>) => void;
   focus: () => void;
+  revealLineInCenter?: (lineNumber: number) => void;
+  revealPositionInCenter?: (position: { lineNumber: number; column: number }) => void;
+  setPosition?: (position: { lineNumber: number; column: number }) => void;
+  onDidChangeCursorPosition: (handler: (event: { position: { lineNumber: number; column: number } }) => void) => unknown;
 };
 
 type EditorInsertEvent = CustomEvent<{ text: string; handled?: boolean }>;
+type EditorTarget = { path: string; line?: number; column?: number };
 
 const guessLanguage = (path: string): string => {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
@@ -39,7 +44,6 @@ const guessLanguage = (path: string): string => {
 
 const basename = (path: string) => path.split(/[/\\]/).filter(Boolean).pop() ?? path;
 const dirname = (path: string) => path.replace(/\\/g, "/").split("/").filter(Boolean).slice(0, -1).join("/");
-const breadcrumbs = (path: string): string[] => path.replace(/\\/g, "/").split("/").filter(Boolean);
 
 const FILE_ICON_COLORS: Record<string, string> = {
   ts: "#3178c6", tsx: "#3178c6",
@@ -103,7 +107,118 @@ const isEditablePath = (path: string): boolean => {
 interface FileSnapshot {
   content: string;
   contentHash?: string;
+  sizeBytes?: number;
 }
+
+const MAX_EDITOR_BYTES = 2 * 1024 * 1024;
+const MAX_EDITOR_CHARS = 1_000_000;
+const MAX_EDITOR_LINES = 20_000;
+const MAX_MARKDOWN_PREVIEW_IMAGES = 80;
+
+const formatBytes = (bytes?: number): string => {
+  if (!bytes || !Number.isFinite(bytes)) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+const countLines = (content: string): number =>
+  content ? content.split(/\r\n|\r|\n/).length : 0;
+
+const countMarkdownPreviewImages = (content: string): number => {
+  const markdownImages = content.match(/!\[[^\]]*]\([^\)\r\n]*\)/g)?.length ?? 0;
+  const htmlImages = content.match(/<img\b/gi)?.length ?? 0;
+  return markdownImages + htmlImages;
+};
+
+const largeFileReason = (snapshot: FileSnapshot): string | null => {
+  const bytes = snapshot.sizeBytes;
+  if (bytes != null && bytes > MAX_EDITOR_BYTES) {
+    return `This file is ${formatBytes(bytes)}, which is above the ${formatBytes(MAX_EDITOR_BYTES)} editor limit.`;
+  }
+  if (snapshot.content.length > MAX_EDITOR_CHARS) {
+    return `This file has ${snapshot.content.length.toLocaleString()} characters, which is above the editor limit.`;
+  }
+  const lines = countLines(snapshot.content);
+  if (lines > MAX_EDITOR_LINES) {
+    return `This file has ${lines.toLocaleString()} lines, which is above the editor limit.`;
+  }
+  return null;
+};
+
+const errorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error || "Could not read file.");
+
+const isLargeFileError = (message: string): boolean =>
+  /too large|max supported size|above the .*limit|413/i.test(message);
+
+const markdownPreviewComponents = {
+  a: (props: React.AnchorHTMLAttributes<HTMLAnchorElement>) => (
+    <a {...props} target="_blank" rel="noreferrer" style={{ color: "var(--accent-primary)" }} />
+  ),
+  img: (props: React.ImgHTMLAttributes<HTMLImageElement>) => (
+    <img
+      {...props}
+      loading="lazy"
+      decoding="async"
+      style={{
+        maxWidth: "100%",
+        maxHeight: 520,
+        objectFit: "contain",
+        display: "block",
+        margin: "10px 0",
+        borderRadius: "var(--radius-sm, 4px)",
+        border: "1px solid var(--border-subtle)",
+        background: "var(--surface-soft)",
+        ...props.style,
+      }}
+    />
+  ),
+  pre: (props: React.HTMLAttributes<HTMLPreElement>) => (
+    <pre
+      {...props}
+      style={{
+        overflowX: "auto",
+        margin: "10px 0",
+        padding: "12px 14px",
+        borderRadius: "var(--radius-sm, 6px)",
+        border: "1px solid var(--border-subtle)",
+        background: "var(--surface-soft)",
+        ...props.style,
+      }}
+    />
+  ),
+  code: (props: React.HTMLAttributes<HTMLElement>) => (
+    <code
+      {...props}
+      style={{
+        fontFamily: "var(--font-mono)",
+        fontSize: "0.92em",
+        ...props.style,
+      }}
+    />
+  ),
+  table: (props: React.TableHTMLAttributes<HTMLTableElement>) => (
+    <div style={{ overflowX: "auto", margin: "10px 0" }}>
+      <table {...props} style={{ borderCollapse: "collapse", width: "100%", ...props.style }} />
+    </div>
+  ),
+  th: (props: React.ThHTMLAttributes<HTMLTableCellElement>) => (
+    <th
+      {...props}
+      style={{
+        border: "1px solid var(--border-subtle)",
+        padding: "6px 10px",
+        background: "var(--surface-soft)",
+        textAlign: "left",
+        ...props.style,
+      }}
+    />
+  ),
+  td: (props: React.TdHTMLAttributes<HTMLTableCellElement>) => (
+    <td {...props} style={{ border: "1px solid var(--border-subtle)", padding: "6px 10px", ...props.style }} />
+  ),
+};
 
 const readFileSnapshot = async (path: string): Promise<FileSnapshot | null> => {
   if (!isEditablePath(path)) return null;
@@ -113,6 +228,7 @@ const readFileSnapshot = async (path: string): Promise<FileSnapshot | null> => {
       return {
         content: desktopFile.content,
         contentHash: desktopFile.contentHash ?? desktopFile.content_hash,
+        sizeBytes: desktopFile.sizeBytes ?? desktopFile.size_bytes,
       };
     }
   }
@@ -121,6 +237,7 @@ const readFileSnapshot = async (path: string): Promise<FileSnapshot | null> => {
   return {
     content: response.content,
     contentHash: response.content_hash,
+    sizeBytes: response.size_bytes ?? response.size,
   };
 };
 
@@ -149,15 +266,13 @@ export const EditorPanel = () => {
   const closeOtherEditorTabs = useAppStore((s) => s.closeOtherEditorTabs);
   const closeAllEditorTabs = useAppStore((s) => s.closeAllEditorTabs);
 
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState<{ path: string; name: string }[]>([]);
-  const [searchLoading, setSearchLoading] = useState(false);
   const [cursor, setCursor] = useState({ line: 1, column: 1 });
   const [saving, setSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saved" | "error">("idle");
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const [mdPreview, setMdPreview] = useState(false);
   const editorRef = useRef<MonacoEditorInstance | null>(null);
+  const pendingRevealRef = useRef<EditorTarget | null>(null);
 
   const activeTab = tabs.find((tab) => tab.path === activeTabPath) ?? null;
   const editorSlot = panelSlots.find((slot) => slot.kind === "editor");
@@ -166,41 +281,28 @@ export const EditorPanel = () => {
   const dirty = activeTab ? activeTab.content !== activeTab.original : false;
   const language = useMemo(() => guessLanguage(activeTabPath ?? ""), [activeTabPath]);
   const monacoTheme = themeMode === "light" ? "light" : "vs-dark";
-  const activeFileName = activeTabPath ? basename(activeTabPath) : "";
+  const canRenderMarkdown = Boolean(activeTab && isMarkdownPath(activeTab.path) && !activeTab.loading && !activeTab.error && !activeTab.largeFile);
+  const markdownImageCount = useMemo(
+    () => canRenderMarkdown && activeTab ? countMarkdownPreviewImages(activeTab.content) : 0,
+    [activeTab, canRenderMarkdown],
+  );
+  const markdownPreviewTooImageHeavy = markdownImageCount > MAX_MARKDOWN_PREVIEW_IMAGES;
 
   useEffect(() => {
-    if (activeTabPath && isMarkdownPath(activeTabPath)) {
-      setMdPreview(true);
-    } else {
-      setMdPreview(false);
-    }
+    setMdPreview(false);
   }, [activeTabPath]);
-
-  // Search
-  useEffect(() => {
-    if (!query.trim()) {
-      setResults([]);
-      return;
-    }
-    setSearchLoading(true);
-    const timer = window.setTimeout(() => {
-      const search = isDesktop()
-        ? fsSearchFiles(workingDirectory || "", query.trim(), 20, "file")
-        : searchWorkspaceFiles(query.trim(), 20);
-      search
-        .then((items) => setResults(items))
-        .catch(() => setResults([]))
-        .finally(() => setSearchLoading(false));
-    }, 150);
-    return () => window.clearTimeout(timer);
-  }, [query, workingDirectory]);
 
   // Consume open requests from other panels
   useEffect(() => {
-    for (const requestedPath of editorOpenRequests) {
-      openEditorTab(requestedPath);
-      loadFileIfNeeded(requestedPath);
-      consumeEditorOpenRequest(requestedPath);
+    for (const request of editorOpenRequests) {
+      openEditorTab(request.path);
+      loadFileIfNeeded(request.path);
+      handleSetActive(request.path, {
+        path: request.path,
+        line: request.line,
+        column: request.column,
+      });
+      consumeEditorOpenRequest(request.id);
     }
   }, [editorOpenRequests, consumeEditorOpenRequest, openEditorTab]);
 
@@ -212,7 +314,7 @@ export const EditorPanel = () => {
     }
   }, [activeEditorPath, activeTabPath, tabs, setActiveTab]);
 
-  // External file changes — track last processed index to handle batches
+  // External file changes: track last processed index to handle batches
   const lastFileChangeLen = useRef(0);
   useEffect(() => {
     if (fileChanges.length <= lastFileChangeLen.current) {
@@ -245,11 +347,37 @@ export const EditorPanel = () => {
       markTabLoaded(path, "", `${basename(path)} is not a text file that can be edited here.`);
       return;
     }
-    const snapshot = await readFileSnapshot(path);
-    if (snapshot != null) {
-      markTabLoaded(path, snapshot.content, null, snapshot.contentHash);
-    } else {
-      markTabLoaded(path, "", `Could not read ${path}`);
+    try {
+      const snapshot = await readFileSnapshot(path);
+      if (snapshot != null) {
+        const warning = largeFileReason(snapshot);
+        if (warning) {
+          markTabLoaded(path, "", null, snapshot.contentHash, {
+            largeFile: true,
+            loadWarning: warning,
+            sizeBytes: snapshot.sizeBytes,
+          });
+        } else {
+          markTabLoaded(path, snapshot.content, null, snapshot.contentHash, {
+            largeFile: false,
+            loadWarning: null,
+            sizeBytes: snapshot.sizeBytes,
+          });
+        }
+      } else {
+        markTabLoaded(path, "", `Could not read ${path}`);
+      }
+    } catch (error) {
+      const message = errorMessage(error);
+      if (isLargeFileError(message)) {
+        markTabLoaded(path, "", null, undefined, {
+          largeFile: true,
+          loadWarning: message,
+          sizeBytes: undefined,
+        });
+      } else {
+        markTabLoaded(path, "", message || `Could not read ${path}`);
+      }
     }
   };
 
@@ -260,9 +388,35 @@ export const EditorPanel = () => {
     }
   };
 
-  const handleSetActive = (path: string) => {
+  const revealEditorTarget = (target: EditorTarget | null = pendingRevealRef.current) => {
+    if (!target?.line || target.path !== activeTabPath) return false;
+    const tab = useAppStore.getState().editorTabs.find((item) => item.path === target.path);
+    if (!tab || tab.loading || tab.error || tab.largeFile || mdPreview) return false;
+    const editor = editorRef.current;
+    if (!editor) return false;
+    const lineNumber = Math.max(1, Math.floor(target.line));
+    const column = Math.max(1, Math.floor(target.column ?? 1));
+    editor.setPosition?.({ lineNumber, column });
+    editor.revealPositionInCenter?.({ lineNumber, column });
+    editor.revealLineInCenter?.(lineNumber);
+    editor.focus();
+    setCursor({ line: lineNumber, column });
+    if (pendingRevealRef.current?.path === target.path) {
+      pendingRevealRef.current = null;
+    }
+    return true;
+  };
+
+  const handleSetActive = (path: string, target?: EditorTarget) => {
     setActiveTab(path);
-    setCursor({ line: 1, column: 1 });
+    if (target?.line) {
+      const column = target.column ?? 1;
+      pendingRevealRef.current = { path, line: target.line, column };
+      setCursor({ line: target.line, column });
+      window.setTimeout(() => revealEditorTarget({ path, line: target.line, column }), 0);
+    } else {
+      setCursor({ line: 1, column: 1 });
+    }
     useAppStore.setState({ activeEditorPath: path });
   };
 
@@ -272,9 +426,15 @@ export const EditorPanel = () => {
     openEditorTab(normalized);
     loadFileIfNeeded(normalized);
     handleSetActive(normalized);
-    setQuery("");
-    setResults([]);
   };
+
+  useEffect(() => {
+    if (!pendingRevealRef.current) return;
+    const id = window.setTimeout(() => {
+      revealEditorTarget();
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [activeTabPath, activeTab?.loading, activeTab?.error, activeTab?.largeFile, mdPreview]);
 
   const closeEditorPanel = () => {
     removePanel(editorSlotId);
@@ -288,6 +448,10 @@ export const EditorPanel = () => {
   const save = async () => {
     if (!activeTab) {
       pushToast("No file is open.", "info", 1600);
+      return;
+    }
+    if (activeTab.largeFile) {
+      pushToast(`${basename(activeTab.path)} was not loaded into the editor.`, "warning", 2400);
       return;
     }
     if (!dirty) {
@@ -346,7 +510,7 @@ export const EditorPanel = () => {
   useEffect(() => {
     const handleInsert = (event: Event) => {
       const detail = (event as EditorInsertEvent).detail;
-      if (!detail?.text || !activeTab || activeTab.loading || activeTab.error || mdPreview) return;
+      if (!detail?.text || !activeTab || activeTab.loading || activeTab.error || activeTab.largeFile || mdPreview) return;
       const editor = editorRef.current;
       if (!editor) return;
       const selection = editor.getSelection();
@@ -382,115 +546,40 @@ export const EditorPanel = () => {
   }, [activeTabPath]);
 
   return (
-    <div style={editorShellStyle}>
-      <div style={editorTopBarStyle}>
-        <div style={editorToolbarMainStyle}>
-          <div style={quickOpenStyle}>
-            <Search size={13} />
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && query.trim()) openFile(results[0]?.path ?? query.trim());
-              }}
-              placeholder="Search files or type path"
-              style={quickOpenInputStyle}
-            />
-          </div>
-          <div style={editorActionsStyle}>
-            {activeTabPath && isMarkdownPath(activeTabPath) && (
-              <IconButton label={mdPreview ? "Edit source" : "Preview markdown"} onClick={() => setMdPreview(!mdPreview)} primary={mdPreview}>
-                <Eye size={14} />
-              </IconButton>
-            )}
-            <IconButton label="Save file" disabled={!dirty || saving} onClick={() => void save()} primary={dirty}>
-              {saveStatus === "saved" ? <Check size={14} /> : <Save size={14} />}
-            </IconButton>
-            <IconButton label="Revert file" disabled={!dirty || saving} onClick={revert}>
-              <RotateCcw size={14} />
-            </IconButton>
-            <IconButton label="Hide editor" onClick={hideEditor}>
-              <EyeOff size={14} />
-            </IconButton>
-            <IconButton
-              label={editorSlot?.maximized ? "Restore editor" : "Maximize editor"}
-              onClick={() => togglePanelMaximized(editorSlotId)}
-              primary={Boolean(editorSlot?.maximized)}
-            >
-              {editorSlot?.maximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-            </IconButton>
-            <IconButton label="Close editor" onClick={closeEditorPanel}>
-              <X size={14} />
-            </IconButton>
-          </div>
-        </div>
-        {activeTabPath && (
-          <div style={editorContextBarStyle}>
-            <div style={activeFileBadgeStyle} title={activeTabPath}>
-              <FileCode2 size={15} style={{ color: getFileIconColor(activeTabPath) }} />
-              <span style={activeFileNameStyle}>{activeFileName}</span>
-              {dirty && <span style={modifiedPillStyle}>modified</span>}
-            </div>
-            <div title={activeTabPath} style={breadcrumbStyle}>
-              {breadcrumbs(activeTabPath).slice(-5).map((part, index, parts) => (
-                <span key={`${part}-${index}`} style={{ display: "inline-flex", alignItems: "center", gap: 5, minWidth: 0 }}>
-                  {index === 0 && <FolderOpen size={12} />}
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{part}</span>
-                  {index < parts.length - 1 && <span style={{ color: "var(--text-muted)" }}>/</span>}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {results.length > 0 && (
-        <div style={quickOpenResultsStyle}>
-          {results.map((result) => (
-            <button
-              key={result.path}
-              onClick={() => openFile(result.path)}
-              style={quickOpenResultStyle}
-            >
-              {result.path}
-            </button>
-          ))}
-        </div>
-      )}
-      {searchLoading && (
-        <div style={{ padding: "4px 10px", color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>
-          Searching...
-        </div>
-      )}
-
+    <div className="flex-1 min-h-0 flex flex-col" style={{ background: "var(--surface-page)" }}>
       {tabs.length > 0 && (
-        <div style={tabStripStyle}>
+        <div className="flex min-h-[38px] overflow-x-auto overflow-y-hidden gap-0.5 px-2.5 pt-1.5 pb-0 border-b scrollbar-thin" style={{ borderColor: "var(--border-subtle)", background: "var(--surface-sidebar)", scrollbarColor: "color-mix(in oklch, var(--text-muted) 35%, transparent) transparent" }}>
           {tabs.map((tab) => {
             const tabDirty = tab.content !== tab.original;
             const active = tab.path === activeTabPath;
             return (
               <button
                 key={tab.path}
-                className="editor-tab"
+                className="editor-tab relative inline-flex items-center gap-1.5 h-8 max-w-60 min-w-[124px] flex-none border border-transparent rounded-t-[7px] rounded-b-none cursor-pointer px-2.5 text-[13px] transition-[background,color,border-color] duration-100"
                 onClick={() => handleSetActive(tab.path)}
                 onContextMenu={(e) => {
                   e.preventDefault();
                   setCtxMenu({ x: e.clientX, y: e.clientY, path: tab.path });
                 }}
                 title={tab.path}
-                style={tabButtonStyle(active)}
+                style={{
+                  borderBottomColor: active ? "var(--surface-base)" : "transparent",
+                  background: active ? "var(--surface-base)" : "transparent",
+                  color: active ? "var(--text-primary)" : "var(--text-muted)",
+                  fontFamily: "var(--font-ui)",
+                }}
               >
                 {tabDirty ? (
-                  <Circle size={7} fill="currentColor" style={{ color: "var(--state-warning)", flexShrink: 0 }} />
+                  <Circle size={7} fill="currentColor" className="shrink-0" style={{ color: "var(--state-warning)" }} />
                 ) : (
-                  <FileCode2 size={13} style={{ color: getFileIconColor(tab.path), flexShrink: 0 }} />
+                  <FileCode2 size={13} className="shrink-0" style={{ color: getFileIconColor(tab.path) }} />
                 )}
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: "13px" }}>
+                <span className="overflow-hidden text-ellipsis whitespace-nowrap text-[13px]">
                   {basename(tab.path)}
                 </span>
                 <span
                   role="button"
-                  className="editor-tab-close"
+                  className="editor-tab-close inline-flex items-center justify-center rounded-[4px] w-[18px] h-[18px] shrink-0 ml-auto transition-[opacity,background] duration-100"
                   title="Close tab"
                   aria-label={`Close ${basename(tab.path)}`}
                   onClick={(event) => {
@@ -498,17 +587,9 @@ export const EditorPanel = () => {
                     handleCloseTab(tab.path);
                   }}
                   style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    justifyContent: "center",
                     color: "var(--text-muted)",
                     borderRadius: "var(--radius-sm, 4px)",
-                    width: 18,
-                    height: 18,
-                    flexShrink: 0,
-                    marginLeft: "auto",
                     opacity: active || tabDirty ? 1 : 0,
-                    transition: "opacity 100ms, background 100ms",
                   }}
                 >
                   {tabDirty ? <Circle size={7} fill="currentColor" /> : <X size={14} />}
@@ -519,22 +600,75 @@ export const EditorPanel = () => {
         </div>
       )}
       {activeTab?.error && (
-        <div style={{ padding: "6px 10px", color: "var(--state-danger)", fontSize: "var(--text-xs)" }}>
+        <div className="px-2.5 py-1.5" style={{ color: "var(--state-danger)", fontSize: "var(--text-xs)" }}>
           {activeTab.error}
         </div>
       )}
 
-      <div style={editorCanvasStyle}>
+      {canRenderMarkdown && (
+        <div className="flex items-center justify-between gap-2.5 min-h-[34px] px-2.5 py-[5px] border-b" style={{ borderColor: "var(--border-subtle)", background: "var(--surface-page)" }}>
+          <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)" }}>{basename(activeTab?.path ?? "Markdown")}</span>
+          <div role="tablist" aria-label="Markdown view mode" className="inline-flex items-center gap-0.5 p-0.5 border rounded-[6px] shrink-0" style={{ borderColor: "var(--border-subtle)", background: "var(--surface-soft)" }}>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={!mdPreview}
+              onClick={() => setMdPreview(false)}
+              className="h-6 inline-flex items-center gap-[5px] px-2 border-0 rounded-[4px] cursor-pointer"
+              style={{
+                background: !mdPreview ? "var(--surface-raised)" : "transparent",
+                color: !mdPreview ? "var(--text-primary)" : "var(--text-muted)",
+                fontFamily: "var(--font-ui)",
+                fontSize: "var(--text-xs)",
+                fontWeight: !mdPreview ? 650 : 500,
+                boxShadow: !mdPreview ? "0 1px 2px rgba(0,0,0,0.12)" : "none",
+              }}
+            >
+              <Edit3 size={12} />
+              Edit
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mdPreview}
+              onClick={() => setMdPreview(true)}
+              className="h-6 inline-flex items-center gap-[5px] px-2 border-0 rounded-[4px] cursor-pointer"
+              style={{
+                background: mdPreview ? "var(--surface-raised)" : "transparent",
+                color: mdPreview ? "var(--text-primary)" : "var(--text-muted)",
+                fontFamily: "var(--font-ui)",
+                fontSize: "var(--text-xs)",
+                fontWeight: mdPreview ? 650 : 500,
+                boxShadow: mdPreview ? "0 1px 2px rgba(0,0,0,0.12)" : "none",
+              }}
+            >
+              <Eye size={12} />
+              Rendered
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="flex-1 min-h-0 overflow-hidden flex flex-col" style={{ background: "var(--surface-base)" }}>
         {activeTab ? (
           activeTab.loading ? (
-            <div style={{ height: "100%", display: "grid", placeItems: "center", color: "var(--text-muted)" }}>
+            <div className="h-full grid place-items-center" style={{ color: "var(--text-muted)" }}>
               Loading file...
             </div>
           ) : isImagePath(activeTab.path) ? (
             <ImageViewer path={activeTab.path} workingDirectory={workingDirectory} />
-          ) : isMarkdownPath(activeTab.path) && mdPreview ? (
-            <div style={mdPreviewStyle}>
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{activeTab.content}</ReactMarkdown>
+          ) : activeTab.largeFile ? (
+            <LargeFileNotice tab={activeTab} />
+          ) : canRenderMarkdown && mdPreview && markdownPreviewTooImageHeavy ? (
+            <MarkdownPreviewLimitNotice
+              imageCount={markdownImageCount}
+              onEdit={() => setMdPreview(false)}
+            />
+          ) : canRenderMarkdown && mdPreview ? (
+            <div className="md-prose flex-1 overflow-y-auto px-[34px] py-6 text-[15px] leading-[1.7] break-words" style={{ color: "var(--text-primary)" }}>
+              <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownPreviewComponents}>
+                {activeTab.content}
+              </ReactMarkdown>
             </div>
           ) : (
             <Suspense fallback={<EditorLoading />}>
@@ -549,6 +683,7 @@ export const EditorPanel = () => {
                   editor.onDidChangeCursorPosition((event) => {
                     setCursor({ line: event.position.lineNumber, column: event.position.column });
                   });
+                  window.setTimeout(() => revealEditorTarget(), 0);
                 }}
                 options={{
                   automaticLayout: true,
@@ -587,20 +722,21 @@ export const EditorPanel = () => {
             </Suspense>
           )
         ) : (
-          <div style={emptyEditorStyle}>
+          <div className="h-full flex flex-col items-center justify-center gap-2.5 text-sm" style={{ color: "var(--text-muted)", background: "var(--surface-base)" }}>
             <FileCode2 size={30} />
-            <div style={{ color: "var(--text-secondary)", fontWeight: 600 }}>No file open</div>
-            <div style={{ maxWidth: 420, textAlign: "center" }}>
+            <div className="font-semibold" style={{ color: "var(--text-secondary)" }}>No file open</div>
+            <div className="max-w-[420px] text-center">
               Use Files or the search box above to open a workspace file.
             </div>
           </div>
         )}
       </div>
 
-      <div title={activeTabPath ?? ""} style={editorInfoBarStyle(dirty)}>
-        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
-          {activeTabPath || "No file open"}{dirty ? "  • modified" : ""}
+      <div title={activeTabPath ?? ""} className="flex gap-3 min-h-6 items-center px-3 border-t overflow-hidden whitespace-nowrap text-xs" style={{ color: dirty ? "var(--state-warning)" : "var(--text-muted)", borderColor: "var(--border-subtle)", fontFamily: "var(--font-mono)", background: "var(--surface-sidebar)" }}>
+        <span className="flex-1 min-w-0 overflow-hidden text-ellipsis">
+          {activeTabPath || "No file open"}{dirty ? " - modified" : ""}
         </span>
+        {activeTab?.sizeBytes != null && <span>{formatBytes(activeTab.sizeBytes)}</span>}
         <span>{language}</span>
         {saveStatus === "saved" && <span style={{ color: "var(--state-success)" }}>Saved</span>}
         {saveStatus === "error" && <span style={{ color: "var(--state-danger)" }}>Save failed</span>}
@@ -608,20 +744,30 @@ export const EditorPanel = () => {
       </div>
 
       {ctxMenu && (
-        <TabContextMenu
-          x={ctxMenu.x}
-          y={ctxMenu.y}
+        <ContextMenu
+          position={{ x: ctxMenu.x, y: ctxMenu.y }}
           onClose={() => setCtxMenu(null)}
-          onCloseTab={() => { handleCloseTab(ctxMenu.path); setCtxMenu(null); }}
-          onCloseOthers={() => { closeOtherEditorTabs(ctxMenu.path); setCtxMenu(null); }}
-          onCloseAll={() => { closeAllEditorTabs(); setCtxMenu(null); }}
-          onCloseToRight={() => {
-            const idx = tabs.findIndex((t) => t.path === ctxMenu.path);
-            tabs.slice(idx + 1).forEach((t) => closeEditorTab(t.path));
-            setCtxMenu(null);
-          }}
-          onCopyPath={() => { void navigator.clipboard.writeText(ctxMenu.path); setCtxMenu(null); }}
-          onReveal={() => { void revealPath(ctxMenu.path); setCtxMenu(null); }}
+          items={[
+            { label: "Close tab", onClick: () => handleCloseTab(ctxMenu.path) },
+            { label: "Close other tabs", onClick: () => closeOtherEditorTabs(ctxMenu.path) },
+            { label: "Close all tabs", onClick: () => closeAllEditorTabs() },
+            {
+              label: "Close to the right",
+              onClick: () => {
+                const idx = tabs.findIndex((t) => t.path === ctxMenu.path);
+                tabs.slice(idx + 1).forEach((t) => closeEditorTab(t.path));
+              },
+            },
+            { separator: true, label: "" },
+            {
+              label: "Copy file path",
+              onClick: () => { void navigator.clipboard.writeText(ctxMenu.path); },
+            },
+            {
+              label: "Reveal in file tree",
+              onClick: () => { void revealPath(ctxMenu.path); },
+            },
+          ]}
         />
       )}
     </div>
@@ -629,263 +775,37 @@ export const EditorPanel = () => {
 };
 
 const EditorLoading = () => (
-  <div style={{ height: "100%", display: "grid", placeItems: "center", color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>
+  <div className="h-full grid place-items-center" style={{ color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>
     Loading editor...
   </div>
 );
 
-const IconButton = ({
-  children,
-  disabled,
-  label,
-  onClick,
-  primary = false,
-}: {
-  children: React.ReactNode;
-  disabled?: boolean;
-  label: string;
-  onClick: () => void;
-  primary?: boolean;
-}) => (
-  <button
-    disabled={disabled}
-    onClick={onClick}
-    title={label}
-    aria-label={label}
-    style={{
-      width: 28,
-      height: 28,
-      display: "inline-flex",
-      alignItems: "center",
-      justifyContent: "center",
-      background: primary && !disabled ? "var(--accent-primary)" : "var(--surface-page)",
-      color: primary && !disabled ? "var(--surface-base)" : disabled ? "var(--text-muted)" : "var(--text-primary)",
-      border: "1px solid var(--border-subtle)",
-      borderRadius: "var(--radius-sm, 6px)",
-      cursor: disabled ? "not-allowed" : "pointer",
-      padding: 0,
-      opacity: disabled ? 0.55 : 1,
-    }}
-  >
-    {children}
-  </button>
+const LargeFileNotice = ({ tab }: { tab: { path: string; loadWarning?: string | null; sizeBytes?: number } }) => (
+  <div className="h-full flex flex-col items-center justify-center gap-[9px] p-6 text-center" style={{ color: "var(--text-muted)", background: "var(--surface-base)" }}>
+    <FileWarning size={28} style={{ color: "var(--state-warning)" }} />
+    <div className="font-bold" style={{ color: "var(--text-primary)" }}>File not loaded into editor</div>
+    <div className="max-w-[520px] leading-[1.5]" style={{ color: "var(--text-secondary)", fontSize: "var(--text-sm)" }}>
+      {tab.loadWarning || "This file is too large to render safely in the editor."}
+    </div>
+    <div className="max-w-[520px] overflow-hidden text-ellipsis whitespace-nowrap" style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)" }}>
+      {basename(tab.path)}{tab.sizeBytes != null ? ` - ${formatBytes(tab.sizeBytes)}` : ""}
+    </div>
+  </div>
 );
 
-const editorShellStyle: React.CSSProperties = {
-  flex: 1,
-  minHeight: 0,
-  display: "flex",
-  flexDirection: "column",
-  background: "var(--surface-page)",
-};
-
-const editorTopBarStyle: React.CSSProperties = {
-  display: "grid",
-  gap: 9,
-  minHeight: 70,
-  padding: "10px 14px 9px",
-  borderBottom: "1px solid var(--border-subtle)",
-  background: "var(--surface-sidebar)",
-  fontSize: "var(--text-sm)",
-};
-
-const editorToolbarMainStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-  minWidth: 0,
-};
-
-const editorActionsStyle: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 6,
-  marginLeft: "auto",
-  flexShrink: 0,
-};
-
-const quickOpenStyle: React.CSSProperties = {
-  height: 32,
-  flex: "1 1 360px",
-  minWidth: 170,
-  display: "flex",
-  alignItems: "center",
-  gap: 6,
-  padding: "0 10px",
-  background: "var(--surface-page)",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 7px)",
-  color: "var(--text-muted)",
-};
-
-const quickOpenInputStyle: React.CSSProperties = {
-  flex: 1,
-  minWidth: 0,
-  background: "transparent",
-  border: 0,
-  color: "var(--text-primary)",
-  outline: 0,
-  fontSize: "14px",
-};
-
-const quickOpenResultsStyle: React.CSSProperties = {
-  borderBottom: "1px solid var(--border-subtle)",
-  maxHeight: 180,
-  overflowY: "auto",
-  padding: 4,
-  background: "var(--surface-sidebar)",
-};
-
-const quickOpenResultStyle: React.CSSProperties = {
-  width: "100%",
-  textAlign: "left",
-  border: "1px solid transparent",
-  borderRadius: "var(--radius-sm, 4px)",
-  background: "transparent",
-  color: "var(--text-secondary)",
-  cursor: "pointer",
-  padding: "5px 7px",
-  fontFamily: "var(--font-mono)",
-  fontSize: "var(--text-xs)",
-};
-
-const editorContextBarStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-  minWidth: 0,
-};
-
-const activeFileBadgeStyle: React.CSSProperties = {
-  flex: "0 0 auto",
-  maxWidth: "46%",
-  minWidth: 0,
-  height: 28,
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 6,
-  padding: "0 8px",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 6px)",
-  background: "var(--surface-soft)",
-};
-
-const activeFileNameStyle: React.CSSProperties = {
-  minWidth: 0,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  color: "var(--text-primary)",
-  fontSize: "13px",
-  fontWeight: 650,
-};
-
-const modifiedPillStyle: React.CSSProperties = {
-  flexShrink: 0,
-  padding: "1px 5px",
-  borderRadius: 999,
-  background: "color-mix(in oklch, var(--state-warning) 14%, transparent)",
-  color: "var(--state-warning)",
-  fontSize: 10,
-  fontFamily: "var(--font-mono)",
-};
-
-const breadcrumbStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 5,
-  minWidth: 0,
-  flex: 1,
-  height: 28,
-  padding: "0 8px",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 6px)",
-  background: "var(--surface-page)",
-  color: "var(--text-muted)",
-  fontFamily: "var(--font-mono)",
-  overflow: "hidden",
-  whiteSpace: "nowrap",
-};
-
-const tabStripStyle: React.CSSProperties = {
-  display: "flex",
-  minHeight: 38,
-  overflowX: "auto",
-  overflowY: "hidden",
-  gap: 2,
-  padding: "6px 10px 0",
-  borderBottom: "1px solid var(--border-subtle)",
-  background: "var(--surface-sidebar)",
-  scrollbarWidth: "thin",
-  scrollbarColor: "color-mix(in oklch, var(--text-muted) 35%, transparent) transparent",
-};
-
-const tabButtonStyle = (active: boolean): React.CSSProperties => ({
-  position: "relative",
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 6,
-  height: 32,
-  maxWidth: 240,
-  minWidth: 124,
-  flex: "0 0 auto",
-  border: "1px solid transparent",
-  borderBottomColor: active ? "var(--surface-base)" : "transparent",
-  borderRadius: "var(--radius-sm, 7px) var(--radius-sm, 7px) 0 0",
-  background: active ? "var(--surface-base)" : "transparent",
-  color: active ? "var(--text-primary)" : "var(--text-muted)",
-  cursor: "pointer",
-  padding: "0 10px",
-  fontSize: "13px",
-  fontFamily: "var(--font-ui)",
-  transition: "background var(--transition-micro, 100ms), color var(--transition-micro, 100ms), border-color var(--transition-micro, 100ms)",
-});
-
-const editorInfoBarStyle = (dirty: boolean): React.CSSProperties => ({
-  display: "flex",
-  gap: 12,
-  minHeight: 24,
-  alignItems: "center",
-  padding: "0 12px",
-  color: dirty ? "var(--state-warning)" : "var(--text-muted)",
-  borderTop: "1px solid var(--border-subtle)",
-  fontFamily: "var(--font-mono)",
-  fontSize: "12px",
-  overflow: "hidden",
-  whiteSpace: "nowrap",
-  background: "var(--surface-sidebar)",
-});
-
-const editorCanvasStyle: React.CSSProperties = {
-  flex: 1,
-  minHeight: 0,
-  overflow: "hidden",
-  display: "flex",
-  flexDirection: "column",
-  background: "var(--surface-base)",
-};
-
-const emptyEditorStyle: React.CSSProperties = {
-  height: "100%",
-  display: "flex",
-  flexDirection: "column",
-  alignItems: "center",
-  justifyContent: "center",
-  gap: 10,
-  color: "var(--text-muted)",
-  fontSize: "14px",
-  background: "var(--surface-base)",
-};
-
-const mdPreviewStyle: React.CSSProperties = {
-  flex: 1,
-  overflowY: "auto",
-  padding: "24px 34px",
-  color: "var(--text-primary)",
-  fontSize: "15px",
-  lineHeight: 1.7,
-  wordBreak: "break-word",
-};
+const MarkdownPreviewLimitNotice = ({ imageCount, onEdit }: { imageCount: number; onEdit: () => void }) => (
+  <div className="h-full flex flex-col items-center justify-center gap-[9px] p-6 text-center" style={{ color: "var(--text-muted)", background: "var(--surface-base)" }}>
+    <Image size={28} style={{ color: "var(--state-warning)" }} />
+    <div className="font-bold" style={{ color: "var(--text-primary)" }}>Markdown preview skipped</div>
+    <div className="max-w-[520px] leading-[1.5]" style={{ color: "var(--text-secondary)", fontSize: "var(--text-sm)" }}>
+      This Markdown file references {imageCount.toLocaleString()} images. Open it in edit mode to avoid loading them all at once.
+    </div>
+    <button type="button" onClick={onEdit} className="inline-flex items-center gap-1.5 h-[30px] px-2.5 border rounded-[4px] cursor-pointer font-semibold" style={{ borderColor: "var(--border-subtle)", background: "var(--surface-raised)", color: "var(--text-primary)", fontFamily: "var(--font-ui)", fontSize: "var(--text-xs)" }}>
+      <Edit3 size={13} />
+      Edit Markdown
+    </button>
+  </div>
+);
 
 const ImageViewer = ({ path, workingDirectory }: { path: string; workingDirectory: string }) => {
   const imgSrc = (() => {
@@ -895,28 +815,14 @@ const ImageViewer = ({ path, workingDirectory }: { path: string; workingDirector
   })();
 
   return (
-    <div
-      style={{
-        flex: 1,
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 12,
-        padding: 24,
-        overflow: "auto",
-        background: "var(--surface-base)",
-      }}
-    >
+    <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6 overflow-auto" style={{ background: "var(--surface-base)" }}>
       <img
         src={imgSrc}
         alt={basename(path)}
+        className="max-w-full object-contain rounded-[4px] border"
         style={{
-          maxWidth: "100%",
           maxHeight: "calc(100% - 40px)",
-          objectFit: "contain",
-          borderRadius: "var(--radius-sm, 4px)",
-          border: "1px solid var(--border-subtle)",
+          borderColor: "var(--border-subtle)",
         }}
         onError={(e) => {
           const target = e.currentTarget;
@@ -925,15 +831,7 @@ const ImageViewer = ({ path, workingDirectory }: { path: string; workingDirector
           if (fallback) fallback.style.display = "flex";
         }}
       />
-      <div
-        style={{
-          display: "none",
-          flexDirection: "column",
-          alignItems: "center",
-          gap: 8,
-          color: "var(--text-muted)",
-        }}
-      >
+      <div className="hidden flex-col items-center gap-2" style={{ color: "var(--text-muted)" }}>
         <Image size={32} />
         <span style={{ fontSize: "var(--text-sm)" }}>Cannot display image</span>
         <span style={{ fontSize: "var(--text-xs)", fontFamily: "var(--font-mono)" }}>{basename(path)}</span>
@@ -945,82 +843,5 @@ const ImageViewer = ({ path, workingDirectory }: { path: string; workingDirector
   );
 };
 
-const TabContextMenu = ({
-  x,
-  y,
-  onClose,
-  onCloseTab,
-  onCloseOthers,
-  onCloseAll,
-  onCloseToRight,
-  onCopyPath,
-  onReveal,
-}: {
-  x: number;
-  y: number;
-  onClose: () => void;
-  onCloseTab: () => void;
-  onCloseOthers: () => void;
-  onCloseAll: () => void;
-  onCloseToRight: () => void;
-  onCopyPath: () => void;
-  onReveal: () => void;
-}) => {
-  useEffect(() => {
-    const dismiss = () => onClose();
-    window.addEventListener("mousedown", dismiss);
-    return () => window.removeEventListener("mousedown", dismiss);
-  }, [onClose]);
-
-  const items = [
-    { label: "Close", action: onCloseTab },
-    { label: "Close Others", action: onCloseOthers },
-    { label: "Close All", action: onCloseAll },
-    { label: "Close to the Right", action: onCloseToRight },
-    { label: "---", action: () => {} },
-    { label: "Copy Path", action: onCopyPath },
-    { label: "Reveal in Explorer", action: onReveal },
-  ];
-
-  return (
-    <div
-      onMouseDown={(e) => e.stopPropagation()}
-      style={{
-        position: "fixed",
-        left: x,
-        top: y,
-        zIndex: 9999,
-        background: "var(--surface-raised)",
-        border: "1px solid var(--border-subtle)",
-        borderRadius: "var(--radius-sm, 6px)",
-        boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
-        padding: "4px 0",
-        minWidth: 160,
-      }}
-    >
-      {items.map((item, i) =>
-        item.label === "---" ? (
-          <div key={i} style={{ height: 1, background: "var(--border-subtle)", margin: "4px 0" }} />
-        ) : (
-          <button
-            key={item.label}
-            onClick={item.action}
-            style={{
-              display: "block",
-              width: "100%",
-              textAlign: "left",
-              background: "transparent",
-              border: 0,
-              color: "var(--text-secondary)",
-              cursor: "pointer",
-              padding: "5px 12px",
-              fontSize: "var(--text-xs)",
-            }}
-          >
-            {item.label}
-          </button>
-        ),
-      )}
-    </div>
-  );
-};
+// TabContextMenu used to be defined inline here; now replaced by the
+// generic ContextMenu component in ../components/ContextMenu.

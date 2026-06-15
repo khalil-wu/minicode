@@ -1,14 +1,9 @@
-"""
-Agent 辅助工具（DESIGN.md §8.2）。
-
-  - ask_user:       主动向用户提问。权限: AUTO
-  - read_artifact:  读取 artifact 全文。权限: AUTO
-  - task:           委托隔离上下文的子 agent。权限: AUTO
-"""
+"""Agent helper tools: user clarification, artifacts, and subagents."""
 
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -26,19 +21,12 @@ from backend.tools.registry import ToolRegistry
 
 
 class AskUserTool(BaseTool):
-    """
-    Agent 主动向用户提问。
-
-    当 Agent 缺少关键信息无法继续时使用。
-    权限: AUTO
-    """
+    """Ask the user one concise clarification question."""
 
     name = "ask_user"
     description = (
-        "向用户提出一个问题以获取缺失的关键信息。"
-        "当你缺少完成任务所需的关键决策或信息时使用此工具。"
-        "示例: ask_user(question='你想使用 TypeScript 还是 JavaScript？')。"
-        "注意: 不要用于不必要的确认，只在真正需要用户决策时使用。"
+        "Ask the user a focused clarification question when a required detail cannot be inferred from context or tools. "
+        "Ask at most ONE question per turn. Include enough context for the user to answer without reading the entire conversation."
     )
     permission = PermissionLevel.AUTO
 
@@ -51,7 +39,7 @@ class AskUserTool(BaseTool):
                 "properties": {
                     "question": {
                         "type": "string",
-                        "description": "要向用户提出的问题，应清晰明确",
+                        "description": "The concise, self-contained question to ask the user. Include relevant context so the user can answer without scrolling back.",
                     },
                 },
                 "required": ["question"],
@@ -61,30 +49,18 @@ class AskUserTool(BaseTool):
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
         question = args.get("question", "")
         if not question:
-            return self._error_result("缺少 question 参数")
-
-        # ask_user 的实际实现由 Agent Loop 层拦截处理
-        # 这里只返回一个标记，Agent Loop 会将其转发给前端
-        return self._success_result(
-            f"[等待用户回答] {question}"
-        )
+            return self._error_result("Missing question argument")
+        return self._success_result(f"[waiting for user answer] {question}")
 
 
 class ReadArtifactTool(BaseTool):
-    """
-    读取 Artifact Store 中存储的完整内容。
-
-    当工具返回了 artifact_id 引用时，Agent 可用此工具获取全文。
-    权限: AUTO
-    """
+    """Read full content from an artifact created by a previous tool."""
 
     name = "read_artifact"
+    read_only = True
     description = (
-        "读取 artifact 的完整内容。"
-        "当其他工具因输出过长而将内容存入 artifact 时，"
-        "使用此工具获取完整内容。"
-        "示例: read_artifact(artifact_id='art_a1b2c3d4')。"
-        "注意: artifact_id 由其他工具返回，在当前会话内有效。"
+        "Read complete artifact content when a previous tool returned an artifact_id. "
+        "Only use artifact IDs that appeared in this conversation."
     )
     permission = PermissionLevel.AUTO
 
@@ -97,6 +73,17 @@ class ReadArtifactTool(BaseTool):
         self._artifact_store = artifact_store
         self._attachment_store = attachment_store
 
+    def get_spec(self):
+        from backend.agent.harness.contracts import ToolSpec
+
+        return ToolSpec(
+            name=self.name,
+            capability="artifact.read",
+            required_args=("artifact_id",),
+            arg_roles={"artifact_id": "latest_artifact"},
+            empty_args_policy="repair_or_block",
+        )
+
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
             name=self.name,
@@ -106,7 +93,7 @@ class ReadArtifactTool(BaseTool):
                 "properties": {
                     "artifact_id": {
                         "type": "string",
-                        "description": "artifact 的唯一标识符，如 'art_a1b2c3d4'",
+                        "description": "Artifact identifier, for example 'art_a1b2c3d4'.",
                     },
                 },
                 "required": ["artifact_id"],
@@ -117,7 +104,7 @@ class ReadArtifactTool(BaseTool):
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
         artifact_id = args.get("artifact_id", "")
         if not artifact_id:
-            return self._error_result("缺少 artifact_id 参数")
+            return self._error_result("Missing artifact_id argument")
 
         content = self._artifact_store.get(artifact_id)
         if content is None and self._attachment_store is not None:
@@ -136,9 +123,9 @@ class ReadArtifactTool(BaseTool):
         if content is None:
             available = self._artifact_store.list_artifacts()
             ids = [a.artifact_id for a in available]
-            hint = f"可用的 artifact: {', '.join(ids)}" if ids else "当前没有可用的 artifact"
+            hint = f"Available artifacts: {', '.join(ids)}" if ids else "No artifacts are currently available"
             return self._error_result(
-                f"artifact '{artifact_id}' 不存在。{hint}"
+                f"Artifact '{artifact_id}' does not exist. {hint}"
             )
 
         return self._success_result(content)
@@ -146,7 +133,7 @@ class ReadArtifactTool(BaseTool):
     @staticmethod
     def _is_parse_error(content: str) -> bool:
         text = (content or "").strip().lower()
-        return text.startswith(("错误:", "error:", "閿欒:"))
+        return text.startswith(("错误:", "error:", "parse error:", "pdf parse failed"))
 
     def _try_reparse(self, artifact_id: str) -> str | None:
         """Attempt to re-parse from stored native binary data."""
@@ -210,21 +197,38 @@ class ReadArtifactTool(BaseTool):
 
 
 class TaskTool(BaseTool):
-    """
-    委托一个隔离上下文的子 agent 完成有边界的工作。
-
-    这对应 Claude Code 的 Task/subagent 思路：主 agent 保持单一 ReAct
-    循环，只在需要时把探索、分析或小范围执行交给独立上下文的子 agent。
-    """
+    """Delegate a bounded task to an isolated subagent."""
 
     name = "task"
     description = (
-        "Delegate a focused task to a subagent running in its own isolated context. "
-        "Use this for bounded side investigations, codebase exploration, or a clearly scoped implementation slice. "
-        "Do not use it to force a global plan/accept/execute workflow; the main agent remains responsible for orchestration. "
-        "The subagent returns a concise summary to continue the current conversation."
+        "Delegate a sub-task to an independent agent. The sub-agent has its own context and tool access. "
+        "Use for complex, independent work items that benefit from focused attention. "
+        "Supports parallel sub-tasks via the parallel_tasks parameter (up to 5 concurrent). "
+        "Results include the sub-agent's findings and a summary of tools used."
     )
     permission = PermissionLevel.AUTO
+
+    def get_spec(self):
+        from backend.agent.harness.contracts import ToolSpec
+
+        return ToolSpec(
+            name=self.name,
+            capability="agent.delegate",
+            toolset="agent",
+            exposure="deferred",
+            required_args=("description", "prompt"),
+            arg_roles={
+                "description": "generated_content",
+                "prompt": "generated_content",
+                "agent_type": "control",
+            },
+            repair_policy={
+                "description": "needs_model_generation",
+                "prompt": "needs_model_generation",
+                "agent_type": "runtime_control",
+            },
+            empty_args_policy="repair_or_block",
+        )
 
     def __init__(
         self,
@@ -263,8 +267,45 @@ class TaskTool(BaseTool):
                         "enum": ["general-purpose", "explore", "plan", "implement"],
                         "description": "Optional subagent type. Use explore or plan for read-heavy investigation; implement for a focused code change.",
                     },
+                    "parallel_tasks": {
+                        "type": "array",
+                        "description": (
+                            "Run multiple subtasks concurrently. Each item is an object with "
+                            "'description', 'prompt', and optional 'agent_type'. "
+                            "When provided, the single-task 'prompt'/'description' fields are ignored."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "description": {
+                                    "type": "string",
+                                    "description": "Short description of this subtask.",
+                                },
+                                "prompt": {
+                                    "type": "string",
+                                    "description": "Complete prompt for this subtask.",
+                                },
+                                "agent_type": {
+                                    "type": "string",
+                                    "enum": ["general-purpose", "explore", "plan", "implement"],
+                                    "description": "Subagent type for this subtask.",
+                                },
+                            },
+                            "required": ["description", "prompt"],
+                        },
+                    },
+                    "timeout_seconds": {
+                        "type": "number",
+                        "description": (
+                            "Wall-clock timeout in seconds per subtask (default 300, max 600). "
+                            "If a subtask exceeds this, partial results are returned."
+                        ),
+                    },
                 },
-                "required": ["description", "prompt"],
+                "anyOf": [
+                    {"required": ["description", "prompt"]},
+                    {"required": ["parallel_tasks"]},
+                ],
             },
         )
 
@@ -273,7 +314,50 @@ class TaskTool(BaseTool):
         args: dict[str, Any],
         context: ToolExecutionContext | None = None,
     ) -> ToolResult:
+        if self._is_recursive_subagent_call(context):
+            return ToolResult(
+                content=(
+                    "Blocked recursive subagent delegation. Subagents cannot call the task tool; "
+                    "return a concise summary to the parent agent instead."
+                ),
+                is_error=True,
+                status="blocked",
+                display_summary="Blocked recursive subagent",
+                result_kind="subagent",
+            )
+
         description = str(args.get("description") or "").strip()
+        parallel_tasks = args.get("parallel_tasks")
+        timeout_seconds = float(args.get("timeout_seconds") or 300.0)
+        timeout_seconds = min(max(timeout_seconds, 30.0), 600.0)
+
+        llm = self._resolve_llm()
+        tool_registry = self._resolve_tool_registry()
+        permission_checker = self._resolve_permission_checker()
+        if llm is None or tool_registry is None or permission_checker is None:
+            return self._error_result("Subagent runtime is not configured")
+
+        # ── Parallel execution path ──
+        if isinstance(parallel_tasks, list) and len(parallel_tasks) >= 2:
+            tasks: list[dict[str, str]] = []
+            for item in parallel_tasks[:5]:  # cap at 5 parallel subtasks
+                if not isinstance(item, dict):
+                    continue
+                t_desc = str(item.get("description") or "").strip()
+                t_prompt = str(item.get("prompt") or "").strip()
+                t_type = str(item.get("agent_type") or "general-purpose").strip().lower()
+                if t_desc and t_prompt:
+                    tasks.append({
+                        "description": t_desc,
+                        "prompt": t_prompt,
+                        "agent_type": t_type if t_type in {"general-purpose", "explore", "plan", "implement"} else "general-purpose",
+                    })
+            if len(tasks) >= 2:
+                return await self._run_parallel_subtasks(
+                    tasks, context, timeout_seconds,
+                )
+
+        # ── Single execution path ──
         prompt = str(args.get("prompt") or "").strip()
         agent_type = str(args.get("agent_type") or "general-purpose").strip().lower()
         if agent_type == "general":
@@ -281,19 +365,46 @@ class TaskTool(BaseTool):
         if agent_type not in {"general-purpose", "explore", "plan", "implement"}:
             agent_type = "general-purpose"
         if not description:
-            return self._error_result("缺少 description 参数")
+            return self._error_result("Missing description argument")
         if not prompt:
-            return self._error_result("缺少 prompt 参数")
+            return self._error_result("Missing prompt argument")
 
+        return await self._run_single_subtask(
+            description=description,
+            prompt=prompt,
+            agent_type=agent_type,
+            context=context,
+            timeout_seconds=timeout_seconds,
+        )
+
+    # ------------------------------------------------------------------
+    # Single subtask execution
+    # ------------------------------------------------------------------
+
+    async def _run_single_subtask(
+        self,
+        *,
+        description: str,
+        prompt: str,
+        agent_type: str,
+        context: ToolExecutionContext | None,
+        timeout_seconds: float = 300.0,
+        subtask_index: int | None = None,
+        total_subtasks: int | None = None,
+    ) -> ToolResult:
+        """Run one isolated subagent loop with timeout and progress reporting.
+
+        Returns a structured ``ToolResult`` that includes the subagent summary,
+        duration, iteration count, and tool-call statistics.
+        """
         llm = self._resolve_llm()
         tool_registry = self._resolve_tool_registry()
         permission_checker = self._resolve_permission_checker()
-        if llm is None or tool_registry is None or permission_checker is None:
-            return self._error_result("task 子 agent 运行时尚未配置")
 
         subagent_id = f"subagent-{uuid4().hex[:8]}"
         parent_id = context.task_id if context and context.task_id else context.session_id if context else ""
         emit_event = context.emit_event if context else None
+
         if emit_event is not None:
             await emit_event(
                 "subagent.start",
@@ -306,6 +417,22 @@ class TaskTool(BaseTool):
             )
 
         sub_settings = self._resolve_agent_settings()
+        if sub_settings.max_iterations > 8:
+            sub_settings = AgentSettings(
+                max_iterations=8,
+                compaction_threshold=sub_settings.compaction_threshold,
+                stagnation_limit=sub_settings.stagnation_limit,
+                history_keep_recent=sub_settings.history_keep_recent,
+                fallback_providers=sub_settings.fallback_providers,
+                reflection_pass=sub_settings.reflection_pass,
+                agent_mode=sub_settings.agent_mode,
+                stream_timeout_seconds=sub_settings.stream_timeout_seconds,
+                stream_max_attempts=sub_settings.stream_max_attempts,
+                stream_retry_delay_seconds=sub_settings.stream_retry_delay_seconds,
+                stream_retryable_substrings=sub_settings.stream_retryable_substrings,
+                reflection_policy=sub_settings.reflection_policy,
+                stream_retry_policy=sub_settings.stream_retry_policy,
+            )
         sub_budget = self._resolve_token_budget()
         sub_context = self._build_permission_context(agent_type, context)
         delegated_prompt = self._build_subagent_prompt(agent_type, prompt)
@@ -316,6 +443,10 @@ class TaskTool(BaseTool):
             sub_state.checkpoint_manager = context.checkpoint_manager
 
         summary_parts: list[str] = []
+        start_time = time.perf_counter()
+        timed_out = False
+        last_tool_name = ""
+
         try:
             from backend.agent.loop import run_agent_loop
 
@@ -328,57 +459,272 @@ class TaskTool(BaseTool):
                     ),
                 }
 
-            async for event in run_agent_loop(
-                user_message=delegated_prompt,
-                llm=llm,
-                tool_registry=tool_registry,
-                artifact_store=self._artifact_store,
-                permission_checker=permission_checker,
-                agent_settings=sub_settings,
-                token_budget=sub_budget,
-                context_builder=ContextBuilder(
-                    token_budget=sub_budget,
-                    agent_settings=sub_settings,
-                ),
-                state=sub_state,
-                approval_handler=subagent_approval_handler,
-                permission_context=sub_context,
-                session_id=context.session_id if context else "",
-                task_id=subagent_id,
-                task_manager=context.task_manager if context else None,
-                emit_event=emit_event,
-                metadata=dict(context.metadata) if context else {},
-                stream_callback=context.stream_callback if context else None,
-                session_context=None,
-            ):
-                if event.type == "text_chunk":
-                    summary_parts.append(str(event.data.get("content", "")))
-                elif event.type == "error":
-                    summary_parts.append(f"\nError: {event.data.get('message', '')}")
+            try:
+                async with asyncio.timeout(timeout_seconds):
+                    async for event in run_agent_loop(
+                        user_message=delegated_prompt,
+                        llm=llm,
+                        tool_registry=tool_registry,
+                        artifact_store=self._artifact_store,
+                        permission_checker=permission_checker,
+                        agent_settings=sub_settings,
+                        token_budget=sub_budget,
+                        context_builder=ContextBuilder(
+                            token_budget=sub_budget,
+                            agent_settings=sub_settings,
+                        ),
+                        state=sub_state,
+                        approval_handler=subagent_approval_handler,
+                        permission_context=sub_context,
+                        session_id=context.session_id if context else "",
+                        task_id=subagent_id,
+                        task_manager=context.task_manager if context else None,
+                        emit_event=emit_event,
+                        metadata=dict(context.metadata) if context else {},
+                        stream_callback=context.stream_callback if context else None,
+                        session_context=None,
+                    ):
+                        if event.type == "text_chunk":
+                            summary_parts.append(str(event.data.get("content", "")))
+                        elif event.type == "error":
+                            summary_parts.append(f"\nError: {event.data.get('message', '')}")
+                        elif event.type == "tool_result":
+                            last_tool_name = str(event.data.get("id", ""))
+                        # Emit progress at iteration boundaries
+                        if emit_event is not None and event.type == "tool_result":
+                            elapsed = time.perf_counter() - start_time
+                            await emit_event(
+                                "subagent.progress",
+                                AgentEvent.subagent_progress(
+                                    subagent_id=subagent_id,
+                                    iteration=sub_state.iterations,
+                                    max_iterations=sub_settings.max_iterations,
+                                    tool_name=last_tool_name,
+                                    detail=f"{elapsed:.1f}s elapsed",
+                                ).data,
+                            )
+            except asyncio.TimeoutError:
+                timed_out = True
 
+            elapsed_ms = int((time.perf_counter() - start_time) * 1000)
             summary = "".join(summary_parts).strip() or sub_state.reply.strip()
+            tool_call_count = len(sub_state.tool_calls)
+
             if emit_event is not None:
                 await emit_event(
                     "subagent.done",
-                    AgentEvent.subagent_done(subagent_id=subagent_id, summary=summary).data,
+                    AgentEvent.subagent_done(
+                        subagent_id=subagent_id,
+                        summary=summary[:500] if summary else "",
+                        duration_ms=elapsed_ms,
+                        iterations=sub_state.iterations,
+                        tool_call_count=tool_call_count,
+                        timed_out=timed_out,
+                    ).data,
                 )
-            return self._success_result(
-                f"Subagent {subagent_id} ({agent_type}) completed.\n\n{summary}"
+
+            if timed_out and not summary:
+                return ToolResult(
+                    content=(
+                        f"Subagent {subagent_id} ({agent_type}) timed out after "
+                        f"{timeout_seconds:.0f}s with no result. "
+                        f"It completed {sub_state.iterations} iteration(s) and "
+                        f"{tool_call_count} tool call(s)."
+                    ),
+                    is_error=True,
+                    duration_ms=elapsed_ms,
+                    display_summary=f"Subagent timed out: {description[:60]}",
+                    result_kind="subagent",
+                )
+
+            result_text = self._build_subtask_result_summary(
+                subagent_id=subagent_id,
+                agent_type=agent_type,
+                summary=summary,
+                duration_ms=elapsed_ms,
+                iterations=sub_state.iterations,
+                tool_calls=sub_state.tool_calls,
+                timed_out=timed_out,
+                timeout_seconds=timeout_seconds,
+            )
+            return ToolResult(
+                content=result_text,
+                duration_ms=elapsed_ms,
+                display_summary=f"Subagent ({agent_type}): {description[:60]}",
+                result_kind="subagent",
             )
         except asyncio.CancelledError:
+            elapsed_ms = int((time.perf_counter() - start_time) * 1000)
             if emit_event is not None:
                 await emit_event(
                     "subagent.done",
-                    AgentEvent.subagent_done(subagent_id=subagent_id, error="cancelled").data,
+                    AgentEvent.subagent_done(
+                        subagent_id=subagent_id,
+                        error="cancelled",
+                        duration_ms=elapsed_ms,
+                        iterations=sub_state.iterations,
+                    ).data,
                 )
             raise
         except Exception as exc:
+            elapsed_ms = int((time.perf_counter() - start_time) * 1000)
             if emit_event is not None:
                 await emit_event(
                     "subagent.done",
-                    AgentEvent.subagent_done(subagent_id=subagent_id, error=str(exc)).data,
+                    AgentEvent.subagent_done(
+                        subagent_id=subagent_id,
+                        error=str(exc),
+                        duration_ms=elapsed_ms,
+                        iterations=sub_state.iterations,
+                    ).data,
                 )
-            return self._error_result(f"task 子 agent 执行失败: {exc}")
+            return ToolResult(
+                content=(
+                    f"Subagent {subagent_id} ({agent_type}) failed after "
+                    f"{elapsed_ms}ms and {sub_state.iterations} iteration(s).\n"
+                    f"Error: {type(exc).__name__}: {exc}"
+                ),
+                is_error=True,
+                duration_ms=elapsed_ms,
+                display_summary=f"Subagent failed: {description[:60]}",
+                result_kind="subagent",
+            )
+
+    # ------------------------------------------------------------------
+    # Parallel subtask execution
+    # ------------------------------------------------------------------
+
+    async def _run_parallel_subtasks(
+        self,
+        tasks: list[dict[str, str]],
+        context: ToolExecutionContext | None,
+        timeout_seconds: float,
+    ) -> ToolResult:
+        """Run multiple subtasks concurrently via ``asyncio.gather``.
+
+        Each subtask gets its own wall-clock timeout.  An outer timeout
+        ensures the entire parallel batch cannot run indefinitely.
+        """
+        emit_event = context.emit_event if context else None
+        total = len(tasks)
+        start_time = time.perf_counter()
+
+        coros = [
+            self._run_single_subtask(
+                description=t["description"],
+                prompt=t["prompt"],
+                agent_type=t.get("agent_type", "general-purpose"),
+                context=context,
+                timeout_seconds=timeout_seconds,
+                subtask_index=i,
+                total_subtasks=total,
+            )
+            for i, t in enumerate(tasks)
+        ]
+
+        # Outer timeout: per-task timeout + 30s overhead, capped at 10 minutes
+        outer_timeout = min(timeout_seconds + 30.0, 600.0)
+        try:
+            async with asyncio.timeout(outer_timeout):
+                results = await asyncio.gather(*coros, return_exceptions=True)
+        except asyncio.TimeoutError:
+            elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+            if emit_event is not None:
+                await emit_event(
+                    "subagent.done",
+                    AgentEvent.subagent_done(
+                        subagent_id="parallel-batch",
+                        error="outer timeout",
+                        duration_ms=elapsed_ms,
+                    ).data,
+                )
+            return ToolResult(
+                content=(
+                    f"Parallel subtasks timed out after {outer_timeout:.0f}s. "
+                    f"Some tasks may not have completed."
+                ),
+                is_error=True,
+                duration_ms=elapsed_ms,
+                display_summary="Parallel subtasks timed out",
+                result_kind="subagent",
+            )
+
+        elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+
+        # Merge results
+        parts: list[str] = [f"Parallel subtasks completed ({total} tasks, {elapsed_ms / 1000:.1f}s total):\n"]
+        has_error = False
+        for i, (task, result) in enumerate(zip(tasks, results), 1):
+            if isinstance(result, Exception):
+                has_error = True
+                parts.append(f"--- Task {i}/{total}: {task['description']} ---\nFAILED: {result}\n")
+            elif isinstance(result, ToolResult):
+                if result.is_error:
+                    has_error = True
+                parts.append(f"--- Task {i}/{total}: {task['description']} ---\n{result.content}\n")
+            else:
+                parts.append(f"--- Task {i}/{total}: {task['description']} ---\nNo result returned.\n")
+
+        return ToolResult(
+            content="\n".join(parts),
+            is_error=has_error,
+            duration_ms=elapsed_ms,
+            display_summary=f"Parallel subtasks: {total} tasks",
+            result_kind="subagent",
+        )
+
+    # ------------------------------------------------------------------
+    # Result formatting
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_subtask_result_summary(
+        *,
+        subagent_id: str,
+        agent_type: str,
+        summary: str,
+        duration_ms: int,
+        iterations: int,
+        tool_calls: list,
+        timed_out: bool,
+        timeout_seconds: float,
+    ) -> str:
+        """Build a structured result summary for the parent agent.
+
+        Includes the subagent's text output, timing metadata, and a compact
+        list of tool calls so the parent knows what the subagent actually did.
+        """
+        header = f"Subagent {subagent_id} ({agent_type})"
+        if timed_out:
+            header += f" [TIMED OUT after {timeout_seconds:.0f}s]"
+        header += f" completed in {duration_ms / 1000:.1f}s, {iterations} iteration(s)."
+
+        # Include up to 10 most recent tool calls as a compact summary
+        tool_lines: list[str] = []
+        if tool_calls:
+            recent = tool_calls[-10:]
+            for tc in recent:
+                name = getattr(tc, "tool_name", "?")
+                status = getattr(tc, "status", "?")
+                # Build a short arg summary
+                inp = getattr(tc, "tool_input", {})
+                if isinstance(inp, dict):
+                    arg_short = ", ".join(
+                        f"{k}={str(v)[:50]}"
+                        for k, v in list(inp.items())[:3]
+                    )
+                else:
+                    arg_short = str(inp)[:80]
+                tool_lines.append(f"  - {name}({arg_short}) [{status}]")
+
+        parts = [header]
+        if summary:
+            parts.append(f"\n{summary}")
+        if tool_lines:
+            parts.append(f"\nTools used ({len(tool_calls)} total):")
+            parts.extend(tool_lines)
+
+        return "\n".join(parts)
 
     def _resolve_llm(self) -> LLMAdapter | None:
         if callable(self._llm_provider):
@@ -433,6 +779,17 @@ class TaskTool(BaseTool):
             filesystem_constraints=dict(parent_permission.filesystem_constraints),
             source=f"subagent:{agent_type}",
         )
+
+    @staticmethod
+    def _is_recursive_subagent_call(context: ToolExecutionContext | None) -> bool:
+        if context is None:
+            return False
+        permission = context.permission
+        if permission.source.startswith("subagent:"):
+            return True
+        if "task" in permission.tool_deny_rules:
+            return True
+        return str(context.task_id or "").startswith("subagent-")
 
     @staticmethod
     def _build_subagent_prompt(agent_type: str, prompt: str) -> str:

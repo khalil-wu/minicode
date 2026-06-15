@@ -19,8 +19,6 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from backend.agent.policies import (
-        GroundedReplyPolicy,
-        RealtimeSearchPolicy,
         ReflectionPolicy,
         StreamRetryPolicy,
     )
@@ -82,7 +80,7 @@ class LLMSettings:
     model: str = "gpt-5.4"
     reasoning_effort: str = "high"
     max_tokens: int = 8192
-    wire_api: str = "responses"  # "responses", "chat", or "anthropic"
+    wire_api: str = "chat"  # "responses", "chat", or "anthropic"
 
 
 @dataclass(frozen=True)
@@ -159,9 +157,7 @@ class PermissionSettings:
         ]
     )
     always_deny: list[str] = field(default_factory=list)
-    path_allowlist: list[str] = field(
-        default_factory=lambda: ["./src", "./tests", "./backend", "./frontend"]
-    )
+    path_allowlist: list[str] = field(default_factory=lambda: ["."])
     path_denylist: list[str] = field(
         default_factory=lambda: [".env", ".mcp.json", "settings.json", ".git/**", "*.key", "*.pem", "secrets/"]
     )
@@ -172,12 +168,21 @@ class AgentSettings:
     """Agent Loop 运行参数。"""
 
     max_iterations: int = 30
+    turn_error_budget: int = 5  # 单轮最多允许的内部重试/恢复次数
     compaction_threshold: float = 0.75  # token 使用率阈值
     stagnation_limit: int = 3  # 同一工具+参数调用 N 次判定停滞
     history_keep_recent: int = 15  # compaction 后保留最近 N 轮
     fallback_providers: tuple[str, ...] = ()  # 主 LLM 失败时按顺序尝试的备用 provider
-    reflection_pass: bool = False  # 完成回复后是否执行一次自我审查和修正
+    reflection_pass: bool = False  # 完成回复后是否执行一次自我审查和修正（默认关闭，减少不必要的"注意"提示）
+    reflection_multi_perspective: bool = True  # 高风险回合（有 mutation/web 断言）用对抗式双维度复核；低风险回合零开销跳过
+    answer_gate_enabled: bool = False  # 默认关闭（仅弱模型需要；强模型兜底用）
     agent_mode: str = "react"
+
+    # Action-level verification: run this command after workspace mutations and
+    # feed failures back to the model before accepting the final answer.
+    # Empty = disabled. Example: "npx tsc -b && npx vitest run" / "python -m pytest -q".
+    verify_command: str = ""
+    verify_timeout_seconds: float = 120.0
 
     # Stream retry fields (match current module-level constants in loop.py)
     stream_timeout_seconds: float = 180.0
@@ -192,10 +197,20 @@ class AgentSettings:
     )
 
     # Policy slots — None means the Loop_Core fills in the default implementation
-    realtime_search_policy: "RealtimeSearchPolicy | None" = None
-    grounded_reply_policy: "GroundedReplyPolicy | None" = None
     reflection_policy: "ReflectionPolicy | None" = None
     stream_retry_policy: "StreamRetryPolicy | None" = None
+
+
+def get_answer_gate_enabled(model_name: str, config_value: bool | None = None) -> bool:
+    """判断是否启用answer gate，与模型能力联动。
+
+    强模型默认关闭（节省token/延迟），弱模型默认开启（兜底）。
+    显式配置值优先。
+    """
+    if config_value is not None:
+        return config_value
+    weak_models = {"deepseek", "qwen", "llama-3", "mistral", "gemma", "llama3"}
+    return any(wm in model_name.lower() for wm in weak_models)
 
 
 @dataclass(frozen=True)
@@ -265,16 +280,38 @@ def _vault_api_key(name: str) -> str:
     return str(value or "").strip()
 
 
+def _same_url_host(left: str, right: str) -> bool:
+    try:
+        left_host = urlsplit(left.strip()).netloc.lower()
+        right_host = urlsplit(right.strip()).netloc.lower()
+    except Exception:
+        return False
+    return bool(left_host and right_host and left_host == right_host)
+
+
+def _custom_allows_openai_key_fallback(base_url: str) -> bool:
+    if os.getenv("CUSTOM_ALLOW_OPENAI_KEY_FALLBACK", "").strip().lower() in {"1", "true", "yes"}:
+        return True
+    host = urlsplit(base_url.strip()).netloc.lower()
+    if host == "api.openai.com":
+        return True
+    return _same_url_host(base_url, os.getenv("OPENAI_BASE_URL", ""))
+
+
+def _custom_provider_api_key(base_url: str) -> str:
+    direct = (os.getenv("CUSTOM_API_KEY") or _vault_api_key("CUSTOM_API_KEY")).strip()
+    if direct:
+        return direct
+    if _custom_allows_openai_key_fallback(base_url):
+        return (os.getenv("OPENAI_API_KEY") or _vault_api_key("OPENAI_API_KEY")).strip()
+    return ""
+
+
 def _provider_api_key(provider: str) -> str:
     if provider == "anthropic":
         return (os.getenv("ANTHROPIC_API_KEY") or _vault_api_key("ANTHROPIC_API_KEY")).strip()
     if provider == "custom":
-        return (
-            os.getenv("CUSTOM_API_KEY")
-            or _vault_api_key("CUSTOM_API_KEY")
-            or os.getenv("OPENAI_API_KEY")
-            or _vault_api_key("OPENAI_API_KEY")
-        ).strip()
+        return _custom_provider_api_key(os.getenv("OPENAI_BASE_URL", ""))
     return (os.getenv("OPENAI_API_KEY") or _vault_api_key("OPENAI_API_KEY")).strip()
 
 
@@ -325,6 +362,39 @@ def _normalize_wire_api(value: str, default: str) -> str:
     if normalized in {"anthropic_messages", "messages", "claude"}:
         return "anthropic"
     return default
+
+
+def _is_deepseek_base_url(base_url: str) -> bool:
+    host = urlsplit(base_url.strip()).netloc.lower()
+    return host == "api.deepseek.com" or host.endswith(".api.deepseek.com")
+
+
+def normalize_custom_wire_api(base_url: str, value: str, default: str = "chat") -> str:
+    wire_api = _normalize_wire_api(value, default)
+    if _is_deepseek_base_url(base_url):
+        return "chat"
+    return wire_api
+
+
+def provider_supports_reasoning_effort(provider: str, section: dict[str, Any] | None) -> bool:
+    """Return True when the configured runtime path applies reasoning_effort."""
+    normalized = _normalize_provider(provider)
+    if normalized == "anthropic":
+        return False
+    data = section if isinstance(section, dict) else {}
+    wire_api = str(data.get("wire_api") or "chat").strip().lower()
+    if normalized == "custom":
+        wire_api = normalize_custom_wire_api(str(data.get("base_url") or ""), wire_api, "chat")
+    else:
+        wire_api = _normalize_wire_api(wire_api, "chat")
+    return wire_api == "responses"
+
+
+def active_provider_supports_reasoning_effort(payload: dict[str, Any] | None = None) -> bool:
+    settings_payload = payload if isinstance(payload, dict) else get_llm_settings_payload()
+    provider = str(settings_payload.get("provider") or get_llm_provider()).strip()
+    section = settings_payload.get(_normalize_provider(provider))
+    return provider_supports_reasoning_effort(provider, section if isinstance(section, dict) else None)
 
 
 def _is_anthropic_model_id(model: str) -> bool:
@@ -401,7 +471,7 @@ def get_openai_settings(settings_data: dict[str, Any] | None = None) -> dict[str
     reasoning_effort = str(
         provider_data.get("reasoning_effort") or os.getenv("OPENAI_REASONING_EFFORT", "high")
     ).strip()
-    wire_api = str(provider_data.get("wire_api") or os.getenv("OPENAI_WIRE_API", "responses")).strip()
+    wire_api = str(provider_data.get("wire_api") or os.getenv("OPENAI_WIRE_API", "chat")).strip()
     max_tokens = _coerce_int(provider_data.get("max_tokens", os.getenv("OPENAI_MAX_TOKENS", "8192")), 8192)
 
     available_models = _coerce_model_list(provider_data.get("available_models"))
@@ -462,13 +532,13 @@ def get_custom_settings(settings_data: dict[str, Any] | None = None) -> dict[str
     raw = llm_data.get("custom", {})
     provider_data = raw if isinstance(raw, dict) else {}
 
-    api_key = _provider_api_key("custom")
     base_url = str(provider_data.get("base_url") or os.getenv("OPENAI_BASE_URL", "")).strip()
+    api_key = _custom_provider_api_key(base_url)
     model = str(provider_data.get("model") or os.getenv("OPENAI_MODEL", "")).strip()
     reasoning_effort = str(
         provider_data.get("reasoning_effort") or os.getenv("OPENAI_REASONING_EFFORT", "high")
     ).strip()
-    wire_api = _normalize_wire_api(str(provider_data.get("wire_api", "chat")), "chat")
+    wire_api = normalize_custom_wire_api(base_url, str(provider_data.get("wire_api", "chat")), "chat")
     max_tokens = _coerce_int(provider_data.get("max_tokens", os.getenv("OPENAI_MAX_TOKENS", "8192")), 8192)
     thinking_budget = _coerce_int(
         provider_data.get("thinking_budget", os.getenv("ANTHROPIC_THINKING_BUDGET", "0")),
@@ -510,6 +580,13 @@ def get_available_models(
     if active_provider == "custom":
         return get_custom_settings(settings_data)["available_models"]
     return get_openai_settings(settings_data)["available_models"]
+
+
+def resolve_provider_api_key_for_base_url(provider: str, base_url: str) -> str:
+    normalized = _normalize_provider(provider)
+    if normalized == "custom":
+        return _custom_provider_api_key(base_url)
+    return _provider_api_key(normalized)
 
 
 def _load_settings_json() -> dict:
@@ -648,7 +725,11 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
     _set_runtime_api_key("custom", custom_api_key)
     custom_base_url = str(custom_updates.get("base_url", current_custom["base_url"])).strip()
     custom_model = str(custom_updates.get("model", current_custom["model"])).strip()
-    custom_wire_api = _normalize_wire_api(str(custom_updates.get("wire_api", current_custom["wire_api"])), current_custom["wire_api"])
+    custom_wire_api = normalize_custom_wire_api(
+        custom_base_url,
+        str(custom_updates.get("wire_api", current_custom["wire_api"])),
+        current_custom["wire_api"],
+    )
     next_custom_available = _coerce_model_list(
         custom_updates.get("available_models", current_custom["available_models"])
     )
@@ -785,7 +866,11 @@ def load_config() -> AppConfig:
         history_keep_recent=agent_data.get("history_keep_recent", 15),
         fallback_providers=tuple(fallback_providers),
         reflection_pass=bool(agent_data.get("reflection_pass", False)),
+        reflection_multi_perspective=bool(agent_data.get("reflection_multi_perspective", True)),
+        answer_gate_enabled=bool(agent_data.get("answer_gate_enabled", True)),
         agent_mode=_normalize_agent_mode(agent_data.get("agent_mode", "react")),
+        verify_command=str(agent_data.get("verify_command", "") or "").strip(),
+        verify_timeout_seconds=float(agent_data.get("verify_timeout_seconds", 120.0)),
     )
 
     # Token 预算

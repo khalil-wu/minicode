@@ -1,15 +1,17 @@
 import { File, Folder, Sparkles } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { isDesktop, fsSearchFiles } from "../desktop/runtime";
+import { isDesktop, fsListTree, fsSearchFiles } from "../desktop/runtime";
 import { useAppStore } from "../stores";
 import { listWorkspaceTree, searchWorkspaceFiles } from "../protocol/workspace";
 import { fuzzyFilter } from "../lib/fuzzy-match";
+import { buildRuntimeSlashArgMenuItems, buildRuntimeSlashMenuItems } from "../lib/runtime-commands";
 
 interface Props {
   open: boolean;
   kind: "slash" | "mention";
   filter?: string;
   onSelect: (value: string) => void;
+  placement?: "above" | "below";
 }
 
 interface FileItem {
@@ -26,65 +28,68 @@ interface MenuItem {
   path?: string;
 }
 
-const FALLBACK_SLASH_COMMANDS: { name: string; description: string }[] = [
-  { name: "/review", description: "Review code changes" },
-  { name: "/debug", description: "Debug the current issue" },
-  { name: "/refactor", description: "Refactor safely" },
-  { name: "/test", description: "Add or update tests" },
-  { name: "/docs", description: "Write developer docs" },
-  { name: "/explain", description: "Explain code paths" },
-  { name: "/commit", description: "Prepare a commit summary" },
-  { name: "/skills", description: "Browse skills" },
-  { name: "/permissions", description: "Inspect or change permissions" },
-  { name: "/effort", description: "Set reasoning effort" },
-  { name: "/new", description: "Start a new conversation" },
-  { name: "/clear", description: "Clear conversation" },
-  { name: "/compact", description: "Compact context" },
-  { name: "/memory", description: "Set memory mode" },
-  { name: "/archive", description: "Archive conversation" },
-  { name: "/unarchive", description: "Unarchive conversation" },
-  { name: "/tasks", description: "Show running tasks" },
-  { name: "/status", description: "Show runtime status" },
-  { name: "/usage", description: "Show token usage" },
-  { name: "/help", description: "Show slash command help" },
-];
+const MENTION_SEARCH_DEBOUNCE_MS = 150;
+const MENTION_CACHE_LIMIT = 80;
+const mentionTreeCache = new Map<string, FileItem[]>();
+const mentionSearchCache = new Map<string, FileItem[]>();
 
-const SLASH_ORDER = FALLBACK_SLASH_COMMANDS.map((item) => item.name);
-const FALLBACK_DESCRIPTION = new Map(FALLBACK_SLASH_COMMANDS.map((item) => [item.name, item.description]));
+export const __clearMentionFileCacheForTests = () => {
+  mentionTreeCache.clear();
+  mentionSearchCache.clear();
+};
 
-export const MenuOverlay = ({ open, kind, filter, onSelect }: Props) => {
+const rememberMentionResults = (cache: Map<string, FileItem[]>, key: string, results: FileItem[]) => {
+  if (!cache.has(key) && cache.size >= MENTION_CACHE_LIMIT) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey) cache.delete(oldestKey);
+  }
+  cache.set(key, results);
+};
+
+export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" }: Props) => {
   const [activeIndex, setActiveIndex] = useState(0);
   const [fileResults, setFileResults] = useState<FileItem[]>([]);
   const [searching, setSearching] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<Array<HTMLDivElement | null>>([]);
+  const searchSequenceRef = useRef(0);
   const storeCommands = useAppStore((s) => s.slashCommands);
   const availableSkills = useAppStore((s) => s.availableSkills);
+  const workingDirectory = useAppStore((s) => s.workingDirectory);
   const slashFilter = filter ?? "";
 
   // Slash commands
-  const rawSlashItems = storeCommands.length > 0
-    ? storeCommands.map((c) => {
-        const name = c.label?.startsWith("/") ? c.label : `/${c.command}`;
-        return { name, description: c.description || FALLBACK_DESCRIPTION.get(name) || "" };
-      })
-    : FALLBACK_SLASH_COMMANDS;
-  const slashBaseItems = rawSlashItems
-    .filter((item, index, list) => list.findIndex((other) => other.name === item.name) === index)
-    .sort((a, b) => {
-      const ai = SLASH_ORDER.indexOf(a.name);
-      const bi = SLASH_ORDER.indexOf(b.name);
-      if (ai !== -1 || bi !== -1) return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
-      return a.name.localeCompare(b.name);
-    });
+  const slashBaseItems = buildRuntimeSlashMenuItems(storeCommands);
+  const slashSkillItems: MenuItem[] = availableSkills.map((skill) => ({
+    name: `/${skill.name}`,
+    description: skill.description || "Skill",
+    type: "skill" as const,
+    path: `/${skill.name}`,
+  }));
+  const skillsPickerActive = /^\/skills(?:\s|$)/i.test(slashFilter);
 
-  const slashCommandItems = slashFilter && slashFilter !== "/"
-    ? fuzzyFilter(slashBaseItems, slashFilter.replace(/^\//, ""), (c) => c.name + " " + c.description)
-    : slashBaseItems;
+  // Argument stage: "/effort" or "/effort lo" with a local command that
+  // declares args shows its argument completions instead of command matches.
+  const slashArgItems = kind === "slash" && !skillsPickerActive
+    ? buildRuntimeSlashArgMenuItems(slashFilter, storeCommands)
+    : null;
+
+  const slashCommandItems = slashArgItems
+    ? slashArgItems
+    : skillsPickerActive
+    ? fuzzyFilter(
+        slashSkillItems,
+        slashFilter.replace(/^\/skills\s*/i, "").replace(/^\//, ""),
+        (c) => c.name + " " + c.description,
+      )
+    : slashFilter && slashFilter !== "/"
+      ? fuzzyFilter([...slashBaseItems, ...slashSkillItems], slashFilter.replace(/^\//, ""), (c) => c.name + " " + c.description)
+      : [...slashBaseItems, ...slashSkillItems];
   const slashItems = slashCommandItems.slice(0, 18);
 
   // Mention mode: extract query from @<query>
   const mentionQuery = kind === "mention" ? (filter ?? "").replace(/^@/, "").trim() : "";
+  const mentionSearchQuery = stripLineAnchor(mentionQuery);
   const skillItems: MenuItem[] = kind === "mention"
     ? fuzzyFilter(
         availableSkills.map((skill) => ({
@@ -93,7 +98,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect }: Props) => {
           type: "skill" as const,
           path: `skill:${skill.name}`,
         })),
-        mentionQuery,
+        mentionSearchQuery,
         (skill) => `${skill.name} ${skill.description}`,
       ).slice(0, 8)
     : [];
@@ -104,51 +109,134 @@ export const MenuOverlay = ({ open, kind, filter, onSelect }: Props) => {
 
   // File search effect for @ mentions
   useEffect(() => {
-    if (!open || kind !== "mention") return;
+    if (!open || kind !== "mention") {
+      searchSequenceRef.current += 1;
+      setSearching(false);
+      return;
+    }
 
-    setSearching(true);
+    const searchId = ++searchSequenceRef.current;
+    const desktopMode = isDesktop();
+    const root = workingDirectory || "";
+    const cacheScope = desktopMode ? `desktop:${root}` : "web";
 
-    if (!mentionQuery) {
+    if (!mentionSearchQuery) {
+      const cacheKey = `${cacheScope}:tree`;
+      const cached = mentionTreeCache.get(cacheKey);
+      if (cached) {
+        setFileResults(cached);
+        setSearching(false);
+        return;
+      }
+      setSearching(true);
+      if (desktopMode && workingDirectory) {
+        fsListTree(workingDirectory)
+          .then((entries) => {
+            if (searchId !== searchSequenceRef.current) return; // Stale result
+            const results = entries.slice(0, 8).map((entry) => {
+              const type = entry.isDirectory ? "folder" as const : "file" as const;
+              return {
+                name: entry.name || entry.path,
+                description: entry.path.replace(/[\\/][^\\/]*$/, ""),
+                type,
+                path: `${type}:${entry.path}`,
+              };
+            });
+            rememberMentionResults(mentionTreeCache, cacheKey, results);
+            setFileResults(results);
+          })
+          .catch(() => {
+            if (searchId !== searchSequenceRef.current) return;
+            setFileResults([]);
+          })
+          .finally(() => {
+            if (searchId !== searchSequenceRef.current) return;
+            setSearching(false);
+          });
+        return;
+      }
       listWorkspaceTree(".")
         .then((tree) => {
+          if (searchId !== searchSequenceRef.current) return; // Stale result
           const children = tree?.children ?? [];
-          setFileResults(children.slice(0, 8).map((node) => ({
+          const results = children.slice(0, 8).map((node) => ({
             name: node.name || node.path,
             description: node.path,
             type: node.is_dir ? "folder" as const : "file" as const,
             path: `${node.is_dir ? "folder" : "file"}:${node.path}`,
-          })));
+          }));
+          rememberMentionResults(mentionTreeCache, cacheKey, results);
+          setFileResults(results);
         })
-        .catch(() => setFileResults([]))
-        .finally(() => setSearching(false));
+        .catch(() => {
+          if (searchId !== searchSequenceRef.current) return;
+          setFileResults([]);
+        })
+        .finally(() => {
+          if (searchId !== searchSequenceRef.current) return;
+          setSearching(false);
+        });
       return;
     }
 
-    if (isDesktop()) {
-      const root = useAppStore.getState().workingDirectory || "";
-      fsSearchFiles(root, mentionQuery, 10, "all")
-        .then((files) => {
-          setFileResults(files.map((f) => {
-            const type = f.kind === "folder" || f.path.endsWith("/") || f.path.endsWith("\\") ? "folder" as const : "file" as const;
-            return { name: f.name || f.path, description: f.path.replace(/[\\/][^\\/]*$/, ""), type, path: `${type}:${f.path}` };
-          }));
-        })
-        .catch(() => undefined)
-        .finally(() => setSearching(false));
-    } else {
-      searchWorkspaceFiles(mentionQuery, 10, "all")
-        .then((files) => {
-          setFileResults(files.map((f) => ({
-            name: f.name || f.path,
-            description: f.path.replace(/[\\/][^\\/]*$/, ""),
-            type: f.kind === "folder" ? "folder" as const : "file" as const,
-            path: `${f.kind === "folder" ? "folder" : "file"}:${f.path}`,
-          })));
-        })
-        .catch(() => undefined)
-        .finally(() => setSearching(false));
+    const cacheKey = `${cacheScope}:search:${mentionSearchQuery}`;
+    const cached = mentionSearchCache.get(cacheKey);
+    if (cached) {
+      setFileResults(cached);
+      setSearching(false);
+      return;
     }
-  }, [open, kind, mentionQuery]);
+
+    setFileResults([]);
+    setSearching(true);
+    const timer = window.setTimeout(() => {
+      if (searchId !== searchSequenceRef.current) return;
+
+      if (desktopMode) {
+        fsSearchFiles(workingDirectory || "", mentionSearchQuery, 10, "all")
+          .then((files) => {
+            if (searchId !== searchSequenceRef.current) return; // Stale result
+            const results = files.map((f) => {
+              const type = f.kind === "folder" || f.path.endsWith("/") || f.path.endsWith("\\") ? "folder" as const : "file" as const;
+              return { name: f.name || f.path, description: f.path.replace(/[\\/][^\\/]*$/, ""), type, path: `${type}:${f.path}` };
+            });
+            rememberMentionResults(mentionSearchCache, cacheKey, results);
+            setFileResults(results);
+          })
+          .catch(() => {
+            if (searchId !== searchSequenceRef.current) return;
+            setFileResults([]);
+          })
+          .finally(() => {
+            if (searchId !== searchSequenceRef.current) return;
+            setSearching(false);
+          });
+      } else {
+        searchWorkspaceFiles(mentionSearchQuery, 10, "all")
+          .then((files) => {
+            if (searchId !== searchSequenceRef.current) return; // Stale result
+            const results = files.map((f) => ({
+              name: f.name || f.path,
+              description: f.path.replace(/[\\/][^\\/]*$/, ""),
+              type: f.kind === "folder" ? "folder" as const : "file" as const,
+              path: `${f.kind === "folder" ? "folder" : "file"}:${f.path}`,
+            }));
+            rememberMentionResults(mentionSearchCache, cacheKey, results);
+            setFileResults(results);
+          })
+          .catch(() => {
+            if (searchId !== searchSequenceRef.current) return;
+            setFileResults([]);
+          })
+          .finally(() => {
+            if (searchId !== searchSequenceRef.current) return;
+            setSearching(false);
+          });
+      }
+    }, MENTION_SEARCH_DEBOUNCE_MS);
+
+    return () => window.clearTimeout(timer);
+  }, [open, kind, mentionSearchQuery, workingDirectory]);
 
   const items: MenuItem[] =
     kind === "slash"
@@ -199,24 +287,21 @@ export const MenuOverlay = ({ open, kind, filter, onSelect }: Props) => {
 
   if (!open) return null;
 
-  const activeItem = items[activeIndex];
-
   return (
     <div
       style={{
         position: "absolute",
-        bottom: "calc(100% + 10px)",
-        left: kind === "slash" ? 0 : 12,
+        bottom: placement === "above" ? "calc(100% + 10px)" : undefined,
+        top: placement === "below" ? "calc(100% + 10px)" : undefined,
+        left: kind === "slash" ? 0 : 8,
         zIndex: 50,
-        display: "flex",
-        alignItems: "flex-start",
-        gap: 0,
+        maxWidth: "calc(100vw - 32px)",
       }}
     >
       <div
         ref={listRef}
         role="listbox"
-        style={menuListStyle}
+        style={menuListStyle(kind)}
       >
         {items.length === 0 ? (
           <div style={emptyMenuStyle}>
@@ -248,26 +333,22 @@ export const MenuOverlay = ({ open, kind, filter, onSelect }: Props) => {
           ))
         )}
       </div>
-      {activeItem?.description && kind === "mention" && (
-        <div style={tooltipStyle}>
-          {activeItem.description}
-        </div>
-      )}
     </div>
   );
 };
 
-const menuListStyle: React.CSSProperties = {
-  width: 280,
+const menuListStyle = (kind: Props["kind"]): React.CSSProperties => ({
+  width: kind === "mention" ? "min(320px, calc(100vw - 56px))" : "min(420px, calc(100vw - 56px))",
   background: "var(--surface-raised)",
   border: "1px solid var(--border-subtle)",
   borderRadius: "var(--radius-md, 8px)",
-  boxShadow: "var(--shadow-md)",
-  padding: 4,
-  maxHeight: "min(320px, calc(100vh - 230px))",
+  boxShadow: "var(--shadow-soft)",
+  padding: 6,
+  maxHeight: "min(270px, calc(100vh - 230px))",
   overflowY: "auto",
+  overflowX: "hidden",
   overscrollBehavior: "contain",
-};
+});
 
 const emptyMenuStyle: React.CSSProperties = {
   padding: "8px 10px",
@@ -279,12 +360,13 @@ const menuItemStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   gap: 8,
-  minHeight: 34,
-  padding: "0 9px",
+  minHeight: 36,
+  padding: "0 8px",
   fontSize: "var(--text-sm)",
   cursor: "pointer",
   borderRadius: "var(--radius-sm, 5px)",
   color: "var(--text-primary)",
+  minWidth: 0,
 };
 
 const menuIconStyle: React.CSSProperties = {
@@ -296,7 +378,7 @@ const menuIconStyle: React.CSSProperties = {
 };
 
 const menuNameStyle: React.CSSProperties = {
-  flex: 1,
+  flex: "1 1 auto",
   minWidth: 0,
   overflow: "hidden",
   textOverflow: "ellipsis",
@@ -322,13 +404,6 @@ const menuShortcutStyle: React.CSSProperties = {
   fontFamily: "var(--font-mono)",
 };
 
-const tooltipStyle: React.CSSProperties = {
-  maxWidth: 480,
-  padding: "8px 10px",
-  background: "color-mix(in oklch, var(--text-primary) 88%, black)",
-  color: "var(--surface-page)",
-  borderRadius: "var(--radius-sm, 6px)",
-  boxShadow: "var(--shadow-md)",
-  fontSize: "var(--text-xs)",
-  lineHeight: 1.35,
-};
+function stripLineAnchor(value: string): string {
+  return value.replace(/#L?\d+(?:-L?\d+)?$/i, "");
+}

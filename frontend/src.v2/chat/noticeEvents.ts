@@ -38,6 +38,8 @@ export const handleNoticeEvent = (e: ServerEvent, conversationId?: string): bool
       return true;
     }
     case "conversation.compaction.updated": {
+      const targetId = conversationIdFor(e, conversationId);
+      if (targetId && targetId !== useAppStore.getState().conversationId) return true;
       const ev = e as unknown as { summary?: string };
       const currentUsage = useAppStore.getState().contextUsage;
       s.setContextUsage({
@@ -48,7 +50,28 @@ export const handleNoticeEvent = (e: ServerEvent, conversationId?: string): bool
       });
       return true;
     }
-    case "conversation.summary.updated":
+    case "conversation.summary.updated": {
+      const ev = e as unknown as {
+        conversation_id?: string;
+        title?: string | null;
+        updated_at?: string | null;
+      };
+      const targetId = conversationIdFor(e, conversationId);
+      if (targetId) {
+        useAppStore.setState((state) => ({
+          conversations: state.conversations.map((conversation) =>
+            conversation.id === targetId
+              ? {
+                  ...conversation,
+                  title: typeof ev.title === "string" && ev.title ? ev.title : conversation.title,
+                  updatedAt: typeof ev.updated_at === "string" && ev.updated_at ? ev.updated_at : conversation.updatedAt,
+                }
+              : conversation,
+          ),
+        }));
+      }
+      return true;
+    }
     case "conversation.hydration.updated":
     case "permission.rules.updated":
     case "checkpoint.list":

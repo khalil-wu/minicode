@@ -1,3 +1,5 @@
+import { safeURL } from "../lib/safe-parse";
+
 const RUNTIME = (globalThis as unknown as {
   __MINICODE_RUNTIME__?: { apiBaseUrl?: string; wsBaseUrl?: string; runtimeToken?: string };
 }).__MINICODE_RUNTIME__;
@@ -6,7 +8,7 @@ const ENV = (import.meta as unknown as {
   env?: {
   VITE_API_BASE_URL?: string;
   VITE_WS_BASE_URL?: string;
-  DEV?: boolean;
+  DEV?: boolean | string;
   };
 }).env ?? {};
 
@@ -36,19 +38,35 @@ const currentHttpOrigin = (): string => {
   return "http://127.0.0.1:5173";
 };
 
-export const apiBase = (): string =>
-  trimBase(RUNTIME?.apiBaseUrl) ??
-  trimBase(envValue("VITE_API_BASE_URL")) ??
-  currentHttpOrigin();
+const isViteDevServer = (): boolean => ENV.DEV === true || ENV.DEV === "true";
 
-export const wsBase = (): string => {
-  const explicit = trimBase(RUNTIME?.wsBaseUrl) ?? trimBase(envValue("VITE_WS_BASE_URL"));
-  if (explicit) return explicit;
-  const api = trimBase(envValue("VITE_API_BASE_URL"));
-  if (api) return api.replace(/^http/i, "ws");
+const currentWsOrigin = (): string => {
   const location = currentLocation();
   const proto = location?.protocol === "https:" ? "wss:" : "ws:";
   return `${proto}//${location?.host ?? "127.0.0.1:5173"}`;
+};
+
+/*
+ * VITE_DEV_BACKEND_ORIGIN and related env vars configure Vite's dev proxy.
+ * Browser code stays same-origin in dev so API/WS traffic goes through that
+ * proxy instead of crossing CORS/runtime-token boundaries.
+ */
+export const apiBase = (): string =>
+  trimBase(RUNTIME?.apiBaseUrl) ??
+  (isViteDevServer()
+    ? currentHttpOrigin()
+    : trimBase(envValue("VITE_API_BASE_URL"))) ??
+  currentHttpOrigin();
+
+export const wsBase = (): string => {
+  const runtimeWs = trimBase(RUNTIME?.wsBaseUrl);
+  if (runtimeWs) return runtimeWs;
+  if (isViteDevServer()) return currentWsOrigin();
+  const explicit = trimBase(envValue("VITE_WS_BASE_URL"));
+  if (explicit) return explicit;
+  const api = trimBase(envValue("VITE_API_BASE_URL"));
+  if (api) return api.replace(/^http/i, "ws");
+  return currentWsOrigin();
 };
 
 export const runtimeToken = (): string => RUNTIME?.runtimeToken?.trim() ?? "";
@@ -63,7 +81,8 @@ export const authHeaders = (headers?: HeadersInit): HeadersInit => {
 export const withRuntimeToken = (url: string): string => {
   const token = runtimeToken();
   if (!token) return url;
-  const parsed = new URL(url, currentHttpOrigin());
+  const parsed = safeURL(url, currentHttpOrigin());
+  if (!parsed) return url; // Invalid URL, return as-is
   parsed.searchParams.set("minicode_token", token);
   const isAbsolute = /^[a-z][a-z\d+\-.]*:/i.test(url);
   return isAbsolute ? parsed.toString() : `${parsed.pathname}${parsed.search}${parsed.hash}`;
@@ -71,7 +90,12 @@ export const withRuntimeToken = (url: string): string => {
 
 export const wsUrl = (path: string, params?: Record<string, string | undefined>): string => {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  const url = new URL(`${wsBase()}${normalizedPath}`);
+  const url = safeURL(`${wsBase()}${normalizedPath}`);
+  if (!url) {
+    // Fallback to a basic URL if construction fails
+    console.error(`Failed to construct WebSocket URL for path: ${path}`);
+    return `${wsBase()}${normalizedPath}`;
+  }
   Object.entries(params ?? {}).forEach(([key, value]) => {
     if (value != null && value !== "") url.searchParams.set(key, value);
   });

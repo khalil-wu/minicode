@@ -31,6 +31,7 @@ const toFileRows = (status: GitStatus | null) => {
 export const GitPanel = () => {
   const activeBottomTab = useAppStore((s) => s.activeBottomTab);
   const workspaceGit = useAppStore((s) => s.workspaceGit);
+  const workingDirectory = useAppStore((s) => s.workingDirectory);
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [worktree, setWorktree] = useState<WorkspaceGitWorktreeResponse | null>(null);
   const [selectedFile, setSelectedFile] = useState("");
@@ -42,18 +43,18 @@ export const GitPanel = () => {
     setLoading(true);
     try {
       const [nextStatus, nextWorktree] = await Promise.all([
-        fetchWorkspaceGitStatus(),
-        fetchWorkspaceGitWorktree(),
+        fetchWorkspaceGitStatus(workingDirectory),
+        fetchWorkspaceGitWorktree(workingDirectory),
       ]);
       setStatus(nextStatus);
       setWorktree(nextWorktree);
       const target = selectedFile || "";
-      const nextDiff = await fetchWorkspaceGitDiff(target);
+      const nextDiff = await fetchWorkspaceGitDiff(target, workingDirectory);
       setDiff(nextDiff?.diff ?? "");
     } finally {
       setLoading(false);
     }
-  }, [selectedFile]);
+  }, [selectedFile, workingDirectory]);
 
   useEffect(() => {
     void refresh();
@@ -65,8 +66,8 @@ export const GitPanel = () => {
 
   useEffect(() => {
     if (!selectedFile) return;
-    fetchWorkspaceGitDiff(selectedFile).then((result) => setDiff(result?.diff ?? ""));
-  }, [selectedFile]);
+    fetchWorkspaceGitDiff(selectedFile, workingDirectory).then((result) => setDiff(result?.diff ?? ""));
+  }, [selectedFile, workingDirectory]);
 
   const fileRows = useMemo(() => toFileRows(status), [status]);
   const branch = branchDisplayName(status?.branch || workspaceGit?.branch) || "No branch";
@@ -106,56 +107,43 @@ export const GitPanel = () => {
   };
 
   return (
-    <div style={{ height: "100%", display: "grid", gridTemplateColumns: "minmax(220px, 320px) 1fr", minHeight: 0 }}>
-      <aside
-        style={{
-          borderRight: "1px solid var(--border-subtle)",
-          overflow: "auto",
-          padding: 10,
-          fontSize: "var(--text-sm)",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+    <div className="h-full grid min-h-0" style={{ gridTemplateColumns: "minmax(220px, 320px) 1fr" }}>
+      <aside className="border-r overflow-auto p-2.5" style={{ borderColor: "var(--border-subtle)", fontSize: "var(--text-sm)" }}>
+        <div className="flex items-center gap-2 mb-2.5">
           <GitBranch size={15} color="var(--accent-primary)" />
-          <span title={branch} style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-mono)", color: "var(--text-primary)" }}>
+          <span title={branch} className="flex-1 min-w-0 overflow-hidden truncate whitespace-nowrap font-mono" style={{ fontFamily: "var(--font-mono)", color: "var(--text-primary)" }}>
             {branch}
           </span>
-          <button onClick={() => void refresh()} disabled={loading} title="Refresh Git status" aria-label="Refresh Git status" style={iconButtonStyle}>
+          <button onClick={() => void refresh()} disabled={loading} title="Refresh Git status" aria-label="Refresh Git status" className="w-6 h-6 border rounded inline-flex items-center justify-center p-0 bg-transparent cursor-pointer" style={{ borderColor: "var(--border-subtle)", borderRadius: "var(--radius-sm, 4px)", color: "var(--text-muted)" }}>
             <RefreshCw size={13} />
           </button>
         </div>
 
         {status?.error && (
-          <div style={{ color: "var(--state-warning)", fontSize: "var(--text-xs)", marginBottom: 10 }}>
+          <div className="mb-2.5" style={{ color: "var(--state-warning)", fontSize: "var(--text-xs)" }}>
             {status.error}
           </div>
         )}
 
         <SectionTitle label="Changes" count={fileRows.length} />
         {fileRows.length === 0 ? (
-          <div style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)", padding: "4px 0 12px" }}>
+          <div className="py-1 pb-3" style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>
             {loading ? "Loading..." : "Working tree clean"}
           </div>
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 2, marginBottom: 14 }}>
+          <div className="flex flex-col gap-0.5 mb-3.5">
             {fileRows.map((row) => (
               <button
                 key={`${row.group}:${row.path}`}
                 onClick={() => setSelectedFile(row.path)}
                 title={`${row.group}: ${row.path}`}
+                className="border-0 bg-transparent cursor-pointer overflow-hidden p-1 px-1.5 text-left truncate whitespace-nowrap"
                 style={{
-                  border: 0,
                   borderRadius: "var(--radius-sm, 4px)",
                   background: selectedFile === row.path ? "var(--surface-active)" : "transparent",
                   color: row.color,
-                  cursor: "pointer",
                   fontFamily: "var(--font-mono)",
                   fontSize: "var(--text-xs)",
-                  overflow: "hidden",
-                  padding: "4px 6px",
-                  textAlign: "left",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
                 }}
               >
                 {row.path}
@@ -166,39 +154,36 @@ export const GitPanel = () => {
 
         <SectionTitle label="Workspaces" count={worktree?.worktrees?.length ?? workspaceGit?.worktreeCount ?? 0} />
         {worktree?.error && (
-          <div style={{ color: "var(--state-warning)", fontSize: "var(--text-xs)", marginBottom: 8 }}>
+          <div className="mb-2" style={{ color: "var(--state-warning)", fontSize: "var(--text-xs)" }}>
             {worktree.error}
           </div>
         )}
         {worktree?.worktrees?.length ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <div className="flex flex-col gap-1">
             {worktree.worktrees.map((item) => (
               <div
                 key={item.path}
                 title={item.path}
+                className="border rounded p-1.5"
                 style={{
-                  border: "1px solid var(--border-subtle)",
+                  borderColor: "var(--border-subtle)",
                   borderRadius: "var(--radius-sm, 4px)",
                   background: item.is_current ? "var(--surface-active)" : "var(--surface-soft)",
-                  padding: "5px 6px",
                 }}
               >
-                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <div className="flex items-center gap-1.5">
                   <span
+                    className="w-1.5 h-1.5 rounded-full flex-shrink-0"
                     style={{
-                      width: 6,
-                      height: 6,
-                      borderRadius: "50%",
                       background: item.is_current ? "var(--accent-primary)" : "var(--text-muted)",
-                      flexShrink: 0,
                     }}
                   />
-                  <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-primary)" }}>
+                  <span className="flex-1 min-w-0 overflow-hidden truncate whitespace-nowrap" style={{ color: "var(--text-primary)" }}>
                     {branchDisplayName(item.branch) || (item.is_detached ? "detached" : item.is_isolated ? "isolated session" : "unknown")}
                   </span>
-                  <span style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>{item.commit}</span>
+                  <span className="font-mono" style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>{item.commit}</span>
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
+                <div className="flex items-center gap-1.5 mt-1">
                   <span style={badgeStyle(item.is_current ? "var(--accent-primary)" : "var(--text-muted)")}>
                     {item.is_current ? "current" : item.is_main ? "main" : item.is_isolated ? "isolated" : "linked"}
                   </span>
@@ -207,7 +192,7 @@ export const GitPanel = () => {
                     disabled={item.is_current || worktreeAction === item.path}
                     title="Switch workspace"
                     aria-label="Switch workspace"
-                    style={miniButtonStyle}
+                    className="bg-transparent border rounded cursor-pointer" style={{ borderColor: "var(--border-subtle)", borderRadius: "var(--radius-sm, 4px)", color: "var(--text-muted)", fontSize: "var(--text-xs)", padding: "1px 7px" }}
                   >
                     Switch
                   </button>
@@ -217,13 +202,13 @@ export const GitPanel = () => {
                       disabled={worktreeAction === item.path}
                       title="Remove protected workspace"
                       aria-label="Remove protected workspace"
-                      style={dangerIconButtonStyle}
+                      className="inline-flex items-center justify-center p-0 bg-transparent cursor-pointer border rounded" style={{ width: 22, height: 22, borderColor: "var(--border-subtle)", borderRadius: "var(--radius-sm, 4px)", color: "var(--state-danger)" }}
                     >
                       <Trash2 size={12} />
                     </button>
                   )}
                 </div>
-                <div style={{ marginTop: 2, color: "var(--text-muted)", fontSize: "var(--text-xs)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                <div className="mt-0.5 overflow-hidden truncate whitespace-nowrap" style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>
                   {workspaceDisplayName(item.path, item.is_isolated ? "isolated workspace" : "Current workspace")}
                 </div>
               </div>
@@ -236,20 +221,18 @@ export const GitPanel = () => {
         )}
       </aside>
 
-      <main style={{ minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" }}>
+      <main className="min-w-0 min-h-0 flex flex-col">
         <div
+          className="flex items-center gap-2 border-b"
           style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
             padding: "7px 10px",
-            borderBottom: "1px solid var(--border-subtle)",
+            borderColor: "var(--border-subtle)",
             background: "var(--surface-page)",
             fontSize: "var(--text-xs)",
           }}
         >
           <GitCompare size={14} color="var(--text-muted)" />
-          <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-secondary)", fontFamily: "var(--font-mono)" }}>
+          <span className="flex-1 min-w-0 overflow-hidden truncate whitespace-nowrap font-mono" style={{ color: "var(--text-secondary)", fontFamily: "var(--font-mono)" }}>
             {selectedFile || "Full working tree diff"}
           </span>
           {selectedFile && (
@@ -257,31 +240,25 @@ export const GitPanel = () => {
               onClick={() => useAppStore.getState().openEditorFile(selectedFile, selectedFile.split(/[/\\]/).pop())}
               title="Open file in editor"
               aria-label="Open file in editor"
-              style={iconButtonStyle}
+              className="w-6 h-6 border rounded inline-flex items-center justify-center p-0 bg-transparent cursor-pointer" style={{ borderColor: "var(--border-subtle)", borderRadius: "var(--radius-sm, 4px)", color: "var(--text-muted)" }}
             >
               <ExternalLink size={13} />
             </button>
           )}
           {selectedFile && (
-            <button onClick={() => setSelectedFile("")} style={clearButtonStyle}>
+            <button onClick={() => setSelectedFile("")} className="bg-transparent border rounded cursor-pointer" style={{ borderColor: "var(--border-subtle)", borderRadius: "var(--radius-sm, 4px)", color: "var(--text-muted)", fontSize: "var(--text-xs)", padding: "2px 8px" }}>
               Show all
             </button>
           )}
         </div>
         <pre
+          className="flex-1 min-h-0 m-0 overflow-auto p-3 whitespace-pre-wrap break-words"
           style={{
-            flex: 1,
-            minHeight: 0,
-            margin: 0,
-            overflow: "auto",
-            padding: 12,
             background: "var(--surface-base)",
             color: diff ? "var(--text-secondary)" : "var(--text-muted)",
             fontFamily: "var(--font-mono)",
             fontSize: "var(--text-xs)",
             lineHeight: 1.55,
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
           }}
         >
           {diff || (loading ? "Loading diff..." : "No diff for this selection.")}
@@ -293,59 +270,17 @@ export const GitPanel = () => {
 
 const SectionTitle = ({ label, count }: { label: string; count: number }) => (
   <div
+    className="font-bold uppercase"
     style={{
       color: "var(--text-muted)",
       fontSize: "var(--text-xs)",
-      fontWeight: 700,
       margin: "10px 0 6px",
-      textTransform: "uppercase",
       letterSpacing: 0,
     }}
   >
     {label} ({count})
   </div>
 );
-
-const iconButtonStyle: React.CSSProperties = {
-  width: 24,
-  height: 24,
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 4px)",
-  background: "transparent",
-  color: "var(--text-muted)",
-  cursor: "pointer",
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  padding: 0,
-};
-
-const clearButtonStyle: React.CSSProperties = {
-  background: "transparent",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 4px)",
-  color: "var(--text-muted)",
-  cursor: "pointer",
-  fontSize: "var(--text-xs)",
-  padding: "2px 8px",
-};
-
-const miniButtonStyle: React.CSSProperties = {
-  background: "transparent",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 4px)",
-  color: "var(--text-muted)",
-  cursor: "pointer",
-  fontSize: "var(--text-xs)",
-  padding: "1px 7px",
-};
-
-const dangerIconButtonStyle: React.CSSProperties = {
-  ...iconButtonStyle,
-  width: 22,
-  height: 22,
-  color: "var(--state-danger)",
-};
 
 const badgeStyle = (color: string): React.CSSProperties => ({
   border: "1px solid var(--border-subtle)",

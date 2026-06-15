@@ -65,16 +65,18 @@ export const QuickOpen = () => {
 
   return (
     <div
+      className="overlay-backdrop"
       onClick={close}
       style={{
         position: "fixed",
         inset: 0,
-        background: "rgba(0,0,0,0.5)",
+        background: "var(--backdrop-overlay)",
         display: "flex",
         alignItems: "flex-start",
         justifyContent: "center",
         padding: "10vh 16px 16px",
-        zIndex: 100,
+        zIndex: "var(--z-modal)",
+        pointerEvents: "auto",
       }}
     >
       <div
@@ -91,6 +93,7 @@ export const QuickOpen = () => {
           overflow: "hidden",
           display: "flex",
           flexDirection: "column",
+          pointerEvents: "auto",
         }}
       >
         <input

@@ -1,159 +1,206 @@
 """
-MCP 动态工具注册（DESIGN.md §六.3）。
+Dynamic MCP tool registration.
 
-将 MCP Server 暴露的工具动态代理注册到主 ToolRegistry，
-对 Agent Loop 完全透明 — Agent 不需要知道工具来自 MCP。
-
-命名规范：mcp__{server_name}__{tool_name}
-    例如 websearch server 的 search 工具 → mcp__websearch__search
-
-职责：
-  - Server 连接后，为每个 MCP tool 创建 MCPToolProxy 代理
-  - MCPToolProxy 实现 BaseTool 接口，execute() 转发到 MCPClient.call_tool()
-  - 注册到主 ToolRegistry
-  - Server 断开时自动注销对应工具
-
-设计原则：
-  - Token-efficient: MCP 工具返回也遵从 artifact 模式（长输出存 artifact）
-  - 透明代理: Agent 无感知，调用方式与内置工具完全一致
+This module exposes MCP server tools through the main ToolRegistry so the
+agent can call them like built-in tools. Tool names follow:
+    mcp__{server_name}__{tool_name}
 """
 
 from __future__ import annotations
 
+import json
 import logging
+from collections import OrderedDict
 from typing import Any
 
 from backend.artifact.store import ArtifactStore
-from backend.mcp.client import MCPClient, MCPToolDef, MCPCallResult
+from backend.mcp.client import MCPCallResult, MCPClient, MCPToolDef
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
-# 工具输出超过此长度时存入 artifact
-ARTIFACT_THRESHOLD = 2000  # 约 500 tokens
+# Store large MCP outputs as artifacts instead of sending the full text inline.
+ARTIFACT_THRESHOLD = 2000
+
+
+def _is_non_critical_mcp_timeout(server_name: str, tool_name: str, text: str) -> bool:
+    if server_name not in {"memory-rag", "memory_rag"}:
+        return False
+    if tool_name not in {"remember", "recall"}:
+        return False
+    return "timed out" in text.lower() or "timeout" in text.lower() or "超时" in text
 
 
 class MCPToolProxy(BaseTool):
-    """
-    MCP 工具代理。
+    """Adapter that exposes an MCP tool through the local tool registry.
 
-    将 MCP Server 的工具包装为 BaseTool，使其能被 ToolRegistry 统一管理。
-    execute() 调用时转发到 MCPClient.call_tool()。
+    Stores a *manager reference* instead of a direct client pointer so that
+    reconnection (which creates a new MCPClient instance) is transparently
+    picked up on the next ``execute()`` call.
     """
+
+    # Class-level LRU cache for read-only tool results (shared across all instances).
+    _result_cache: OrderedDict = OrderedDict()
+    _RESULT_CACHE_MAX = 128
 
     def __init__(
         self,
         server_name: str,
         tool_def: MCPToolDef,
-        client: MCPClient,
+        client_or_manager: MCPClient | Any,
         artifact_store: ArtifactStore | None = None,
+        manager: Any | None = None,
     ) -> None:
         self._server_name = server_name
         self._tool_def = tool_def
-        self._client = client
         self._artifact_store = artifact_store
 
-        # BaseTool 属性
+        # Prefer the manager reference for dynamic client lookup (reconnection-safe).
+        # Fall back to a direct client pointer for backward compatibility.
+        self._manager = manager
+        self._static_client: MCPClient | None = client_or_manager if manager is None else None
+
         self.name = f"mcp__{server_name}__{tool_def.name}"
         self.description = tool_def.description
-        self.permission = PermissionLevel.CONFIRM  # MCP 工具默认需要确认
 
-    def get_schema(self) -> ToolSchema:
-        """返回工具 JSON Schema。"""
-        # 从 MCP inputSchema 构建
-        params = self._tool_def.input_schema
-        if not params:
-            params = {"type": "object", "properties": {}}
-
-        # 在描述中标注来源
-        desc = (
-            f"[MCP:{self._server_name}] {self._tool_def.description}\n"
-            f"原始工具名: {self._tool_def.name}"
+        # Map MCP annotations/_meta to local capability hints (Phase 3.2).
+        ann = getattr(tool_def, "annotations", {}) or {}
+        meta = getattr(tool_def, "meta", {}) or {}
+        self.read_only = bool(ann.get("readOnlyHint", False))
+        self.destructive = bool(ann.get("destructiveHint", False))
+        self.open_world = bool(ann.get("openWorldHint", False))
+        self.always_load = bool(
+            meta.get("anthropic/alwaysLoad") or meta.get("alwaysLoad") or False
         )
 
+        # Permission: read-only → AUTO; destructive/open-world → CONFIRM.
+        # memory-rag stays AUTO (local, low-risk). Unknown tools default CONFIRM.
+        if self.read_only and not (self.destructive or self.open_world):
+            self.permission = PermissionLevel.AUTO
+        elif server_name in {"memory-rag", "memory_rag"}:
+            self.permission = PermissionLevel.AUTO
+        else:
+            self.permission = PermissionLevel.CONFIRM
+
+    @property
+    def _client(self) -> MCPClient | None:
+        """Dynamic client lookup — survives MCP server reconnections."""
+        if self._manager is not None:
+            return self._manager.get_client(self._server_name)
+        return self._static_client
+
+    def is_read_only(self, args: dict[str, Any] | None = None) -> bool:
+        return self.read_only and not (self.destructive or self.open_world)
+
+    def get_schema(self) -> ToolSchema:
+        """Build a ToolSchema from the MCP tool definition."""
+        params = self._tool_def.input_schema or {"type": "object", "properties": {}}
+        description = (
+            f"[MCP:{self._server_name}] {self._tool_def.description}\n"
+            f"Original tool: {self._tool_def.name}"
+        )
         return ToolSchema(
             name=self.name,
-            description=desc,
+            description=description,
             parameters=params,
         )
 
-    async def execute(self, args: dict[str, Any]) -> ToolResult:
-        """
-        执行 MCP 工具调用。
+    def get_spec(self):
+        from backend.agent.harness.mcp_adapter import MCPToolSpecAdapter
 
-        流程：
-          1. 通过 MCPClient.call_tool() 转发调用
-          2. 解析结果
-          3. 大输出存 artifact
-          4. 返回 ToolResult
+        return MCPToolSpecAdapter.from_tool_def(self._server_name, self._tool_def).build_spec(self.name)
+
+    async def execute(self, args: dict[str, Any]) -> ToolResult:
+        """Execute the MCP tool and normalize the result into ToolResult.
+
+        Read-only, non-destructive, closed-world tools benefit from an LRU
+        result cache keyed on (server, tool, args) to avoid redundant MCP calls.
         """
-        if not self._client.connected:
+        client = self._client
+        if client is None or not client.connected:
             return self._error_result(
-                f"MCP Server '{self._server_name}' 未连接，"
-                f"请检查 .mcp.json 配置或手动重启"
+                f"MCP server '{self._server_name}' is not connected. "
+                "Check .mcp.json or restart the server."
             )
+
+        # --- result cache lookup (read-only tools only) ---
+        cache_key: str | None = None
+        if self.read_only and not (self.destructive or self.open_world):
+            cache_key = (
+                f"{self._server_name}::{self._tool_def.name}::"
+                f"{json.dumps(args, sort_keys=True, ensure_ascii=False)}"
+            )
+            if cache_key in MCPToolProxy._result_cache:
+                MCPToolProxy._result_cache.move_to_end(cache_key)
+                return MCPToolProxy._result_cache[cache_key]
 
         try:
-            result: MCPCallResult = await self._client.call_tool(
-                self._tool_def.name, args,
-            )
+            result: MCPCallResult = await client.call_tool(self._tool_def.name, args)
         except Exception as exc:
-            return self._error_result(
-                f"MCP 工具 '{self._tool_def.name}' 调用失败: {exc}"
+            return self._error_result(f"MCP tool '{self._tool_def.name}' failed: {exc}")
+
+        if result.is_error and _is_non_critical_mcp_timeout(self._server_name, self._tool_def.name, result.text or ""):
+            return ToolResult(
+                content=(
+                    f"Optional MCP tool {self._server_name}/{self._tool_def.name} timed out. "
+                    "Do not retry it in this turn; continue with the user-facing answer."
+                ),
+                is_error=False,
+                status="timeout",
+                limitation="non-critical timeout",
+                display_summary=f"Optional MCP timed out: {self._server_name}/{self._tool_def.name}",
+                result_kind="mcp",
             )
 
-        # 错误处理
         if result.is_error:
-            return self._error_result(result.text or "MCP 工具执行失败")
+            return self._error_result(result.text or "MCP tool execution failed")
 
-        # 正常结果
         full_text = result.text
-
-        # Token-efficient：大输出存 artifact
         if len(full_text) > ARTIFACT_THRESHOLD and self._artifact_store:
             artifact_id = self._artifact_store.save(
                 content=full_text,
                 source=self.name,
                 type="mcp_result",
             )
-            # 生成摘要
             lines = full_text.split("\n")
             preview = "\n".join(lines[:5])
             summary = (
-                f"MCP {self._server_name}.{self._tool_def.name} 执行成功\n"
-                f"返回 {len(full_text)} 字符（{len(lines)} 行）"
+                f"MCP {self._server_name}.{self._tool_def.name} completed successfully\n"
+                f"Returned {len(full_text)} chars across {len(lines)} lines"
             )
-            return self._success_result(
+            result_obj = self._success_result(
                 content=summary,
                 artifact_id=artifact_id,
                 artifact_preview=preview,
             )
+        else:
+            result_obj = self._success_result(content=full_text)
 
-        return self._success_result(content=full_text)
+        # --- store in result cache (read-only tools only) ---
+        if cache_key is not None:
+            MCPToolProxy._result_cache[cache_key] = result_obj
+            if len(MCPToolProxy._result_cache) > MCPToolProxy._RESULT_CACHE_MAX:
+                MCPToolProxy._result_cache.popitem(last=False)
+
+        return result_obj
 
 
 class MCPToolRegistry:
-    """
-    MCP 动态工具注册管理器。
-
-    使用示例：
-        mcp_registry = MCPToolRegistry(tool_registry, artifact_store)
-        # Server 连接后注册工具
-        mcp_registry.register_server_tools("websearch", tools, client)
-        # Server 断开时注销工具
-        mcp_registry.unregister_server_tools("websearch")
-    """
+    """Manage MCP tool proxy registration and cleanup."""
 
     def __init__(
         self,
         tool_registry: ToolRegistry,
         artifact_store: ArtifactStore | None = None,
+        mcp_manager: Any | None = None,
     ) -> None:
         self._tool_registry = tool_registry
         self._artifact_store = artifact_store
-        # 追踪每个 server 注册了哪些工具名
+        self._mcp_manager = mcp_manager
         self._server_tools: dict[str, list[str]] = {}
+        # Cache for tool lists: server_name -> (version, tools_list)
+        self._tool_list_cache: dict[str, tuple[int, list]] = {}
 
     def register_server_tools(
         self,
@@ -161,55 +208,36 @@ class MCPToolRegistry:
         tools: list[MCPToolDef],
         client: MCPClient,
     ) -> int:
-        """
-        为指定 Server 的所有工具创建代理并注册。
-
-        Args:
-            server_name: Server 名称
-            tools: 工具定义列表
-            client: MCPClient 实例
-
-        Returns:
-            注册的工具数量
-        """
-        # 先注销旧工具
+        """Register all tools exposed by one MCP server."""
         self.unregister_server_tools(server_name)
-
         registered_names: list[str] = []
 
         for tool_def in tools:
             proxy = MCPToolProxy(
                 server_name=server_name,
                 tool_def=tool_def,
-                client=client,
+                client_or_manager=client,
                 artifact_store=self._artifact_store,
+                manager=self._mcp_manager,
             )
-
             self._tool_registry.register(proxy)
             registered_names.append(proxy.name)
-            logger.info(
-                "[MCPRegistry] 注册工具: %s (来自 %s)",
-                proxy.name, server_name,
-            )
+            logger.info("[MCPRegistry] Registered tool: %s (from %s)", proxy.name, server_name)
 
         self._server_tools[server_name] = registered_names
         return len(registered_names)
 
     def unregister_server_tools(self, server_name: str) -> None:
-        """
-        注销指定 Server 的所有工具。
-
-        在 Server 断开连接或重启时调用。
-        """
+        """Unregister all tools that came from one MCP server."""
         tool_names = self._server_tools.pop(server_name, [])
         for name in tool_names:
             self._tool_registry.unregister(name)
-            logger.info("[MCPRegistry] 注销工具: %s", name)
+            logger.info("[MCPRegistry] Unregistered tool: %s", name)
 
     def get_server_tool_count(self, server_name: str) -> int:
-        """获取指定 Server 的注册工具数量。"""
+        """Return the number of tools registered for one server."""
         return len(self._server_tools.get(server_name, []))
 
     def get_all_mcp_tools(self) -> dict[str, list[str]]:
-        """获取所有 MCP 工具的名称映射。"""
+        """Return the current server-to-tool mapping."""
         return dict(self._server_tools)

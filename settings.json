@@ -8,6 +8,8 @@
       "read_artifact",
       "load_skill",
       "read_memory",
+      "web_search",
+      "web_fetch",
       "mcp__memory_rag__*",
       "mcp__code_index__search",
       "todo_write",
@@ -15,7 +17,6 @@
     ],
     "require_confirm": [
       "run_command",
-      "web_fetch",
       "mcp__websearch__*"
     ],
     "require_diff_review": [
@@ -24,10 +25,7 @@
     ],
     "always_deny": [],
     "path_allowlist": [
-      "./src",
-      "./tests",
-      "./backend",
-      "./frontend"
+      "."
     ],
     "path_denylist": [
       ".env",
@@ -38,9 +36,9 @@
     ]
   },
   "agent": {
-    "max_iterations": 30,
+    "max_iterations": 60,
     "compaction_threshold": 0.75,
-    "stagnation_limit": 3,
+    "stagnation_limit": 5,
     "history_keep_recent": 15,
     "fallback_providers": [
       "anthropic"
@@ -61,18 +59,18 @@
     "provider": "custom",
     "openai": {
       "api_key": "",
-      "base_url": "https://lucen.cc/v1",
+      "base_url": "",
       "model": "gpt-4o",
       "available_models": [
         "gpt-4o"
       ],
       "reasoning_effort": "high",
       "max_tokens": 8192,
-      "wire_api": "responses"
+      "wire_api": "chat"
     },
     "anthropic": {
       "api_key": "",
-      "base_url": "https://anyrouter.top",
+      "base_url": "",
       "model": "claude-sonnet-4-6",
       "available_models": [
         "claude-sonnet-4-6"
@@ -82,31 +80,15 @@
     },
     "custom": {
       "api_key": "",
-      "base_url": "https://gw2.oops.asia/v1",
-      "model": "gpt-5.4",
+      "base_url": "https://api.deepseek.com/v1",
+      "model": "deepseek-v4-flash",
       "available_models": [
-        "codex-auto-review",
-        "gpt-5.2",
-        "gpt-5.2-2025-12-11",
-        "gpt-5.2-chat-latest",
-        "gpt-5.2-pro",
-        "gpt-5.2-pro-2025-12-11",
-        "gpt-5.3-codex",
-        "gpt-5.4",
-        "gpt-5.4-2026-03-05",
-        "gpt-5.4-mini",
-        "gpt-5.5",
-        "gpt-4o-audio-preview",
-        "gpt-5.3-codex-spark",
-        "gpt-image-2",
-        "gpt-image-1",
-        "gpt-image-1.5",
-        "claude-sonnet-4.6",
-        "claude-sonnet-4-6",
-        "claude-opus-4.6",
-        "claude-opus-4-6"
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+        "deepseek-chat",
+        "deepseek-reasoner"
       ],
-      "reasoning_effort": "low",
+      "reasoning_effort": "high",
       "max_tokens": 8192,
       "thinking_budget": 0,
       "wire_api": "chat"

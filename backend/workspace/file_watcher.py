@@ -17,7 +17,6 @@ from typing import Callable, Set, Optional
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 
-from backend.tools.search_tools import clear_search_caches
 from backend.workspace.file_state_cache import get_global_file_cache
 from backend.workspace.fuzzy_search import invalidate_global_fuzzy_search
 
@@ -201,6 +200,8 @@ class WorkspaceFileWatcher:
 
                     # 使搜索结果缓存失效，避免返回过时 grep/glob 结果
                     if event_type in ("modified", "created", "deleted", "moved"):
+                        from backend.tools.search_tools import clear_search_caches
+
                         clear_search_caches()
 
                     logger.debug(f"File changed: {path} ({event_type})")

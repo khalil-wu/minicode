@@ -46,6 +46,7 @@ export const handleCommandCatalogEvent = (e: ServerEvent): boolean => {
           description: string;
           type: string;
           enabled?: boolean;
+          args?: { value: string; description: string }[];
         }[];
       };
       if (ev.commands) {
@@ -55,6 +56,11 @@ export const handleCommandCatalogEvent = (e: ServerEvent): boolean => {
           label: c.label ?? `/${c.name}`,
           description: c.description ?? "",
           type: (c.type as "local" | "template" | "protocol") ?? "local",
+          args: Array.isArray(c.args) && c.args.length > 0
+            ? c.args
+                .filter((arg) => arg && typeof arg.value === "string" && arg.value)
+                .map((arg) => ({ value: arg.value, description: arg.description ?? "" }))
+            : undefined,
         })));
       }
       return true;

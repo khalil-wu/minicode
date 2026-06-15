@@ -2,7 +2,7 @@
 websearch MCP Server（DESIGN.md §六.2）。
 
 传输：stdio（通过 stdin/stdout 与 MCPClient 通信）
-依赖：duckduckgo-search（无需 API Key）、trafilatura（正文提取）
+依赖：ddgs（无需 API Key，优先）、duckduckgo-search（兼容 fallback）、trafilatura（正文提取）
 
 功能概述：
   这是 MiniCode 的网页搜索能力提供者。Agent 可以通过此 Server 搜索互联网
@@ -28,10 +28,8 @@ Token-efficient 设计原则（DESIGN.md §14.2 ACI）：
 
 from __future__ import annotations
 
-import json
 import logging
 import sys
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +64,12 @@ def _search_duckduckgo(query: str, num_results: int = 5) -> list[dict[str, str]]
         [{"title": "...", "url": "...", "snippet": "..."}, ...]
     """
     try:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
     except ImportError:
-        return [{"title": "错误", "url": "", "snippet": "需要安装: pip install duckduckgo-search"}]
+        try:
+            from duckduckgo_search import DDGS
+        except ImportError:
+            return [{"title": "错误", "url": "", "snippet": "需要安装: pip install ddgs"}]
 
     try:
         results = []

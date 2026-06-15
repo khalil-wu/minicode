@@ -1,61 +1,179 @@
-"""
-ToolSearch 工具（参考 Claude Code ToolSearchTool 延迟加载模式）。
+"""Deferred tool discovery bridge.
 
-当注册的工具数量较多时，避免将所有工具 schema 一次性发给 LLM（会消耗大量 tokens）。
-ToolSearchTool 让 Agent 能够按关键词搜索可用工具，按需发现和使用。
-
-使用场景：
-  - Agent 不确定用什么工具时
-  - 工具数量 > 15 时自动启用
-  - 减少 tool_schemas 的 token 消耗
-
-权限: AUTO
+Core tools stay directly visible to the model. Optional or connector tools are
+searched and invoked through this small bridge so the live registry remains the
+single source of truth.
 """
 
 from __future__ import annotations
 
-import logging
+import json
+import math
+import re
+from dataclasses import dataclass, field
 from typing import Any
 
+from backend.agent.harness.catalog import BRIDGE_TOOL_NAMES, tool_spec_for
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 
-logger = logging.getLogger(__name__)
+
+TOKEN_RE = re.compile(r"[A-Za-z0-9_\-\.\u4e00-\u9fff]+")
+
+
+@dataclass
+class DeferredToolEntry:
+    name: str
+    description: str
+    schema: dict[str, Any]
+    permission: str
+    read_only: bool
+    tokens: list[str] = field(default_factory=list)
+
+
+def _tokenize(text: str) -> list[str]:
+    tokens: list[str] = []
+    for raw in TOKEN_RE.findall(text.lower()):
+        tokens.extend(part for part in re.split(r"[_\-.]+", raw) if part)
+    return tokens
+
+
+def _schema_search_text(schema: dict[str, Any]) -> str:
+    function = schema.get("function") if isinstance(schema, dict) else {}
+    if not isinstance(function, dict):
+        return ""
+    params = function.get("parameters") or {}
+    properties = params.get("properties") if isinstance(params, dict) else {}
+    param_names = " ".join(properties.keys()) if isinstance(properties, dict) else ""
+    return f"{function.get('name', '')} {function.get('description', '')} {param_names}"
+
+
+def _bm25_score(
+    query_tokens: list[str],
+    doc_tokens: list[str],
+    doc_freq: dict[str, int],
+    avg_dl: float,
+    doc_count: int,
+) -> float:
+    if not query_tokens or not doc_tokens:
+        return 0.0
+    tf: dict[str, int] = {}
+    for token in doc_tokens:
+        tf[token] = tf.get(token, 0) + 1
+    score = 0.0
+    k1 = 1.5
+    b = 0.75
+    dl = len(doc_tokens)
+    for token in query_tokens:
+        freq = tf.get(token, 0)
+        if not freq:
+            continue
+        df = doc_freq.get(token, 0)
+        idf = math.log(1 + (doc_count - df + 0.5) / (df + 0.5))
+        norm = freq * (k1 + 1) / (freq + k1 * (1 - b + b * dl / max(avg_dl, 1.0)))
+        score += idf * norm
+    return score
+
+
+class DeferredToolCatalog:
+    def __init__(self, registry: Any) -> None:
+        self.registry = registry
+
+    def entries(self) -> list[DeferredToolEntry]:
+        # Derive from the registry's ToolSchemaView (single source of truth) when
+        # available, falling back to per-tool spec computation otherwise.
+        build_views = getattr(self.registry, "build_schema_views", None)
+        if callable(build_views):
+            entries: list[DeferredToolEntry] = []
+            for view in build_views():
+                if view.name in BRIDGE_TOOL_NAMES:
+                    continue
+                if view.exposure != "deferred" or view.direct or view.schema is None:
+                    continue
+                function = view.schema.get("function") or {}
+                meta = view.runtime_metadata or {}
+                entry = DeferredToolEntry(
+                    name=str(function.get("name") or view.name),
+                    description=str(function.get("description") or ""),
+                    schema=view.schema,
+                    permission=str(meta.get("permission") or "auto"),
+                    read_only=bool(meta.get("read_only", False)),
+                )
+                hint = (view.search_hint or "").strip()
+                entry.tokens = _tokenize(_schema_search_text(view.schema) + (" " + hint if hint else ""))
+                entries.append(entry)
+            return entries
+
+        # Legacy fallback (registry without build_schema_views).
+        entries = []
+        for tool in self.registry.get_tools():
+            if tool.name in BRIDGE_TOOL_NAMES:
+                continue
+            spec = tool_spec_for(tool.name, self.registry)
+            if spec.exposure != "deferred":
+                continue
+            schema = tool.get_schema().to_openai_tool()
+            function = schema.get("function") or {}
+            entry = DeferredToolEntry(
+                name=str(function.get("name") or tool.name),
+                description=str(function.get("description") or ""),
+                schema=schema,
+                permission=tool.permission.value,
+                read_only=bool(tool.read_only),
+            )
+            entry.tokens = _tokenize(_schema_search_text(schema))
+            entries.append(entry)
+        return entries
+
+    def search(self, query: str, limit: int) -> list[DeferredToolEntry]:
+        catalog = self.entries()
+        query_tokens = _tokenize(query)
+        if not catalog or not query_tokens:
+            return []
+
+        doc_freq: dict[str, int] = {}
+        for entry in catalog:
+            for token in set(entry.tokens):
+                doc_freq[token] = doc_freq.get(token, 0) + 1
+        avg_dl = sum(len(entry.tokens) for entry in catalog) / max(len(catalog), 1)
+
+        scored: list[tuple[float, DeferredToolEntry]] = []
+        for entry in catalog:
+            score = _bm25_score(query_tokens, entry.tokens, doc_freq, avg_dl, len(catalog))
+            name_lower = entry.name.lower()
+            query_lower = query.lower()
+            if query_lower and query_lower in name_lower:
+                score += 3.0
+            if all(token in entry.tokens for token in query_tokens):
+                score += 1.0
+            if score > 0:
+                scored.append((score, entry))
+
+        scored.sort(key=lambda item: (-item[0], item[1].name))
+        return [entry for _, entry in scored[:limit]]
+
+    def get(self, name: str) -> DeferredToolEntry | None:
+        for entry in self.entries():
+            if entry.name == name:
+                return entry
+        return None
 
 
 class ToolSearchTool(BaseTool):
-    """
-    搜索可用工具。
-
-    当 Agent 不确定要用什么工具时，可以通过关键词搜索
-    发现合适的工具。返回匹配的工具名称和描述。
-    """
-
     name = "tool_search"
     read_only = True
-    description = (
-        "搜索可用工具。当你不确定该用什么工具来完成任务时，"
-        "用关键词搜索来发现合适的工具。"
-        "示例: tool_search(query='git') 查找 Git 相关工具。"
-        "示例: tool_search(query='search file') 查找文件搜索工具。"
-    )
     permission = PermissionLevel.AUTO
+    description = (
+        "Search deferred tools that are not directly listed. Returns matching tool "
+        "names and short descriptions. Use tool_describe before tool_call when the "
+        "parameter schema is not known."
+    )
 
-    def __init__(self) -> None:
-        self._tool_index: list[dict[str, str]] = []
+    def __init__(self, registry: Any | None = None) -> None:
+        self._registry = registry
 
-    def update_index(self, tools: list[BaseTool]) -> None:
-        """从当前注册的工具列表构建搜索索引。"""
-        self._tool_index = []
-        for tool in tools:
-            if tool.name == self.name:
-                continue
-            schema = tool.get_schema()
-            self._tool_index.append({
-                "name": schema.name,
-                "description": schema.description,
-                "permission": tool.permission.value,
-                "read_only": str(tool.read_only),
-            })
+    def update_index(self, tools: list[BaseTool], registry: Any | None = None) -> None:
+        if registry is not None:
+            self._registry = registry
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -66,59 +184,103 @@ class ToolSearchTool(BaseTool):
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "搜索关键词，用于匹配工具名称和描述",
+                        "description": "Capability keywords, for example 'git branch' or 'browser click'.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of matches to return. Default 5.",
                     },
                 },
                 "required": ["query"],
             },
         )
 
-    async def execute(
-        self,
-        args: dict[str, Any],
-        context: Any = None,
-    ) -> ToolResult:
-        query = str(args.get("query", "")).strip().lower()
+    async def execute(self, args: dict[str, Any], context: Any = None) -> ToolResult:
+        if self._registry is None:
+            return self._error_result("Tool registry is not available")
+        query = str(args.get("query") or "").strip()
         if not query:
-            return self._error_result("请提供搜索关键词")
+            return self._error_result("query is required")
+        limit = max(1, min(int(args.get("limit") or 5), 20))
 
-        # 简单的关键词匹配
-        matches: list[dict[str, str]] = []
-        keywords = query.split()
+        catalog = DeferredToolCatalog(self._registry)
+        matches = catalog.search(query, limit)
+        total = len(catalog.entries())
+        payload = {
+            "query": query,
+            "total_available": total,
+            "matches": [
+                {
+                    "name": entry.name,
+                    "description": entry.description[:400],
+                    "permission": entry.permission,
+                    "read_only": entry.read_only,
+                }
+                for entry in matches
+            ],
+        }
+        return ToolResult(
+            content=json.dumps(payload, ensure_ascii=False, indent=2),
+            display_summary=f"Found {len(matches)} deferred tools",
+            result_kind="generic",
+        )
 
-        for tool_info in self._tool_index:
-            name_lower = tool_info["name"].lower()
-            desc_lower = tool_info["description"].lower()
-            searchable = f"{name_lower} {desc_lower}"
 
-            # 所有关键词都匹配
-            if all(kw in searchable for kw in keywords):
-                matches.append(tool_info)
+class ToolDescribeTool(BaseTool):
+    name = "tool_describe"
+    read_only = True
+    permission = PermissionLevel.AUTO
+    description = "Load the full JSON schema for one deferred tool returned by tool_search."
 
-        if not matches:
-            # 退化到单关键词部分匹配
-            for tool_info in self._tool_index:
-                name_lower = tool_info["name"].lower()
-                desc_lower = tool_info["description"].lower()
-                searchable = f"{name_lower} {desc_lower}"
-                if any(kw in searchable for kw in keywords):
-                    matches.append(tool_info)
+    def __init__(self, registry: Any) -> None:
+        self._registry = registry
 
-        if not matches:
-            return self._success_result(
-                f"没有找到匹配 '{query}' 的工具。"
-                f"当前共有 {len(self._tool_index)} 个可用工具。"
-            )
+    def get_schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=self.name,
+            description=self.description,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Exact deferred tool name."},
+                },
+                "required": ["name"],
+            },
+        )
 
-        lines = [f"找到 {len(matches)} 个匹配的工具：\n"]
-        for m in matches[:10]:
-            ro = " [只读]" if m["read_only"] == "True" else ""
-            perm = f" [权限:{m['permission']}]"
-            lines.append(f"- **{m['name']}**{ro}{perm}")
-            # 截取描述前80字符
-            desc = m["description"][:80]
-            if len(m["description"]) > 80:
-                desc += "..."
-            lines.append(f"  {desc}")
+    async def execute(self, args: dict[str, Any], context: Any = None) -> ToolResult:
+        name = str(args.get("name") or "").strip()
+        if not name:
+            return self._error_result("name is required")
+        entry = DeferredToolCatalog(self._registry).get(name)
+        if entry is None:
+            return self._error_result(f"'{name}' is not an available deferred tool")
+        return ToolResult(
+            content=json.dumps(entry.schema, ensure_ascii=False, indent=2),
+            display_summary=f"Loaded schema for {name}",
+            result_kind="generic",
+        )
 
-        return self._success_result("\n".join(lines))
+
+class ToolCallTool(BaseTool):
+    name = "tool_call"
+    read_only = False
+    permission = PermissionLevel.AUTO
+    description = "Invoke a deferred tool by name with arguments matching the schema returned by tool_describe."
+
+    def get_schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=self.name,
+            description=self.description,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Exact deferred tool name."},
+                    "arguments": {"type": "object", "description": "Arguments for the deferred tool."},
+                },
+                "required": ["name", "arguments"],
+            },
+        )
+
+    async def execute(self, args: dict[str, Any], context: Any = None) -> ToolResult:
+        return self._error_result("tool_call must be unwrapped by the agent harness before execution")

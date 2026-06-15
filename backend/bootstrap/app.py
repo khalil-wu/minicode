@@ -59,6 +59,7 @@ class AppBootstrap:
         self.rag_pipeline: Any | None = None
         self._status_cache_payload: dict[str, Any] | None = None
         self._status_cache_expires_at = 0.0
+        self.task_scheduler: Any | None = None
 
     async def startup(self) -> None:
         self.config = load_config()
@@ -117,13 +118,13 @@ class AppBootstrap:
             from backend.mcp.manager import MCPServerManager
 
             self.mcp_manager = MCPServerManager(on_status_change=self._on_mcp_status_change)
-            started = await _with_startup_timeout("MCP manager", self.mcp_manager.start_all(), timeout=10.0)
+            started = await _with_startup_timeout("MCP manager", self.mcp_manager.start_all(), timeout=30.0)
             if started is _STARTUP_TIMED_OUT:
-                try:
-                    await self.mcp_manager.stop_all()
-                except Exception:
-                    pass
-                self.mcp_manager = None
+                # 不销毁整个 MCP manager — 让慢速服务器（如 npx）在后台继续连接。
+                # 后端已经可用，WebSocket 客户端会在服务器连接后收到 mcp.lifecycle 事件。
+                logger.warning(
+                    "MCP manager startup timed out; some servers may still be connecting in background"
+                )
             else:
                 logger.info("MCP manager initialized")
         except Exception as exc:
@@ -148,7 +149,20 @@ class AppBootstrap:
         except Exception as exc:
             logger.warning("Hooks init failed: %s", exc)
 
+        try:
+            from backend.tasks.scheduler import get_global_scheduler
+            self.task_scheduler = get_global_scheduler()
+            await self.task_scheduler.start()
+            logger.info("Task scheduler is ready")
+        except Exception as exc:
+            logger.warning("Task scheduler init failed: %s", exc)
+
     async def shutdown(self) -> None:
+        if self.task_scheduler:
+            try:
+                await self.task_scheduler.stop()
+            except Exception:
+                pass
         if self.mcp_manager:
             await self.mcp_manager.stop_all()
             logger.info("MCP manager stopped")
@@ -160,11 +174,16 @@ class AppBootstrap:
     def create_tool_registry(self, artifact_store: Any) -> ToolRegistry:
         try:
             params = signature(self._build_tool_registry).parameters
+            kwargs: dict[str, Any] = {}
             if "llm_provider" in params:
+                kwargs["llm_provider"] = self.create_llm
+            if "mcp_manager" in params:
+                kwargs["mcp_manager"] = self.mcp_manager
+            if kwargs:
                 return self._build_tool_registry(
                     artifact_store,
                     self.vector_memory,
-                    llm_provider=self.create_llm,
+                    **kwargs,
                 )
         except (TypeError, ValueError):
             pass

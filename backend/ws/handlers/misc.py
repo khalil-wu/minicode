@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from backend.agent.message import AgentEvent
-from backend.config import get_available_models, get_llm_provider
+from backend.config import get_available_models
 
 if TYPE_CHECKING:
     from backend.ws.handler import WebSocketSession
@@ -44,35 +43,16 @@ async def handle_checkpoint_rewind(session: "WebSocketSession", data: dict[str, 
     return True
 
 
-async def handle_plan_edit(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    from backend.agent.plan import PLAN_REGISTRY
-    plan_id = str(data.get("plan_id", "")).strip()
-    action = str(data.get("action", "")).strip().lower()
-    steps = data.get("steps") if isinstance(data.get("steps"), list) else None
-    accept = bool(data.get("accept", False)) or action == "accept"
-    if action == "reject":
-        PLAN_REGISTRY.cancel(plan_id)
-        plan = PLAN_REGISTRY.get(plan_id)
-        if plan is None:
-            await session._send_event(AgentEvent.error(f"Unknown plan '{plan_id}'", recoverable=True))
-            return True
-        await session._send_event(AgentEvent(type="plan.update", data=plan.to_payload()))
-        return True
-    plan = PLAN_REGISTRY.edit(plan_id, steps, accept=accept)
-    if plan is None:
-        await session._send_event(AgentEvent.error(f"Unknown plan '{plan_id}'", recoverable=True))
-        return True
-    await session._send_event(AgentEvent(type="plan.update", data=plan.to_payload()))
-    return True
-
-
 async def handle_task_edit(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     todo_id = str(data.get("todo_id", "")).strip()
     status = str(data.get("status", "")).strip()
     if not todo_id or status not in {"pending", "in_progress", "completed", "blocked"}:
         await session._send_event(AgentEvent.error("task.edit requires todo_id + valid status", recoverable=True))
         return True
-    await session._send_event(AgentEvent.task_update(todo_id=todo_id, status=status, content=str(data.get("content", ""))))
+    event = AgentEvent.task_update(todo_id=todo_id, status=status, content=str(data.get("content", "")))
+    if session.active_conversation_id:
+        event.data["conversation_id"] = session.active_conversation_id
+    await session._send_event(event)
     return True
 
 
@@ -81,16 +61,20 @@ async def handle_subagent_cancel(session: "WebSocketSession", data: dict[str, An
     if not subagent_id:
         await session._send_event(AgentEvent.error("subagent_id is required", recoverable=True))
         return True
-    await session._send_event(AgentEvent.subagent_done(subagent_id=subagent_id, error="cancelled by user"))
+    event = AgentEvent.subagent_done(subagent_id=subagent_id, error="cancelled by user")
+    if session.active_conversation_id:
+        event.data["conversation_id"] = session.active_conversation_id
+    await session._send_event(event)
     return True
 
 
 async def handle_inspector_focus(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     target_kind = str(data.get("target_kind", "")).strip() or "message"
     target_id = str(data.get("target_id", "")).strip()
-    await session._send_event(
-        AgentEvent.inspector_update(target_kind=target_kind, target_id=target_id, payload={"acknowledged": True})
-    )
+    event = AgentEvent.inspector_update(target_kind=target_kind, target_id=target_id, payload={"acknowledged": True})
+    if session.active_conversation_id:
+        event.data["conversation_id"] = session.active_conversation_id
+    await session._send_event(event)
     return True
 
 
@@ -166,17 +150,38 @@ async def handle_approval_file_diff_command(session: "WebSocketSession", data: d
 
 async def handle_interrupt_command(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     session._interrupted = True
-    if session._active_task_id:
-        session.task_manager.cancel(session._active_task_id)
+    target_conversation_id = str(data.get("conversation_id") or data.get("conversationId") or "").strip()
+    target_task_id = (
+        getattr(session, "_conversation_run_task_ids", {}).get(target_conversation_id)
+        if target_conversation_id
+        else session._active_task_id
+    )
+    if target_task_id:
+        session.task_manager.cancel(target_task_id)
     task_was_running = False
-    if session._active_run_task and not session._active_run_task.done():
-        session._active_run_task.cancel()
+    target_task = (
+        getattr(session, "_conversation_run_tasks", {}).get(target_conversation_id)
+        if target_conversation_id
+        else session._active_run_task
+    )
+    if target_task and not target_task.done():
+        target_task.cancel()
         task_was_running = True
-    await session._cancel_pending_approvals(reason="user_interrupted")
-    session._active_task_id = None
+    await session._cancel_pending_approvals(
+        reason="user_interrupted",
+        conversation_id=target_conversation_id or None,
+    )
+    if target_conversation_id:
+        getattr(session, "_conversation_run_tasks", {}).pop(target_conversation_id, None)
+        getattr(session, "_conversation_run_task_ids", {}).pop(target_conversation_id, None)
+    else:
+        session._active_task_id = None
     if not task_was_running:
         from backend.agent.message import AgentEvent
-        await session._send_event(AgentEvent.done())
+        done = AgentEvent.done()
+        if target_conversation_id:
+            done.data["conversation_id"] = target_conversation_id
+        await session._send_event(done)
     return True
 
 
@@ -219,10 +224,10 @@ async def handle_approval_respond(session: "WebSocketSession", data: dict[str, A
         return True
 
     if action == "approve":
-        approval_manager.remove_approval(approval_id)
+        approval_manager.resolve_approval(approval_id, "approve")
         await session._emit_command_result("approval.respond", f"Approved: {approval.title}", level="success", data={"approval_id": approval_id, "action": "approve"})
     else:
-        approval_manager.remove_approval(approval_id)
+        approval_manager.resolve_approval(approval_id, "reject", guidance=guidance if isinstance(guidance, str) else None)
         guidance_text = f" with guidance: {guidance}" if guidance else ""
         await session._emit_command_result("approval.respond", f"Rejected: {approval.title}{guidance_text}", level="success", data={"approval_id": approval_id, "action": "reject", "guidance": guidance})
     return True
@@ -309,6 +314,7 @@ async def handle_commands_list(session: "WebSocketSession", data: dict[str, Any]
 
 async def handle_llm_config_set(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     from backend.config import (
+        active_provider_supports_reasoning_effort,
         get_llm_settings_payload,
         load_config,
         save_llm_settings,
@@ -318,6 +324,7 @@ async def handle_llm_config_set(session: "WebSocketSession", data: dict[str, Any
     raw_provider = str(data.get("provider", "")).strip()
     model_hint = str(data.get("model", "")).strip()
     reasoning_effort = str(data.get("reasoning_effort") or "").strip().lower()
+    reasoning_effort_requested = bool(reasoning_effort)
     if reasoning_effort and reasoning_effort not in {"low", "medium", "high", "max"}:
         await session._send_event(AgentEvent.error("reasoning_effort must be low, medium, high, or max", recoverable=True))
         return True
@@ -331,14 +338,29 @@ async def handle_llm_config_set(session: "WebSocketSession", data: dict[str, Any
         if target_provider in {"openai", "custom"}:
             section = saved_payload.get(target_provider)
             if isinstance(section, dict):
-                section["reasoning_effort"] = reasoning_effort
-                save_llm_settings(saved_payload)
-                session.config = load_config()
-                saved_payload = get_llm_settings_payload()
+                if not active_provider_supports_reasoning_effort(saved_payload):
+                    await session._send_event(
+                        AgentEvent(
+                            type="system_notice",
+                            data={
+                                "content": (
+                                    "Reasoning effort was not applied because the active provider "
+                                    "uses Chat Completions. Switch to a Responses-compatible model/API format."
+                                )
+                            },
+                        )
+                    )
+                    reasoning_effort = ""
+                else:
+                    section["reasoning_effort"] = reasoning_effort
+                    save_llm_settings(saved_payload)
+                    session.config = load_config()
+                    saved_payload = get_llm_settings_payload()
         else:
             await session._send_event(
                 AgentEvent(type="system_notice", data={"content": "Reasoning effort applies to OpenAI-compatible providers."})
             )
+            reasoning_effort = ""
 
     session.provider = str(saved_payload.get("provider") or provider)
     section = saved_payload.get(session.provider)
@@ -359,7 +381,8 @@ async def handle_llm_config_set(session: "WebSocketSession", data: dict[str, Any
     notice = f"Provider updated to {provider} ({session.selected_model})"
     if reasoning_effort:
         notice = f"Reasoning effort set to {reasoning_effort}"
-    await session._send_event(AgentEvent(type="system_notice", data={"content": notice}))
+    if reasoning_effort or not reasoning_effort_requested:
+        await session._send_event(AgentEvent(type="system_notice", data={"content": notice}))
     await session._send_llm_state()
     return True
 
@@ -367,7 +390,6 @@ async def handle_llm_config_set(session: "WebSocketSession", data: dict[str, Any
 HANDLERS: dict[str, Any] = {
     "checkpoint.list": handle_checkpoint_list,
     "checkpoint.rewind": handle_checkpoint_rewind,
-    "plan.edit": handle_plan_edit,
     "task.edit": handle_task_edit,
     "subagent.cancel": handle_subagent_cancel,
     "inspector.focus": handle_inspector_focus,

@@ -1,71 +1,88 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Check,
-  Code2,
-  FileText,
-  Globe,
-  Search,
-  TerminalSquare,
-  Wrench,
   X,
 } from "lucide-react";
 import { useAppStore } from "../stores";
 import { sendClientCommand } from "../protocol/ws-outbox";
+import { buildApprovalResponseCommand } from "../protocol/prompt-responses";
+import { pendingPromptTargetsConversation } from "../lib/pending-prompts";
+import { ToolGlyph, toolDisplayName, summarizeArgs, humanizeKey } from "../chat/toolUtils";
 
 export const ApprovalModal = () => {
-  const pendingApproval = useAppStore((s) => s.pendingApproval);
+  const pendingApprovalState = useAppStore((s) => s.pendingApproval);
   const approvalQueue = useAppStore((s) => s.approvalQueue);
-  const queuedCount = approvalQueue.length;
+  const activeConversationId = useAppStore((s) => s.conversationId);
+  const visibleApproval = pendingPromptTargetsConversation(pendingApprovalState, activeConversationId, activeConversationId)
+    ? pendingApprovalState
+    : null;
+  const visibleQueue = approvalQueue.filter((item) =>
+    pendingPromptTargetsConversation(item, activeConversationId, activeConversationId),
+  );
+  const queuedCount = visibleQueue.length;
   const [respondingId, setRespondingId] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const timeoutRef = useRef<number | null>(null);
 
   const respond = useCallback((approved: boolean) => {
-    if (!pendingApproval || respondingId === pendingApproval.requestId) return;
-    setRespondingId(pendingApproval.requestId);
-    const sent = sendClientCommand({
-      type: "approval",
-      tool_call_id: pendingApproval.requestId,
-      action: approved ? "approve" : "reject",
-    });
+    if (!visibleApproval || respondingId === visibleApproval.requestId) return;
+    setRespondingId(visibleApproval.requestId);
+    const sent = sendClientCommand(buildApprovalResponseCommand(
+      visibleApproval.requestId,
+      approved ? "approve" : "reject",
+      visibleApproval.protocol,
+    ));
     if (sent) {
-      useAppStore.getState().markApprovalSubmitted(pendingApproval.requestId);
-      window.setTimeout(() => useAppStore.getState().clearApproval(pendingApproval.requestId), 250);
+      useAppStore.getState().markApprovalSubmitted(visibleApproval.requestId);
+      // Clear any existing timeout
+      if (timeoutRef.current !== null) {
+        window.clearTimeout(timeoutRef.current);
+      }
+      timeoutRef.current = window.setTimeout(() => {
+        useAppStore.getState().clearApproval(visibleApproval.requestId);
+        timeoutRef.current = null;
+      }, 250);
     } else {
-      useAppStore.getState().markApprovalError(pendingApproval.requestId, "Connection is offline");
+      useAppStore.getState().markApprovalError(visibleApproval.requestId, "Connection is offline");
       setRespondingId(null);
     }
-  }, [pendingApproval, respondingId]);
+  }, [visibleApproval, respondingId]);
 
   const approveAll = useCallback(() => {
-    if (!pendingApproval) return;
+    if (!visibleApproval) return;
     const store = useAppStore.getState();
-    const all = [pendingApproval, ...store.approvalQueue];
+    const all = [visibleApproval, ...store.approvalQueue.filter((item) =>
+      pendingPromptTargetsConversation(item, activeConversationId, activeConversationId),
+    )];
     const submitted: string[] = [];
     for (const item of all) {
-      const sent = sendClientCommand({
-        type: "approval",
-        tool_call_id: item.requestId,
-        action: "approve",
-      });
+      const sent = sendClientCommand(buildApprovalResponseCommand(item.requestId, "approve", item.protocol));
       if (sent) submitted.push(item.requestId);
       else store.markApprovalError(item.requestId, "Connection is offline");
     }
     for (const id of submitted) store.markApprovalSubmitted(id);
-    window.setTimeout(() => store.clearApprovals(submitted), 250);
-  }, [pendingApproval]);
+    // Clear any existing timeout
+    if (timeoutRef.current !== null) {
+      window.clearTimeout(timeoutRef.current);
+    }
+    timeoutRef.current = window.setTimeout(() => {
+      store.clearApprovals(submitted);
+      timeoutRef.current = null;
+    }, 250);
+  }, [activeConversationId, visibleApproval]);
 
   useEffect(() => {
     setRespondingId(null);
-  }, [pendingApproval?.requestId]);
+  }, [visibleApproval?.requestId]);
 
   useEffect(() => {
-    if (!pendingApproval) return;
+    if (!visibleApproval) return;
     const previousActive = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const focusFirst = () => {
       const focusable = getFocusable(dialogRef.current);
       (focusable[0] ?? dialogRef.current)?.focus();
     };
-    window.setTimeout(focusFirst, 0);
+    const focusTimeoutId = window.setTimeout(focusFirst, 0);
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -93,13 +110,19 @@ export const ApprovalModal = () => {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => {
+      window.clearTimeout(focusTimeoutId);
+      if (timeoutRef.current !== null) {
+        window.clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
       window.removeEventListener("keydown", handleKeyDown);
       previousActive?.focus();
     };
-  }, [pendingApproval, respond]);
+  }, [visibleApproval, respond]);
 
-  if (!pendingApproval) return null;
+  if (!visibleApproval) return null;
 
+  const pendingApproval = visibleApproval;
   const isResponding = respondingId === pendingApproval.requestId || pendingApproval.status === "submitted";
   const totalPending = 1 + queuedCount;
   const summary = summarizeArgs(pendingApproval.args);
@@ -110,11 +133,11 @@ export const ApprovalModal = () => {
       style={{
         position: "fixed",
         inset: 0,
-        background: "rgba(0,0,0,0.5)",
+        background: "var(--backdrop-overlay)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        zIndex: 110,
+        zIndex: "var(--z-approval)",
       }}
     >
       <div
@@ -154,7 +177,7 @@ export const ApprovalModal = () => {
         </div>
         {queuedCount > 0 && (
           <div style={queueStyle}>
-            Next: {approvalQueue.map((a) => `${toolDisplayName(a.toolName)}${formatApprovalTarget(a.args)}`).join(", ")}
+            Next: {visibleQueue.map((a) => `${toolDisplayName(a.toolName)}${formatApprovalTarget(a.args)}`).join(", ")}
           </div>
         )}
         <div style={summaryBoxStyle}>
@@ -212,48 +235,6 @@ export const ApprovalModal = () => {
     </div>
   );
 };
-
-const ToolGlyph = ({ name }: { name: string }) => {
-  const props = { size: 15, color: "var(--state-warning)" };
-  if (name.includes("web")) return <Globe {...props} />;
-  if (name.includes("command") || name.includes("terminal") || name.includes("bash")) return <TerminalSquare {...props} />;
-  if (name.includes("write") || name.includes("edit") || name.includes("patch")) return <Code2 {...props} />;
-  if (name.includes("read") || name.includes("file")) return <FileText {...props} />;
-  if (name.includes("grep") || name.includes("glob") || name.includes("search")) return <Search {...props} />;
-  return <Wrench {...props} />;
-};
-
-const toolDisplayName = (name: string): string => {
-  if (name === "web_search" || name === "search_web") return "Search web";
-  if (name === "web_fetch") return "Fetch page";
-  if (name === "run_command") return "Run command";
-  if (name === "read_file") return "Read file";
-  if (name === "write_file") return "Write file";
-  if (name === "edit_file") return "Edit file";
-  if (name === "apply_patch") return "Apply patch";
-  if (name === "grep_files" || name === "grep") return "Search files";
-  if (name === "glob_files" || name === "glob") return "Scan files";
-  if (name === "git_status") return "Check git";
-  return name.replace(/_/g, " ");
-};
-
-const summarizeArgs = (args: Record<string, unknown>): { label: string; value: string }[] => {
-  const preferred = ["command", "cmd", "path", "file_path", "target", "filename", "query", "pattern", "url", "cwd"];
-  const rows: { label: string; value: string }[] = [];
-  for (const key of preferred) {
-    const value = args[key];
-    if (typeof value === "string" && value.trim()) rows.push({ label: humanizeKey(key), value });
-    else if (typeof value === "number" || typeof value === "boolean") rows.push({ label: humanizeKey(key), value: String(value) });
-  }
-  if (rows.length > 0) return rows.slice(0, 4);
-  const fallback = Object.entries(args)
-    .filter(([, value]) => typeof value === "string" || typeof value === "number" || typeof value === "boolean")
-    .slice(0, 4)
-    .map(([key, value]) => ({ label: humanizeKey(key), value: String(value) }));
-  return fallback.length > 0 ? fallback : [{ label: "request", value: "No concise parameters available" }];
-};
-
-const humanizeKey = (key: string) => key.replace(/_/g, " ");
 
 const getFocusable = (root: HTMLElement | null): HTMLElement[] => {
   if (!root) return [];

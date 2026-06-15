@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
-from backend.llm.errors import is_fatal_llm_error
+from backend.llm.errors import is_fatal_llm_error, is_retryable_llm_error
 
 if TYPE_CHECKING:
     from backend.config import AgentSettings
@@ -52,9 +52,13 @@ class DefaultStreamRetryPolicy:
     def decide_retry(self, error_message: str, attempt_index: int) -> StreamRetryDecision:
         """Return a retry decision based on error message content and attempt budget.
 
-        should_retry is True when:
-        - attempt_index < settings.stream_max_attempts, AND
-        - any retryable substring appears in error_message (case-insensitive)
+        should_retry is True when attempt budget remains AND either:
+        - a configured retryable substring appears (e.g. rate-limit / 429), OR
+        - the error classifies as retryable (transient network / stream drop).
+
+        The classifier branch is what lets a DeepSeek streaming cutoff
+        (RemoteProtocolError "peer closed connection…") retry instead of
+        surfacing immediately as a generic failure.
         """
         if is_fatal_llm_error(error_message):
             return StreamRetryDecision(
@@ -64,12 +68,10 @@ class DefaultStreamRetryPolicy:
             )
 
         error_lower = error_message.lower()
-        should_retry = (
-            attempt_index < self._settings.stream_max_attempts
-            and any(
-                p in error_lower
-                for p in self._settings.stream_retryable_substrings
-            )
+        has_budget = attempt_index < self._settings.stream_max_attempts
+        should_retry = has_budget and (
+            any(p in error_lower for p in self._settings.stream_retryable_substrings)
+            or is_retryable_llm_error(error_message)
         )
         return StreamRetryDecision(
             should_retry=should_retry,

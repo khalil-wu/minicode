@@ -47,6 +47,9 @@ class WorkspaceService:
         self._write_lock = threading.Lock()
 
     def list_tree(self, path: str) -> WorkspaceTreeResponse:
+        root = self.workspace_root_path()
+        if not root.exists() or not root.is_dir():
+            raise HTTPException(status_code=404, detail=f"Workspace folder is missing: {root}")
         target = self.resolve_workspace_path(path)
         if not target.exists():
             raise HTTPException(status_code=404, detail=f"Path not found: {path}")

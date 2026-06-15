@@ -3,7 +3,6 @@ import { AgentProgressTrace } from "./AgentProgressTrace";
 
 export const PlanPanel = () => {
   const plan = useAppStore((s) => s.plan);
-  const permissionMode = useAppStore((s) => s.permissionMode);
 
   if (!plan) {
     return (
@@ -11,11 +10,6 @@ export const PlanPanel = () => {
         <AgentProgressTrace mode="compact" />
         <div>
           No proposed plan in this session.
-          {permissionMode === "plan" && (
-            <div style={{ marginTop: 6, fontSize: "var(--text-xs)" }}>
-              Plan mode is read-only: the agent can inspect and outline, but cannot edit files or execute commands.
-            </div>
-          )}
         </div>
       </div>
     );

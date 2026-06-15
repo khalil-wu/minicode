@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from backend.chroma_utils import create_chroma_persistent_client
 from backend.config import PROJECT_ROOT
 
 logger = logging.getLogger(__name__)
@@ -65,22 +66,7 @@ class VectorMemory:
             storage_key = str(self._storage_dir.resolve())
             self._client = self._shared_clients.get(storage_key)
             if self._client is None:
-                settings = None
-                config_module = getattr(chromadb, "config", None)
-                settings_cls = getattr(config_module, "Settings", None)
-                if settings_cls is not None:
-                    settings = settings_cls(anonymized_telemetry=False)
-
-                if settings is None:
-                    self._client = chromadb.PersistentClient(path=str(self._storage_dir))
-                else:
-                    try:
-                        self._client = chromadb.PersistentClient(
-                            path=str(self._storage_dir),
-                            settings=settings,
-                        )
-                    except TypeError:
-                        self._client = chromadb.PersistentClient(path=str(self._storage_dir))
+                self._client = create_chroma_persistent_client(chromadb, self._storage_dir)
                 self._shared_clients[storage_key] = self._client
             self._collection = self._get_or_create_collection(self._collection_name)
             logger.info("Vector memory using ChromaDB collection=%s", self._collection_name)

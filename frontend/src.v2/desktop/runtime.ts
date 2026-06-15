@@ -94,6 +94,10 @@ export interface BrowserActionResult {
   screenshot: BrowserScreenshotResult;
 }
 
+export interface BrowserNavigateOptions {
+  allowPrivateNetwork?: boolean;
+}
+
 interface MiniCodeDesktop {
   platformInfo: { isDesktop: boolean; platform: string; arch: string };
   windowControls: {
@@ -139,7 +143,7 @@ interface MiniCodeDesktop {
   browser: {
     discover(endpoint?: string): Promise<BrowserDiscoveryResult>;
     captureScreenshot(endpoint: string | undefined, targetId: string): Promise<BrowserScreenshotResult>;
-    navigate(endpoint: string | undefined, targetId: string, url: string): Promise<BrowserActionResult>;
+    navigate(endpoint: string | undefined, targetId: string, url: string, options?: BrowserNavigateOptions): Promise<BrowserActionResult>;
     click(endpoint: string | undefined, targetId: string, selector: string): Promise<BrowserActionResult>;
     type(endpoint: string | undefined, targetId: string, selector: string, text: string): Promise<BrowserActionResult>;
   };
@@ -193,12 +197,9 @@ export const fsReadFile = async (path: string): Promise<string | null> => {
 };
 
 export const fsReadFileInfo = async (path: string): Promise<FsFileResponse | null> => {
-  try {
-    const result = await desktop()?.fs.readFile(path);
-    return result ?? null;
-  } catch {
-    return null;
-  }
+  const fs = desktop()?.fs;
+  if (!fs) return null;
+  return await fs.readFile(path);
 };
 
 export const fsWriteFile = async (path: string, content: string): Promise<boolean> => {
@@ -293,7 +294,8 @@ const normalizeFsListTreeResult = (path: string, payload: unknown): FsListTreeRe
 export const fsListTreeResult = async (path: string): Promise<FsListTreeResult> => {
   try {
     return normalizeFsListTreeResult(path, await desktop()?.fs.listTree(path));
-  } catch {
+  } catch (err) {
+    console.warn("[fsListTree] failed for", path, err);
     return { workspaceRoot: path, requestedPath: path, entries: [] };
   }
 };
@@ -411,9 +413,10 @@ export const browserNavigate = async (
   endpoint: string | undefined,
   targetId: string,
   url: string,
+  options?: BrowserNavigateOptions,
 ): Promise<BrowserActionResult | null> => {
   try {
-    return (await desktop()?.browser.navigate(endpoint, targetId, url)) ?? null;
+    return (await desktop()?.browser.navigate(endpoint, targetId, url, options)) ?? null;
   } catch {
     return null;
   }

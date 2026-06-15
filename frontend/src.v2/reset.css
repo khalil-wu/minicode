@@ -15,7 +15,7 @@ body,
 
 body {
   font-family: var(--font-ui);
-  font-size: var(--text-md);
+  font-size: var(--text-base);
   background: var(--surface-base);
   color: var(--text-primary);
   -webkit-font-smoothing: antialiased;
@@ -39,12 +39,7 @@ body {
   45% { opacity: 1; transform: scaleY(1); }
 }
 
-@keyframes thinking-flow {
-  0% { transform: translateX(-115%); opacity: 0; }
-  20% { opacity: 0.75; }
-  70% { opacity: 0.75; }
-  100% { transform: translateX(115%); opacity: 0; }
-}
+
 
 @keyframes overlay-in {
   from { opacity: 0; backdrop-filter: blur(0); }
@@ -106,15 +101,9 @@ body {
   100% { background-position: 200% 0; }
 }
 
-@keyframes connection-pulse {
-  0%, 100% { opacity: 0.4; }
-  50% { opacity: 1; }
-}
 
-@keyframes thinking-shimmer {
-  0% { background-position: -200% 0; }
-  100% { background-position: 200% 0; }
-}
+
+
 
 @keyframes preview-flash {
   from { opacity: 1; }
@@ -187,17 +176,7 @@ body {
   border-radius: var(--radius-sm, 4px);
 }
 
-.thinking-shimmer {
-  display: inline-block;
-  width: 32px;
-  height: 3px;
-  border-radius: 2px;
-  background: linear-gradient(90deg, var(--accent-primary) 25%, var(--surface-hover) 50%, var(--accent-primary) 75%);
-  background-size: 200% 100%;
-  animation: thinking-shimmer 1.8s ease-in-out infinite;
-  vertical-align: middle;
-  margin-left: 6px;
-}
+
 
 .thinking-wave {
   display: inline-flex;
@@ -229,29 +208,7 @@ body {
   animation-delay: 220ms;
 }
 
-.thinking-flow {
-  position: relative;
-  width: 24px;
-  height: 2px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: color-mix(in oklch, var(--accent-primary) 12%, transparent);
-}
 
-.thinking-flow::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  width: 55%;
-  border-radius: inherit;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    color-mix(in oklch, var(--accent-primary) 72%, white),
-    transparent
-  );
-  animation: thinking-flow 1.35s ease-in-out infinite;
-}
 
 .thinking-mini-dot {
   width: 7px;
@@ -313,6 +270,12 @@ body {
   opacity: 1 !important;
 }
 
+/* Show edit button on hover of user message bubble */
+.edit-bubble-wrap:hover button[title="Edit and resend"],
+.edit-bubble-wrap:focus-within button[title="Edit and resend"] {
+  opacity: 1 !important;
+}
+
 button {
   transition: background 100ms ease,
               color 100ms ease,
@@ -336,40 +299,40 @@ button:hover {
   transition: width 200ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.dock-animate {
-  transition: height 200ms cubic-bezier(0.4, 0, 0.2, 1);
-}
 
-.panel-fade {
-  animation: fade-in 150ms ease both;
-}
+
 
 /* ── Connection Banner ───────────────────────────────── */
 
-.connection-banner {
-  animation: slide-down 200ms ease both;
-}
 
-.connection-dot {
-  animation: connection-pulse 1.5s ease-in-out infinite;
-}
 
 /* ── Custom scrollbars ───────────────────────────────── */
 
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+/* Thumb is nearly invisible at rest so it doesn't read as a full-height
+   line, and only firms up when the user actually hovers the scroll area.
+   The transparent border + background-clip keeps a slim 6px visual thumb
+   inside the 10px track so it never hugs the very edge. */
 ::-webkit-scrollbar-thumb {
-  background: var(--border-subtle);
-  border-radius: 4px;
+  background: transparent;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
   transition: background 150ms ease;
 }
+:hover::-webkit-scrollbar-thumb {
+  background: color-mix(in oklch, var(--text-muted) 28%, transparent);
+  background-clip: padding-box;
+}
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--border-strong, var(--border-subtle));
+  background: color-mix(in oklch, var(--text-muted) 48%, transparent);
+  background-clip: padding-box;
 }
 
 /* ── Focus ring for keyboard navigation ──────────────── */
