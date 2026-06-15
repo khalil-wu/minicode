@@ -52,13 +52,18 @@ def build_harness_guidance(
     if "todo_write" in names:
         plan_lines = [
             "Planning contract:",
-            "- For multi-step work (≥3 steps, several files, several subtasks, a user-supplied list, "
-            "or staged verification), call todo_write FIRST to create a task checklist, then execute and keep it updated.",
-            "- Each task should be 2-10 minutes of work. Use clear imperative form (\"Fix auth bug\", not \"Fixing auth bug\").",
-            "- Only ONE task should be in_progress at a time. Update status to completed when done, then mark the next as in_progress.",
-            "- Example: User asks to \"refactor authentication\" → create tasks: [\"Analyze current code\", \"Design new structure\", "
-            "\"Implement changes\", \"Write tests\", \"Update docs\"], then work through them one by one.",
-            "- Skip the checklist ONLY for simple single-step requests (modifying one file, answering a question) — it is overhead, not ceremony.",
+            "- **MANDATORY**: For ANY multi-step work (≥2 steps, several files, user-supplied list, "
+            "or takes >5 minutes), you MUST call todo_write FIRST before doing anything else.",
+            "- Break the work into clear, actionable tasks with imperative form: \"Fix auth bug\", \"Add tests\", \"Update docs\".",
+            "- Create tasks at the START of your response, before any execution. This shows the user your plan immediately.",
+            "- Only ONE task should be in_progress at a time. Update status to completed when done, then mark next as in_progress.",
+            "- Example workflow:",
+            "  User: \"refactor authentication and add tests\"",
+            "  Step 1: Call todo_write([\"Analyze current auth code\", \"Design new structure\", \"Implement refactor\", \"Write unit tests\", \"Update docs\"])",
+            "  Step 2: Mark first task as in_progress",
+            "  Step 3: Execute the task",
+            "  Step 4: Mark as completed, move to next",
+            "- Skip ONLY for trivial single-step requests (one-file edit, simple question).",
         ]
         if "task" in names:
             plan_lines.append(
