@@ -38,6 +38,9 @@ def build_harness_guidance(
         (
             "Harness contract:\n"
             "- Treat tool results as runtime evidence. If you need to act, call tools before claiming completion.\n"
+            "- **CRITICAL**: After calling tools, you MUST provide a text summary explaining what you found/did. "
+            "DO NOT only call tools without any explanation.\n"
+            "- If you've called 3+ tools in a row without providing text, STOP and summarize your findings NOW.\n"
             "- Final answers must separate confirmed results from plans, guesses, and candidate evidence."
         )
     ]

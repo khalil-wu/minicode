@@ -167,7 +167,7 @@ class PermissionSettings:
 class AgentSettings:
     """Agent Loop 运行参数。"""
 
-    max_iterations: int = 30
+    max_iterations: int = 15  # 降低到 15，避免无限循环浪费 token
     turn_error_budget: int = 5  # 单轮最多允许的内部重试/恢复次数
     compaction_threshold: float = 0.75  # token 使用率阈值
     stagnation_limit: int = 3  # 同一工具+参数调用 N 次判定停滞

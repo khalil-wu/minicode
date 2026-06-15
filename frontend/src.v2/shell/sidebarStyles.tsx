@@ -34,51 +34,51 @@ export const primaryActionStyle: React.CSSProperties = {
   display: "inline-flex",
   alignItems: "center",
   justifyContent: "center",
-  gap: 6,
-  height: 32,
-  padding: "0 10px",
+  gap: 8,  // 🔧 从 6 增加到 8
+  height: 36,  // 🔧 从 32 增加到 36
+  padding: "0 12px",  // 🔧 从 10px 增加到 12px
   background: "var(--surface-page)",
   color: "var(--text-primary)",
   border: "1px solid transparent",
   borderRadius: "var(--radius-sm, 6px)",
   cursor: "pointer",
-  fontSize: "var(--text-sm)",
-  fontWeight: 700,
+  fontSize: "var(--text-sm)",  // 🔧 保持 12px
+  fontWeight: 600,  // 🔧 从 700 降低到 600
 };
 
 export const sessionControlStackStyle: React.CSSProperties = {
   display: "grid",
-  gap: 10,
-  padding: "12px 6px 8px",
+  gap: 12,  // 🔧 从 10 增加到 12
+  padding: "16px 12px 12px",  // 🔧 增加 padding
   borderBottom: "1px solid var(--border-subtle)",
   background: "var(--surface-sidebar)",
 };
 
 export const routineGroupStyle: React.CSSProperties = {
   display: "grid",
-  gap: 3,
+  gap: 4,  // 🔧 从 3 增加到 4
   padding: 0,
 };
 
 export const sidebarLinkStyle: React.CSSProperties = {
   display: "inline-flex",
   alignItems: "center",
-  gap: 7,
-  minHeight: 32,
-  padding: "0 9px",
+  gap: 8,  // 增加间距
+  minHeight: 36,  // 增加高度
+  padding: "0 12px",  // 增加左右 padding
   background: "transparent",
   color: "var(--text-secondary)",
   border: "1px solid transparent",
   borderRadius: "var(--radius-sm, 6px)",
   cursor: "pointer",
-  fontSize: "var(--text-xs)",
-  fontWeight: 600,
+  fontSize: "var(--text-sm)",  // 🔧 从 text-xs (11px) 改为 text-sm (12px)
+  fontWeight: 500,  // 🔧 从 600 降低到 500，更轻盈
   textAlign: "left",
 };
 
 export const comingSoonStyle: React.CSSProperties = {
   marginLeft: "auto",
-  fontSize: 10,
+  fontSize: "var(--text-xs)",  // 🔧 从 10px 改为 11px
   color: "var(--text-muted)",
   fontFamily: "var(--font-mono)",
 };

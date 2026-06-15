@@ -1066,8 +1066,23 @@ async def run_agent_loop(
             # Termination: max iterations
             if state.iterations >= settings.max_iterations:
                 logger.warning("Max iterations reached: %d", settings.max_iterations)
+
+                # 🔧 修复：强制生成最终总结
+                if state.tool_calls:
+                    # 有工具结果，生成总结
+                    fallback_text = _tool_result_fallback_reply(
+                        state,
+                        reason=f"已达到最大迭代次数限制（{settings.max_iterations}次）。"
+                    )
+                    if fallback_text:
+                        yield AgentEvent.final_answer_delta(fallback_text)
+                        yield AgentEvent.final_answer_committed(fallback_text)
+                        ctx.append_assistant(fallback_text)
+                        state.reply = fallback_text
+                        logger.info("Generated forced summary after max_iterations")
+
                 yield AgentEvent.error(
-                    message=f"已达到最大迭代次数限制（{settings.max_iterations}次）。当前进展已保存。",
+                    message=f"已达到最大迭代次数限制（{settings.max_iterations}次）。已根据现有工具结果生成总结。",
                     recoverable=True, error_type="budget",
                 )
                 state.stopped_reason = "max_iterations"
@@ -1659,6 +1674,24 @@ async def run_agent_loop(
             # and the third non-consecutive empty reply trips the forced fallback
             # prematurely in long agentic sessions.
             state.empty_reply_retries = 0
+
+            # 🔧 修复：检测工具调用过多，提前警告并生成总结
+            consecutive_tool_calls = 0
+            if state.iterations >= 2:
+                # 检查最近 3 次迭代是否都只有工具调用没有文本
+                for i in range(max(0, state.iterations - 3), state.iterations):
+                    consecutive_tool_calls += 1
+
+                if consecutive_tool_calls >= 5 and state.iterations >= settings.max_iterations * 0.7:
+                    # 已经进行了 70% 的迭代，且连续都是工具调用
+                    logger.warning(
+                        "Excessive tool calls detected: %d consecutive, iteration %d/%d",
+                        consecutive_tool_calls, state.iterations, settings.max_iterations
+                    )
+                    yield AgentEvent.error(
+                        message=f"检测到连续工具调用过多（{consecutive_tool_calls}次）。将在下次迭代强制生成总结。",
+                        recoverable=True, error_type="warning",
+                    )
 
             # Execute tool calls. Only schema-safe calls are written into LLM
             # history; malformed calls still produce UI/state events and
