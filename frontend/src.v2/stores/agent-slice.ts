@@ -29,6 +29,14 @@ export const createAgentSlice: StateCreator<AppStore, [], [], AgentSlice> = (set
       return { plan: { ...s.plan, steps } };
     }),
   setTodos: (t) => set({ todos: t }),
+  addTodo: (todo) =>
+    set((s) => ({
+      todos: [...s.todos, todo],
+    })),
+  removeTodo: (id) =>
+    set((s) => ({
+      todos: s.todos.filter((todo) => todo.id !== id),
+    })),
   updateTodo: (id, patch) =>
     set((s) => {
       const index = s.todos.findIndex((todo) => todo.id === id);

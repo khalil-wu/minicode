@@ -261,6 +261,33 @@
   color: var(--text-secondary);
 }
 
+.activity-cell-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  margin-left: 6px;
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: var(--transition-fast);
+  flex-shrink: 0;
+}
+
+.activity-cell-copy-btn:hover {
+  background: var(--surface-hover);
+  border-color: var(--border-soft);
+  color: var(--text-secondary);
+}
+
+.activity-cell-copy-btn:active {
+  transform: scale(0.95);
+}
+
 .activity-cell-long-running {
   font-size: var(--text-xs);
   color: var(--text-muted);

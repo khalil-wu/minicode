@@ -1,4 +1,4 @@
-import { Copy, RotateCcw, Trash2 } from "lucide-react";
+import { Copy, RotateCcw, Trash2, RotateCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type React from "react";
 import type { AssistantMarkdownCellState } from "./cellTypes";
@@ -115,6 +115,55 @@ export function AssistantMarkdownCell({
     deleteMessage(cell.messageId);
   }, [cell.messageId, deleteMessage]);
 
+  const regenerate = useCallback(async () => {
+    if (!cell.messageId) return;
+    const state = useAppStore.getState();
+
+    // Find the user message that triggered this response
+    const index = state.messages.findIndex((item) => item.id === cell.messageId);
+    if (index < 0) return;
+
+    // Find the preceding user message
+    let userIndex = -1;
+    for (let i = index - 1; i >= 0; i--) {
+      if (state.messages[i]?.role === "user") {
+        userIndex = i;
+        break;
+      }
+    }
+
+    if (userIndex < 0) return;
+
+    const { showConfirm } = await import("../../overlays/DialogService");
+    const ok = await showConfirm({
+      title: "重新生成",
+      message: "将删除当前回复并重新生成。继续吗？",
+      confirmLabel: "重新生成",
+      danger: false,
+    });
+    if (!ok) return;
+
+    // Delete this assistant message and all following messages
+    const removeCount = state.messages.length - index;
+    for (let i = 0; i < removeCount; i++) {
+      const msg = state.messages[index];
+      if (msg) {
+        deleteMessage(msg.id);
+      }
+    }
+
+    // Re-send the user message
+    const userMessage = state.messages[userIndex];
+    if (userMessage && userMessage.role === "user") {
+      recallMessage(userMessage.id);
+      // Trigger send after a short delay
+      setTimeout(() => {
+        const sendBtn = document.querySelector('[data-send-button]') as HTMLButtonElement;
+        if (sendBtn) sendBtn.click();
+      }, 100);
+    }
+  }, [cell.messageId, deleteMessage, recallMessage]);
+
   return (
     <div className="assistant-cell-wrap">
       <div className="assistant-cell-content md-prose">
@@ -156,6 +205,15 @@ export function AssistantMarkdownCell({
         )}
         {cell.messageId && (
           <>
+            <button
+              type="button"
+              onClick={regenerate}
+              title="重新生成"
+              aria-label="重新生成"
+              className="cell-action-btn"
+            >
+              <RotateCw size={12} />
+            </button>
             <button
               type="button"
               onClick={recall}

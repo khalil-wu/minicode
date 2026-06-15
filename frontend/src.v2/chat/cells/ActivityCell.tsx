@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import type React from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { ChevronDown, ChevronRight, Copy } from "lucide-react";
 import type { ActivityCellState } from "./cellTypes";
 import { useAppStore } from "../../stores";
 import "./cells.css";
@@ -58,10 +58,29 @@ export function ActivityCell({
   const shouldAutoExpand = cell.status === "failed" || !cell.collapsed;
   const [isExpanded, setIsExpanded] = useState(shouldAutoExpand);
   const [showErrorDetail, setShowErrorDetail] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     setIsExpanded(shouldAutoExpand);
   }, [cell.id, cell.status, cell.collapsed, shouldAutoExpand]);
+
+  const copyOutput = useCallback(() => {
+    const records = cell.toolCallRecords ?? [];
+    const outputs = records
+      .map((r) => {
+        const output = r.outputPreview || r.error || "";
+        return output ? `${r.name}:\n${output}` : "";
+      })
+      .filter(Boolean)
+      .join("\n\n");
+
+    if (!outputs) return;
+
+    navigator.clipboard.writeText(outputs).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    });
+  }, [cell.toolCallRecords]);
 
   const hasRecords = cell.toolCallRecords && cell.toolCallRecords.length > 0;
   const canToggle = !isActive && hasRecords;
@@ -122,6 +141,22 @@ export function ActivityCell({
           <span className="activity-cell-toggle">
             {isExpanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
           </span>
+        )}
+
+        {/* Copy output button */}
+        {hasRecords && (cell.status === "completed" || cell.status === "failed") && (
+          <button
+            type="button"
+            className="activity-cell-copy-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              copyOutput();
+            }}
+            title={copied ? "已复制" : "复制输出"}
+            aria-label={copied ? "已复制" : "复制输出"}
+          >
+            <Copy size={10} />
+          </button>
         )}
 
         {/* Long-running warning */}

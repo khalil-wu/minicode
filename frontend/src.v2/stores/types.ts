@@ -761,6 +761,8 @@ export interface AgentSlice {
   updatePlanStep: (idx: number, status: PlanStep["status"]) => void;
   setTodos: (t: TodoItem[]) => void;
   updateTodo: (id: string, patch: Partial<TodoItem>) => void;
+  addTodo: (todo: TodoItem) => void;
+  removeTodo: (id: string) => void;
   addSubagent: (s: SubagentState) => void;
   updateSubagent: (id: string, patch: Partial<SubagentState>) => void;
   removeSubagent: (id: string) => void;
