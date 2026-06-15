@@ -1,5 +1,5 @@
 import { memo, useMemo } from "react";
-import { Activity, CheckCircle, Loader2, Pencil, XCircle } from "lucide-react";
+import { Activity, CheckCircle, Loader2, Pencil, XCircle, Pause, Play } from "lucide-react";
 import { useAppStore } from "../../stores";
 
 /**
@@ -17,6 +17,9 @@ import { useAppStore } from "../../stores";
  */
 export const AgentStatusBar = memo(function AgentStatusBar() {
   const isStreaming = useAppStore((s) => s.isStreaming);
+  const isPaused = useAppStore((s) => s.isPaused);
+  const pauseStreaming = useAppStore((s) => s.pauseStreaming);
+  const resumeStreaming = useAppStore((s) => s.resumeStreaming);
   const conversationId = useAppStore((s) => s.conversationId);
   const agentProgress = useAppStore((s) => s.agentProgress);
   const messages = useAppStore((s) => s.messages);
@@ -68,12 +71,25 @@ export const AgentStatusBar = memo(function AgentStatusBar() {
 
   if (!state) return null;
 
+  const showPauseButton = isStreaming && (state.kind === "thinking" || state.kind === "writing" || state.kind === "executing");
+
   return (
     <div style={barStyle} data-testid="agent-status-bar">
       <StatusIcon kind={state.kind} />
       <span style={labelStyle}>
         <StatusLabel state={state} />
+        {isPaused && <span style={{ marginLeft: 8, color: "var(--state-warning)" }}>(Paused)</span>}
       </span>
+      {showPauseButton && (
+        <button
+          type="button"
+          onClick={isPaused ? resumeStreaming : pauseStreaming}
+          title={isPaused ? "继续" : "暂停"}
+          style={pauseButtonStyle}
+        >
+          {isPaused ? <Play size={12} /> : <Pause size={12} />}
+        </button>
+      )}
     </div>
   );
 });
@@ -148,6 +164,22 @@ const labelStyle: React.CSSProperties = {
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
+};
+
+const pauseButtonStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: 24,
+  height: 24,
+  marginLeft: 12,
+  padding: 0,
+  background: "transparent",
+  border: "1px solid var(--border-subtle)",
+  borderRadius: "var(--radius-sm)",
+  color: "var(--text-muted)",
+  cursor: "pointer",
+  transition: "var(--transition-fast)",
 };
 
 // CSS animation for the spinner

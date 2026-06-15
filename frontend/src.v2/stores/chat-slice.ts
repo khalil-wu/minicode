@@ -54,6 +54,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
   conversationMessages: {},
   conversationStreaming: {},
   isStreaming: false,
+  isPaused: false,
   isConnected: false,
   lastUsage: null,
   sideChats: {},
@@ -240,6 +241,14 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     }),
   interrupt: () => {
     get().finishStreaming(undefined, undefined, "interrupted");
+  },
+  pauseStreaming: () => {
+    set({ isPaused: true });
+    sendClientCommand({ type: "pause_streaming" });
+  },
+  resumeStreaming: () => {
+    set({ isPaused: false });
+    sendClientCommand({ type: "resume_streaming" });
   },
   requestConversationSwitch: (id) => {
     const targetId = id.trim();
