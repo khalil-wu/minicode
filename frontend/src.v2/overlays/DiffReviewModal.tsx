@@ -97,7 +97,7 @@ export const DiffReviewModal = () => {
 
   return (
     <div
-      className="overlay-backdrop fixed inset-0 flex items-center justify-center backdrop-blur-sm"
+      className="overlay-backdrop fixed inset-0 flex items-center justify-center"
       style={{
         background: "rgba(0,0,0,0.6)",
         zIndex: "var(--z-approval)",
