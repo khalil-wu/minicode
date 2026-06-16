@@ -90,7 +90,7 @@ export const AskUserPrompt = () => {
         alignItems: "center",
         justifyContent: "center",
         zIndex: "var(--z-approval)",
-        backdropFilter: "blur(4px)",
+        // 🔧 移除模糊效果 - 用户需要看清背景内容
       }}
     >
       <div
