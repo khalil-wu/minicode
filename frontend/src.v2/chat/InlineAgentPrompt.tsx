@@ -19,7 +19,7 @@ export const InlineAgentPrompt = () => {
   const pendingDiffReview = useAppStore((s) => s.pendingDiffReview);
   const pendingAskUser = useAppStore((s) => s.pendingAskUser);
   const activeConversationId = useAppStore((s) => s.conversationId);
-  const visibleApproval = pendingPromptTargetsConversation(pendingApproval, activeConversationId, activeConversationId)
+  const primaryVisibleApproval = pendingPromptTargetsConversation(pendingApproval, activeConversationId, activeConversationId)
     ? pendingApproval
     : null;
   const visibleDiffReview = pendingPromptTargetsConversation(pendingDiffReview, activeConversationId, activeConversationId)
@@ -31,13 +31,17 @@ export const InlineAgentPrompt = () => {
   const visibleApprovalQueue = approvalQueue.filter((item) =>
     pendingPromptTargetsConversation(item, activeConversationId, activeConversationId),
   );
+  const visibleApproval = primaryVisibleApproval ?? visibleApprovalQueue[0] ?? null;
+  const queuedApprovals = visibleApproval
+    ? visibleApprovalQueue.filter((item) => item.requestId !== visibleApproval.requestId)
+    : [];
 
   if (!visibleApproval && !visibleDiffReview && !visibleAskUser) return null;
 
   return (
     <div style={shellStyle} aria-label="Agent is waiting for input">
       {visibleDiffReview && <DiffApprovalCard request={visibleDiffReview} />}
-      {visibleApproval && <ToolApprovalCard request={visibleApproval} queue={visibleApprovalQueue} />}
+      {visibleApproval && <ToolApprovalCard request={visibleApproval} queue={queuedApprovals} />}
       {visibleAskUser && <AskUserCard request={visibleAskUser} />}
     </div>
   );
@@ -58,7 +62,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
 
   const allowAll = () => {
     const store = useAppStore.getState();
-    const all = [request, ...store.approvalQueue];
+    const all = [request, ...queue];
     for (const item of all) {
       getWebSocket()?.send(buildApprovalResponseCommand(item.requestId, "approve", item.protocol));
     }

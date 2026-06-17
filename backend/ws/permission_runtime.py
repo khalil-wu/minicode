@@ -15,6 +15,31 @@ from backend.ws.utils import (
 
 
 class SessionPermissionRuntimeMixin:
+    def _permission_context_for_conversation(
+        self,
+        conversation: Any | None,
+        *,
+        source: str,
+    ):
+        requested = (
+            normalize_permission_mode(str(getattr(conversation, "permission_mode", DEFAULT_CONVERSATION_PERMISSION_MODE)))
+            or DEFAULT_CONVERSATION_PERMISSION_MODE
+        )
+        deny_rules = normalize_tool_patterns(getattr(conversation, "permission_deny_rules", []))
+        overrides = normalize_permission_overrides(getattr(conversation, "permission_overrides", {}))
+        scope = workspace_scope_for(
+            workspace_root=getattr(conversation, "workspace_root", "") if conversation is not None else "",
+            worktree_path=getattr(conversation, "worktree_path", "") if conversation is not None else "",
+        )
+        return self.permission_checker.build_context(
+            mode=requested,
+            session_overrides=overrides,
+            tool_deny_rules=deny_rules,
+            filesystem_constraints=getattr(self.permission_context, "filesystem_constraints", {}),
+            workspace_scope=scope,
+            source=source,
+        )
+
     def _set_permission_context(
         self,
         *,
@@ -71,26 +96,7 @@ class SessionPermissionRuntimeMixin:
             normalize_permission_mode(str(getattr(active, "permission_mode", DEFAULT_CONVERSATION_PERMISSION_MODE)))
             or DEFAULT_CONVERSATION_PERMISSION_MODE
         )
-        deny_rules = normalize_tool_patterns(getattr(active, "permission_deny_rules", []))
-        overrides = normalize_permission_overrides(getattr(active, "permission_overrides", {}))
-        scope = workspace_scope_for(
-            workspace_root=getattr(active, "workspace_root", "") if active is not None else "",
-            worktree_path=getattr(active, "worktree_path", "") if active is not None else "",
-        )
-        self._set_permission_context(
-            mode=requested,
-            session_overrides=overrides,
-            tool_deny_rules=deny_rules,
-            source=source,
-        )
-        self.permission_context = self.permission_checker.build_context(
-            mode=self.permission_context.mode,
-            session_overrides=self.permission_context.session_overrides,
-            tool_deny_rules=self.permission_context.tool_deny_rules,
-            filesystem_constraints=self.permission_context.filesystem_constraints,
-            workspace_scope=scope,
-            source=source,
-        )
+        self.permission_context = self._permission_context_for_conversation(active, source=source)
         return requested
 
     def _build_permission_rules_payload(self, *, conversation: Any | None = None) -> dict[str, Any]:

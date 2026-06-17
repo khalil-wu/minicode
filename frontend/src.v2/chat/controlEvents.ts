@@ -116,7 +116,6 @@ export const handleControlEvent = (e: ServerEvent): boolean => {
   const s = useAppStore.getState();
   switch (e.type) {
     case "control_request": {
-      if (!isEventForActiveConversation(e)) return true;
       const ev = e as unknown as {
         request_id?: string;
         request?: {
@@ -147,6 +146,7 @@ export const handleControlEvent = (e: ServerEvent): boolean => {
         return true;
       }
       if (request.subtype === "elicitation") {
+        if (!isEventForActiveConversation(e)) return true;
         s.setAskUser({
           requestId,
           protocol: "control",
@@ -159,7 +159,6 @@ export const handleControlEvent = (e: ServerEvent): boolean => {
       return true;
     }
     case "approval_request": {
-      if (!isEventForActiveConversation(e)) return true;
       applyApprovalRequest({
         requestId: e.tool_call_id,
         conversationId: eventConversationId(e),

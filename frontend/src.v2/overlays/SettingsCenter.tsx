@@ -97,17 +97,7 @@ export const SettingsCenter = () => {
   ];
   const activeTabMeta = tabs.find((tab) => tab.id === activeTab) ?? tabs[0];
 
-  const switchPermissionMode = async (mode: typeof permissionMode) => {
-    if (mode === "bypass" && permissionMode !== "bypass") {
-      const { showConfirm } = await import("./DialogService");
-      const ok = await showConfirm({
-        title: "Enable Full access",
-        message: "Full access will run edits and commands without approval prompts. Continue?",
-        confirmLabel: "Enable",
-        danger: true,
-      });
-      if (!ok) return;
-    }
+  const switchPermissionMode = (mode: typeof permissionMode) => {
     setPermissionMode(mode);
   };
 

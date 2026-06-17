@@ -19,7 +19,7 @@ export const GeneralTab = ({
   effortLevel: string;
   currentModel: string;
   showReasoningEffort: boolean;
-  switchPermissionMode: (mode: PermissionMode) => Promise<void>;
+  switchPermissionMode: (mode: PermissionMode) => void;
   setEffortLevel: (level: "low" | "medium" | "high" | "max") => void;
 }) => (
   <>

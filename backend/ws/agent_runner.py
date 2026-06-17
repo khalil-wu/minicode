@@ -276,6 +276,10 @@ class SessionAgentRunnerMixin:
         run_workspace_context = self._workspace_context_for_conversation(conversation)
         run_metadata.setdefault("workspace_context", run_workspace_context)
         run_metadata.setdefault("requires_explicit_workspace", True)
+        run_permission_context = self._permission_context_for_conversation(
+            conversation,
+            source="agent.run",
+        )
 
         # 回填压缩摘要为持久备忘，保证模型轮次即使丢掉 snapshot 也能读到高层结论
         compaction_summary = (conversation.compaction_summary or "").strip()
@@ -419,7 +423,7 @@ class SessionAgentRunnerMixin:
                     skill_manager=self.skill_manager,
                     vector_memory=self.vector_memory,
                     state=agent_state,
-                    permission_context=self.permission_context,
+                    permission_context=run_permission_context,
                     workspace_root=run_workspace_root,
                     session_id=self.session_id,
                     task_id=getattr(self, "_conversation_run_task_ids", {}).get(conversation.id, self._active_task_id or ""),

@@ -13,13 +13,17 @@ export const ApprovalModal = () => {
   const pendingApprovalState = useAppStore((s) => s.pendingApproval);
   const approvalQueue = useAppStore((s) => s.approvalQueue);
   const activeConversationId = useAppStore((s) => s.conversationId);
-  const visibleApproval = pendingPromptTargetsConversation(pendingApprovalState, activeConversationId, activeConversationId)
+  const primaryVisibleApproval = pendingPromptTargetsConversation(pendingApprovalState, activeConversationId, activeConversationId)
     ? pendingApprovalState
     : null;
   const visibleQueue = approvalQueue.filter((item) =>
     pendingPromptTargetsConversation(item, activeConversationId, activeConversationId),
   );
-  const queuedCount = visibleQueue.length;
+  const visibleApproval = primaryVisibleApproval ?? visibleQueue[0] ?? null;
+  const visibleQueuedApprovals = visibleApproval
+    ? visibleQueue.filter((item) => item.requestId !== visibleApproval.requestId)
+    : [];
+  const queuedCount = visibleQueuedApprovals.length;
   const [respondingId, setRespondingId] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const clearTimers = useRef<Set<number>>(new Set());
@@ -65,9 +69,13 @@ export const ApprovalModal = () => {
   const approveAll = useCallback(() => {
     if (!visibleApproval) return;
     const store = useAppStore.getState();
-    const all = [visibleApproval, ...store.approvalQueue.filter((item) =>
-      pendingPromptTargetsConversation(item, activeConversationId, activeConversationId),
-    )];
+    const all = [
+      visibleApproval,
+      ...store.approvalQueue.filter((item) =>
+        item.requestId !== visibleApproval.requestId &&
+        pendingPromptTargetsConversation(item, activeConversationId, activeConversationId),
+      ),
+    ];
     const submitted: string[] = [];
     for (const item of all) {
       const sent = sendClientCommand(buildApprovalResponseCommand(item.requestId, "approve", item.protocol));

@@ -981,11 +981,10 @@ class WebSocketSession(
                 requested_permission_mode,
             )
 
-        if (
-            (not target_conversation_id or target_conversation_id == self.active_conversation_id)
-            and self._set_permission_context_mode(requested_permission_mode, source="user_message")
-        ):
-            await self._emit_permission_mode_updated()
+        if not target_conversation_id or target_conversation_id == self.active_conversation_id:
+            changed = self._set_permission_context_mode(requested_permission_mode, source="user_message")
+            if changed:
+                await self._emit_permission_mode_updated()
             if requested_permission_mode == "bypass":
                 await self._auto_approve_pending_tool_approvals(
                     reason="permission_mode_bypass",

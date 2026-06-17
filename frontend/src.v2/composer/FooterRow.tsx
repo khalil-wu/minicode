@@ -106,17 +106,7 @@ export const FooterRow = memo(({ sendState, onSend, compact = false, minimal = f
     setEffortOpen(false);
   };
 
-  const switchPermissionMode = async (mode: PermissionMode) => {
-    if (mode === "bypass" && permissionMode !== "bypass") {
-      const { showConfirm } = await import("../overlays/DialogService");
-      const ok = await showConfirm({
-        title: "Enable Full access",
-        message: "Full access can read files outside the workspace and run edits or commands without approval prompts. Continue?",
-        confirmLabel: "Enable",
-        danger: true,
-      });
-      if (!ok) return;
-    }
+  const switchPermissionMode = (mode: PermissionMode) => {
     setPermissionMode(mode);
     setPermissionOpen(false);
   };
