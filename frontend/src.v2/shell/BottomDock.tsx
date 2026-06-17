@@ -5,7 +5,7 @@ import { GitPanel } from "../panels/GitPanel";
 
 const TABS = [
   { id: "git", label: "Git" },
-  { id: "timeline", label: "Timeline" },
+  { id: "timeline", label: "Activity" },
   { id: "budget", label: "Budget" },
   { id: "debug", label: "Debug" },
 ] as const;

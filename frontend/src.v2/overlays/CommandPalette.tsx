@@ -298,8 +298,8 @@ export const CommandPalette = () => {
     },
     {
       id: "dock.timeline",
-      label: "Open Timeline",
-      hint: "tool calls",
+      label: "Open Activity",
+      hint: "tool activity",
       run: () => openDockTab("timeline"),
     },
     {

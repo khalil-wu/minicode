@@ -1,6 +1,7 @@
 import type { StateCreator } from "zustand";
 import type { AppStore, ComposerSlice } from "./types";
 import { initialUiPermissionMode, syncPermissionMode } from "../protocol/permissions";
+import { buildApprovalResponseCommand } from "../protocol/prompt-responses";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { LS, readLS, writeLS } from "./shared-helpers";
 
@@ -36,9 +37,29 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
     set((s) => ({ attachments: s.attachments.filter((a) => a.id !== id) })),
   clearAttachments: () => set({ attachments: [] }),
   setPermissionMode: (m) => {
+    const before = get();
     writeLS(LS.permissionMode, m);
     set({ permissionMode: m });
     syncPermissionMode(m);
+    if (m === "bypass") {
+      const responded = new Set<string>();
+      for (const approval of [before.pendingApproval, ...before.approvalQueue]) {
+        if (!approval || responded.has(approval.requestId)) continue;
+        responded.add(approval.requestId);
+        sendClientCommand(buildApprovalResponseCommand(approval.requestId, "approve", approval.protocol));
+      }
+      for (const diff of [before.pendingDiffReview, before.diffReview]) {
+        if (!diff || responded.has(diff.requestId)) continue;
+        responded.add(diff.requestId);
+        sendClientCommand(buildApprovalResponseCommand(diff.requestId, "approve", diff.protocol));
+      }
+      set({
+        pendingApproval: null,
+        approvalQueue: [],
+        pendingDiffReview: null,
+        diffReview: null,
+      });
+    }
   },
   setEffortLevel: (e) => {
     set({ effortLevel: e });

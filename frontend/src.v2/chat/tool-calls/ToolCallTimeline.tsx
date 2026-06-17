@@ -13,12 +13,12 @@ export const ToolCallTimeline = () => {
       </div>
     );
   }
-  const t0 = Math.min(...allCalls.map((c) => c.startedAt));
-  const tEnd = Math.max(...allCalls.map((c) => c.finishedAt ?? c.startedAt + 500));
-  const span = Math.max(1, tEnd - t0);
+  const startedAt = Math.min(...allCalls.map((c) => c.startedAt));
+  const finishedAt = Math.max(...allCalls.map((c) => c.finishedAt ?? c.startedAt + 500));
+  const span = Math.max(1, finishedAt - startedAt);
 
   return (
-    <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 4 }}>
+    <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
       <div
         style={{
           fontSize: "var(--text-xs)",
@@ -26,73 +26,96 @@ export const ToolCallTimeline = () => {
           marginBottom: 6,
         }}
       >
-        Timeline · {allCalls.length} call{allCalls.length === 1 ? "" : "s"} ·{" "}
+        Activity · {allCalls.length} call{allCalls.length === 1 ? "" : "s"} ·{" "}
         {(span / 1000).toFixed(1)}s span
       </div>
       {allCalls.map((c) => {
-        const start = ((c.startedAt - t0) / span) * 100;
-        const end = (((c.finishedAt ?? tEnd) - t0) / span) * 100;
-        const width = Math.max(1, end - start);
+        const status = c.status === "success"
+          ? "Completed"
+          : c.status === "failed"
+            ? "Failed"
+            : c.status === "blocked"
+              ? "Blocked"
+              : c.status === "partial"
+                ? "Partial"
+                : "Running";
+        const summary = c.displaySummary || c.inputSummary || c.summary || c.contentPreview || "";
+        const duration = c.finishedAt
+          ? `${((c.finishedAt - c.startedAt) / 1000).toFixed(2)}s`
+          : c.status === "running"
+            ? "running"
+            : "";
         return (
           <div
             key={c.id}
             style={{
               display: "grid",
-              gridTemplateColumns: "120px 1fr 60px",
+              gridTemplateColumns: "8px minmax(0, 1fr) auto",
               alignItems: "center",
-              gap: 8,
+              gap: 10,
+              minHeight: 42,
+              padding: "8px 10px",
+              border: "1px solid var(--border-subtle)",
+              borderRadius: "var(--radius-sm, 6px)",
+              background: "var(--surface-base)",
               fontSize: "var(--text-xs)",
             }}
           >
             <span
+              aria-hidden="true"
               style={{
-                fontFamily: "var(--font-mono)",
-                color: "var(--accent-primary)",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
+                width: 7,
+                height: 7,
+                borderRadius: 999,
+                background:
+                  c.status === "success"
+                    ? "var(--state-success)"
+                    : c.status === "failed"
+                      ? "var(--state-danger)"
+                      : c.status === "blocked" || c.status === "partial"
+                        ? "var(--state-warning)"
+                        : "var(--accent-primary)",
+                opacity: c.status === "running" ? 1 : 0.72,
               }}
-              title={c.name}
-            >
-              {c.name}
-            </span>
-            <div
-              style={{
-                position: "relative",
-                height: 8,
-                background: "var(--surface-soft)",
-                borderRadius: 4,
-              }}
-            >
+            />
+            <div style={{ minWidth: 0, display: "grid", gap: 2 }}>
+              <span
+                style={{
+                  fontFamily: "var(--font-mono)",
+                  color: "var(--text-primary)",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+                title={c.name}
+              >
+                {c.name}
+              </span>
+              {summary && (
+                <span
+                  style={{
+                    color: "var(--text-muted)",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                  title={summary}
+                >
+                  {summary}
+                </span>
+              )}
+            </div>
+            <div style={{ display: "grid", gap: 2, justifyItems: "end", color: "var(--text-muted)" }}>
               <div
                 style={{
-                  position: "absolute",
-                  left: `${start}%`,
-                  width: `${width}%`,
-                  top: 0,
-                  bottom: 0,
-                  borderRadius: 4,
-                  background:
-                    c.status === "success"
-                      ? "var(--state-success)"
-                      : c.status === "failed"
-                        ? "var(--state-danger)"
-                        : c.status === "blocked"
-                          ? "var(--state-warning)"
-                          : c.status === "partial"
-                            ? "var(--state-warning)"
-                            : "var(--accent-primary)",
-                  opacity: 0.8,
+                  color: c.status === "failed" ? "var(--state-danger)" : "var(--text-secondary)",
+                  fontWeight: 600,
                 }}
-              />
+              >
+                {status}
+              </div>
+              {duration && <span>{duration}</span>}
             </div>
-            <span style={{ color: "var(--text-muted)", textAlign: "right" }}>
-              {c.finishedAt
-                ? `${((c.finishedAt - c.startedAt) / 1000).toFixed(2)}s`
-                : c.status === "running"
-                  ? "…"
-                  : ""}
-            </span>
           </div>
         );
       })}
