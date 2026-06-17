@@ -56,7 +56,7 @@ export function mapEventToCells(
         {
           kind: "status_notice",
           id: nextId("compact"),
-          tone: "warning",
+          tone: "info",
           title: "上下文已压缩",
           message: ev.summary || "已自动压缩对话历史以适应 token 限制。",
           createdAt: now,

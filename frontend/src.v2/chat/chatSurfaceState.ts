@@ -1277,7 +1277,7 @@ function buildStatusNoticeCell(
   // hide the real text.
   const isCompaction = msg.id === "system-compact-status" || msg.id.startsWith("system-compact");
   if (isCompaction) {
-    tone = "warning";
+    tone = "info";
     title = "上下文已压缩";
   } else if (content.startsWith("Error:") || content.startsWith("LLM API")) {
     tone = "danger";

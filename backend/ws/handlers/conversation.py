@@ -325,6 +325,12 @@ async def handle_conversation_permission_mode_set(session: "WebSocketSession", d
                 reason="permission_mode_bypass",
                 conversation_id=conversation_id,
             )
+        elif requested == "auto":
+            await session._auto_approve_pending_tool_approvals(
+                reason="permission_mode_auto",
+                conversation_id=conversation_id,
+                only_auto_allowed=True,
+            )
         await session._send_task_runtime_update()
 
     await session._send_conversation_list()

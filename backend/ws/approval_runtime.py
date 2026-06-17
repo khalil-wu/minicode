@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 from backend.agent.message import AgentEvent
+from backend.tools.base import PermissionLevel
 
 APPROVAL_INLINE_PATCH_LIMIT_BYTES = 100_000
 APPROVAL_INLINE_FILE_LIMIT = 10
@@ -65,6 +66,7 @@ class SessionApprovalRuntimeMixin:
         *,
         reason: str,
         conversation_id: str | None = None,
+        only_auto_allowed: bool = False,
     ) -> list[str]:
         pending_payloads = getattr(self, "_pending_approval_payloads", {})
         target_conversation_id = str(conversation_id or "").strip()
@@ -83,6 +85,8 @@ class SessionApprovalRuntimeMixin:
                 and str(request.get("subtype") or "").strip() == "can_use_tool"
             )
             if payload_type != "approval_request" and not is_tool_control_request:
+                continue
+            if only_auto_allowed and not self._pending_tool_payload_is_auto_allowed(payload):
                 continue
 
             resolved = self._resolve_pending_approval(
@@ -103,6 +107,27 @@ class SessionApprovalRuntimeMixin:
             await self._send_event(event)
 
         return approved_ids
+
+    def _pending_tool_payload_is_auto_allowed(self, payload: dict[str, Any]) -> bool:
+        tool_name = str(payload.get("tool_name") or "").strip()
+        args = payload.get("args") or {}
+        request = payload.get("request")
+        if isinstance(request, dict):
+            tool_name = str(request.get("tool_name") or tool_name).strip()
+            args = request.get("input") or args
+        if not tool_name:
+            return False
+        if not isinstance(args, dict):
+            args = {}
+        checker = getattr(self, "permission_checker", None)
+        context = getattr(self, "permission_context", None)
+        if checker is None:
+            return False
+        try:
+            return checker.check(tool_name, args, context=context) == PermissionLevel.AUTO
+        except Exception as exc:
+            logger.debug("pending approval auto-check failed for %s: %s", tool_name, exc)
+            return False
 
     def _normalize_control_response(
         self,
