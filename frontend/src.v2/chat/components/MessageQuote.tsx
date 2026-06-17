@@ -1,3 +1,4 @@
+import * as React from "react";
 import { Quote, X } from "lucide-react";
 import type { ChatMessage } from "../../stores/types";
 import "./message-quote.css";

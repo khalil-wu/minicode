@@ -35,6 +35,13 @@ def _short_path(value: str, max_parts: int = 2) -> str:
     return f".../{'/'.join(parts[-max_parts:])}"
 
 
+def _short_label(value: str, max_len: int = 72) -> str:
+    text = " ".join(value.strip().split())
+    if len(text) <= max_len:
+        return text
+    return f"{text[: max_len - 3].rstrip()}..."
+
+
 def _hostname(value: str) -> str:
     try:
         parsed = urlparse(value)
@@ -48,6 +55,10 @@ def _mcp_server_and_tool(name: str) -> tuple[str, str]:
     if len(parts) == 3 and parts[0] == "mcp":
         return parts[1], parts[2]
     return "", ""
+
+
+def _with_target(label: str, target: str) -> str:
+    return f"{label} {_short_label(target)}" if target else label
 
 
 class ProjectionRegistry:
@@ -112,26 +123,46 @@ class ProjectionRegistry:
             return _short_text(query)
         return ""
 
-    def display_hint_for_tool(self, tool_name: str) -> str:
+    def display_hint_for_tool(self, tool_name: str, args: dict[str, Any] | None = None) -> str:
         name = tool_name.lower()
+        target = self.input_summary_for_tool(tool_name, args or {})
         if name == "todo_write":
-            return "Updating tasks"
+            return "Update tasks"
         if name == "todo_read":
-            return "Reading tasks"
+            return "Read tasks"
+        if name in {"read_file", "read_artifact"}:
+            return _with_target("Read", target)
+        if name == "list_files":
+            return _with_target("List", target)
+        if any(part in name for part in ("grep", "glob", "search")) and self.result_kind_for_tool(tool_name) == "file":
+            return _with_target("Search", target)
+        if name in {"web_search", "search_web"}:
+            return _with_target("Search web", target)
+        if name in {"web_fetch"} or "fetch" in name:
+            return _with_target("Fetch", target)
+        if "command" in name or "terminal" in name or name in {"bash", "powershell"}:
+            return _with_target("Run", target)
+        if name in {"write_file", "edit_file"} or any(part in name for part in ("write", "edit", "patch", "delete")):
+            verb = "Write" if "write" in name else "Edit"
+            return _with_target(verb, target)
+        if name.startswith("mcp__"):
+            server, tool = _mcp_server_and_tool(tool_name)
+            label = f"{server}/{tool}" if server else tool_name
+            return _with_target(label, target)
         return {
-            "web": "Fetching page",
-            "search": "Searching",
-            "command": "Running command",
-            "file": "Reading workspace",
-            "edit": "Editing workspace",
-            "mcp": "Running MCP tool",
-            "skill": "Managing skill",
+            "web": "Fetch",
+            "search": "Search",
+            "command": "Run",
+            "file": "Read workspace",
+            "edit": "Edit workspace",
+            "mcp": "MCP tool",
+            "skill": "Manage skill",
         }.get(self.result_kind_for_tool(tool_name), "Running tool")
 
     def project_tool_call(self, tool_name: str, args: dict[str, Any]) -> ToolProjection:
         return ToolProjection(
             result_kind=self.result_kind_for_tool(tool_name),
-            display_hint=self.display_hint_for_tool(tool_name),
+            display_hint=self.display_hint_for_tool(tool_name, args),
             input_summary=self.input_summary_for_tool(tool_name, args),
             activity_kind=self.activity_kind_for_tool(tool_name),
         )
@@ -155,18 +186,18 @@ class ProjectionRegistry:
         if name == "todo_read":
             return "Task read failed" if status == "failed" else "Read tasks"
         if kind == "search":
-            return f"Searched web: {target}" if target else "Searched web"
+            return _with_target("Search web", target) if target else "Search web"
         if kind == "web":
             url = str(args.get("url") or result.source_url or "")
             host = _hostname(url) or target
-            verb = "Fetch failed" if status == "failed" else "Fetched page"
-            return f"{verb}: {host}" if host else verb
+            verb = "Fetch failed" if status == "failed" else "Fetch"
+            return _with_target(verb, host) if host else verb
         if kind == "command":
             prefix = "Command failed" if status == "failed" else "Ran command"
-            return f"{prefix}: {target}" if target else prefix
+            return _with_target(prefix, target) if target else prefix
         if kind == "edit":
             path = target or _short_path(str(args.get("file_path") or args.get("path") or ""))
-            summary = f"Edited file: {path}" if path else "Edited file"
+            summary = _with_target("Edited file", path) if path else "Edited file"
             if diff:
                 plus = int(diff.get("plus") or diff.get("additions") or 0)
                 minus = int(diff.get("minus") or diff.get("deletions") or 0)
@@ -175,10 +206,12 @@ class ProjectionRegistry:
             return summary
         if kind == "file":
             if name == "list_files":
-                return f"Listed directory: {target}" if target else "Listed directory"
-            if name == "read_file":
-                return f"Read file: {target}" if target else "Read file"
-            return f"Used workspace tool: {target}" if target else "Used workspace tool"
+                return _with_target("List", target) if target else "List"
+            if name in {"read_file", "read_artifact"}:
+                return _with_target("Read", target) if target else "Read"
+            if any(part in name for part in ("grep", "glob", "search")):
+                return _with_target("Search", target) if target else "Search"
+            return _with_target("Workspace", target) if target else "Workspace"
         if kind == "mcp":
             server, tool = _mcp_server_and_tool(tc.name)
             label = f"{server}/{tool}" if server else tc.name
@@ -203,8 +236,8 @@ def input_summary_for_tool(tool_name: str, args: dict[str, Any]) -> str:
     return DEFAULT_PROJECTION_REGISTRY.input_summary_for_tool(tool_name, args)
 
 
-def display_hint_for_tool(tool_name: str) -> str:
-    return DEFAULT_PROJECTION_REGISTRY.display_hint_for_tool(tool_name)
+def display_hint_for_tool(tool_name: str, args: dict[str, Any] | None = None) -> str:
+    return DEFAULT_PROJECTION_REGISTRY.display_hint_for_tool(tool_name, args)
 
 
 def activity_kind_for_tool(tool_name: str) -> str:

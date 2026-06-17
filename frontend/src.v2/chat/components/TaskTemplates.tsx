@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { FileText, ChevronRight } from "lucide-react";
+import { FileText, ChevronRight, X } from "lucide-react";
 import { useAppStore } from "../../stores";
-import type { TodoItem } from "../../stores/types";
+import { createTodoItem } from "../../lib/todo-utils";
 import "./task-templates.css";
 
 interface TaskTemplate {
@@ -128,14 +128,8 @@ export function TaskTemplates({ onApply }: TaskTemplatesProps) {
   const addTodo = useAppStore((s) => s.addTodo);
 
   const applyTemplate = (template: TaskTemplate) => {
-    const now = Date.now();
-    template.tasks.forEach((task, index) => {
-      const todo: TodoItem = {
-        id: `todo-${now}-${index}`,
-        content: task,
-        status: "pending",
-      };
-      addTodo(todo);
+    template.tasks.forEach((task) => {
+      addTodo(createTodoItem(task));
     });
     setExpanded(false);
     onApply?.();
@@ -165,8 +159,10 @@ export function TaskTemplates({ onApply }: TaskTemplatesProps) {
           type="button"
           className="task-templates-close"
           onClick={() => setExpanded(false)}
+          title="关闭模板"
+          aria-label="关闭模板选择"
         >
-          ✕
+          <X size={14} />
         </button>
       </div>
 

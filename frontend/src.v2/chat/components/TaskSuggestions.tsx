@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
-import { Sparkles, X, Check } from "lucide-react";
+import { Sparkles, X, Check, Plus } from "lucide-react";
 import { useAppStore } from "../../stores";
-import type { TodoItem } from "../../stores/types";
+import { createTodoItem } from "../../lib/todo-utils";
 import "./task-suggestions.css";
 
 interface TaskSuggestion {
@@ -12,7 +12,7 @@ interface TaskSuggestion {
 }
 
 interface TaskSuggestionsProps {
-  userPrompt: string;
+  userPrompt?: string;
   onDismiss?: () => void;
 }
 
@@ -40,12 +40,7 @@ export function TaskSuggestions({ userPrompt, onDismiss }: TaskSuggestionsProps)
   }, [userPrompt]);
 
   const adoptSuggestion = (suggestion: TaskSuggestion) => {
-    const todo: TodoItem = {
-      id: `todo-${Date.now()}-${suggestion.id}`,
-      content: suggestion.content,
-      status: "pending",
-    };
-    addTodo(todo);
+    addTodo(createTodoItem(suggestion.content));
     setAdopted((prev) => new Set(prev).add(suggestion.id));
   };
 
@@ -95,6 +90,8 @@ export function TaskSuggestions({ userPrompt, onDismiss }: TaskSuggestionsProps)
           type="button"
           className="task-suggestions-close"
           onClick={onDismiss}
+          title="关闭建议"
+          aria-label="关闭 AI 建议"
         >
           <X size={14} />
         </button>
@@ -126,7 +123,7 @@ export function TaskSuggestions({ userPrompt, onDismiss }: TaskSuggestionsProps)
                 disabled={isAdopted}
                 title={isAdopted ? "已采纳" : "采纳建议"}
               >
-                {isAdopted ? <Check size={16} /> : "✓"}
+                {isAdopted ? <Check size={16} /> : <Plus size={16} />}
               </button>
             </div>
           );

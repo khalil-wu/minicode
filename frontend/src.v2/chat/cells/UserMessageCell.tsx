@@ -54,22 +54,21 @@ export function UserMessageCell({ cell }: { cell: UserMessageCellState }) {
 
   return (
     <div className="user-cell-wrap">
-      <div className="edit-bubble-wrap" style={editBubbleWrapperStyle}>
+      <div className="edit-bubble-wrap">
         <button
           type="button"
           onClick={onEdit}
           title="Edit and resend"
           aria-label="Edit and resend"
-          style={editButtonStyle}
         >
           <Pencil size={11} />
         </button>
         <div className="user-cell-bubble md-prose">
-          <div style={userMsgContentStyle}>{cell.content}</div>
+          <div className="user-cell-content">{cell.content}</div>
           {cell.attachments && cell.attachments.length > 0 && (
-            <div style={attachmentsStyle}>
+            <div className="user-cell-attachments">
               {cell.attachments.map((attachment) => (
-                <span key={attachment.name} style={attachmentChipStyle}>
+                <span key={attachment.name} className="user-cell-attachment-chip">
                   {attachment.name}
                 </span>
               ))}
@@ -91,50 +90,3 @@ export function UserMessageCell({ cell }: { cell: UserMessageCellState }) {
     </div>
   );
 }
-
-const userMsgContentStyle: React.CSSProperties = {
-  color: "var(--text-primary)",
-  whiteSpace: "pre-wrap",
-  wordBreak: "break-word",
-};
-
-const attachmentsStyle: React.CSSProperties = {
-  display: "flex",
-  gap: 6,
-  marginTop: 8,
-  flexWrap: "wrap",
-};
-
-const attachmentChipStyle: React.CSSProperties = {
-  padding: "2px 8px",
-  borderRadius: "var(--radius-sm)",
-  background: "var(--surface-soft)",
-  fontSize: "var(--text-xs)",
-  color: "var(--text-muted)",
-};
-
-const editBubbleWrapperStyle: React.CSSProperties = {
-  position: "relative",
-  width: "fit-content",
-  maxWidth: "100%",
-};
-
-const editButtonStyle: React.CSSProperties = {
-  position: "absolute",
-  top: 2,
-  right: 2,
-  width: 24,
-  height: 24,
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  background: "var(--surface-raised)",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm)",
-  cursor: "pointer",
-  color: "var(--text-secondary)",
-  padding: 0,
-  opacity: 0,
-  transition: "opacity 150ms ease",
-  zIndex: 1,
-};

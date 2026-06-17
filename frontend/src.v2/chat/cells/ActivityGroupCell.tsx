@@ -1,8 +1,15 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type React from "react";
 import { CheckCircle2, ChevronDown, ChevronRight, Loader2, TriangleAlert } from "lucide-react";
 import type { ActivityCellState } from "./cellTypes";
 import { ActivityCell } from "./ActivityCell";
+import {
+  firstHttpUrl,
+  shortCommand,
+  shortTarget,
+  stringArg,
+} from "./activityCellHelpers";
+import type { ToolCallRecord } from "../../lib/tool-call-reducer";
 import "./cells.css";
 
 export function ActivityGroupCell({
@@ -13,51 +20,54 @@ export function ActivityGroupCell({
   isActive?: boolean;
 }) {
   const status = groupStatus(cells, isActive);
-  const [expanded, setExpanded] = useState(status !== "done");
+  const [expanded, setExpanded] = useState(false);
   const summaryItems = useMemo(() => buildSummaryItems(cells), [cells]);
 
-  // Calculate progress for batch operations
   const progress = useMemo(() => {
-    const completed = cells.filter(c => c.status === "completed").length;
-    const failed = cells.filter(c => c.status === "failed" || c.status === "interrupted").length;
-    const running = cells.filter(c => c.status === "running").length;
-    const total = cells.length;
+    const completed = cells.filter(c => c.status === "done").reduce((sum, cell) => sum + recordCount(cell), 0);
+    const failed = cells.filter(c => c.status === "failed" || c.status === "interrupted").reduce((sum, cell) => sum + recordCount(cell), 0);
+    const running = cells.filter(c => c.status === "running").reduce((sum, cell) => sum + recordCount(cell), 0);
+    const total = totalRecordCount(cells);
     return { completed, failed, running, total };
   }, [cells]);
 
+  useEffect(() => {
+    setExpanded(false);
+  }, [cells, status]);
+
   if (cells.length === 0) return null;
 
-  const title =
-    status === "running"
-      ? "Working"
-      : status === "failed"
-        ? "Stopped"
-        : "Completed";
+  const kind = groupKind(cells);
+  const title = groupTitle(cells, status);
+  const effectiveExpanded = expanded;
+  const progressLabel = kind === "context"
+    ? `${progress.total} 个来源`
+    : `${progress.completed + progress.failed}/${progress.total}`;
+  const showDoneSummary = status !== "done";
 
   const groupStateClass = `activity-group-cell-${status}`;
 
   return (
-    <section className={`activity-group-cell ${groupStateClass}`}>
+    <section className={`activity-group-cell ${groupStateClass}`} data-group-kind={kind}>
       <button
         type="button"
-        aria-label={expanded ? "Collapse activity details" : "Expand activity details"}
-        aria-expanded={expanded}
+        aria-label={effectiveExpanded ? "Collapse activity details" : "Expand activity details"}
+        aria-expanded={effectiveExpanded}
+        data-toggleable="true"
         onClick={() => setExpanded((value) => !value)}
         className="activity-group-header"
       >
-        {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        {effectiveExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         <StatusIcon status={status} />
         <span className="activity-group-title">{title}</span>
 
-        {/* Progress counter for batch operations */}
-        {cells.length > 1 && (
+        {cells.length > 1 && status !== "done" && (
           <span className="activity-group-progress-counter">
-            ({progress.completed + progress.failed}/{progress.total})
+            {progressLabel}
           </span>
         )}
 
-        {/* 折叠时：running显示实时进度，done/failed显示汇总 */}
-        {!expanded && status === "running" && cells.length > 1 ? (
+        {!effectiveExpanded && status === "running" && cells.length > 1 ? (
           <span className="activity-group-inline-progress">
             {cells.filter(c => c.status === "running").slice(0, 2).map((cell) => (
               <span key={cell.id} className="activity-group-inline-progress-item">
@@ -65,7 +75,7 @@ export function ActivityGroupCell({
               </span>
             ))}
           </span>
-        ) : !expanded ? (
+        ) : !effectiveExpanded && showDoneSummary ? (
           <span className="activity-group-summary">
             {summaryItems.map((item) => (
               <span key={item} className="activity-group-pill">
@@ -75,7 +85,7 @@ export function ActivityGroupCell({
           </span>
         ) : null}
       </button>
-      {expanded && (
+      {effectiveExpanded && (
         <div className="activity-group-body">
           {cells.map((cell) => (
             <ActivityCell
@@ -92,7 +102,7 @@ export function ActivityGroupCell({
 
 function StatusIcon({ status }: { status: "running" | "done" | "failed" }) {
   if (status === "running") {
-    return <Loader2 size={14} className="spinner" style={{ color: "var(--accent-primary)" }} />;
+    return <Loader2 size={14} className="spinner" style={{ color: "#3B82F6" }} />;
   }
   if (status === "failed") {
     return <TriangleAlert size={14} style={{ color: "var(--state-danger)" }} />;
@@ -106,44 +116,375 @@ function groupStatus(cells: ActivityCellState[], isActive: boolean): "running" |
   return "done";
 }
 
+function groupTitle(cells: ActivityCellState[], status: "running" | "done" | "failed"): string {
+  if (status === "failed") return "需要处理";
+
+  const counts = activityCounts(cells);
+  const total = totalRecordCount(cells);
+  const fileRead = counts.fileRead ?? 0;
+  const workspaceSearch = counts.workspaceSearch ?? 0;
+  const webSearch = counts.webSearch ?? 0;
+  const mcpToolCall = counts.mcpToolCall ?? 0;
+  const commandExecution = counts.commandExecution ?? 0;
+  const fileChange = counts.fileChange ?? 0;
+  const isContextGroup = (
+    fileRead > 0 ||
+    workspaceSearch > 0 ||
+    webSearch > 0 ||
+    mcpToolCall > 0
+  ) && commandExecution === 0 && fileChange === 0;
+
+  if (isContextGroup) {
+    return status === "running"
+      ? "正在收集上下文"
+      : total === 1 ? "已收集上下文" : `已收集 ${total} 个上下文来源`;
+  }
+  if (commandExecution > 0 && commandExecution === total) {
+    return status === "running"
+      ? "正在运行命令"
+      : total === 1 ? "已运行命令" : `已运行 ${total} 条命令`;
+  }
+  if (fileChange > 0 && fileChange === total) {
+    return total === 1 ? "已编辑文件" : `已编辑 ${total} 个文件`;
+  }
+  if ((counts.genericTool ?? 0) > 0 && (counts.genericTool ?? 0) === total) {
+    const title = cells[0]?.title?.trim();
+    return total === 1 && title ? title : `已处理 ${total} 项`;
+  }
+
+  const firstKind = cells[0]?.activityKind;
+  switch (firstKind) {
+    case "fileRead":
+      return total === 1 ? "已读取文件" : `已读取 ${total} 个文件`;
+    case "workspaceSearch":
+      return total === 1 ? "已搜索工作区" : `已搜索 ${total} 次`;
+    case "webSearch":
+      return total === 1 ? "已搜索网页" : `已搜索网页 ${total} 次`;
+    case "commandExecution":
+      return total === 1 ? "已运行命令" : `已运行 ${total} 条命令`;
+    case "fileChange":
+      return total === 1 ? "已编辑文件" : `已编辑 ${total} 个文件`;
+    case "mcpToolCall":
+      return total === 1 ? "已调用 MCP" : `已调用 ${total} 个 MCP 工具`;
+    case "reasoning":
+    case "planning":
+    case "providerReasoning":
+      return "思考过程";
+    default:
+      return `已处理 ${total} 项`;
+  }
+}
+
+function groupKind(cells: ActivityCellState[]): "context" | "command" | "change" | "tool" | "mixed" {
+  const counts = activityCounts(cells);
+  const total = totalRecordCount(cells);
+  const fileRead = counts.fileRead ?? 0;
+  const workspaceSearch = counts.workspaceSearch ?? 0;
+  const webSearch = counts.webSearch ?? 0;
+  const mcpToolCall = counts.mcpToolCall ?? 0;
+  const commandExecution = counts.commandExecution ?? 0;
+  const fileChange = counts.fileChange ?? 0;
+  const contextTotal = fileRead + workspaceSearch + webSearch + mcpToolCall;
+  if (contextTotal > 0 && commandExecution === 0 && fileChange === 0) return "context";
+  if (commandExecution > 0 && commandExecution === total) return "command";
+  if (fileChange > 0 && fileChange === total) return "change";
+  if ((counts.genericTool ?? 0) > 0 && (counts.genericTool ?? 0) === total) return "tool";
+  return "mixed";
+}
+
 function buildSummaryItems(cells: ActivityCellState[]): string[] {
-  const seen = new Set<string>();
   const items: string[] = [];
+  const counts = activityCounts(cells);
+  const fileRead = counts.fileRead ?? 0;
+  const workspaceSearch = counts.workspaceSearch ?? 0;
+  const webSearch = counts.webSearch ?? 0;
+  const commandExecution = counts.commandExecution ?? 0;
+  const fileChange = counts.fileChange ?? 0;
+  const mcpToolCall = counts.mcpToolCall ?? 0;
+  if (fileRead) items.push(`${fileRead} 个文件`);
+  if (workspaceSearch) items.push(`${workspaceSearch} 次搜索`);
+  if (webSearch) items.push(`${webSearch} 次联网`);
+  if (commandExecution) items.push(`${commandExecution} 条命令`);
+  if (fileChange) items.push(`${fileChange} 处编辑`);
+  if (mcpToolCall) items.push(`${mcpToolCall} 个 MCP`);
+
+  if (items.length === 0) {
+    const seen = new Set<string>();
+    for (const cell of cells) {
+      const item = summaryForCell(cell);
+      if (!item || seen.has(item)) continue;
+      seen.add(item);
+      items.push(item);
+    }
+  }
+  return items.slice(0, 4);
+}
+
+interface ActivityPreviewItem {
+  key: string;
+  label: string;
+  text: string;
+  title?: string;
+  meta?: string;
+}
+
+function buildPreviewItems(cells: ActivityCellState[]): ActivityPreviewItem[] {
+  const items: ActivityPreviewItem[] = [];
+  const seen = new Set<string>();
   for (const cell of cells) {
-    const item = summaryForCell(cell);
-    if (!item || seen.has(item)) continue;
-    seen.add(item);
-    items.push(item);
+    const records = cell.toolCallRecords ?? [];
+    if (records.length === 0) {
+      const fallback = previewForCellWithoutRecords(cell);
+      if (fallback) addPreviewItem(items, seen, fallback);
+      continue;
+    }
+    for (const record of records) {
+      const item = previewForRecord(cell, record);
+      if (item) addPreviewItem(items, seen, item);
+      if (items.length >= 3) break;
+    }
+    if (items.length >= 3) break;
   }
   return items;
 }
 
+function addPreviewItem(items: ActivityPreviewItem[], seen: Set<string>, item: Omit<ActivityPreviewItem, "key">) {
+  const key = `${item.label}\n${item.text}\n${item.meta ?? ""}`;
+  if (seen.has(key)) return;
+  seen.add(key);
+  items.push({ ...item, key });
+}
+
+function previewForCellWithoutRecords(cell: ActivityCellState): Omit<ActivityPreviewItem, "key"> | null {
+  if (
+    cell.activityKind === "reasoning" ||
+    cell.activityKind === "planning" ||
+    cell.activityKind === "providerReasoning" ||
+    cell.activityKind === "processNote"
+  ) {
+    const text = cell.status === "running" ? "正在思考" : "思考过程";
+    return {
+      label: cell.status === "running" ? "思考" : "推理",
+      text,
+      title: text,
+    };
+  }
+
+  const text = readableFallback(cell.subtitle || cell.title).trim();
+  if (!text) return null;
+  return {
+    label: labelForActivityKind(cell.activityKind),
+    text: shortPreviewText(text, 74),
+    title: text,
+  };
+}
+
+function previewForRecord(
+  cell: ActivityCellState,
+  record: ToolCallRecord,
+): Omit<ActivityPreviewItem, "key"> | null {
+  const args = record.args ?? {};
+  const name = record.name.toLowerCase();
+  const displayText = record.displaySummary || record.inputSummary || record.summary || "";
+
+  if (cell.activityKind === "commandExecution" || /run_command|bash|powershell|terminal|shell/i.test(name)) {
+    const command = stringArg(args.command ?? args.cmd) || displayText;
+    if (!command) return null;
+    const output = compactOutputPreview(record.outputPreview || record.stdoutPreview || record.stderrPreview || "");
+    return {
+      label: "运行",
+      text: shortCommand(command).replace(/^\$\s*/, ""),
+      title: command,
+      meta: output || statusMeta(record),
+    };
+  }
+
+  if (cell.activityKind === "fileChange" || /write|edit|patch|delete|remove|create|move|rename|save/i.test(name)) {
+    const target = fileTarget(record);
+    const diff = record.diff ? `+${record.diff.plus} -${record.diff.minus}` : "";
+    return {
+      label: /write/i.test(name) ? "写入" : "编辑",
+      text: target ? shortPath(target) : shortPreviewText(displayText || record.name, 74),
+      title: target || displayText,
+      meta: diff || statusMeta(record),
+    };
+  }
+
+  if (cell.activityKind === "webSearch" || /web_search|search_web|web_fetch|fetch/i.test(name)) {
+    const url = stringArg(args.url ?? args.source_url ?? record.sourceUrl) || firstHttpUrl(displayText);
+    const query = stringArg(args.query ?? args.q);
+    const text = url ? hostLabel(url) : query || displayText;
+    if (!text) return null;
+    return {
+      label: url ? "读取" : "搜索",
+      text: shortPreviewText(text, 78),
+      title: url || query || displayText,
+      meta: record.provider || statusMeta(record),
+    };
+  }
+
+  if (cell.activityKind === "mcpToolCall" || name.startsWith("mcp__")) {
+    const [, server = "", tool = ""] = record.name.match(/^mcp__([^_]+)__(.+)$/i) ?? [];
+    const target = (
+      stringArg(args.query) ||
+      stringArg(args.prompt) ||
+      stringArg(args.path) ||
+      stringArg(args.url) ||
+      displayText
+    );
+    return {
+      label: server || "MCP",
+      text: shortPreviewText(target || tool || record.name, 78),
+      title: target || record.name,
+      meta: tool ? shortPreviewText(tool.replace(/_/g, " "), 24) : statusMeta(record),
+    };
+  }
+
+  if (cell.activityKind === "fileRead" || /read_file|read_artifact/i.test(name)) {
+    const target = fileTarget(record);
+    if (!target && !displayText) return null;
+    return {
+      label: "读取",
+      text: target ? shortPath(target) : shortPreviewText(displayText, 74),
+      title: target || displayText,
+      meta: statusMeta(record),
+    };
+  }
+
+  if (cell.activityKind === "workspaceSearch" || /grep|glob|list_files|fuzzy_search/i.test(name)) {
+    const target = (
+      stringArg(args.pattern) ||
+      stringArg(args.query) ||
+      stringArg(args.glob) ||
+      stringArg(args.directory) ||
+      stringArg(args.path) ||
+      displayText
+    );
+    if (!target) return null;
+    return {
+      label: /list/i.test(name) ? "列出" : "搜索",
+      text: shortPreviewText(target, 78),
+      title: target,
+      meta: statusMeta(record),
+    };
+  }
+
+  const target = displayText || record.inputSummary || record.name;
+  return target
+    ? {
+      label: labelForActivityKind(cell.activityKind),
+      text: shortPreviewText(target, 78),
+      title: target,
+      meta: statusMeta(record),
+    }
+    : null;
+}
+
+function fileTarget(record: ToolCallRecord): string {
+  return stringArg(record.args.file_path ?? record.args.path ?? record.args.target ?? record.args.filename);
+}
+
+function shortPath(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  const parts = normalized.split("/").filter(Boolean);
+  if (parts.length <= 3) return shortTarget(normalized);
+  return `.../${parts.slice(-3).join("/")}`;
+}
+
+function shortPreviewText(value: string, max = 80): string {
+  const text = String(value).replace(/\s+/g, " ").trim();
+  if (text.length <= max) return text;
+  return `${text.slice(0, max - 1).trimEnd()}…`;
+}
+
+function statusMeta(record: ToolCallRecord): string {
+  if (record.status === "failed" || record.status === "blocked") return "失败";
+  if (record.status === "partial") return "部分完成";
+  if (record.status === "running" || record.status === "pending") return "运行中";
+  return "";
+}
+
+function compactOutputPreview(value: string): string {
+  const lines = String(value)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return shortPreviewText(lines.slice(-2).join(" · "), 88);
+}
+
+function hostLabel(url: string): string {
+  try {
+    return new URL(url).host.replace(/^www\./i, "");
+  } catch {
+    return url;
+  }
+}
+
+function labelForActivityKind(kind: ActivityCellState["activityKind"]): string {
+  switch (kind) {
+    case "fileRead":
+      return "读取";
+    case "workspaceSearch":
+      return "搜索";
+    case "webSearch":
+      return "联网";
+    case "commandExecution":
+      return "运行";
+    case "fileChange":
+      return "编辑";
+    case "mcpToolCall":
+      return "MCP";
+    case "reasoning":
+    case "planning":
+    case "processNote":
+    case "providerReasoning":
+      return "备注";
+    default:
+      return "工具";
+  }
+}
+
+function totalRecordCount(cells: ActivityCellState[]): number {
+  return Math.max(1, cells.reduce((sum, cell) => sum + Math.max(1, cell.toolCallRecords?.length ?? 1), 0));
+}
+
+function recordCount(cell: ActivityCellState): number {
+  return Math.max(1, cell.toolCallRecords?.length ?? Number(firstNumber(cell.subtitle || cell.title) || 1));
+}
+
+function activityCounts(cells: ActivityCellState[]) {
+  return cells.reduce((counts, cell) => {
+    counts[cell.activityKind] = (counts[cell.activityKind] ?? 0) + recordCount(cell);
+    return counts;
+  }, {} as Partial<Record<ActivityCellState["activityKind"], number>>);
+}
+
 function summaryForCell(cell: ActivityCellState): string {
   const subtitle = cell.subtitle ?? "";
-  const count = String(Math.max(1, cell.toolCallRecords?.length ?? Number(firstNumber(cell.subtitle || cell.title) || 1)));
+  const count = String(recordCount(cell));
   switch (cell.activityKind) {
     case "reasoning":
     case "planning":
     case "processNote":
     case "providerReasoning":
-      return cell.status === "running" ? "thinking" : "reasoning";
+      return cell.status === "running" ? "思考" : "推理";
     case "progress":
-      return "progress";
+      return "进度";
     case "webSearch":
       if (/page|web|read/i.test(`${cell.title} ${subtitle}`)) {
-        return count ? `pages ${count}` : "read web pages";
+        return count ? `${count} 个页面` : "已读取网页";
       }
-      return count ? `searches ${count}` : "searched web";
+      return count ? `${count} 次搜索` : "已搜索网页";
     case "fileRead":
-      return count ? `files ${count}` : cell.title;
+      return count ? `${count} 个文件` : cell.title;
     case "workspaceSearch":
-      return count ? `searches ${count}` : cell.title;
+      return count ? `${count} 次搜索` : cell.title;
     case "commandExecution":
-      return count ? `commands ${count}` : cell.title;
+      return count ? `${count} 条命令` : cell.title;
     case "fileChange":
-      return count ? `changed ${count}` : cell.title;
+      return count ? `${count} 处编辑` : cell.title;
     case "mcpToolCall":
-      return count ? `MCP ${count}` : cell.title;
+      return count ? `${count} 个 MCP` : cell.title;
     default:
       return readableFallback(cell.title);
   }

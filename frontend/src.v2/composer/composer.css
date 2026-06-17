@@ -1,0 +1,247 @@
+/**
+ * Composer styles - Codex-inspired design
+ */
+
+/* ========== Composer Container ========== */
+.composer-container {
+  padding: var(--spacing-4);
+  background: var(--bg-app);
+  border-top: 1px solid var(--border-light);
+}
+
+.composer-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+  transition: box-shadow var(--transition-base);
+}
+
+.composer-card:focus-within {
+  box-shadow: var(--shadow-lg);
+  border-color: var(--accent-primary);
+}
+
+/* ========== Composer Textarea ========== */
+.composer-textarea-wrap {
+  padding: var(--spacing-4);
+}
+
+.composer-textarea {
+  width: 100%;
+  min-height: 60px;
+  max-height: 300px;
+  border: none;
+  outline: none;
+  resize: none;
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--line-height-relaxed);
+  color: var(--text-primary);
+  background: transparent;
+}
+
+.composer-textarea::placeholder {
+  color: var(--text-muted);
+}
+
+/* ========== Footer Row ========== */
+.composer-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--spacing-3) var(--spacing-4);
+  border-top: 1px solid var(--border-light);
+  background: var(--bg-card);
+}
+
+.composer-footer-left {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-3);
+}
+
+.composer-footer-right {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+}
+
+/* ========== Attach Button ========== */
+.composer-attach-btn {
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-full);
+  background: var(--bg-card);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: all var(--transition-base);
+  flex-shrink: 0;
+}
+
+.composer-attach-btn:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-medium);
+  transform: scale(1.05);
+}
+
+.composer-attach-btn:active {
+  transform: scale(0.95);
+}
+
+/* ========== Context Info ========== */
+.composer-context {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.composer-context-icon {
+  font-size: 16px;
+}
+
+.composer-model-select {
+  padding: 4px 8px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+  cursor: pointer;
+  transition: all var(--transition-base);
+  max-width: 180px;
+}
+
+.composer-model-select:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-medium);
+}
+
+/* ========== Permission Mode Button ========== */
+.composer-permission-btn {
+  padding: 4px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: all var(--transition-base);
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-1);
+}
+
+.composer-permission-btn:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--border-medium);
+}
+
+/* ========== Send Button (Codex Orange Circle) ========== */
+.composer-send-btn {
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: var(--radius-full);
+  background: var(--accent-orange);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 18px;
+  font-weight: bold;
+  transition: all var(--transition-base);
+  box-shadow: var(--shadow-sm);
+  flex-shrink: 0;
+}
+
+.composer-send-btn:hover:not(:disabled) {
+  background: #FF8800;
+  box-shadow: var(--shadow-md);
+  transform: scale(1.05);
+}
+
+.composer-send-btn:active:not(:disabled) {
+  transform: scale(0.95);
+  box-shadow: var(--shadow-sm);
+}
+
+.composer-send-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+/* ========== Stop Button ========== */
+.composer-stop-btn {
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-full);
+  background: var(--bg-card);
+  color: var(--error-red);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all var(--transition-base);
+  flex-shrink: 0;
+}
+
+.composer-stop-btn:hover {
+  background: var(--error-red);
+  color: white;
+  border-color: var(--error-red);
+  transform: scale(1.05);
+}
+
+.composer-stop-btn:active {
+  transform: scale(0.95);
+}
+
+/* ========== Drag & Drop Overlay ========== */
+.composer-drag-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(74, 144, 226, 0.1);
+  border: 2px dashed var(--accent-primary);
+  border-radius: var(--radius-lg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--text-lg);
+  color: var(--accent-primary);
+  pointer-events: none;
+  z-index: 10;
+}
+
+/* ========== Responsive ========== */
+@media (max-width: 768px) {
+  .composer-footer {
+    flex-direction: column;
+    gap: var(--spacing-3);
+  }
+
+  .composer-footer-left,
+  .composer-footer-right {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .composer-context {
+    flex: 1;
+  }
+
+  .composer-model-select {
+    max-width: none;
+  }
+}

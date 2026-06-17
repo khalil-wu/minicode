@@ -14,12 +14,26 @@ body,
 }
 
 body {
-  font-family: var(--font-ui);
+  font-family: var(--font-sans);
   font-size: var(--text-base);
-  background: var(--surface-base);
+  background: var(--bg-app);
   color: var(--text-primary);
+  line-height: var(--line-height-normal);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+button {
+  font-family: inherit;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+
+input,
+textarea,
+select {
+  font-family: inherit;
 }
 
 /* ── Keyframe Animations ─────────────────────────────── */
@@ -42,8 +56,8 @@ body {
 
 
 @keyframes overlay-in {
-  from { opacity: 0; backdrop-filter: blur(0); }
-  to { opacity: 1; backdrop-filter: blur(6px); }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 @keyframes overlay-out {

@@ -1,12 +1,13 @@
-import { Check, ChevronDown, Paperclip, Send, ShieldCheck, StopCircle } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, FolderOpen, Plus, ShieldCheck, Square } from "lucide-react";
 import { memo, useEffect, useId, useRef, useState } from "react";
 import type { SendButtonState } from "../lib/send-state";
 import { useAppStore } from "../stores";
 import { getWebSocket } from "../hooks/useWebSocket";
 import { uploadComposerFiles } from "./uploads";
-import type { PermissionMode } from "../stores/types";
+import type { EffortLevel, PermissionMode } from "../stores/types";
 import { formatModelLabel } from "../lib/model-label";
 import { UsageRing } from "../shell/UsageRing";
+import { branchDisplayName, workspaceDisplayName } from "../lib/workspace-display";
 
 interface Props {
   sendState: SendButtonState;
@@ -20,47 +21,58 @@ interface Props {
   minimal?: boolean;
 }
 
-const formatTokens = (n: number): string => {
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
-  return String(n);
-};
-
 const PERMISSION_MODES: { id: PermissionMode; label: string; desc: string }[] = [
   { id: "ask_permissions", label: "Ask", desc: "Ask before file and network actions" },
   { id: "auto", label: "Auto", desc: "Auto read, search, and edit workspace files" },
   { id: "bypass", label: "Full access", desc: "Use files, network, edits, and commands without prompts" },
 ];
 
+const EFFORT_OPTIONS: { id: EffortLevel; label: string; desc: string }[] = [
+  { id: "low", label: "Low", desc: "Fastest pass" },
+  { id: "medium", label: "Med", desc: "Balanced reasoning" },
+  { id: "high", label: "High", desc: "Default coding depth" },
+  { id: "max", label: "Max", desc: "Deepest reasoning" },
+];
+
 
 export const FooterRow = memo(({ sendState, onSend, compact = false, minimal = false }: Props) => {
   const permissionMode = useAppStore((s) => s.permissionMode);
+  const effortLevel = useAppStore((s) => s.effortLevel);
   const currentModel = useAppStore((s) => s.currentModel);
   const availableModels = useAppStore((s) => s.availableModels);
+  const workingDirectory = useAppStore((s) => s.workingDirectory);
+  const workspaceGit = useAppStore((s) => s.workspaceGit);
   const prMonitor = useAppStore((s) => s.prMonitor);
   const setPermissionMode = useAppStore((s) => s.setPermissionMode);
+  const setEffortLevel = useAppStore((s) => s.setEffortLevel);
   const fileInputId = useId();
   const fileRef = useRef<HTMLInputElement>(null);
   const [modelOpen, setModelOpen] = useState(false);
   const [permissionOpen, setPermissionOpen] = useState(false);
+  const [effortOpen, setEffortOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const permissionRef = useRef<HTMLDivElement>(null);
+  const effortRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const close = (e: MouseEvent) => {
       if (modelOpen && dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) setModelOpen(false);
       if (permissionOpen && permissionRef.current && !permissionRef.current.contains(e.target as Node)) setPermissionOpen(false);
+      if (effortOpen && effortRef.current && !effortRef.current.contains(e.target as Node)) setEffortOpen(false);
     };
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
-  }, [modelOpen, permissionOpen]);
+  }, [modelOpen, permissionOpen, effortOpen]);
 
   useEffect(() => {
     const openModelMenu = () => {
       setPermissionOpen(false);
+      setEffortOpen(false);
       setModelOpen(true);
     };
     const openPermissionMenu = () => {
       setModelOpen(false);
+      setEffortOpen(false);
       setPermissionOpen(true);
     };
     document.addEventListener("open-model-menu", openModelMenu);
@@ -87,6 +99,11 @@ export const FooterRow = memo(({ sendState, onSend, compact = false, minimal = f
   const switchModel = (model: string) => {
     getWebSocket()?.send({ type: "llm.model.set", model });
     setModelOpen(false);
+  };
+
+  const switchEffort = (level: EffortLevel) => {
+    setEffortLevel(level);
+    setEffortOpen(false);
   };
 
   const switchPermissionMode = async (mode: PermissionMode) => {
@@ -124,6 +141,12 @@ export const FooterRow = memo(({ sendState, onSend, compact = false, minimal = f
   const disabledReason = !currentModel.trim() ? "Select a model before sending" : undefined;
 
   const permLabel = permissionLabel(permissionMode);
+  const effortLabel = effortOption(effortLevel).label;
+  const workspaceLabel = workspaceDisplayName(workingDirectory, "Work in a project");
+  const branchLabel = branchDisplayName(workspaceGit?.branch);
+  const workspaceTitle = [workingDirectory || workspaceLabel, branchLabel ? `branch: ${branchLabel}` : ""]
+    .filter(Boolean)
+    .join("\n");
 
   return (
     <div className="flex flex-col gap-0">
@@ -149,7 +172,7 @@ export const FooterRow = memo(({ sendState, onSend, compact = false, minimal = f
         </div>
       )}
 
-      <div style={footerStyle(compact, minimal)}>
+      <div className="composer-footer" style={footerStyle(compact, minimal)}>
         <input
           id={fileInputId}
           ref={fileRef}
@@ -161,28 +184,99 @@ export const FooterRow = memo(({ sendState, onSend, compact = false, minimal = f
           aria-hidden="true"
           onChange={handleFileChange}
         />
-        <button
-          type="button"
-          title="Attach file"
-          style={iconBtn(compact)}
-          aria-label="Attach file"
-          onClick={openFilePicker}
-          onKeyDown={(event) => {
-            if (event.key !== "Enter" && event.key !== " ") return;
-            openFilePicker(event);
-          }}
-        >
-          <Paperclip size={14} />
-        </button>
+        <div style={footerLeftStyle}>
+          <button
+            type="button"
+            title="Attach file"
+            className="composer-attach-btn"
+            style={iconBtn(compact)}
+            aria-label="Attach file"
+            onClick={openFilePicker}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" && event.key !== " ") return;
+              openFilePicker(event);
+            }}
+          >
+            <Plus size={compact ? 16 : 18} strokeWidth={1.8} />
+          </button>
+
+          <Picker
+            refEl={permissionRef}
+            open={permissionOpen}
+            setOpen={(open) => {
+              if (open) {
+                setModelOpen(false);
+                setEffortOpen(false);
+              }
+              setPermissionOpen(open);
+            }}
+            label={permLabel}
+            title={`Permission: ${permLabel}`}
+            tone={permissionTone(permissionMode)}
+            icon={<ShieldCheck size={12} />}
+          >
+            {PERMISSION_MODES.map((mode) => (
+              <MenuChoice
+                key={mode.id}
+                active={permissionMode === mode.id}
+                label={mode.label}
+                desc={mode.desc}
+                onClick={() => {
+                  switchPermissionMode(mode.id);
+                }}
+              />
+            ))}
+          </Picker>
+
+          {!minimal && (
+            <span style={workspacePillStyle} title={workspaceTitle}>
+              <FolderOpen size={13} />
+              <span style={workspaceNameStyle}>{workspaceLabel}</span>
+              {branchLabel && <span style={branchLabelStyle}>{branchLabel}</span>}
+            </span>
+          )}
+        </div>
 
         <span className="flex-1 min-w-0" />
+
+        {!minimal && <ContextUsageRing />}
+
+        <Picker
+          refEl={effortRef}
+          open={effortOpen}
+          align="right"
+          setOpen={(open) => {
+            if (open) {
+              setModelOpen(false);
+              setPermissionOpen(false);
+            }
+            setEffortOpen(open);
+          }}
+          label={effortLabel}
+          title={`Reasoning effort: ${effortOption(effortLevel).desc}`}
+          tone={effortLevel === "max" ? "warning" : "normal"}
+        >
+          {EFFORT_OPTIONS.map((option) => (
+            <MenuChoice
+              key={option.id}
+              active={effortLevel === option.id}
+              label={option.label}
+              desc={option.desc}
+              onClick={() => switchEffort(option.id)}
+            />
+          ))}
+        </Picker>
 
         <div ref={dropdownRef} className="relative">
           <button
             onClick={() => {
               setPermissionOpen(false);
+              setEffortOpen(false);
               setModelOpen(!modelOpen);
             }}
+            className="composer-model-select"
+            aria-expanded={modelOpen}
+            aria-haspopup="listbox"
             style={{ ...pill, background: modelOpen ? "var(--surface-page)" : "var(--surface-soft)", borderColor: modelOpen ? "var(--border-subtle)" : "transparent" }}
             title={currentModel || "Select model"}
           >
@@ -190,7 +284,7 @@ export const FooterRow = memo(({ sendState, onSend, compact = false, minimal = f
             <ChevronDown size={11} className="opacity-55 ml-0.5 flex-shrink-0" />
           </button>
           {modelOpen && availableModels.length > 0 && (
-            <div style={dropdownStyle}>
+            <div style={dropdownStyle("right")}>
               {availableModels.map((m) => (
                 <button key={m} onClick={() => switchModel(m)} style={{ ...dropdownItem, background: m === currentModel ? dropdownActiveBg : "transparent" }}>
                   {m === currentModel && <Check size={13} className="mr-1.5" style={{ color: "var(--accent-primary)" }} />}
@@ -212,41 +306,7 @@ export const FooterRow = memo(({ sendState, onSend, compact = false, minimal = f
           )}
         </div>
 
-        <Picker
-          refEl={permissionRef}
-          open={permissionOpen}
-          setOpen={(open) => {
-            if (open) setModelOpen(false);
-            setPermissionOpen(open);
-          }}
-          label={permLabel}
-          title={`Permission: ${permLabel}`}
-          tone={permissionTone(permissionMode)}
-          icon={<ShieldCheck size={12} />}
-        >
-          {PERMISSION_MODES.map((mode) => (
-            <MenuChoice
-              key={mode.id}
-              active={permissionMode === mode.id}
-              label={mode.label}
-              desc={mode.desc}
-              onClick={() => {
-                switchPermissionMode(mode.id);
-              }}
-            />
-          ))}
-        </Picker>
-
-        {!minimal && <ContextUsageRing />}
-
-        {compact ? (
-          <>
-            <span className="flex-1" />
-          <SendIconBtn sendState={sendState} onSend={onSend} disabledReason={disabledReason} />
-          </>
-        ) : (
-          <SendBtn sendState={sendState} onSend={onSend} disabledReason={disabledReason} />
-        )}
+        <SendIconBtn sendState={sendState} onSend={onSend} disabledReason={disabledReason} />
       </div>
     </div>
   );
@@ -260,6 +320,7 @@ const Picker = ({
   label,
   title,
   tone = "normal",
+  align = "left",
   icon,
   children,
 }: {
@@ -269,6 +330,7 @@ const Picker = ({
   label: string;
   title: string;
   tone?: "normal" | "danger" | "info" | "warning";
+  align?: "left" | "right";
   icon?: React.ReactNode;
   children: React.ReactNode;
 }) => (
@@ -278,6 +340,9 @@ const Picker = ({
       onClick={() => {
         setOpen(!open);
       }}
+      className="composer-permission-btn"
+      aria-expanded={open}
+      aria-haspopup="listbox"
       style={{ ...pill, background: open ? "var(--surface-page)" : "var(--surface-soft)", borderColor: open ? "var(--border-subtle)" : "transparent", color: toneColor(tone) }}
       title={title}
     >
@@ -285,7 +350,7 @@ const Picker = ({
       {label}
       <ChevronDown size={11} className="opacity-55 ml-0.5" />
     </button>
-    {open && <div style={dropdownStyle}>{children}</div>}
+    {open && <div style={dropdownStyle(align)}>{children}</div>}
   </div>
 );
 
@@ -302,6 +367,7 @@ const MenuChoice = ({
 }) => (
   <button
     onClick={onClick}
+    className="composer-menu-choice"
     style={{
       ...dropdownItem,
       display: "grid",
@@ -321,33 +387,6 @@ const MenuChoice = ({
     </span>
   </button>
 );
-
-const TokenUsage = memo(() => {
-  const lastUsage = useAppStore((s) => s.lastUsage);
-  const isStreaming = useAppStore((s) => s.isStreaming);
-  if (!lastUsage) return null;
-  const total = lastUsage.input + lastUsage.output + lastUsage.cacheRead + lastUsage.cacheWrite;
-  if (total === 0) return null;
-  return (
-    <span style={{ ...pathStyle, opacity: isStreaming ? 0.55 : 1 }} title={`In: ${lastUsage.input} Out: ${lastUsage.output} Cache: ${lastUsage.cacheRead}`}>
-      {formatTokens(lastUsage.input + lastUsage.output)} tok
-      {isStreaming && <span style={{ opacity: 0.65 }}> (Previous Turn)</span>}
-    </span>
-  );
-});
-TokenUsage.displayName = "TokenUsage";
-
-const SendBtn = memo(({ sendState, onSend, disabledReason }: { sendState: SendButtonState; onSend: () => void; disabledReason?: string }) => {
-  const disabled = sendState === "disabled";
-  const label = sendState === "stop" ? "Stop" : sendState === "sending" ? "..." : "Send";
-  return (
-    <button onClick={onSend} disabled={disabled} title={disabledReason} className="btn-send px-3.5 border-0 font-semibold min-w-[42px] h-[42px] inline-flex items-center justify-center gap-1.5" style={sendButtonStyle(sendState, disabled)}>
-      {sendState === "stop" ? <StopCircle size={14} /> : <Send size={14} />}
-      <span>{label}</span>
-    </button>
-  );
-});
-SendBtn.displayName = "SendBtn";
 
 const ContextUsageRing = memo(() => {
   const contextUsage = useAppStore((s) => s.contextUsage);
@@ -393,7 +432,7 @@ const toneColor = (tone: "normal" | "danger" | "info" | "warning") => {
 };
 
 const permissionTone = (mode: PermissionMode): "normal" | "danger" | "info" | "warning" =>
-  mode === "bypass" ? "danger" : mode === "auto" ? "info" : "normal";
+  mode === "bypass" ? "warning" : mode === "auto" ? "info" : "normal";
 
 const permissionLabel = (mode: PermissionMode): string => {
   if (mode === "ask_permissions") return "Ask";
@@ -401,6 +440,9 @@ const permissionLabel = (mode: PermissionMode): string => {
   if (mode === "bypass") return "Full access";
   return "Auto";
 };
+
+const effortOption = (level: EffortLevel) =>
+  EFFORT_OPTIONS.find((option) => option.id === level) ?? EFFORT_OPTIONS[2];
 
 const prMonitorStyle = (status: string): React.CSSProperties => ({
   display: "flex",
@@ -431,10 +473,17 @@ const footerStyle = (compact: boolean, minimal: boolean): React.CSSProperties =>
   fontSize: "var(--text-xs)",
 });
 
+const footerLeftStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 7,
+  minWidth: 0,
+};
+
 const iconBtn = (compact: boolean): React.CSSProperties => ({
   background: "transparent",
   color: "var(--text-secondary)",
-  border: 0,
+  border: "1px solid transparent",
   cursor: "pointer",
   width: compact ? 28 : 34,
   height: compact ? 28 : 34,
@@ -457,21 +506,42 @@ const pill: React.CSSProperties = {
   alignItems: "center",
 };
 
+const workspacePillStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  minWidth: 0,
+  maxWidth: 260,
+  height: 28,
+  padding: "0 8px",
+  border: "1px solid transparent",
+  borderRadius: "var(--radius-full)",
+  color: "var(--text-secondary)",
+  background: "transparent",
+};
 
-const pathStyle: React.CSSProperties = {
-  color: "var(--text-muted)",
-  fontFamily: "var(--font-mono)",
-  fontSize: "var(--text-xs)",
-  maxWidth: 170,
+const workspaceNameStyle: React.CSSProperties = {
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
+  fontSize: "var(--text-xs)",
 };
 
-const dropdownStyle: React.CSSProperties = {
+const branchLabelStyle: React.CSSProperties = {
+  overflow: "hidden",
+  maxWidth: 88,
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  color: "var(--text-muted)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 10,
+};
+
+const dropdownStyle = (align: "left" | "right" = "left"): React.CSSProperties => ({
   position: "absolute",
   bottom: "calc(100% + 6px)",
-  left: 0,
+  left: align === "left" ? 0 : "auto",
+  right: align === "right" ? 0 : "auto",
   minWidth: 244,
   background: "var(--surface-page)",
   border: "1px solid var(--border-subtle)",
@@ -481,7 +551,7 @@ const dropdownStyle: React.CSSProperties = {
   zIndex: 10,
   maxHeight: 260,
   overflowY: "auto",
-};
+});
 
 const dropdownActiveBg = "color-mix(in oklch, var(--accent-primary) 7%, var(--surface-page))";
 
@@ -499,26 +569,19 @@ const dropdownItem: React.CSSProperties = {
   borderRadius: "var(--radius-sm, 6px)",
 };
 
-const sendButtonStyle = (sendState: SendButtonState, disabled: boolean): React.CSSProperties => ({
-  background: sendState === "stop" ? "var(--state-danger)" : disabled ? "var(--surface-soft)" : "var(--accent-primary)",
-  color: disabled ? "var(--text-muted)" : "var(--text-on-accent)",
-  borderRadius: "var(--radius-md, 12px)",
-  cursor: disabled ? "not-allowed" : "pointer",
-});
-
 const SendIconBtn = memo(({ sendState, onSend, disabledReason }: { sendState: SendButtonState; onSend: () => void; disabledReason?: string }) => {
   const disabled = sendState === "disabled";
   return (
-    <button onClick={onSend} disabled={disabled} title={disabledReason || (sendState === "stop" ? "Stop" : "Send")} aria-label={sendState === "stop" ? "Stop" : "Send"} className="btn-send w-7 h-7 border-0 inline-flex items-center justify-center" style={sendIconButtonStyle(sendState, disabled)}>
-      {sendState === "stop" ? <StopCircle size={15} /> : <Send size={15} />}
+    <button onClick={onSend} disabled={disabled} title={disabledReason || (sendState === "stop" ? "Stop" : "Send")} aria-label={sendState === "stop" ? "Stop" : "Send"} className="btn-send composer-send-btn w-7 h-7 border-0 inline-flex items-center justify-center" style={sendIconButtonStyle(sendState, disabled)}>
+      {sendState === "stop" ? <Square size={12} fill="currentColor" /> : <ArrowUp size={16} strokeWidth={2.3} />}
     </button>
   );
 });
 SendIconBtn.displayName = "SendIconBtn";
 
 const sendIconButtonStyle = (sendState: SendButtonState, disabled: boolean): React.CSSProperties => ({
-  borderRadius: "var(--radius-sm, 7px)",
-  background: sendState === "stop" ? "var(--state-danger)" : disabled ? "transparent" : "var(--accent-primary)",
+  borderRadius: "var(--radius-full)",
+  background: sendState === "stop" ? "var(--text-primary)" : disabled ? "var(--surface-soft)" : "var(--text-primary)",
   color: disabled ? "var(--text-muted)" : "var(--text-on-accent)",
   cursor: disabled ? "not-allowed" : "pointer",
 });

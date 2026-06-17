@@ -1,13 +1,16 @@
 import { memo, useCallback, useMemo } from "react";
-import type React from "react";
 import { Copy, FileDown, RotateCcw, Search } from "lucide-react";
 import type {
   AssistantMarkdownCellState,
   ChatTurnState,
+  ExecCellState,
   HistoryCellState,
   StreamingAssistantTailCellState,
   UserMessageCellState,
 } from "../cells/cellTypes";
+import { AgentTurn } from "../../agent-loop/components/AgentTurn";
+import type { RenderAgentCellArgs } from "../../agent-loop/components/AgentTurn";
+import { projectChatTurnToAgentLoop, isTestCommand } from "../../agent-loop/projection/project-turn";
 import {
   ActivityCell,
   ActivityGroupCell,
@@ -15,6 +18,7 @@ import {
   DiffCell,
   ErrorCell,
   ExecCell,
+  ExecGroupCell,
   PlanCell,
   StatusNoticeCell,
   ThinkingCell,
@@ -36,8 +40,8 @@ export const ChatTurn = memo(function ChatTurn({
   turn: ChatTurnState;
   wide?: boolean;
 }) {
-  const committedCellEntries = useMemo(
-    () => withStableRenderKeys(groupActivityCells(turn.committedCells)),
+  const committedCells = useMemo(
+    () => groupActivityCells(turn.committedCells),
     [turn.committedCells],
   );
   const stopActiveRun = useCallback(() => {
@@ -49,99 +53,136 @@ export const ChatTurn = memo(function ChatTurn({
       conversation_id: conversationId,
     });
   }, []);
+  const agentTurn = useMemo(
+    () => projectChatTurnToAgentLoop(turn, committedCells),
+    [turn, committedCells],
+  );
+  const renderCell = useCallback(
+    ({ key, cell, isActive = false, className }: RenderAgentCellArgs) => (
+      <CellWithContextMenu
+        key={key}
+        cell={cell}
+        isActive={isActive}
+        className={className}
+        onStopExecution={stopActiveRun}
+      />
+    ),
+    [stopActiveRun],
+  );
 
   return (
-    <div className="chat-turn" style={turnStyle(wide)}>
-      {turn.userCell && <CellWithContextMenu cell={turn.userCell} />}
-      {committedCellEntries.map(({ cell, key }) => (
-        <CellWithContextMenu key={key} cell={cell} onStopExecution={stopActiveRun} />
-      ))}
-      {turn.activeCell && (
-        <CellWithContextMenu cell={turn.activeCell} isActive onStopExecution={stopActiveRun} />
-      )}
-      {turn.finalAnswerCell && (
-        <CellWithContextMenu cell={turn.finalAnswerCell} />
-      )}
-      {/* Streaming text that hasn't formed a final answer yet */}
-      {turn.status === "streaming" &&
-        !turn.activeCell &&
-        !turn.finalAnswerCell && <StreamingIndicator />}
-    </div>
+    <AgentTurn turn={agentTurn} wide={wide} renderCell={renderCell} />
   );
 });
 
 function groupActivityCells(cells: ChatTurnState["committedCells"]): ChatTurnState["committedCells"] {
   const grouped: ChatTurnState["committedCells"] = [];
   let buffer: Extract<HistoryCellState, { kind: "activity" }>[] = [];
+  let execBuffer: ExecCellState[] = [];
 
   const flush = () => {
     if (buffer.length === 0) return;
 
-    // ✅ P0优化：减少过度聚合
-    // 规则1：正在执行的工具不聚合（用户需要看到实时进度）
-    if (buffer.some(cell => cell.status === "running")) {
-      buffer.forEach(cell => grouped.push(cell));
-      buffer = [];
-      return;
-    }
-
-    // 规则2：失败的工具不聚合（需要突出显示）
-    if (buffer.some(cell => cell.status === "failed" || cell.status === "interrupted")) {
-      buffer.forEach(cell => grouped.push(cell));
-      buffer = [];
-      return;
-    }
-
-    // 规则3：只有3个以上的同类已完成工具才聚合
-    if (buffer.length === 1 || buffer.length === 2) {
+    if (!shouldGroupActivityBuffer(buffer)) {
       buffer.forEach(cell => grouped.push(cell));
     } else {
-      // 检查是否同类工具
-      const firstKind = buffer[0]?.activityKind;
-      const allSameKind = buffer.every(cell => cell.activityKind === firstKind);
-
-      if (allSameKind) {
-        // 同类工具聚合
-        grouped.push({
-          kind: "activity_group",
-          id: `activity-group-${buffer[0]?.id ?? grouped.length}`,
-          cells: buffer,
-          status: groupStatus(buffer),
-          collapsed: true,
-          startedAt: Math.min(...buffer.map((cell) => cell.startedAt)),
-          completedAt: latestCompletedAt(buffer),
-        });
-      } else {
-        // 不同类工具不聚合
-        buffer.forEach(cell => grouped.push(cell));
-      }
+      grouped.push({
+        kind: "activity_group",
+        id: `activity-group-${activityGroupKey(buffer)}-${buffer[0]?.id ?? grouped.length}`,
+        cells: buffer,
+        status: groupStatus(buffer),
+        collapsed: true,
+        startedAt: Math.min(...buffer.map((cell) => cell.startedAt)),
+        completedAt: latestCompletedAt(buffer),
+      });
     }
     buffer = [];
   };
 
+  const flushExec = () => {
+    if (execBuffer.length === 0) return;
+
+    grouped.push({
+      kind: "exec_group",
+      id: `exec-group-${execBuffer[0]?.id ?? grouped.length}`,
+      cells: execBuffer,
+      status: execGroupStatus(execBuffer),
+      collapsed: true,
+      startedAt: Math.min(...execBuffer.map((cell) => cell.createdAt)),
+      completedAt: latestExecCompletedAt(execBuffer),
+    });
+    execBuffer = [];
+  };
+
   for (const cell of cells) {
     if (cell.kind === "activity") {
+      flushExec();
+      if (!canGroupActivityCell(cell)) {
+        flush();
+        grouped.push(cell);
+        continue;
+      }
+      const nextKey = activityGroupKey([cell]);
+      const currentKey = buffer.length ? activityGroupKey(buffer) : nextKey;
+      if (buffer.length > 0 && nextKey !== currentKey) flush();
       buffer.push(cell);
       continue;
     }
+    if (cell.kind === "exec" && canGroupExecCell(cell)) {
+      flush();
+      const currentKey = execBuffer.length ? execGroupKey(execBuffer) : execGroupKey([cell]);
+      const nextKey = execGroupKey([cell]);
+      if (execBuffer.length > 0 && nextKey !== currentKey) flushExec();
+      execBuffer.push(cell);
+      continue;
+    }
     flush();
+    flushExec();
     grouped.push(cell);
   }
   flush();
+  flushExec();
   return grouped;
 }
 
-function withStableRenderKeys(cells: ChatTurnState["committedCells"]) {
-  const seen = new Map<string, number>();
-  return cells.map((cell) => {
-    const base = `${cell.kind}:${cell.id}`;
-    const count = seen.get(base) ?? 0;
-    seen.set(base, count + 1);
-    return {
-      cell,
-      key: count === 0 ? base : `${base}:${count}`,
-    };
-  });
+function canGroupExecCell(cell: ExecCellState): boolean {
+  return cell.status !== "pending_approval";
+}
+
+function execGroupKey(cells: ExecCellState[]): "test" | "command" {
+  return cells.every((cell) => isTestCommand(cell.command)) ? "test" : "command";
+}
+
+function execGroupStatus(cells: ExecCellState[]): "running" | "done" | "failed" {
+  if (cells.some((cell) => cell.status === "failed" || cell.status === "cancelled")) return "failed";
+  if (cells.some((cell) => cell.status === "running" || cell.status === "pending_approval")) return "running";
+  return "done";
+}
+
+function latestExecCompletedAt(cells: ExecCellState[]): number | undefined {
+  const values = cells.map((cell) => cell.completedAt).filter((value): value is number => Number.isFinite(value));
+  return values.length ? Math.max(...values) : undefined;
+}
+
+function canGroupActivityCell(cell: Extract<HistoryCellState, { kind: "activity" }>): boolean {
+  if (cell.status === "failed" || cell.status === "interrupted") return false;
+  return activityGroupKey([cell]) !== "solo";
+}
+
+function shouldGroupActivityBuffer(cells: Extract<HistoryCellState, { kind: "activity" }>[]): boolean {
+  if (cells.some((cell) => cell.status === "failed" || cell.status === "interrupted")) return false;
+  return activityGroupKey(cells) !== "solo";
+}
+
+function activityGroupKey(cells: Extract<HistoryCellState, { kind: "activity" }>[]): "context" | "command" | "change" | "tool" | "solo" {
+  const kinds = new Set(cells.map((cell) => cell.activityKind));
+  if ([...kinds].every((kind) => kind === "fileRead" || kind === "workspaceSearch" || kind === "webSearch" || kind === "mcpToolCall")) {
+    return "context";
+  }
+  if (kinds.size === 1 && kinds.has("commandExecution")) return "command";
+  if (kinds.size === 1 && kinds.has("fileChange")) return "change";
+  if (kinds.size === 1 && kinds.has("genericTool")) return "tool";
+  return "solo";
 }
 
 function groupStatus(cells: Extract<HistoryCellState, { kind: "activity" }>[]) {
@@ -160,17 +201,19 @@ function latestCompletedAt(cells: Extract<HistoryCellState, { kind: "activity" }
 function CellWithContextMenu({
   cell,
   isActive = false,
+  className,
   onStopExecution,
 }: {
   cell: HistoryCellState;
   isActive?: boolean;
+  className?: string;
   onStopExecution?: () => void;
 }) {
   const items = useMemo(() => buildCellMenuItems(cell), [cell]);
   const { onContextMenu, menu } = useContextMenu(items);
 
   return (
-    <div onContextMenu={onContextMenu} style={{ position: "relative" }}>
+    <div className={className} onContextMenu={onContextMenu} style={{ position: "relative" }}>
       <HistoryCellRenderer cell={cell} isActive={isActive} onStopExecution={onStopExecution} />
       {menu}
     </div>
@@ -291,6 +334,9 @@ export function HistoryCellRenderer({
     case "exec":
       return <ExecCell cell={cell} isActive={isActive} onStop={onStopExecution} />;
 
+    case "exec_group":
+      return <ExecGroupCell cells={cell.cells} isActive={isActive} onStop={onStopExecution} />;
+
     case "diff":
       return <DiffCell cell={cell} />;
 
@@ -316,47 +362,9 @@ function StreamingAssistantTailCell({
   cell: StreamingAssistantTailCellState;
 }) {
   return (
-    <div className="md-prose" style={streamingTailStyle}>
+    <div className="streaming-tail-cell md-prose">
       <MarkdownRenderer content={cell.partialMarkdown} isStreaming />
       <span className="streaming-cursor" />
     </div>
   );
 }
-
-function StreamingIndicator() {
-  return (
-    <div
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 6,
-        padding: "2px 8px",
-        color: "var(--text-muted)",
-        fontStyle: "italic",
-        fontSize: "var(--text-sm, 13px)",
-        opacity: 0.6,
-      }}
-    >
-      <span className="thinking-mini-dot" />
-      <span>Thinking...</span>
-    </div>
-  );
-}
-
-// ── Styles ──────────────────────────────────────────────────────────
-
-const turnStyle = (wide: boolean): React.CSSProperties => ({
-  display: "flex",
-  flexDirection: "column",
-  gap: 10,
-  marginBottom: 22,
-  width: wide ? "min(1320px, 100%)" : "min(880px, 100%)",
-  margin: "0 auto",
-});
-
-const streamingTailStyle: React.CSSProperties = {
-  color: "var(--text-primary)",
-  fontSize: "var(--text-md, 14px)",
-  lineHeight: 1.75,
-  wordBreak: "break-word",
-};

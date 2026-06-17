@@ -62,7 +62,7 @@ export const ComposerTextarea = ({
   const lastValRef = useRef(value);
   // Single-row base height: minimal (Cowork home) is tightest, then compact
   // (code mode), then the default chat composer.
-  const baseHeight = minimal ? 40 : compact ? 36 : 54;
+  const baseHeight = minimal ? 40 : compact ? 36 : MIN_HEIGHT;
   const lastHeightRef = useRef(baseHeight);
 
   useEffect(() => {
@@ -143,6 +143,7 @@ export const ComposerTextarea = ({
     }
   };
 
+  const hasContextPrefix = Boolean(commandLabel || skillTokens.length > 0);
   const textarea = (
     <textarea
       ref={ref}
@@ -179,54 +180,111 @@ export const ComposerTextarea = ({
       }}
       placeholder={placeholder ?? "Write a message..."}
       autoFocus
-      className="bg-transparent border-0 outline-0 resize-none overflow-y-hidden tracking-normal transition-colors duration-[140ms]"
+      className="composer-textarea bg-transparent border-0 outline-0 resize-none overflow-y-hidden tracking-normal transition-colors duration-[140ms]"
       style={{
-        width: commandLabel || skillTokens.length > 0 ? "auto" : "100%",
-        flex: commandLabel || skillTokens.length > 0 ? "1 1 180px" : undefined,
+        width: "100%",
+        flex: hasContextPrefix ? "0 0 auto" : undefined,
         minHeight: baseHeight,
         maxHeight: MAX_HEIGHT,
         color: "var(--text-primary)",
         fontFamily: "var(--font-ui)",
-        fontSize: compact ? 14 : 16,
+        fontSize: compact ? 14 : 15,
         lineHeight: compact ? 1.4 : 1.55,
-        padding: commandLabel
-          ? (compact ? "10px 14px 6px 0" : "12px 16px 10px 0")
-          : minimal ? "9px 16px" : compact ? "10px 14px 6px" : "13px 14px 8px",
+        padding: commandLabel || skillTokens.length > 0
+          ? (compact ? "5px 14px 7px" : "6px 14px 8px")
+          : minimal ? "9px 16px" : compact ? "10px 14px 6px" : "8px 12px 6px",
       }}
     />
   );
 
-  if (!commandLabel && skillTokens.length === 0) return textarea;
+  if (!hasContextPrefix) return textarea;
 
   return (
-    <div className="flex items-start flex-wrap min-w-0" style={{ gap: 7 }}>
-      {commandLabel && (
-        <span className="shrink-0 mt-3 ml-[14px] font-extrabold text-[15px] leading-[1.5]" style={{ color: "var(--command-accent-strong, var(--state-info))" }}>
-          {commandLabel}
-        </span>
-      )}
-      {skillTokens.map((skill) => (
-        <button
-          key={skill.name}
-          type="button"
-          title={skill.description || skill.name}
-          onClick={() => onRemoveSkill?.(skill.name)}
-          className="shrink-0 inline-flex items-center max-w-[190px] h-6 mt-[11px] px-[7px] cursor-pointer font-bold"
-          style={{
-            gap: 5,
-            border: "1px solid color-mix(in oklch, var(--command-accent, var(--state-info)) 35%, transparent)",
-            borderRadius: "var(--radius-full)",
-            background: "color-mix(in oklch, var(--command-accent, var(--state-info)) 9%, transparent)",
-            color: "var(--command-accent-strong, var(--state-info))",
-            fontSize: "var(--text-xs)",
-          }}
-        >
-          <Sparkles size={12} />
-          <span className="overflow-hidden text-ellipsis whitespace-nowrap">{skill.name}</span>
-          <X size={12} className="shrink-0 opacity-[0.72]" />
-        </button>
-      ))}
+    <div className="composer-textarea-frame" style={textareaFrameStyle} data-command-mode={commandMode ? "true" : "false"}>
+      <div className="composer-context-prefix-row" style={prefixRowStyle}>
+        {commandLabel && (
+          <button
+            type="button"
+            title="Clear command"
+            onClick={onClearCommand}
+            className="composer-prefix-token"
+            style={commandPrefixStyle}
+          >
+            <span style={prefixGlyphStyle}>/</span>
+            <span style={prefixNameStyle}>{commandLabel}</span>
+            <X size={12} className="shrink-0 opacity-[0.62]" />
+          </button>
+        )}
+        {skillTokens.map((skill) => (
+          <button
+            key={skill.name}
+            type="button"
+            title={skill.description || skill.name}
+            onClick={() => onRemoveSkill?.(skill.name)}
+            className="composer-prefix-token"
+            style={skillPrefixStyle}
+          >
+            <Sparkles size={12} />
+            <span style={prefixNameStyle}>{skill.name}</span>
+            <X size={12} className="shrink-0 opacity-[0.62]" />
+          </button>
+        ))}
+      </div>
       {textarea}
     </div>
   );
+};
+
+const textareaFrameStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 0,
+  minWidth: 0,
+};
+
+const prefixRowStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  flexWrap: "wrap",
+  gap: 6,
+  minHeight: 28,
+  padding: "6px 10px 0",
+};
+
+const prefixBaseStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 5,
+  maxWidth: 240,
+  minHeight: 22,
+  padding: "0 7px",
+  borderRadius: "var(--radius-sm, 5px)",
+  cursor: "pointer",
+  fontSize: "var(--text-xs)",
+  fontWeight: 650,
+};
+
+const commandPrefixStyle: React.CSSProperties = {
+  ...prefixBaseStyle,
+  border: "1px solid color-mix(in oklch, var(--accent-primary) 28%, var(--border-subtle))",
+  background: "color-mix(in oklch, var(--accent-primary) 7%, var(--surface-page))",
+  color: "var(--accent-primary)",
+};
+
+const skillPrefixStyle: React.CSSProperties = {
+  ...prefixBaseStyle,
+  border: "1px solid color-mix(in oklch, var(--accent-primary) 24%, var(--border-subtle))",
+  background: "transparent",
+  color: "var(--accent-primary)",
+};
+
+const prefixGlyphStyle: React.CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontWeight: 800,
+};
+
+const prefixNameStyle: React.CSSProperties = {
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
 };

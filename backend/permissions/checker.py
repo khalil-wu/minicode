@@ -506,11 +506,11 @@ class PermissionChecker:
                 return PermissionLevel.CONFIRM
 
             # Tool-owned permission decision (CC's checkPermissions analogue).
-            # Honored in every mode except plan/auto. Plan denies local
+            # Honored in every mode except plan/auto/bypass. Plan denies local
             # mutations outright; auto has product-level semantics below
-            # (workspace edits are allowed without prompting) and should not be
-            # narrowed by a tool's conservative default metadata.
-            if tool is not None and context.mode not in {"plan", "auto"}:
+            # (workspace edits are allowed without prompting), and bypass must
+            # not be narrowed by a tool's conservative default metadata.
+            if tool is not None and context.mode not in {"plan", "auto", "bypass"}:
                 tool_level = self._consult_tool(tool, args, context)
                 if tool_level is not None:
                     return tool_level

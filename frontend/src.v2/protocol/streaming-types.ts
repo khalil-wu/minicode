@@ -26,6 +26,9 @@ export type StreamingServerEventType =
   | "tool_call"
   | "tool_result"
   | "tool_output_delta"
+  | "agent.loop.started"
+  | "agent.loop.completed"
+  | "agent.item"
   | "agent.progress"
   | "task.update"
   | "approval_request"
@@ -54,7 +57,9 @@ export type StreamingServerEventType =
 export type StreamingClientCommandType =
   | "task.edit"
   | "subagent.cancel"
-  | "inspector.focus";
+  | "inspector.focus"
+  | "pause_streaming"
+  | "resume_streaming";
 
 // ──────────────────────────────────────────────────────────────────
 // Event payload types
@@ -160,6 +165,46 @@ export interface ToolOutputDeltaEvent {
   id: string;
   output: string;
   stream?: "stdout" | "stderr" | string;
+}
+
+export interface AgentLoopEvent {
+  type: "agent.loop.started" | "agent.loop.completed";
+  item_id?: string;
+  loop_id: string;
+  iteration_id?: string;
+  status?: "running" | "completed" | "failed" | "interrupted" | string;
+  title?: string;
+  summary?: string;
+  started_at?: number;
+  completed_at?: number;
+  duration_ms?: number;
+  item_count?: number;
+  tool_call_count?: number;
+  default_collapsed?: boolean;
+}
+
+export interface AgentItemEvent {
+  type: "agent.item";
+  id: string;
+  item_id?: string;
+  loop_id?: string;
+  iteration_id?: string;
+  parent_id?: string;
+  kind: "process_text" | "action_summary" | "observation" | "status" | "plan" | "tool_group" | string;
+  source?: "model" | "runtime" | "system" | "tool" | string;
+  role?: "assistant" | "runtime" | string;
+  status?: "running" | "completed" | "failed" | "info" | string;
+  title?: string;
+  content?: string;
+  summary?: string;
+  visibility?: "timeline" | "compact" | "debug" | string;
+  created_at?: number;
+  order?: number;
+  seq?: number;
+  default_collapsed?: boolean;
+  group_id?: string;
+  step_id?: string;
+  tool_call_ids?: string[];
 }
 
 export interface AgentProgressEvent {

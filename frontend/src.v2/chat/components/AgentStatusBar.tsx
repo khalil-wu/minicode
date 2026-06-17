@@ -83,7 +83,7 @@ export const AgentStatusBar = memo(function AgentStatusBar() {
       {showPauseButton && (
         <button
           type="button"
-          onClick={isPaused ? resumeStreaming : pauseStreaming}
+          onClick={isPaused ? () => resumeStreaming() : () => pauseStreaming()}
           title={isPaused ? "继续" : "暂停"}
           style={pauseButtonStyle}
         >

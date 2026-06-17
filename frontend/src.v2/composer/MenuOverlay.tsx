@@ -1,4 +1,4 @@
-import { File, Folder, Sparkles } from "lucide-react";
+import { AtSign, Command, File, Folder, Sparkles } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { isDesktop, fsListTree, fsSearchFiles } from "../desktop/runtime";
 import { useAppStore } from "../stores";
@@ -19,13 +19,18 @@ interface FileItem {
   description: string;
   type: "file" | "folder";
   path: string;
+  section?: string;
 }
 
 interface MenuItem {
   name: string;
   description: string;
-  type?: "file" | "folder" | "skill";
+  type?: "file" | "folder" | "skill" | "command" | "argument";
   path?: string;
+  section?: string;
+  sourceLevel?: string;
+  active?: boolean;
+  triggers?: string[];
 }
 
 const MENTION_SEARCH_DEBOUNCE_MS = 150;
@@ -55,23 +60,39 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
   const searchSequenceRef = useRef(0);
   const storeCommands = useAppStore((s) => s.slashCommands);
   const availableSkills = useAppStore((s) => s.availableSkills);
+  const selectedSkills = useAppStore((s) => s.selectedSkills);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const slashFilter = filter ?? "";
+  const selectedSkillNames = new Set(selectedSkills.map((skill) => skill.name));
 
   // Slash commands
-  const slashBaseItems = buildRuntimeSlashMenuItems(storeCommands);
+  const slashBaseItems: MenuItem[] = buildRuntimeSlashMenuItems(storeCommands).map((item) => ({
+    ...item,
+    type: "command" as const,
+    section: "Commands",
+    path: item.name,
+  }));
   const slashSkillItems: MenuItem[] = availableSkills.map((skill) => ({
     name: `/${skill.name}`,
     description: skill.description || "Skill",
     type: "skill" as const,
     path: `/${skill.name}`,
+    section: "Skills",
+    sourceLevel: skill.source_level,
+    active: Boolean(skill.active || selectedSkillNames.has(skill.name)),
+    triggers: skill.triggers,
   }));
   const skillsPickerActive = /^\/skills(?:\s|$)/i.test(slashFilter);
 
   // Argument stage: "/effort" or "/effort lo" with a local command that
   // declares args shows its argument completions instead of command matches.
   const slashArgItems = kind === "slash" && !skillsPickerActive
-    ? buildRuntimeSlashArgMenuItems(slashFilter, storeCommands)
+    ? buildRuntimeSlashArgMenuItems(slashFilter, storeCommands)?.map((item) => ({
+        ...item,
+        type: "argument" as const,
+        section: "Options",
+        path: item.name,
+      }))
     : null;
 
   const slashCommandItems = slashArgItems
@@ -97,6 +118,10 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
           description: skill.description || "Skill",
           type: "skill" as const,
           path: `skill:${skill.name}`,
+          section: "Skills",
+          sourceLevel: skill.source_level,
+          active: Boolean(skill.active || selectedSkillNames.has(skill.name)),
+          triggers: skill.triggers,
         })),
         mentionSearchQuery,
         (skill) => `${skill.name} ${skill.description}`,
@@ -139,6 +164,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
                 name: entry.name || entry.path,
                 description: entry.path.replace(/[\\/][^\\/]*$/, ""),
                 type,
+                section: "Files",
                 path: `${type}:${entry.path}`,
               };
             });
@@ -163,6 +189,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
             name: node.name || node.path,
             description: node.path,
             type: node.is_dir ? "folder" as const : "file" as const,
+            section: "Files",
             path: `${node.is_dir ? "folder" : "file"}:${node.path}`,
           }));
           rememberMentionResults(mentionTreeCache, cacheKey, results);
@@ -198,7 +225,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
             if (searchId !== searchSequenceRef.current) return; // Stale result
             const results = files.map((f) => {
               const type = f.kind === "folder" || f.path.endsWith("/") || f.path.endsWith("\\") ? "folder" as const : "file" as const;
-              return { name: f.name || f.path, description: f.path.replace(/[\\/][^\\/]*$/, ""), type, path: `${type}:${f.path}` };
+              return { name: f.name || f.path, description: f.path.replace(/[\\/][^\\/]*$/, ""), type, section: "Files", path: `${type}:${f.path}` };
             });
             rememberMentionResults(mentionSearchCache, cacheKey, results);
             setFileResults(results);
@@ -219,6 +246,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
               name: f.name || f.path,
               description: f.path.replace(/[\\/][^\\/]*$/, ""),
               type: f.kind === "folder" ? "folder" as const : "file" as const,
+              section: "Files",
               path: `${f.kind === "folder" ? "folder" : "file"}:${f.path}`,
             }));
             rememberMentionResults(mentionSearchCache, cacheKey, results);
@@ -301,50 +329,74 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
       <div
         ref={listRef}
         role="listbox"
-        style={menuListStyle(kind)}
+        className="composer-menu-list"
+        data-kind={kind}
+        data-skills-picker={skillsPickerActive ? "true" : "false"}
+        style={menuListStyle(kind, skillsPickerActive)}
       >
         {items.length === 0 ? (
           <div style={emptyMenuStyle}>
-            {searching ? "Searching..." : kind === "mention" ? "No files found" : "No matches"}
+            {searching ? "Searching..." : kind === "mention" ? "No files found" : skillsPickerActive ? "No skills found" : "No matches"}
           </div>
         ) : (
-          items.map((it, i) => (
-            <div
-              key={it.path ?? it.name}
-              ref={(el) => { itemRefs.current[i] = el; }}
-              role="option"
-              aria-selected={i === activeIndex}
-              onMouseEnter={() => setActiveIndex(i)}
-              onClick={() => onSelect(it.path ?? it.name)}
-              style={{
-                ...menuItemStyle,
-                background: i === activeIndex ? "var(--surface-page)" : "transparent",
-              }}
-            >
-              {"type" in it && it.type && (
-                <span style={menuIconStyle}>
-                  {it.type === "folder" ? <Folder size={14} /> : it.type === "skill" ? <Sparkles size={14} /> : <File size={14} />}
-                </span>
-              )}
-              <span style={menuNameStyle}>{it.name}</span>
-              {kind === "slash" && it.description && <span style={menuDescriptionStyle}>{it.description}</span>}
-              {i === activeIndex && <span style={menuShortcutStyle}>Enter</span>}
-            </div>
-          ))
+          items.map((it, i) => {
+            const showSection = i === 0 || items[i - 1]?.section !== it.section;
+            const displayName = displayMenuName(it, skillsPickerActive);
+            const sourceLabel = it.type === "skill" ? formatSourceLevel(it.sourceLevel) : "";
+            const triggerLabel = it.triggers?.slice(0, 2).join(", ");
+            const showTriggers = Boolean(skillsPickerActive && triggerLabel);
+            return (
+              <div key={it.path ?? it.name}>
+                {showSection && it.section && (
+                  <div className="composer-menu-section-label" style={sectionLabelStyle}>
+                    {it.section}
+                  </div>
+                )}
+                <div
+                  ref={(el) => { itemRefs.current[i] = el; }}
+                  role="option"
+                  aria-selected={i === activeIndex}
+                  onMouseEnter={() => setActiveIndex(i)}
+                  onClick={() => onSelect(it.path ?? it.name)}
+                  className="composer-menu-item"
+                  data-active={i === activeIndex ? "true" : "false"}
+                  data-selected={it.active ? "true" : "false"}
+                  style={{
+                    ...menuItemStyle,
+                    background: i === activeIndex ? "var(--surface-hover)" : "transparent",
+                  }}
+                >
+                  <span style={menuIconStyle}>
+                    {renderMenuIcon(it)}
+                  </span>
+                  <span style={menuBodyStyle}>
+                    <span style={menuTitleRowStyle}>
+                      <span style={menuNameStyle}>{displayName}</span>
+                      {it.active && <span style={activeBadgeStyle}>active</span>}
+                    </span>
+                    {it.description && <span style={menuDescriptionStyle}>{it.description}</span>}
+                    {showTriggers && <span style={menuTriggerStyle}>triggers: {triggerLabel}</span>}
+                  </span>
+                  {sourceLabel && <span style={sourceBadgeStyle}>{sourceLabel}</span>}
+                  {i === activeIndex && <span style={menuShortcutStyle}>Enter</span>}
+                </div>
+              </div>
+            );
+          })
         )}
       </div>
     </div>
   );
 };
 
-const menuListStyle = (kind: Props["kind"]): React.CSSProperties => ({
-  width: kind === "mention" ? "min(320px, calc(100vw - 56px))" : "min(420px, calc(100vw - 56px))",
+const menuListStyle = (kind: Props["kind"], skillsPickerActive: boolean): React.CSSProperties => ({
+  width: kind === "mention" ? "min(360px, calc(100vw - 56px))" : skillsPickerActive ? "min(520px, calc(100vw - 56px))" : "min(460px, calc(100vw - 56px))",
   background: "var(--surface-raised)",
   border: "1px solid var(--border-subtle)",
   borderRadius: "var(--radius-md, 8px)",
-  boxShadow: "var(--shadow-soft)",
-  padding: 6,
-  maxHeight: "min(270px, calc(100vh - 230px))",
+  boxShadow: "0 12px 38px rgb(28 25 23 / 0.10)",
+  padding: 5,
+  maxHeight: skillsPickerActive ? "min(340px, calc(100vh - 230px))" : "min(292px, calc(100vh - 230px))",
   overflowY: "auto",
   overflowX: "hidden",
   overscrollBehavior: "contain",
@@ -357,11 +409,12 @@ const emptyMenuStyle: React.CSSProperties = {
 };
 
 const menuItemStyle: React.CSSProperties = {
-  display: "flex",
+  display: "grid",
+  gridTemplateColumns: "18px minmax(0, 1fr) auto auto",
   alignItems: "center",
   gap: 8,
-  minHeight: 36,
-  padding: "0 8px",
+  minHeight: 42,
+  padding: "5px 7px",
   fontSize: "var(--text-sm)",
   cursor: "pointer",
   borderRadius: "var(--radius-sm, 5px)",
@@ -370,31 +423,54 @@ const menuItemStyle: React.CSSProperties = {
 };
 
 const menuIconStyle: React.CSSProperties = {
-  width: 16,
+  width: 18,
   display: "inline-flex",
   justifyContent: "center",
   color: "var(--text-muted)",
   flexShrink: 0,
 };
 
+const menuBodyStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 1,
+  minWidth: 0,
+};
+
+const menuTitleRowStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+  minWidth: 0,
+};
+
 const menuNameStyle: React.CSSProperties = {
-  flex: "1 1 auto",
   minWidth: 0,
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
   fontFamily: "var(--font-ui)",
-  fontWeight: 520,
+  fontWeight: 620,
 };
 
 const menuDescriptionStyle: React.CSSProperties = {
-  flex: "0 1 170px",
   minWidth: 0,
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
   color: "var(--text-muted)",
   fontSize: "var(--text-xs)",
+  lineHeight: 1.35,
+};
+
+const menuTriggerStyle: React.CSSProperties = {
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  color: "var(--text-muted)",
+  fontSize: 11,
+  lineHeight: 1.3,
+  fontFamily: "var(--font-mono)",
 };
 
 const menuShortcutStyle: React.CSSProperties = {
@@ -403,6 +479,60 @@ const menuShortcutStyle: React.CSSProperties = {
   fontSize: 11,
   fontFamily: "var(--font-mono)",
 };
+
+const sectionLabelStyle: React.CSSProperties = {
+  padding: "6px 7px 4px",
+  color: "var(--text-muted)",
+  fontSize: 11,
+  fontWeight: 700,
+  letterSpacing: 0,
+  textTransform: "uppercase",
+};
+
+const sourceBadgeStyle: React.CSSProperties = {
+  justifySelf: "end",
+  minWidth: 0,
+  maxWidth: 86,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  padding: "2px 5px",
+  border: "1px solid var(--border-subtle)",
+  borderRadius: "var(--radius-sm, 5px)",
+  color: "var(--text-muted)",
+  background: "var(--surface-page)",
+  fontSize: 11,
+  lineHeight: 1.25,
+  fontFamily: "var(--font-mono)",
+};
+
+const activeBadgeStyle: React.CSSProperties = {
+  flexShrink: 0,
+  color: "var(--accent-primary)",
+  fontSize: 11,
+  fontFamily: "var(--font-mono)",
+};
+
+function renderMenuIcon(item: MenuItem) {
+  if (item.type === "folder") return <Folder size={14} />;
+  if (item.type === "file") return <File size={14} />;
+  if (item.type === "skill") return <Sparkles size={14} />;
+  if (item.type === "argument") return <AtSign size={14} />;
+  return <Command size={14} />;
+}
+
+function displayMenuName(item: MenuItem, skillsPickerActive: boolean): string {
+  if (skillsPickerActive && item.type === "skill") return item.name.replace(/^\//, "");
+  return item.name;
+}
+
+function formatSourceLevel(level?: string): string {
+  const normalized = (level || "").replace(/-legacy$/i, "").toLowerCase();
+  if (!normalized) return "";
+  if (normalized === "global") return "personal";
+  if (normalized === "builtin") return "bundled";
+  return normalized;
+}
 
 function stripLineAnchor(value: string): string {
   return value.replace(/#L?\d+(?:-L?\d+)?$/i, "");

@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 import type React from "react";
-import { ChevronDown, ChevronRight, FileCode2, FileSearch, GitBranch, RotateCcw } from "lucide-react";
+import { ChevronDown, ChevronRight, FileCode2, FileSearch, RotateCcw } from "lucide-react";
 import type { DiffCellState } from "./cellTypes";
 import { useAppStore } from "../../stores";
 import { sendClientCommand } from "../../protocol/ws-outbox";
@@ -35,7 +35,7 @@ export function DiffCell({ cell }: { cell: DiffCellState }) {
     const store = useAppStore.getState();
     store.setDiffReviewState({
       requestId: `diff-cell-${cell.id}`,
-      toolName: "assistant changes",
+      toolName: "助手修改",
       diff: reviewableFiles.map((f) => f.patch).filter(Boolean).join("\n\n"),
       files: reviewableFiles.map((f) => ({
         path: f.path,
@@ -57,12 +57,12 @@ export function DiffCell({ cell }: { cell: DiffCellState }) {
     if (revertable.length === 0) return;
     const { showConfirm } = await import("../../overlays/DialogService");
     const ok = await showConfirm({
-      title: "Revert changes",
+      title: "撤销更改",
       message:
         revertable.length === 1
-          ? `Discard changes to ${revertable[0].path}? This cannot be undone.`
-          : `Discard changes to all ${revertable.length} files in this edit? This cannot be undone.`,
-      confirmLabel: "Revert",
+          ? `撤销 ${revertable[0].path} 的更改？此操作不可恢复。`
+          : `撤销本次编辑中的 ${revertable.length} 个文件更改？此操作不可恢复。`,
+      confirmLabel: "撤销",
       danger: true,
     });
     if (!ok) return;
@@ -84,18 +84,23 @@ export function DiffCell({ cell }: { cell: DiffCellState }) {
           onClick={() => setExpanded((v) => !v)}
           className="diff-cell-header-button"
           aria-expanded={expanded}
+          aria-label={expanded ? "收起文件更改" : "展开文件更改"}
         >
           {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-          <GitBranch size={13} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
-          <span className="diff-cell-title">
-            Edited {cell.summary.modifiedFiles} {cell.summary.modifiedFiles === 1 ? "file" : "files"}
+          <span className="diff-cell-icon-tile" aria-hidden="true">
+            <FileCode2 size={15} />
           </span>
-          <span className="diff-cell-stats">
-            <span className="diff-cell-added">
-              +{cell.summary.added}
-            </span>{" "}
-            <span className="diff-cell-removed">
-              -{cell.summary.deleted}
+          <span className="diff-cell-title-block">
+            <span className="diff-cell-title">
+              已编辑 {cell.summary.modifiedFiles} 个文件
+            </span>
+            <span className="diff-cell-stats diff-cell-header-stats">
+              <span className="diff-cell-added">
+                +{cell.summary.added}
+              </span>{" "}
+              <span className="diff-cell-removed">
+                -{cell.summary.deleted}
+              </span>
             </span>
           </span>
         </button>
@@ -104,20 +109,20 @@ export function DiffCell({ cell }: { cell: DiffCellState }) {
             type="button"
             onClick={revertAll}
             className="diff-cell-action-button diff-cell-action-button-danger"
-            title="Revert these changes"
+            title="撤销这些更改"
           >
             <RotateCcw size={12} />
-            Revert
+            撤销
           </button>
           {reviewableFiles.length > 0 && (
             <button
               type="button"
               onClick={openReview}
               className="diff-cell-action-button diff-cell-action-button-accent"
-              title="Review changes in the diff panel"
+              title="在审核面板查看更改"
             >
               <FileSearch size={12} />
-              Review
+              审核
             </button>
           )}
         </div>
@@ -134,7 +139,7 @@ export function DiffCell({ cell }: { cell: DiffCellState }) {
               onClick={() => setShowAllFiles(true)}
               className="diff-cell-show-more"
             >
-              Show {hiddenCount} more {hiddenCount === 1 ? "file" : "files"}
+              再显示 {hiddenCount} 个文件
             </button>
           )}
         </div>
@@ -162,7 +167,7 @@ function DiffFileRow({
     const store = useAppStore.getState();
     store.setDiffReviewState({
       requestId: `diff-cell-${Date.now()}`,
-      toolName: "diff preview",
+      toolName: "差异预览",
       diff: file.patch,
       files: [{
         path: file.path,
@@ -185,8 +190,8 @@ function DiffFileRow({
         type="button"
         onClick={openFile}
         className="diff-cell-file-button"
-        aria-label={`Open ${file.path}`}
-        title={`Open ${file.path}`}
+        aria-label={`打开 ${file.path}`}
+        title={`打开 ${file.path}`}
       >
         <FileCode2 size={12} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
         <span className="diff-cell-file-path">{shortPath(file.path)}</span>
@@ -204,10 +209,10 @@ function DiffFileRow({
           type="button"
           onClick={openFullDiff}
           className="diff-cell-file-action"
-          aria-label={`Review ${file.path}`}
-          title={`Review ${file.path}`}
+          aria-label={`审核 ${file.path}`}
+          title={`审核 ${file.path}`}
         >
-          Review
+          审核
         </button>
       ) : (
         <span style={{ width: 40, height: 1 }} />

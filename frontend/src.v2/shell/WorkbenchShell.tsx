@@ -81,7 +81,7 @@ const CoworkModeShell = () => {
           </SafeBoundary>
         </div>
       )}
-      {rightPanelOpen && <SidebarRight />}
+      {rightPanelOpen && !isEmptyConversation && <SidebarRight />}
     </div>
   );
 };

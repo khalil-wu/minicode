@@ -10,6 +10,7 @@ import {
   StopCircle,
 } from "lucide-react";
 import type { ExecCellState } from "./cellTypes";
+import { shortCommand } from "./activityCellHelpers";
 import "./cells.css";
 
 const streamOutputText = (full: string | undefined, preview: string[]): string =>
@@ -27,7 +28,6 @@ export function ExecCell({
 }) {
   const [expanded, setExpanded] = useState(
     cell.status === "running" ||
-    cell.status === "failed" ||
     cell.status === "pending_approval" ||
     !cell.collapsed,
   );
@@ -64,14 +64,16 @@ export function ExecCell({
 
   const statusLabel =
     cell.status === "pending_approval"
-      ? "waiting"
+      ? "等待授权"
       : cell.status === "running"
-        ? "running"
+        ? "运行中"
         : cell.status === "success"
-          ? "passed"
+          ? "成功"
           : cell.status === "failed"
-            ? "failed"
-            : "cancelled";
+            ? "失败"
+            : "已取消";
+  const title = commandTitle(cell.status);
+  const commandPreview = shortCommand(cell.command).replace(/^\$\s*/, "");
 
   const duration =
     cell.durationMs != null
@@ -118,12 +120,13 @@ export function ExecCell({
           <span className={`exec-cell-status-badge exec-cell-status-${statusColor}`}>
             <StatusIcon status={cell.status} />
           </span>
-          <span className="exec-cell-command">{cell.command}</span>
+          <span className="exec-cell-title">{title}</span>
+          <span className="exec-cell-command-preview" title={cell.command}>{commandPreview}</span>
           <span className="exec-cell-meta">
             {statusLabel}
-            {duration ? ` - ${duration}` : ""}
+            {duration ? ` · ${duration}` : ""}
             {cell.exitCode != null && cell.status === "failed"
-              ? ` - exit ${cell.exitCode}`
+              ? ` · exit ${cell.exitCode}`
               : ""}
           </span>
         </button>
@@ -131,56 +134,69 @@ export function ExecCell({
           <button
             type="button"
             onClick={stopCommand}
-            title="Stop command"
-            aria-label="Stop command"
+            title="停止命令"
+            aria-label="停止命令"
             className="exec-cell-stop-button"
           >
             <StopCircle size={12} />
-            Stop
+            停止
           </button>
         )}
       </div>
 
-      {expanded && hasOutput && (
+      {expanded && (
         <div className="exec-cell-output-stack">
-          {stdoutText && (
-            <OutputSection
-              label={labelStreams ? "stdout" : undefined}
-              text={stdoutText}
-              tone="normal"
-            />
-          )}
-          {stderrText && (
-            <OutputSection
-              label="stderr"
-              text={stderrText}
-              tone={cell.status === "failed" ? "error" : "warning"}
-            />
+          <div className="exec-cell-shell-header">
+            <span>Shell</span>
+            <span>{statusLabel}</span>
+          </div>
+          <pre className="exec-cell-shell-command">{`$ ${cell.command}`}</pre>
+          {hasOutput ? (
+            <>
+              {stdoutText && (
+                <OutputSection
+                  label={labelStreams ? "stdout" : undefined}
+                  text={stdoutText}
+                  tone="normal"
+                />
+              )}
+              {stderrText && (
+                <OutputSection
+                  label="stderr"
+                  text={stderrText}
+                  tone={cell.status === "failed" ? "error" : "warning"}
+                />
+              )}
+            </>
+          ) : cell.status === "running" ? (
+            <div className="exec-cell-waiting-output">
+              等待输出...
+            </div>
+          ) : (
+            <div className="exec-cell-empty-output">
+              {cell.status === "cancelled" ? "已取消" : "无输出"}
+            </div>
           )}
           <button
             type="button"
             onClick={handleCopy}
-            title={copied ? "Copied" : "Copy output"}
+            title={copied ? "已复制" : "复制输出"}
             className="exec-cell-copy-button"
           >
             <Copy size={11} />
           </button>
         </div>
       )}
-
-      {expanded && !hasOutput && cell.status !== "running" && (
-        <div className="exec-cell-empty-output">
-          {cell.status === "cancelled" ? "Cancelled before output" : "No output"}
-        </div>
-      )}
-
-      {expanded && cell.status === "running" && !hasOutput && (
-        <div className="exec-cell-waiting-output">
-          Waiting for command output...
-        </div>
-      )}
     </div>
   );
+}
+
+function commandTitle(status: ExecCellState["status"]): string {
+  if (status === "pending_approval") return "等待运行命令";
+  if (status === "running") return "正在运行命令";
+  if (status === "failed") return "命令运行失败";
+  if (status === "cancelled") return "命令已取消";
+  return "已运行命令";
 }
 
 function StatusIcon({ status }: { status: ExecCellState["status"] }) {

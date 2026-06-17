@@ -156,6 +156,8 @@ async def handle_conversation_list(session: "WebSocketSession", data: dict[str, 
         active = session.conversation_repo.get_conversation(session.active_conversation_id)
         if active is None or getattr(active, "archived", False):
             await _activate_conversation_or_blank(session)
+    else:
+        await _activate_conversation_or_blank(session)
     await session._send_conversation_list()
     return True
 
@@ -318,6 +320,11 @@ async def handle_conversation_permission_mode_set(session: "WebSocketSession", d
     if conversation_id == session.active_conversation_id:
         session._set_permission_context_mode(requested, source=source)
         await session._emit_permission_mode_updated()
+        if requested == "bypass":
+            await session._auto_approve_pending_tool_approvals(
+                reason="permission_mode_bypass",
+                conversation_id=conversation_id,
+            )
         await session._send_task_runtime_update()
 
     await session._send_conversation_list()

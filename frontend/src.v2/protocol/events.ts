@@ -33,6 +33,8 @@ export type {
   ToolErrorInfo,
   ToolResultEvent,
   ToolOutputDeltaEvent,
+  AgentLoopEvent,
+  AgentItemEvent,
   AgentProgressEvent,
   ApprovalRequestEvent,
   ApprovalCancelledEvent,
@@ -237,6 +239,9 @@ export interface UntypedServerEvent {
     | "tool_call"
     | "tool_result"
     | "tool_output_delta"
+    | "agent.loop.started"
+    | "agent.loop.completed"
+    | "agent.item"
     | "agent.progress"
     | "approval_request"
     | "approval.cancelled"
@@ -369,6 +374,8 @@ import type {
   ToolCallEvent,
   ToolResultEvent,
   ToolOutputDeltaEvent,
+  AgentLoopEvent,
+  AgentItemEvent,
   AgentProgressEvent,
   ApprovalRequestEvent,
   ApprovalCancelledEvent,
@@ -451,6 +458,7 @@ import type {
 export interface ServerEventEnvelope {
   seq?: number;
   event_id?: string;
+  timestamp?: string;
 }
 
 type ServerEventPayload =
@@ -463,6 +471,8 @@ type ServerEventPayload =
   | ToolCallEvent
   | ToolResultEvent
   | ToolOutputDeltaEvent
+  | AgentLoopEvent
+  | AgentItemEvent
   | AgentProgressEvent
   | ApprovalRequestEvent
   | ApprovalCancelledEvent
@@ -668,6 +678,9 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   "tool_call",
   "tool_result",
   "tool_output_delta",
+  "agent.loop.started",
+  "agent.loop.completed",
+  "agent.item",
   "agent.progress",
   "task.update",
   "approval_request",

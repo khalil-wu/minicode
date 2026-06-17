@@ -7,7 +7,6 @@
   right: 0;
   bottom: 0;
   background: color-mix(in oklch, var(--text-primary) 30%, transparent);
-  backdrop-filter: blur(4px);
   display: flex;
   align-items: flex-start;
   justify-content: center;

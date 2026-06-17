@@ -22,7 +22,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   textScale: initialTextScale(),
   viewMode: "normal" as const,
   appMode: "code" as const,
-  rightStackTab: "preview" as const,
+  rightStackTab: "tasks" as const,
   rightStackTabLocked: false,
   contextUsage: null,
   commandPaletteOpen: false,

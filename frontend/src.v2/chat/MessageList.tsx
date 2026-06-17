@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Bot, FileText, FolderOpen, GitBranch, MessageSquareText, Settings2, ShieldCheck, TerminalSquare } from "lucide-react";
+import { Bot, FolderOpen, MessageSquareText, Settings2 } from "lucide-react";
 import { useAppStore } from "../stores";
 import { formatModelLabel } from "../lib/model-label";
-import { branchDisplayName, workspaceDisplayName } from "../lib/workspace-display";
+import { workspaceDisplayName } from "../lib/workspace-display";
 import { projectMessagesToTurns, projectRecentMessagesToTurns } from "./chatSurfaceState";
 import { ChatTurn } from "./components/ChatTurn";
-import { InlineTaskList } from "./components/InlineTaskList";
 import { openWorkspaceFolder } from "../workspace/openWorkspaceFolder";
 
 const RECENT_TURN_WINDOW = 40;
@@ -139,7 +138,7 @@ export const MessageList = () => {
           flexDirection: "column",
           gap: "var(--space-turn-gap)",
           padding: "58px clamp(22px, 7vw, 104px)",
-          paddingBottom: appMode === "code" ? 220 : 180,
+          paddingBottom: appMode === "code" ? 56 : 34,
           overscrollBehavior: "contain",
           scrollbarGutter: "stable",
           background: "var(--surface-base)",
@@ -152,7 +151,6 @@ export const MessageList = () => {
           </>
         ) : (
           <>
-            <InlineTaskList />
             {hiddenTurnCount > 0 && (
               <button
                 type="button"
@@ -223,184 +221,88 @@ export const MessageList = () => {
 const EmptyState = () => {
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const currentModel = useAppStore((s) => s.currentModel);
-  const permissionMode = useAppStore((s) => s.permissionMode);
-  const workspaceGit = useAppStore((s) => s.workspaceGit);
-  const terminalSessions = useAppStore((s) => s.terminalSessions);
-  const mcpServers = useAppStore((s) => s.mcpServers);
-  const appMode = useAppStore((s) => s.appMode);
   const settingsOpen = useAppStore((s) => s.settingsOpen);
   const toggleSettings = useAppStore((s) => s.toggleSettings);
   const createConversation = useAppStore((s) => s.createConversation);
-  const setDraft = useAppStore((s) => s.setDraft);
 
   const hasProjectWorkspace = Boolean(workingDirectory.trim());
   const hasModel = Boolean(currentModel.trim());
-  const projectName = workspaceDisplayName(workingDirectory, "Computer");
+  const projectName = workspaceDisplayName(workingDirectory, "No workspace");
   const modelLabel = formatModelLabel(currentModel, "Select model");
-  const wide = appMode === "cowork" || appMode === "code";
-  const starterPrompt = hasProjectWorkspace
-    ? "Review this workspace and suggest the safest next release-hardening step."
-    : "Help me turn this task into a concrete plan, then ask for the first file or folder if needed.";
   const openModelSettings = () => {
     if (!settingsOpen) toggleSettings();
     window.setTimeout(() => {
       window.dispatchEvent(new CustomEvent("minicode:settings-tab", { detail: "provider" }));
     }, 0);
   };
-  const startChat = () => {
-    if (!useAppStore.getState().conversationId) {
-      createConversation({ bindWorkspace: hasProjectWorkspace });
-    }
-    setDraft(starterPrompt);
-  };
+  const startChat = () => createConversation({ bindWorkspace: hasProjectWorkspace });
 
   return (
-    <div className="mx-auto my-auto grid gap-4" style={{ width: wide ? "min(1320px, 100%)" : "min(980px, 100%)" }}>
-      <div className="flex items-center gap-3 pb-3" style={{ borderBottom: "1px solid var(--border-subtle)" }}>
-        <div
-          className="w-[34px] h-[34px] inline-flex items-center justify-center flex-shrink-0 border"
-          style={{
-            borderRadius: "var(--radius-sm, 6px)",
-            borderColor: "var(--border-subtle)",
-            background: "var(--surface-page)",
-            color: "var(--accent-primary)",
-          }}
-        >
-          <Bot size={18} />
-        </div>
-        <div className="min-w-0">
-          <div className="font-[650]" style={{ color: "var(--text-primary)", fontSize: "var(--text-md)" }}>
-            {hasProjectWorkspace ? `Ready in ${projectName}` : "Ready to build"}
+    <div className="workbench-empty-state">
+      <section className="workbench-empty-hero">
+        <div className="workbench-empty-brand">
+          <div className="workbench-empty-mark" aria-hidden="true">
+            <Bot size={20} />
           </div>
-          <div className="mt-[3px]" style={{ color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>
-            {hasProjectWorkspace
-              ? "Ask for a change, inspect files, or run a focused release check."
-              : "Start with a workspace, a model, or a plain-English task."}
+          <div className="workbench-empty-copy-block">
+            <div className="workbench-empty-kicker">MiniCode</div>
+            <h1 className="workbench-empty-title">
+              What needs attention?
+            </h1>
+            <p className="workbench-empty-copy">
+              {hasProjectWorkspace
+                ? `Workspace active: ${projectName}`
+                : "Open a workspace or start with a prompt."}
+            </p>
           </div>
         </div>
-      </div>
 
-      <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))" }}>
-        <ActionCard
-          icon={<FolderOpen size={16} />}
-          title={hasProjectWorkspace ? "Workspace open" : "Open workspace"}
-          detail={hasProjectWorkspace ? projectName : "Choose the code folder MiniCode should inspect and edit."}
-          actionLabel={hasProjectWorkspace ? "Switch folder" : "Open folder"}
-          onClick={() => void openWorkspaceFolder()}
-        />
-        <ActionCard
-          icon={<Settings2 size={16} />}
-          title={hasModel ? "Model ready" : "Select model"}
-          detail={hasModel ? modelLabel : "Add a provider key and choose the model before sending."}
-          actionLabel="Models"
-          onClick={openModelSettings}
-          tone={hasModel ? "normal" : "warning"}
-        />
-        <ActionCard
-          icon={<MessageSquareText size={16} />}
-          title="Start chat"
-          detail={hasProjectWorkspace ? "Seed the composer with a release-review prompt." : "Seed the composer with a planning prompt."}
-          actionLabel="Use starter"
-          onClick={startChat}
-        />
-      </div>
+        <div className="workbench-empty-actions">
+          <EmptyAction
+            icon={<FolderOpen size={15} />}
+            title={hasProjectWorkspace ? "Switch workspace" : "Open workspace"}
+            detail={hasProjectWorkspace ? projectName : "Choose the folder for this session."}
+            onClick={() => void openWorkspaceFolder()}
+          />
+          <EmptyAction
+            icon={<Settings2 size={15} />}
+            title={hasModel ? "Model settings" : "Select model"}
+            detail={modelLabel}
+            onClick={openModelSettings}
+          />
+          <EmptyAction
+            icon={<MessageSquareText size={15} />}
+            title="New conversation"
+            detail="Start a fresh thread."
+            onClick={startChat}
+          />
+        </div>
+      </section>
 
-      <div className="grid gap-[6px]" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(132px, 1fr))" }}>
-        <MetaItem label="model" value={modelLabel} />
-        <MetaItem label="mode" value={permissionModeLabel(permissionMode)} />
-        {hasProjectWorkspace && <MetaItem label="branch" value={branchDisplayName(workspaceGit?.branch) || "--"} icon={<GitBranch size={13} />} />}
-        {mcpServers.length > 0 && <MetaItem label="mcp" value={`${mcpServers.length}`} />}
-        {terminalSessions.length > 0 && <MetaItem label="terminal" value={`${terminalSessions.length}`} icon={<TerminalSquare size={13} />} />}
-      </div>
-
-      <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))" }}>
-        <PromptHint icon={<ShieldCheck size={15} />} title="Permissions" detail="Ask, Auto, or Full access" />
-        <PromptHint icon={<FileText size={15} />} title="@file" detail={hasProjectWorkspace ? "Reference workspace context" : "Attach or mention a path"} />
-        <PromptHint icon={<TerminalSquare size={15} />} title="Ctrl+J" detail="Open the terminal stack" />
-      </div>
     </div>
   );
 };
 
-const ActionCard = ({
+const EmptyAction = ({
   icon,
   title,
   detail,
-  actionLabel,
   onClick,
-  tone = "normal",
 }: {
   icon: React.ReactNode;
   title: string;
   detail: string;
-  actionLabel: string;
   onClick: () => void;
-  tone?: "normal" | "warning";
 }) => (
   <button
     type="button"
     onClick={onClick}
-    className="grid gap-2 text-left border cursor-pointer"
-    style={{
-      minHeight: 118,
-      padding: "13px 14px",
-      borderColor: tone === "warning" ? "color-mix(in oklch, var(--state-warning) 45%, var(--border-subtle))" : "var(--border-subtle)",
-      borderRadius: "var(--radius-md, 10px)",
-      background: tone === "warning"
-        ? "color-mix(in oklch, var(--state-warning) 9%, var(--surface-page))"
-        : "var(--surface-page)",
-      color: "var(--text-primary)",
-      fontFamily: "var(--font-ui)",
-    }}
+    className="workbench-empty-action"
   >
-    <span className="inline-flex items-center gap-2" style={{ color: tone === "warning" ? "var(--state-warning)" : "var(--accent-primary)" }}>
-      {icon}
-      <span style={{ fontWeight: 700, fontSize: "var(--text-sm)" }}>{title}</span>
-    </span>
-    <span style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)", lineHeight: 1.45 }}>{detail}</span>
-    <span style={{ color: tone === "warning" ? "var(--state-warning)" : "var(--accent-primary)", fontSize: "var(--text-xs)", fontWeight: 700 }}>
-      {actionLabel}
+    <span className="workbench-empty-action-icon" aria-hidden="true">{icon}</span>
+    <span className="workbench-empty-action-body">
+      <span className="workbench-empty-action-title">{title}</span>
+      <span className="workbench-empty-action-detail">{detail}</span>
     </span>
   </button>
 );
-
-const MetaItem = ({ label, value, icon }: { label: string; value: string; icon?: React.ReactNode }) => (
-  <div
-    className="grid gap-[5px] min-w-0 px-[11px] py-[9px] border"
-    style={{
-      borderColor: "var(--border-subtle)",
-      borderRadius: "var(--radius-sm, 6px)",
-      background: "var(--surface-page)",
-    }}
-  >
-    <span className="inline-flex items-center gap-[5px]" style={{ color: "var(--text-muted)", fontSize: "10px", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600 }}>
-      {icon}
-      {label}
-    </span>
-    <span className="overflow-hidden text-ellipsis whitespace-nowrap" style={{ color: "var(--text-secondary)", fontFamily: "var(--font-mono)", fontSize: "var(--text-sm)" }}>
-      {value}
-    </span>
-  </div>
-);
-
-const PromptHint = ({ icon, title, detail }: { icon: React.ReactNode; title: string; detail: string }) => (
-  <div
-    className="grid grid-cols-[auto_auto_1fr] items-center gap-[7px] min-w-0 px-[10px] py-[9px] border"
-    style={{
-      borderColor: "var(--border-subtle)",
-      borderRadius: "var(--radius-sm, 4px)",
-      background: "var(--surface-page)",
-      fontSize: "var(--text-xs)",
-    }}
-  >
-    <span className="inline-flex" style={{ color: "var(--accent-primary)" }}>{icon}</span>
-    <span className="font-semibold" style={{ color: "var(--text-primary)" }}>{title}</span>
-    <span className="overflow-hidden text-ellipsis whitespace-nowrap" style={{ color: "var(--text-muted)" }}>{detail}</span>
-  </div>
-);
-
-const permissionModeLabel = (mode: string): string => {
-  if (mode === "ask_permissions") return "Ask";
-  if (mode === "bypass") return "Full access";
-  return "Auto";
-};

@@ -5,18 +5,15 @@ export const ContextChipRegion = () => {
   const actionChip = useAppStore((s) => s.actionChip);
   const mentionResults = useAppStore((s) => s.mentionResults);
   const selectedMentions = useAppStore((s) => s.selectedMentions);
-  const selectedSkills = useAppStore((s) => s.selectedSkills);
-  const attachments = useAppStore((s) => s.attachments);
   const setMentionResults = useAppStore((s) => s.setMentionResults);
   const addSelectedMention = useAppStore((s) => s.addSelectedMention);
   const removeSelectedMention = useAppStore((s) => s.removeSelectedMention);
   const clearSelectedMentions = useAppStore((s) => s.clearSelectedMentions);
-  const clearSelectedSkills = useAppStore((s) => s.clearSelectedSkills);
   const openEditorFile = useAppStore((s) => s.openEditorFile);
   const visibleActionChip = actionChip && !actionChip.label.toLowerCase().startsWith("skill selected")
     ? actionChip
     : null;
-  if (!visibleActionChip && mentionResults.length === 0 && selectedMentions.length === 0 && selectedSkills.length === 0) return null;
+  if (!visibleActionChip && mentionResults.length === 0 && selectedMentions.length === 0) return null;
   return (
     <div style={tokenRowStyle}>
       {visibleActionChip && (
@@ -68,12 +65,11 @@ export const ContextChipRegion = () => {
           </button>
         </>
       )}
-      {(selectedMentions.length > 1 || selectedSkills.length > 1) && (
+      {selectedMentions.length > 1 && (
         <button
           type="button"
           onClick={() => {
             clearSelectedMentions();
-            clearSelectedSkills();
           }}
           style={clearAllStyle}
         >

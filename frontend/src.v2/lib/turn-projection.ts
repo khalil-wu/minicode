@@ -24,6 +24,8 @@ export interface TurnActivityItem {
   blocks: ContentBlock[];
   status: TurnActivityStatus;
   content?: string;
+  source?: string;
+  itemKind?: string;
   records?: ToolCallRecord[];
   progress?: Extract<ContentBlock, { type: "progress" }>[];
   startedAt?: number;
@@ -409,11 +411,49 @@ const pushThinkingBlock = (
   });
 };
 
+const pushProcessBlock = (
+  items: TurnActivityItem[],
+  block: Extract<ContentBlock, { type: "process" }>,
+  index: number,
+) => {
+  if (!block.content.trim() || block.visibility === "debug") return;
+  const kind: TurnActivityKind = "processNote";
+  const status: TurnActivityStatus =
+    block.status === "running"
+      ? "running"
+      : block.status === "failed"
+        ? "failed"
+        : block.status === "info"
+          ? "info"
+          : "completed";
+  const last = items.at(-1);
+  if (last?.kind === kind && last.source === block.source && last.itemKind === block.itemKind) {
+    last.blocks.push(block);
+    last.content = `${last.content ?? ""}${block.content}`;
+    last.status = status;
+    last.hasFailure = last.hasFailure || status === "failed";
+    return;
+  }
+  items.push({
+    id: block.id || `process-${index}`,
+    kind,
+    blocks: [block],
+    content: block.content,
+    source: block.source,
+    itemKind: block.itemKind,
+    status,
+    startedAt: block.timestamp,
+    finishedAt: block.status && block.status !== "running" ? block.timestamp : undefined,
+    hasFailure: status === "failed",
+    hasPendingUserAction: false,
+  });
+};
+
 const nonEmptyTextIndexes = (blocks: ContentBlock[]): number[] =>
   blocks.flatMap((block, index) => block.type === "text" && block.content.trim() ? [index] : []);
 
 const isActivityBlock = (block: ContentBlock): boolean =>
-  block.type === "tool_call" || block.type === "progress" || block.type === "thinking";
+  block.type === "tool_call" || block.type === "progress" || block.type === "thinking" || block.type === "process";
 
 const hasWorkActivity = (blocks: ContentBlock[]): boolean =>
   blocks.some(isActivityBlock);
@@ -621,6 +661,10 @@ export function projectTurn(
     if (block.type === "thinking") {
       if (!block.source) return;
       pushThinkingBlock(activityItems, block, index, options.isThinkingStreaming);
+      return;
+    }
+    if (block.type === "process") {
+      pushProcessBlock(activityItems, block, index);
       return;
     }
     if (block.type === "text") {

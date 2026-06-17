@@ -25,6 +25,8 @@ _PRIVATE_REASONING_TAG_OPEN_RE = re.compile(
     r"<(?:thinking|reasoning|internal)\b",
     re.IGNORECASE,
 )
+_TEXT_DRAFT_STREAM_THRESHOLD_CHARS = 180
+_TEXT_DRAFT_STREAM_THRESHOLD_AFTER_TOOLS_CHARS = 80
 
 
 def scrub_thinking_tags(text: str) -> str:
@@ -131,8 +133,10 @@ class FinalAnswerController:
         if self.preamble_emitted or not self.draft_text.strip():
             return None
         self.preamble_emitted = True
+        preamble = self.draft_text
+        self.draft_text = ""
         return AgentEvent.thinking_chunk(
-            self.draft_text,
+            preamble,
             source="model_preamble",
             visibility="timeline",
         )
@@ -168,9 +172,11 @@ class StreamProcessor:
     text_buffer: str = ""
     pending_tool_calls: list[ToolCallEvent] | None = None
     streamed_text: bool = False
+    streamed_text_started: bool = False
     process_text_emitted: bool = False
     thinking_chars: int = 0
     final_answer: FinalAnswerController | None = None
+    has_prior_tool_activity: bool = False
 
     def __post_init__(self) -> None:
         if self.final_answer is None:
@@ -184,6 +190,7 @@ class StreamProcessor:
         self.text_buffer = ""
         self.pending_tool_calls = []
         self.streamed_text = False
+        self.streamed_text_started = False
         self.process_text_emitted = False
         self.thinking_chars = 0
         if self.final_answer:
@@ -206,9 +213,23 @@ class StreamProcessor:
             self.text_buffer += event.content
             if self.final_answer:
                 self.final_answer.append(event.content)
-            self.streamed_text = True
-            if self.final_answer:
-                events.extend(self.final_answer.stream_delta(event.content))
+            draft_stream_threshold = (
+                _TEXT_DRAFT_STREAM_THRESHOLD_AFTER_TOOLS_CHARS
+                if self.has_prior_tool_activity
+                else _TEXT_DRAFT_STREAM_THRESHOLD_CHARS
+            )
+            if (
+                self.final_answer
+                and (
+                    self.streamed_text_started
+                    or len(self.full_text.strip()) >= draft_stream_threshold
+                )
+            ):
+                delta_content = event.content if self.streamed_text_started else self.final_answer.draft_text
+                self.streamed_text_started = True
+                events.extend(self.final_answer.stream_delta(delta_content))
+                if events:
+                    self.streamed_text = True
 
         elif event.type == StreamEventType.THINKING_CHUNK:
             self.thinking_chars += len(event.content or "")

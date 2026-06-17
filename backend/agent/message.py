@@ -212,6 +212,129 @@ class AgentEvent:
         return cls(type="tool_result", data=result)
 
     @classmethod
+    def loop_started(
+        cls,
+        *,
+        loop_id: str,
+        iteration_id: str = "",
+        title: str = "Working",
+        summary: str = "",
+        started_at: int | None = None,
+        default_collapsed: bool = False,
+    ) -> AgentEvent:
+        payload: dict[str, Any] = {
+            "item_id": loop_id,
+            "loop_id": loop_id,
+            "iteration_id": iteration_id or loop_id,
+            "status": "running",
+            "title": title,
+            "summary": summary or title,
+            "default_collapsed": default_collapsed,
+        }
+        if started_at is not None:
+            payload["started_at"] = started_at
+        return cls(type="agent.loop.started", data=payload)
+
+    @classmethod
+    def loop_completed(
+        cls,
+        *,
+        loop_id: str,
+        iteration_id: str = "",
+        status: str = "completed",
+        title: str = "Processed",
+        summary: str = "",
+        started_at: int | None = None,
+        completed_at: int | None = None,
+        duration_ms: int | None = None,
+        item_count: int | None = None,
+        tool_call_count: int | None = None,
+        default_collapsed: bool = True,
+    ) -> AgentEvent:
+        payload: dict[str, Any] = {
+            "item_id": loop_id,
+            "loop_id": loop_id,
+            "iteration_id": iteration_id or loop_id,
+            "status": status,
+            "title": title,
+            "summary": summary or title,
+            "default_collapsed": default_collapsed,
+        }
+        if started_at is not None:
+            payload["started_at"] = started_at
+        if completed_at is not None:
+            payload["completed_at"] = completed_at
+        if duration_ms is not None:
+            payload["duration_ms"] = duration_ms
+        if item_count is not None:
+            payload["item_count"] = item_count
+        if tool_call_count is not None:
+            payload["tool_call_count"] = tool_call_count
+        return cls(type="agent.loop.completed", data=payload)
+
+    @classmethod
+    def agent_item(
+        cls,
+        *,
+        id: str,
+        kind: str,
+        content: str = "",
+        loop_id: str = "",
+        iteration_id: str = "",
+        parent_id: str = "",
+        role: str = "assistant",
+        source: str = "",
+        status: str = "completed",
+        title: str = "",
+        summary: str = "",
+        visibility: str = "timeline",
+        created_at: int | None = None,
+        order: int | None = None,
+        seq: int | None = None,
+        default_collapsed: bool | None = None,
+        group_id: str = "",
+        step_id: str = "",
+        tool_call_ids: list[str] | None = None,
+    ) -> AgentEvent:
+        payload: dict[str, Any] = {
+            "id": id,
+            "item_id": id,
+            "kind": kind,
+            "role": role,
+            "status": status,
+            "visibility": visibility,
+        }
+        if source:
+            payload["source"] = source
+        if content:
+            payload["content"] = content
+        if loop_id:
+            payload["loop_id"] = loop_id
+        if iteration_id:
+            payload["iteration_id"] = iteration_id
+        if parent_id:
+            payload["parent_id"] = parent_id
+        if title:
+            payload["title"] = title
+        if summary:
+            payload["summary"] = summary
+        if created_at is not None:
+            payload["created_at"] = created_at
+        if order is not None:
+            payload["order"] = order
+        if seq is not None:
+            payload["seq"] = seq
+        if default_collapsed is not None:
+            payload["default_collapsed"] = default_collapsed
+        if group_id:
+            payload["group_id"] = group_id
+        if step_id:
+            payload["step_id"] = step_id
+        if tool_call_ids:
+            payload["tool_call_ids"] = tool_call_ids
+        return cls(type="agent.item", data=payload)
+
+    @classmethod
     def progress(
         cls,
         message: str,

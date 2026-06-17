@@ -19,6 +19,7 @@ import fnmatch
 import logging
 import random
 import re
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -78,7 +79,8 @@ logger = logging.getLogger(__name__)
 
 _POST_COMPACTION_HARD_LIMIT = 0.98
 LLM_STREAM_TIMEOUT_SECONDS = 120.0
-_TEXT_DRAFT_STREAM_THRESHOLD_CHARS = 32
+_TEXT_DRAFT_STREAM_THRESHOLD_CHARS = 180
+_TEXT_DRAFT_STREAM_THRESHOLD_AFTER_TOOLS_CHARS = 80
 _CLARIFICATION_TOOL_NAMES = {"ask_user"}
 _MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3
 _MAX_OUTPUT_FINISH_REASONS = {
@@ -194,14 +196,26 @@ class FinalAnswerController:
                 events.append(AgentEvent.final_answer_delta(suffix))
         return events
 
-    def emit_preamble(self) -> AgentEvent | None:
+    def emit_preamble(self, *, iteration_id: str = "", loop_id: str = "") -> AgentEvent | None:
         if self.preamble_emitted or not self.draft_text.strip():
             return None
         self.preamble_emitted = True
-        return AgentEvent.thinking_chunk(
-            self.draft_text,
-            source="model_preamble",
+        preamble = self.draft_text
+        self.draft_text = ""
+        item_id = f"{loop_id or iteration_id or 'loop'}:process"
+        return AgentEvent.agent_item(
+            id=item_id,
+            kind="process_text",
+            content=preamble,
+            loop_id=loop_id or iteration_id,
+            iteration_id=iteration_id,
+            role="assistant",
+            source="model",
+            status="completed",
+            title="Process",
+            summary=preamble.strip().splitlines()[0][:120],
             visibility="timeline",
+            seq=1,
         )
 
     def reset(self) -> None:
@@ -336,6 +350,58 @@ def _is_max_output_finish_reason(reason: str) -> bool:
 
 def _iteration_id(state: AgentState) -> str:
     return f"iter:{max(1, state.iterations)}"
+
+
+def _epoch_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _action_summary_for_tool_calls(tool_calls: list[ToolCallEvent]) -> str:
+    names = {tc.name for tc in tool_calls}
+    if any(name in names for name in {"web_search", "search_web"}):
+        return "正在搜索实时信息并核对来源。"
+    if any(name in names for name in {"web_fetch", "fetch_url", "fetch_web"}):
+        return "正在打开相关来源，提取可用信息。"
+    if any(name in names for name in {"read_file", "list_files", "get_file", "open_file"}):
+        return "正在读取相关文件，确认上下文。"
+    if any(name in names for name in {"run_command", "shell", "exec_command"}):
+        return "正在运行命令验证当前状态。"
+    if any(name in names for name in {"edit_file", "apply_patch", "write_file"}):
+        return "正在应用代码修改。"
+    if any("browser" in name or "playwright" in name for name in names):
+        return "正在打开页面进行实际检查。"
+    if any("test" in name.lower() for name in names):
+        return "正在运行测试验证改动。"
+    if any(name.startswith("mcp__") for name in names):
+        return "正在调用外部工具获取上下文。"
+    return "正在调用工具处理当前步骤。"
+
+
+def _runtime_action_summary_event(
+    tool_calls: list[ToolCallEvent],
+    *,
+    iteration_id: str,
+) -> AgentEvent | None:
+    if not tool_calls:
+        return None
+    content = _action_summary_for_tool_calls(tool_calls)
+    return AgentEvent.agent_item(
+        id=f"{iteration_id}:runtime-action-summary",
+        kind="action_summary",
+        content=content,
+        loop_id=iteration_id,
+        iteration_id=iteration_id,
+        role="runtime",
+        source="runtime",
+        status="completed",
+        title="Action",
+        summary=content,
+        visibility="timeline",
+        group_id=iteration_id,
+        step_id=f"{iteration_id}:action",
+        tool_call_ids=[tc.id for tc in tool_calls],
+        seq=1,
+    )
 
 
 def _filter_disabled_tool_schemas(
@@ -1129,6 +1195,15 @@ async def run_agent_loop(
             messages = await ctx.build(user_message=active_user_message, state=state)
 
             state.iterations += 1
+            iteration_id = _iteration_id(state)
+            loop_started_at = _epoch_ms()
+            yield AgentEvent.loop_started(
+                loop_id=iteration_id,
+                iteration_id=iteration_id,
+                title="正在思考",
+                summary="模型正在确认下一步行动",
+                started_at=loop_started_at,
+            )
 
             # Stream the LLM response (with retry ladder)
             full_text = ""
@@ -1138,7 +1213,9 @@ async def run_agent_loop(
             stream_attempt = 0
             text_buffer = ""
             streamed_text = False
+            streamed_text_started = False
             process_text_emitted = False
+            runtime_action_summary_emitted = False
             preamble_text = ""
             final_answer.reset()
             _thinking_chars = 0  # guard: break out of endless thinking loops
@@ -1166,11 +1243,24 @@ async def run_agent_loop(
                             full_text += event.content
                             text_buffer += event.content
                             final_answer.append(event.content)
-                            # Don't emit final_answer_started yet — wait until
-                            # we know there are no tool calls. During streaming,
-                            # text could be reasoning (before tool calls) or the
-                            # final answer (no tool calls). We decide at DONE time.
-                            # For now, just accumulate silently.
+                            draft_stream_threshold = (
+                                _TEXT_DRAFT_STREAM_THRESHOLD_AFTER_TOOLS_CHARS
+                                if state.tool_calls
+                                else _TEXT_DRAFT_STREAM_THRESHOLD_CHARS
+                            )
+                            if (
+                                streamed_text_started
+                                or len(full_text.strip()) >= draft_stream_threshold
+                            ):
+                                delta_content = event.content if streamed_text_started else final_answer.draft_text
+                                streamed_text_started = True
+                                # Stream incrementally so the frontend can render tokens
+                                # as they arrive (typewriter effect). If tool calls appear
+                                # later, the retract mechanism will undo the streamed text
+                                # and re-emit it as a thinking preamble.
+                                for _ev in final_answer.stream_delta(delta_content):
+                                    streamed_text = True
+                                    yield _ev
                         elif event.type == StreamEventType.THINKING_CHUNK:
                             _thinking_chars += len(event.content or "")
                             yield AgentEvent.thinking_chunk(
@@ -1195,11 +1285,16 @@ async def run_agent_loop(
                                 retracted = final_answer.retract("tool_call_started")
                                 if retracted is not None:
                                     yield retracted
-                                preamble_event = final_answer.emit_preamble()
+                                preamble_event = final_answer.emit_preamble(
+                                    iteration_id=iteration_id,
+                                    loop_id=iteration_id,
+                                )
                                 if preamble_event is not None:
                                     yield preamble_event
                                     preamble_text = full_text
                                     full_text = ""
+                                # Clear draft to prevent duplicate preamble on next tool call
+                                final_answer.draft_text = ""
                                 process_text_emitted = True
                                 text_buffer = ""
                         elif event.type == StreamEventType.TOOL_CALL_DELTA:
@@ -1210,13 +1305,26 @@ async def run_agent_loop(
                                 retracted = final_answer.retract("tool_call_started")
                                 if retracted is not None:
                                     yield retracted
-                                preamble_event = final_answer.emit_preamble()
+                                preamble_event = final_answer.emit_preamble(
+                                    iteration_id=iteration_id,
+                                    loop_id=iteration_id,
+                                )
                                 if preamble_event is not None:
                                     yield preamble_event
                                     preamble_text = full_text
                                     full_text = ""
+                                # Clear draft to prevent duplicate preamble on next tool call
+                                final_answer.draft_text = ""
                                 process_text_emitted = True
                                 text_buffer = ""
+                            if pending_tool_calls and not process_text_emitted and not runtime_action_summary_emitted:
+                                action_event = _runtime_action_summary_event(
+                                    pending_tool_calls,
+                                    iteration_id=iteration_id,
+                                )
+                                if action_event is not None:
+                                    yield action_event
+                                    runtime_action_summary_emitted = True
                         elif event.type == StreamEventType.DONE:
                             usage = event.usage
                             finish_reason = event.finish_reason
@@ -1659,6 +1767,17 @@ async def run_agent_loop(
                     ctx.append_assistant(final_text)
                     state.reply = final_text
                     yield AgentEvent.final_answer_committed(final_text)
+                loop_completed_at = _epoch_ms()
+                yield AgentEvent.loop_completed(
+                    loop_id=iteration_id,
+                    iteration_id=iteration_id,
+                    title="已处理",
+                    summary="已生成最终回答",
+                    started_at=loop_started_at,
+                    completed_at=loop_completed_at,
+                    duration_ms=max(0, loop_completed_at - loop_started_at),
+                    tool_call_count=0,
+                )
                 state.stopped_reason = "completed"
                 yield AgentEvent.done(
                     input_tokens=usage.input_tokens,
@@ -1725,6 +1844,23 @@ async def run_agent_loop(
                 guardrail_controller=guardrail_controller,
             ):
                 yield ev
+
+            loop_completed_at = _epoch_ms()
+            tool_call_count = len(pending_tool_calls)
+            yield AgentEvent.loop_completed(
+                loop_id=iteration_id,
+                iteration_id=iteration_id,
+                title="已处理",
+                summary=(
+                    f"已完成 {tool_call_count} 个工具调用"
+                    if tool_call_count != 1
+                    else "已完成 1 个工具调用"
+                ),
+                started_at=loop_started_at,
+                completed_at=loop_completed_at,
+                duration_ms=max(0, loop_completed_at - loop_started_at),
+                tool_call_count=tool_call_count,
+            )
 
             # NOTE: StreamingToolExecutor is integrated via _execute_tool_batch →
             # flush_queue → batch_tool_calls, which already parallelises

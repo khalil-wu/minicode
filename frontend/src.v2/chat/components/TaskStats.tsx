@@ -1,36 +1,16 @@
-import { useMemo } from "react";
-import { TrendingUp, Clock, CheckCircle, Target, AlertCircle } from "lucide-react";
-import { useAppStore } from "../../stores";
+import { TrendingUp, Clock, CheckCircle2, Target, AlertCircle, X } from "lucide-react";
+import { useTaskStats } from "./useTaskStats";
 import "./task-stats.css";
 
+interface TaskStatsProps {
+  onClose?: () => void;
+}
+
 /**
- * Task statistics panel showing completion rate, avg time, etc.
+ * Task statistics panel showing completion rate, status distribution, etc.
  */
-export function TaskStats() {
-  const todos = useAppStore((s) => s.todos);
-
-  const stats = useMemo(() => {
-    const total = todos.length;
-    const completed = todos.filter((t) => t.status === "completed").length;
-    const inProgress = todos.filter((t) => t.status === "in_progress").length;
-    const pending = todos.filter((t) => t.status === "pending").length;
-    const blocked = todos.filter((t) => t.status === "blocked").length;
-
-    const completionRate = total > 0 ? (completed / total) * 100 : 0;
-
-    // Estimate avg time (in real app, track actual timestamps)
-    const avgTimeMin = total > 0 ? Math.round(5 + Math.random() * 10) : 0;
-
-    return {
-      total,
-      completed,
-      inProgress,
-      pending,
-      blocked,
-      completionRate,
-      avgTimeMin,
-    };
-  }, [todos]);
+export function TaskStats({ onClose }: TaskStatsProps) {
+  const stats = useTaskStats();
 
   if (stats.total === 0) {
     return (
@@ -46,28 +26,39 @@ export function TaskStats() {
       <div className="task-stats-header">
         <TrendingUp size={16} />
         <span>任务统计</span>
+        {onClose && (
+          <button
+            type="button"
+            className="task-stats-close"
+            onClick={onClose}
+            title="关闭统计"
+            aria-label="关闭统计面板"
+          >
+            <X size={14} />
+          </button>
+        )}
       </div>
 
       <div className="task-stats-grid">
         {/* Completion Rate */}
         <div className="task-stat-card primary">
           <div className="task-stat-icon">
-            <CheckCircle size={20} />
+            <CheckCircle2 size={20} />
           </div>
           <div className="task-stat-content">
-            <div className="task-stat-value">{Math.round(stats.completionRate)}%</div>
+            <div className="task-stat-value">{Math.round(stats.progress)}%</div>
             <div className="task-stat-label">完成率</div>
           </div>
         </div>
 
-        {/* Avg Time */}
+        {/* In Progress */}
         <div className="task-stat-card secondary">
           <div className="task-stat-icon">
             <Clock size={20} />
           </div>
           <div className="task-stat-content">
-            <div className="task-stat-value">{stats.avgTimeMin}min</div>
-            <div className="task-stat-label">平均耗时</div>
+            <div className="task-stat-value">{stats.inProgress}</div>
+            <div className="task-stat-label">进行中</div>
           </div>
         </div>
 

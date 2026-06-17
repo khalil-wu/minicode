@@ -60,6 +60,50 @@ class SessionApprovalRuntimeMixin:
             return True
         return False
 
+    async def _auto_approve_pending_tool_approvals(
+        self,
+        *,
+        reason: str,
+        conversation_id: str | None = None,
+    ) -> list[str]:
+        pending_payloads = getattr(self, "_pending_approval_payloads", {})
+        target_conversation_id = str(conversation_id or "").strip()
+        approved_ids: list[str] = []
+
+        for request_id, payload in list(pending_payloads.items()):
+            payload_conversation_id = str(payload.get("conversation_id") or "").strip()
+            if target_conversation_id and payload_conversation_id != target_conversation_id:
+                continue
+
+            payload_type = str(payload.get("type") or "").strip()
+            request = payload.get("request")
+            is_tool_control_request = (
+                payload_type == "control_request"
+                and isinstance(request, dict)
+                and str(request.get("subtype") or "").strip() == "can_use_tool"
+            )
+            if payload_type != "approval_request" and not is_tool_control_request:
+                continue
+
+            resolved = self._resolve_pending_approval(
+                request_id,
+                {
+                    "action": "approve",
+                    "auto_approved": True,
+                    "reason": reason,
+                },
+            )
+            if resolved:
+                approved_ids.append(request_id)
+
+        if approved_ids:
+            event = AgentEvent.approval_cancelled(approved_ids, reason=reason)
+            if target_conversation_id:
+                event.data["conversation_id"] = target_conversation_id
+            await self._send_event(event)
+
+        return approved_ids
+
     def _normalize_control_response(
         self,
         data: dict[str, Any],

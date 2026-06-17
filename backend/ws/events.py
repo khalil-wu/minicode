@@ -33,6 +33,9 @@ ServerEventType = Literal[
     "tool_call",
     "tool_output_delta",
     "tool_result",
+    "agent.loop.started",
+    "agent.loop.completed",
+    "agent.item",
     "agent.progress",
     "task.update",
     "approval_request",
@@ -286,6 +289,42 @@ class AgentProgressData(TypedDict, total=False):
     count: int
 
 
+class AgentLoopData(TypedDict, total=False):
+    loop_id: str
+    iteration_id: str
+    status: Literal["running", "completed", "failed", "interrupted"]
+    title: str
+    summary: str
+    started_at: int
+    completed_at: int
+    duration_ms: int
+    item_count: int
+    tool_call_count: int
+    default_collapsed: bool
+
+
+class AgentItemData(TypedDict, total=False):
+    id: str
+    loop_id: str
+    iteration_id: str
+    parent_id: str
+    kind: Literal["process_text", "action_summary", "observation", "status", "plan", "tool_group"]
+    role: Literal["assistant", "runtime", "system", "tool"]
+    source: Literal["model", "runtime", "system", "tool"]
+    status: Literal["running", "completed", "failed", "info"]
+    title: str
+    content: str
+    summary: str
+    visibility: Literal["timeline", "compact", "debug"]
+    created_at: int
+    order: int
+    seq: int
+    default_collapsed: bool
+    group_id: str
+    step_id: str
+    tool_call_ids: list[str]
+
+
 class ThinkingDeltaData(TypedDict, total=False):
     content: str
     source: Literal["provider", "model_preamble", "runtime"]
@@ -504,6 +543,8 @@ __all__ = [
     "is_client_command",
     "TaskUpdateData",
     "AgentProgressData",
+    "AgentLoopData",
+    "AgentItemData",
     "ThinkingDeltaData",
     "ToolCallData",
     "ToolOutputDeltaData",

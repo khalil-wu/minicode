@@ -3,9 +3,10 @@
 .task-stats {
   background: var(--surface-page);
   border: 1px solid var(--border-soft);
-  border-radius: var(--radius-lg);
-  padding: 20px;
-  margin: 16px 0;
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  margin: 12px 0;
+  box-shadow: 0 1px 4px color-mix(in oklch, var(--text-primary) 6%, transparent);
 }
 
 .task-stats-header {
@@ -15,6 +16,26 @@
   margin-bottom: 16px;
   font-size: var(--text-base);
   font-weight: 650;
+  color: var(--text-primary);
+}
+
+.task-stats-close {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.task-stats-close:hover {
+  background: var(--surface-hover);
   color: var(--text-primary);
 }
 
@@ -73,22 +94,22 @@
 
 .task-stat-card.primary .task-stat-icon {
   background: var(--state-success);
-  color: white;
+  color: var(--text-on-accent);
 }
 
 .task-stat-card.secondary .task-stat-icon {
   background: var(--accent-primary);
-  color: white;
+  color: var(--text-on-accent);
 }
 
 .task-stat-card.info .task-stat-icon {
   background: var(--state-info);
-  color: white;
+  color: var(--text-on-accent);
 }
 
 .task-stat-card.warning .task-stat-icon {
   background: var(--state-warning);
-  color: white;
+  color: var(--text-on-accent);
 }
 
 .task-stat-content {

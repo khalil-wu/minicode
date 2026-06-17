@@ -5,6 +5,7 @@ export { ActivityCell } from "./ActivityCell";
 export { ActivityGroupCell } from "./ActivityGroupCell";
 export { PlanCell } from "./PlanCell";
 export { ExecCell } from "./ExecCell";
+export { ExecGroupCell } from "./ExecGroupCell";
 export { DiffCell } from "./DiffCell";
 export { ErrorCell } from "./ErrorCell";
 export { AssistantMarkdownCell } from "./AssistantMarkdownCell";

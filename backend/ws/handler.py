@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextvars import ContextVar
+from datetime import datetime, timezone
 import json
 import logging
 import re
@@ -985,6 +986,11 @@ class WebSocketSession(
             and self._set_permission_context_mode(requested_permission_mode, source="user_message")
         ):
             await self._emit_permission_mode_updated()
+            if requested_permission_mode == "bypass":
+                await self._auto_approve_pending_tool_approvals(
+                    reason="permission_mode_bypass",
+                    conversation_id=target_conversation_id,
+                )
 
     async def _handle_control_cancel(self, command: UserCommand) -> None:
         """Handle control_cancel_request command."""
@@ -1255,6 +1261,7 @@ class WebSocketSession(
         enveloped = dict(payload)
         enveloped.setdefault("seq", seq)
         enveloped.setdefault("event_id", f"{self.session_id}:{self._event_instance_id}:{seq}")
+        enveloped.setdefault("timestamp", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
         return enveloped
 
     async def _send_conversation_list(self) -> None:

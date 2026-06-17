@@ -44,10 +44,12 @@ export interface ActivityBrowserItem {
 
 export interface ActivitySourceItem {
   id: string;
+  kind: "web" | "file";
   label: string;
   title?: string;
-  url: string;
-  host: string;
+  url?: string;
+  path?: string;
+  host?: string;
 }
 
 export interface ActivitySidebarState {
@@ -158,19 +160,6 @@ function buildOutput(messages: ChatMessage[], previewArtifact: ArtifactContentSt
       seen.add(artifact.artifactId);
       items.push(outputFromArtifact(artifact));
     }
-    for (const record of getToolCallsFromMessage(message)) {
-      const preview = String(record.outputPreview || "").trim();
-      if (record.status !== "success" || !preview) continue;
-      const id = `command-output-${record.id}`;
-      if (seen.has(id)) continue;
-      seen.add(id);
-      items.push({
-        id,
-        label: commandLabel(record.args?.command, record.name),
-        kind: "command",
-        detail: firstLine(preview),
-      });
-    }
   }
 
   if (previewArtifact?.artifactId && !seen.has(previewArtifact.artifactId)) {
@@ -224,6 +213,33 @@ function buildSources(messages: ChatMessage[]): ActivitySourceItem[] {
   const assistantMessages = messages.filter((message) => message.role === "assistant");
 
   for (const message of assistantMessages) {
+    for (const record of getToolCallsFromMessage(message)) {
+      const webUrl = toolSourceUrl(record);
+      if (webUrl && !seen.has(`web:${webUrl}`)) {
+        seen.add(`web:${webUrl}`);
+        items.push({
+          id: `web:${webUrl}`,
+          kind: "web",
+          label: hostLabel(webUrl),
+          title: record.displaySummary || record.summary,
+          url: webUrl,
+          host: hostLabel(webUrl),
+        });
+      }
+
+      const filePath = toolSourcePath(record);
+      if (filePath && !seen.has(`file:${filePath}`)) {
+        seen.add(`file:${filePath}`);
+        items.push({
+          id: `file:${filePath}`,
+          kind: "file",
+          label: basename(filePath),
+          title: dirname(filePath),
+          path: filePath,
+        });
+      }
+    }
+
     const citedIndexes = extractInlineCitationIndexes(message.content || "");
     if (citedIndexes.size === 0) continue;
     const citations = (message.citations ?? []).filter((citation, index) =>
@@ -231,10 +247,11 @@ function buildSources(messages: ChatMessage[]): ActivitySourceItem[] {
     );
     for (const citation of citations) {
       const url = citationUrl(citation);
-      if (!url || seen.has(url)) continue;
-      seen.add(url);
+      if (!url || seen.has(`web:${url}`)) continue;
+      seen.add(`web:${url}`);
       items.push({
-        id: url,
+        id: `web:${url}`,
+        kind: "web",
         label: citation.label || hostLabel(url),
         title: citation.title,
         url,
@@ -244,6 +261,43 @@ function buildSources(messages: ChatMessage[]): ActivitySourceItem[] {
   }
 
   return items.slice(-8);
+}
+
+function toolSourceUrl(record: ReturnType<typeof getToolCallsFromMessage>[number]): string {
+  if (String(record.extractionStatus || "").toLowerCase() === "failed") return "";
+  const candidate = record.sourceUrl || stringArg(record.args.url) || stringArg(record.args.source_url);
+  if (!/^https?:\/\//i.test(candidate)) return "";
+  const evidence = String(record.evidenceType || "").toLowerCase();
+  if (evidence === "candidate") return "";
+  if (evidence === "fetched") return candidate;
+  if (/fetch/i.test(`${record.name} ${record.resultKind || ""}`)) return candidate;
+  return "";
+}
+
+function toolSourcePath(record: ReturnType<typeof getToolCallsFromMessage>[number]): string {
+  const candidate = stringArg(record.args.file_path ?? record.args.path ?? record.args.target ?? record.args.filename);
+  if (!candidate || /^https?:\/\//i.test(candidate)) return "";
+  if (
+    /read|grep|glob|search|list|write|edit|patch|delete|remove|create|move|rename|save/i.test(record.name) ||
+    /file|edit|command/i.test(String(record.resultKind || ""))
+  ) {
+    return candidate;
+  }
+  return "";
+}
+
+function stringArg(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function basename(path: string): string {
+  return path.replace(/\\/g, "/").split("/").pop() || path;
+}
+
+function dirname(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  const index = normalized.lastIndexOf("/");
+  return index > 0 ? normalized.slice(0, index) : "";
 }
 
 function outputFromArtifact(artifact: ArtifactPreview): ActivityOutputItem {
@@ -277,17 +331,6 @@ function progressStatus(status: AgentProgressEntry["status"]): ActivityProgressS
   if (status === "completed" || status === "info") return "completed";
   if (status === "running") return "running";
   return "failed";
-}
-
-function commandLabel(command: unknown, fallback: string): string {
-  const text = typeof command === "string" ? command.trim() : "";
-  if (!text) return fallback;
-  return text.length > 90 ? `${text.slice(0, 87)}...` : text;
-}
-
-function firstLine(value: string): string {
-  const line = value.split(/\r?\n/).find((item) => item.trim()) ?? value;
-  return line.length > 120 ? `${line.slice(0, 117)}...` : line;
 }
 
 function citationUrl(citation: Citation): string {

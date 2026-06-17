@@ -31,9 +31,15 @@ import type {
   PlanCellState,
   StatusNoticeCellState,
   StreamingAssistantTailCellState,
+  ThinkingCellState,
   TurnSummaryCellState,
   UserMessageCellState,
 } from "./cells/cellTypes";
+
+type CommittedCellState = Exclude<
+  HistoryCellState,
+  UserMessageCellState | StreamingAssistantTailCellState
+>;
 
 // ── Activity Label Language ─────────────────────────────────────────
 // Activity titles/subtitles follow the user's language, mirroring the
@@ -349,60 +355,62 @@ function statusFromRecords(records: ToolCallRecord[]): TurnActivityStatus {
 }
 
 function aggregateWebActivityItems(items: TurnActivityItem[]): TurnActivityItem[] {
+  const result: TurnActivityItem[] = [];
+  let webRun: TurnActivityItem[] = [];
+
+  const flushWebRun = () => {
+    if (webRun.length === 0) return;
+    result.push(...aggregateContiguousWebRun(webRun));
+    webRun = [];
+  };
+
+  for (const item of items) {
+    if (item.kind === "webSearch") {
+      webRun.push(item);
+      continue;
+    }
+    flushWebRun();
+    result.push(item);
+  }
+  flushWebRun();
+
+  return result;
+}
+
+function aggregateContiguousWebRun(webRun: TurnActivityItem[]): TurnActivityItem[] {
   const searchRecords: ToolCallRecord[] = [];
   const fetchRecords: ToolCallRecord[] = [];
-  let firstWebIndex = -1;
-
-  items.forEach((item, index) => {
-    if (item.kind !== "webSearch") return;
-    if (firstWebIndex < 0) firstWebIndex = index;
+  for (const item of webRun) {
     for (const record of item.records ?? []) {
       if (isWebFetchRecord(record)) fetchRecords.push(record);
       else searchRecords.push(record);
     }
-  });
+  }
 
-  if (firstWebIndex < 0 || searchRecords.length + fetchRecords.length <= 1) return items;
+  if (searchRecords.length + fetchRecords.length <= 1) return webRun;
 
-  const makeWebItem = (id: string, records: ToolCallRecord[], queryCount: number, pageCount: number): TurnActivityItem => {
-    const timing = timingFromRecords(records);
-    const status = statusFromRecords(records);
+  const makeWebItem = (kind: "search" | "fetch", groupRecords: ToolCallRecord[]): TurnActivityItem => {
+    const timing = timingFromRecords(groupRecords);
+    const status = statusFromRecords(groupRecords);
     return {
-      id,
+      id: `${kind === "fetch" ? "web-fetch" : "web-search"}-${groupRecords[0]?.id ?? "turn"}`,
       kind: "webSearch",
       blocks: [],
-      records,
+      records: groupRecords,
       status,
       startedAt: timing.startedAt,
       finishedAt: timing.finishedAt,
-      durationMs: records.reduce((sum, record) => sum + (record.durationMs ?? 0), 0),
-      hasFailure: records.some(isFailedToolRecord),
-      hasPendingUserAction: records.some((record) => record.status === "running" || record.status === "pending"),
-      queryCount,
-      pageCount,
+      durationMs: groupRecords.reduce((sum, record) => sum + (record.durationMs ?? 0), 0),
+      hasFailure: groupRecords.some(isFailedToolRecord),
+      hasPendingUserAction: groupRecords.some((record) => record.status === "running" || record.status === "pending"),
+      queryCount: kind === "search" ? groupRecords.length : 0,
+      pageCount: kind === "fetch" ? groupRecords.length : 0,
     };
   };
 
-  const webItems: TurnActivityItem[] = [];
-  if (searchRecords.length) {
-    webItems.push(makeWebItem(`web-search-${searchRecords[0]?.id ?? "turn"}`, searchRecords, searchRecords.length, 0));
-  }
-  if (fetchRecords.length) {
-    webItems.push(makeWebItem(`web-fetch-${fetchRecords[0]?.id ?? "turn"}`, fetchRecords, 0, fetchRecords.length));
-  }
-
   const result: TurnActivityItem[] = [];
-  let inserted = false;
-  items.forEach((item, index) => {
-    if (item.kind === "webSearch") {
-      if (!inserted && index === firstWebIndex) {
-        result.push(...webItems);
-        inserted = true;
-      }
-      return;
-    }
-    result.push(item);
-  });
+  if (searchRecords.length) result.push(makeWebItem("search", searchRecords));
+  if (fetchRecords.length) result.push(makeWebItem("fetch", fetchRecords));
   return result;
 }
 
@@ -428,6 +436,43 @@ function isHiddenProcessActivity(item: TurnActivityItem): boolean {
     item.kind === "providerReasoning" ||
     item.kind === "reasoning"
   );
+}
+
+function isInterleavedAgentMessageActivity(
+  item: TurnActivityItem,
+  index: number,
+  items: TurnActivityItem[],
+): boolean {
+  if (item.kind !== "agentMessage" || !item.content?.trim()) return false;
+  const previousTool = [...items.slice(0, index)].reverse().find((candidate) => Boolean(candidate.records?.length));
+  const nextTool = items.slice(index + 1).find((candidate) => Boolean(candidate.records?.length));
+  return Boolean(previousTool && nextTool && previousTool.kind !== nextTool.kind);
+}
+
+function isVisibleThinkingActivity(item: TurnActivityItem): boolean {
+  const isThinkingKind =
+    item.kind === "processNote" ||
+    item.kind === "providerReasoning" ||
+    item.kind === "reasoning";
+  if (!isThinkingKind || !item.content?.trim()) return false;
+
+  const thinkingBlocks = item.blocks.filter((block) => block.type === "thinking");
+  if (thinkingBlocks.length === 0) return item.kind !== "providerReasoning";
+
+  return (
+    thinkingBlocks.some((block) =>
+      Boolean(block.content?.trim()) &&
+      block.visibility !== "debug" &&
+      !block.is_raw_provider_reasoning,
+    )
+  );
+}
+
+function thinkingSourceForItem(item: TurnActivityItem): ThinkingCellState["source"] {
+  if (item.kind === "processNote" && item.source === "runtime") return "runtime";
+  if (item.kind === "processNote") return "model_preamble";
+  if (item.kind === "providerReasoning") return "provider";
+  return "reasoning";
 }
 
 function isGenericIterationProgress(item: TurnActivityItem): boolean {
@@ -559,7 +604,7 @@ function aggregateActivityItems(
   } = {},
 ): TurnActivityItem[] {
   const developerMode = useAppStore.getState().viewMode === "verbose";
-  const visibleItems = items.flatMap((item) => {
+  const visibleItems = items.flatMap((item, index) => {
     const withoutGuard = removeInternalGuardRecords(item, developerMode);
     if (!withoutGuard) return [];
     if (!developerMode && shouldHideRecoverableLocalProbeActivity(withoutGuard, options)) return [];
@@ -567,11 +612,13 @@ function aggregateActivityItems(
       hasFinalAnswer: options.hasFinalAnswer,
       isStreaming: options.isStreaming,
     });
+    const visibleThinkingActivity = isVisibleThinkingActivity(withoutGuard);
+    const visibleInterleavedAgentMessage = isInterleavedAgentMessageActivity(withoutGuard, index, items);
     const hiddenGenericIteration = !developerMode &&
       isGenericIterationProgress(withoutGuard) &&
       !isFinalAnswerDraftProgress;
     return !hiddenGenericIteration &&
-      !isHiddenProcessActivity(withoutGuard) &&
+      (!isHiddenProcessActivity(withoutGuard) || visibleThinkingActivity || visibleInterleavedAgentMessage) &&
       (developerMode || !isHiddenSchemaFailureActivity(withoutGuard))
       ? [withoutGuard]
       : [];
@@ -718,18 +765,21 @@ function extractExecCells(
   return cells;
 }
 
-function extractDiffCells(
-  items: TurnActivityItem[],
-): DiffCellState[] {
-  const fileChangeItems = items.filter((i) => i.kind === "fileChange");
-  if (fileChangeItems.length === 0) return [];
+function buildExecCellsForItem(item: TurnActivityItem): ExecCellState[] {
+  return extractExecCells([item]);
+}
+
+function buildDiffCellForFileChangeItems(
+  fileChangeItems: TurnActivityItem[],
+): DiffCellState | null {
+  if (fileChangeItems.length === 0) return null;
 
   const allRecords = fileChangeItems.flatMap((i) => i.records ?? []).filter((record) => (
     record.name !== "todo_write" &&
     (isFileChangeTool(record.name) || Boolean(record.diff)) &&
     (Boolean(extractToolTarget(record)) || Boolean(record.diff?.patch))
   ));
-  if (allRecords.length === 0) return [];
+  if (allRecords.length === 0) return null;
   const totals = diffTotals(allRecords);
 
   const files: DiffFileChange[] = [];
@@ -748,25 +798,224 @@ function extractDiffCells(
     });
   }
 
-  return [
-    {
-      kind: "diff",
-      id: `diff-${fileChangeItems[0]?.id ?? "turn"}`,
-      status: "updated",
-      files,
-      summary: {
-        added: totals.added,
-        deleted: totals.deleted,
-        modifiedFiles: files.length,
-      },
-      collapsed: files.length > 3,
-      createdAt: fileChangeItems[0]?.startedAt ?? Date.now(),
+  return {
+    kind: "diff",
+    id: `diff-${fileChangeItems[0]?.id ?? "turn"}`,
+    status: "updated",
+    files,
+    summary: {
+      added: totals.added,
+      deleted: totals.deleted,
+      modifiedFiles: files.length,
     },
-  ];
+    collapsed: files.length > 3,
+    createdAt: fileChangeItems[0]?.startedAt ?? Date.now(),
+  };
+}
+
+function buildThinkingCell(
+  item: TurnActivityItem,
+  assistantMsg: ChatMessage,
+): ThinkingCellState {
+  return {
+    kind: "thinking",
+    id: `${assistantMsg.id}-thinking-${item.id}`,
+    content: item.content ?? "",
+    source: thinkingSourceForItem(item),
+    createdAt: item.startedAt ?? assistantMsg.timestamp,
+  };
+}
+
+function buildProcessNoteCell(
+  item: TurnActivityItem,
+  assistantMsg: ChatMessage,
+): ThinkingCellState {
+  return {
+    kind: "thinking",
+    id: `${assistantMsg.id}-process-${item.id}`,
+    content: item.content ?? "",
+    source: thinkingSourceForItem(item),
+    createdAt: item.startedAt ?? assistantMsg.timestamp,
+  };
+}
+
+function buildActivityCell(
+  item: TurnActivityItem,
+  options: {
+    lang: Lang;
+    assistantMsg: ChatMessage;
+    hasFinalAnswer: boolean;
+    isStreaming: boolean;
+  },
+): ActivityCellState {
+  const { lang, assistantMsg, hasFinalAnswer, isStreaming } = options;
+  const records = item.records ?? [];
+  const isRunning = item.status === "running" || item.status === "pending";
+  const isFinalAnswerDraftIteration = isFinalAnswerDraftIterationProgress(item, {
+    hasFinalAnswer,
+    isStreaming,
+  });
+  // Populate progress with real-time count for aggregatable activities.
+  let progress: ActivityCellState["progress"];
+  if (item.progress?.length) {
+    progress = { text: isFinalAnswerDraftIteration ? undefined : item.progress.at(-1)?.summary };
+  } else if (isRunning && records.length > 0) {
+    const doneCount = records.filter((r) => r.status === "success").length;
+    progress = { current: doneCount, total: undefined, text: t(lang, `已完成 ${doneCount} 个`, `${doneCount} done`) };
+  }
+  const hasItemFailure = item.hasFailure || item.status === "failed" || item.status === "blocked";
+  const hasItemSuccess = records.some((r) => r.status === "success");
+  const hasPartial = item.status === "partial" || records.some((r) => r.status === "partial");
+  const isPartialFailure = hasItemFailure && hasItemSuccess;
+  const visibleToolRecords = isPartialFailure ? successfulRecords(records) : item.records;
+  return {
+    kind: "activity",
+    id: item.id,
+    activityKind: item.kind,
+    title: isFinalAnswerDraftIteration
+      ? t(lang, "正在输出最终回答", "Writing final answer")
+      : getActivityTitle(item, lang),
+    subtitle: getActivitySubtitle(item, lang),
+    status: isPartialFailure ? "done" : mapActivityStatus(item.status),
+    collapsed:
+      !hasPartial &&
+      (!item.hasFailure || isPartialFailure) &&
+      item.status !== "running" &&
+      item.status !== "pending",
+    toolCallRecords: visibleToolRecords,
+    progress,
+    startedAt: item.startedAt ?? assistantMsg.timestamp,
+    completedAt: item.finishedAt,
+  };
+}
+
+function buildOrderedProcessCells(
+  items: TurnActivityItem[],
+  options: {
+    lang: Lang;
+    assistantMsg: ChatMessage;
+    hasFinalAnswer: boolean;
+    isStreaming: boolean;
+    fallbackErrorCells?: ErrorCellState[];
+  },
+): {
+  orderedCells: CommittedCellState[];
+  activityCells: ActivityCellState[];
+  execCells: ExecCellState[];
+  diffCells: DiffCellState[];
+} {
+  const orderedCells: CommittedCellState[] = [];
+  const activityCells: ActivityCellState[] = [];
+  const execCells: ExecCellState[] = [];
+  const diffCells: DiffCellState[] = [];
+  let emittedAnyErrors = false;
+
+  for (const [index, item] of items.entries()) {
+    if (isInterleavedAgentMessageActivity(item, index, items)) {
+      const cell = buildProcessNoteCell(item, options.assistantMsg);
+      orderedCells.push(cell);
+      const errorCells = buildErrorCellsForItem(item, options.assistantMsg, options.hasFinalAnswer);
+      if (errorCells.length > 0) {
+        orderedCells.push(...errorCells);
+        emittedAnyErrors = true;
+      }
+      continue;
+    }
+
+    if (isVisibleThinkingActivity(item)) {
+      const cell = buildThinkingCell(item, options.assistantMsg);
+      orderedCells.push(cell);
+      const errorCells = buildErrorCellsForItem(item, options.assistantMsg, options.hasFinalAnswer);
+      if (errorCells.length > 0) {
+        orderedCells.push(...errorCells);
+        emittedAnyErrors = true;
+      }
+      continue;
+    }
+
+    if (item.kind === "commandExecution") {
+      const cells = buildExecCellsForItem(item);
+      orderedCells.push(...cells);
+      execCells.push(...cells);
+      const errorCells = buildErrorCellsForItem(item, options.assistantMsg, options.hasFinalAnswer);
+      if (errorCells.length > 0) {
+        orderedCells.push(...errorCells);
+        emittedAnyErrors = true;
+      }
+      continue;
+    }
+
+    if (item.kind === "fileChange") {
+      const diffCell = buildDiffCellForFileChangeItems([item]);
+      if (diffCell) {
+        orderedCells.push(diffCell);
+        diffCells.push(diffCell);
+        const errorCells = buildErrorCellsForItem(item, options.assistantMsg, options.hasFinalAnswer);
+        if (errorCells.length > 0) {
+          orderedCells.push(...errorCells);
+          emittedAnyErrors = true;
+        }
+        continue;
+      }
+    }
+
+    const activityCell = buildActivityCell(item, options);
+    orderedCells.push(activityCell);
+    activityCells.push(activityCell);
+    const errorCells = buildErrorCellsForItem(item, options.assistantMsg, options.hasFinalAnswer);
+    if (errorCells.length > 0) {
+      orderedCells.push(...errorCells);
+      emittedAnyErrors = true;
+    }
+  }
+
+  if (!emittedAnyErrors && options.fallbackErrorCells?.length) {
+    orderedCells.push(...options.fallbackErrorCells);
+    emittedAnyErrors = true;
+  }
+
+  if (!emittedAnyErrors && options.assistantMsg.terminalStatus === "failed") {
+    orderedCells.push({
+      kind: "error",
+      id: `err-${options.assistantMsg.id}`,
+      title: "处理失败",
+      message: options.assistantMsg.content || "Agent 处理过程中发生错误",
+      source: "agent",
+      recoverable: true,
+      createdAt: options.assistantMsg.timestamp,
+    });
+  }
+
+  return {
+    orderedCells,
+    activityCells,
+    execCells,
+    diffCells,
+  };
 }
 
 function extractErrorCells(
   items: TurnActivityItem[],
+  assistantMsg: ChatMessage,
+  hasFinalAnswer = false,
+): ErrorCellState[] {
+  const cells = items.flatMap((item) => buildErrorCellsForItem(item, assistantMsg, hasFinalAnswer));
+  if (cells.length === 0 && assistantMsg.terminalStatus === "failed") {
+    cells.push({
+      kind: "error",
+      id: `err-${assistantMsg.id}`,
+      title: "处理失败",
+      message: assistantMsg.content || "Agent 处理过程中发生错误",
+      source: "agent",
+      recoverable: true,
+      createdAt: assistantMsg.timestamp,
+    });
+  }
+  return cells;
+}
+
+function buildErrorCellsForItem(
+  item: TurnActivityItem,
   assistantMsg: ChatMessage,
   hasFinalAnswer = false,
 ): ErrorCellState[] {
@@ -827,60 +1076,42 @@ function extractErrorCells(
   //   2. Developer mode (show everything for debugging)
   //   3. Entire turn failed terminally (fallback: show what went wrong)
   const turnFailedTerminally = assistantMsg.terminalStatus === "failed";
-  for (const item of items) {
-    const hasNetworkFailure = (item.records ?? []).some((record) =>
-      isFailedToolRecord(record) && isProxyOrNetworkFailure(record),
-    );
-    if (!item.hasFailure && item.status !== "failed" && item.status !== "blocked" && !hasNetworkFailure)
+  const hasNetworkFailure = (item.records ?? []).some((record) =>
+    isFailedToolRecord(record) && isProxyOrNetworkFailure(record),
+  );
+  if (!item.hasFailure && item.status !== "failed" && item.status !== "blocked" && !hasNetworkFailure)
+    return cells;
+  for (const record of item.records ?? []) {
+    const rawFailure = record.status === "failed" || record.status === "blocked";
+    if (developerMode ? !rawFailure : !isFailedToolRecord(record))
       continue;
-    for (const record of item.records ?? []) {
-      const rawFailure = record.status === "failed" || record.status === "blocked";
-      if (developerMode ? !rawFailure : !isFailedToolRecord(record))
-        continue;
-      if (!developerMode && isRepeatGuardRecord(record)) continue;
-      const networkFailure = isProxyOrNetworkFailure(record);
-      const permissionFailure = isPermissionBlockedRecord(record);
-      const missingRequiredArgument = isMissingRequiredArgumentRecord(record);
-      const handledLocalProbeFailure = (
-        (hasFinalAnswer || Boolean(assistantMsg.isStreaming)) &&
-        isLocalExplorationTool(record) &&
-        !networkFailure &&
-        !permissionFailure &&
-        !missingRequiredArgument &&
-        !turnFailedTerminally
-      );
-      if (!developerMode && handledLocalProbeFailure) continue;
-      const userFacingFailure = isUserFacingToolFailure(record);
-      // Suppress internal tool errors unless actionable, developer-visible, or terminal.
-      if (!developerMode && !networkFailure && !turnFailedTerminally && !userFacingFailure) continue;
-      cells.push({
-        kind: "error",
-        id: `err-${record.id}`,
-        title: networkFailure ? "实时信息获取失败" : userFacingToolTitle(record),
-        message: networkFailure
-          ? normalizeAgentErrorMessage(record.summary ?? "")
-          : userFacingToolError(record),
-        source: networkFailure ? "network" : permissionFailure ? "permission" : "tool",
-        recoverable: true,
-        rawError: developerMode ? record.developerDetail ?? record.errorInfo?.developer_detail ?? record.summary : undefined,
-        createdAt: record.finishedAt ?? Date.now(),
-      });
-    }
-  }
-
-  // Terminal error on the message
-  if (
-    assistantMsg.terminalStatus === "failed" &&
-    cells.length === 0
-  ) {
+    if (!developerMode && isRepeatGuardRecord(record)) continue;
+    const networkFailure = isProxyOrNetworkFailure(record);
+    const permissionFailure = isPermissionBlockedRecord(record);
+    const missingRequiredArgument = isMissingRequiredArgumentRecord(record);
+    const handledLocalProbeFailure = (
+      (hasFinalAnswer || Boolean(assistantMsg.isStreaming)) &&
+      isLocalExplorationTool(record) &&
+      !networkFailure &&
+      !permissionFailure &&
+      !missingRequiredArgument &&
+      !turnFailedTerminally
+    );
+    if (!developerMode && handledLocalProbeFailure) continue;
+    const userFacingFailure = isUserFacingToolFailure(record);
+    // Suppress internal tool errors unless actionable, developer-visible, or terminal.
+    if (!developerMode && !networkFailure && !turnFailedTerminally && !userFacingFailure) continue;
     cells.push({
       kind: "error",
-      id: `err-${assistantMsg.id}`,
-      title: "处理失败",
-      message: assistantMsg.content || "Agent 处理过程中发生错误",
-      source: "agent",
+      id: `err-${record.id}`,
+      title: networkFailure ? "实时信息获取失败" : userFacingToolTitle(record),
+      message: networkFailure
+        ? normalizeAgentErrorMessage(record.summary ?? "")
+        : userFacingToolError(record),
+      source: networkFailure ? "network" : permissionFailure ? "permission" : "tool",
       recoverable: true,
-      createdAt: assistantMsg.timestamp,
+      rawError: developerMode ? record.developerDetail ?? record.errorInfo?.developer_detail ?? record.summary : undefined,
+      createdAt: record.finishedAt ?? Date.now(),
     });
   }
 
@@ -1121,77 +1352,29 @@ function buildTurn(
   );
 
   const hasFinalAnswer = Boolean(projection.finalAnswer.trim());
-  const projectedActivityItems = aggregateActivityItems(projection.activityItems, {
-    hasFinalAnswer,
-    isStreaming: Boolean(assistantMsg.isStreaming),
-    terminalFailed: assistantMsg.terminalStatus === "failed",
-  });
-
-  // Extract specialized cells before generic activity projection so command
-  // execution and file edits do not render twice.
-  const execCells = extractExecCells(projectedActivityItems);
-  const diffCells = extractDiffCells(projectedActivityItems);
-  const execRecordIds = new Set(execCells.map((cell) => cell.id));
-  const activityItemsForGenericTimeline = projectedActivityItems.filter((item) => {
-    if (item.kind === "commandExecution" && (item.records ?? []).some((record) => execRecordIds.has(record.id))) {
-      return false;
-    }
-    if (item.kind === "fileChange" && diffCells.length > 0) {
-      return false;
-    }
-    return true;
-  });
-
-  // Convert TurnActivityItem[] → ActivityCellState[]
-  const activityCells: ActivityCellState[] = activityItemsForGenericTimeline.map(
-    (item) => {
-      const records = item.records ?? [];
-      const isRunning = item.status === "running" || item.status === "pending";
-      const isFinalAnswerDraftIteration = isFinalAnswerDraftIterationProgress(item, {
-        hasFinalAnswer,
-        isStreaming: Boolean(assistantMsg.isStreaming),
-      });
-      // Populate progress with real-time count for aggregatable activities
-      let progress: ActivityCellState["progress"];
-      if (item.progress?.length) {
-        progress = { text: isFinalAnswerDraftIteration ? undefined : item.progress.at(-1)?.summary };
-      } else if (isRunning && records.length > 0) {
-        const doneCount = records.filter((r) => r.status === "success").length;
-        progress = { current: doneCount, total: undefined, text: t(lang, `已完成 ${doneCount} 个`, `${doneCount} done`) };
-      }
-      const hasItemFailure = item.hasFailure || item.status === "failed" || item.status === "blocked";
-      const hasItemSuccess = records.some((r) => r.status === "success");
-      const hasPartial = item.status === "partial" || records.some((r) => r.status === "partial");
-      const isPartialFailure = hasItemFailure && hasItemSuccess;
-      const visibleToolRecords = isPartialFailure ? successfulRecords(records) : item.records;
-      return {
-        kind: "activity" as const,
-        id: item.id,
-        activityKind: item.kind,
-        title: isFinalAnswerDraftIteration
-          ? t(lang, "正在输出最终回答", "Writing final answer")
-          : getActivityTitle(item, lang),
-        subtitle: getActivitySubtitle(item, lang),
-        status: isPartialFailure ? "done" : mapActivityStatus(item.status),
-        collapsed:
-          !hasPartial &&
-          (!item.hasFailure || isPartialFailure) &&
-          item.status !== "running" &&
-          item.status !== "pending",
-        toolCallRecords: visibleToolRecords,
-        progress,
-        startedAt: item.startedAt ?? assistantMsg.timestamp,
-        completedAt: item.finishedAt,
-      };
-    },
-  );
-
-  // Extract specialized cells
   const errorCells = extractErrorCells(
     projection.activityItems,
     assistantMsg,
     hasFinalAnswer,
   );
+  const projectedActivityItems = aggregateActivityItems(projection.activityItems, {
+    hasFinalAnswer,
+    isStreaming: Boolean(assistantMsg.isStreaming),
+    terminalFailed: assistantMsg.terminalStatus === "failed",
+  });
+  const {
+    orderedCells: processCells,
+    activityCells,
+    execCells,
+    diffCells,
+  } = buildOrderedProcessCells(projectedActivityItems, {
+    lang,
+    assistantMsg,
+    hasFinalAnswer,
+    isStreaming: Boolean(assistantMsg.isStreaming),
+    fallbackErrorCells: errorCells,
+  });
+
   const planCells = extractPlanCell(projectedActivityItems, assistantMsg);
   const summaryCell = buildTurnSummaryCell(assistantMsg, {
     activityCells,
@@ -1212,18 +1395,15 @@ function buildTurn(
         phase: "final",
         copyable: true,
         createdAt: assistantMsg.timestamp,
+        isStreaming: Boolean(assistantMsg.isStreaming),
       }
     : null;
 
   // Determine active cell during streaming
   let activeCell: HistoryCellState | null = null;
-  const committedCells: Exclude<
-    HistoryCellState,
-    | UserMessageCellState
-    | StreamingAssistantTailCellState
-  >[] = [];
+  const committedCells: CommittedCellState[] = [];
 
-  if (assistantMsg.isStreaming && !assistantMsg.isThinkingStreaming) {
+  if (assistantMsg.isStreaming) {
     const hasActivityRunning = projectedActivityItems.some(
       (i) => i.status === "running" || i.status === "pending",
     );
@@ -1242,45 +1422,16 @@ function buildTurn(
         updatedAt: Date.now(),
       };
       if (summaryCell) committedCells.push(summaryCell);
-      committedCells.push(...activityCells, ...execCells, ...diffCells, ...errorCells, ...planCells);
+      committedCells.push(...processCells, ...planCells);
     } else {
-      // Tool activity still running — find the active one
-      const runningActivityCells = activityCells.filter(
-        (c) => c.status === "running",
-      );
-      const doneActivityCells = activityCells.filter(
-        (c) => c.status !== "running",
-      );
-
-      // Running exec cells are the primary foreground task. Keep them active
-      // even if generic progress/iteration activity is also running.
-      const runningExecCells = execCells.filter(
-        (c) => c.status === "running",
-      );
-      const doneExecCells = execCells.filter((c) => c.status !== "running");
-
       if (summaryCell) committedCells.push(summaryCell);
-      if (runningExecCells.length > 0) {
-        activeCell = runningExecCells[runningExecCells.length - 1];
-        committedCells.push(...doneActivityCells, ...runningActivityCells);
-      } else if (runningActivityCells.length > 0) {
-        activeCell = runningActivityCells[runningActivityCells.length - 1];
-        committedCells.push(...doneActivityCells);
-      } else {
-        committedCells.push(...doneActivityCells);
-      }
-      committedCells.push(...doneExecCells);
-      committedCells.push(...diffCells);
-      committedCells.push(...errorCells);
+      committedCells.push(...processCells);
       committedCells.push(...planCells);
     }
   } else {
     // Not streaming — all cells are committed
     if (summaryCell) committedCells.push(summaryCell);
-    committedCells.push(...activityCells);
-    committedCells.push(...execCells);
-    committedCells.push(...diffCells);
-    committedCells.push(...errorCells);
+    committedCells.push(...processCells);
     committedCells.push(...planCells);
   }
 

@@ -345,29 +345,6 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     sendClientCommand({ type: "skills.list" });
   }, []);
 
-  // Inject breathing keyframe animation stylesheet once
-  useEffect(() => {
-    const id = "mc-composer-breathe-style";
-    if (document.getElementById(id)) return;
-    const style = document.createElement("style");
-    style.id = id;
-    style.textContent = `
-@keyframes mc-composer-breathe {
-  0%, 100% {
-    border-color: color-mix(in oklch, var(--accent-primary) 30%, var(--border-subtle));
-    box-shadow: 0 0 0 2px color-mix(in oklch, var(--accent-primary) 5%, transparent),
-                0 12px 32px color-mix(in oklch, var(--surface-base) 18%, transparent);
-  }
-  50% {
-    border-color: color-mix(in oklch, var(--accent-primary) 55%, var(--border-subtle));
-    box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent-primary) 12%, transparent),
-                0 12px 32px color-mix(in oklch, var(--surface-base) 18%, transparent);
-  }
-}`;
-    document.head.appendChild(style);
-    return () => { style.remove(); };
-  }, []);
-
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
@@ -388,27 +365,26 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       onDrop={handleDrop}
       className="composer-container relative mx-auto flex flex-col transition-[background_140ms_ease,border-color_300ms_ease,box-shadow_140ms_ease]"
       style={{
-        position: codeMode || minimal ? "relative" : "absolute",
-        left: codeMode || minimal ? undefined : "50%",
-        bottom: codeMode || minimal ? undefined : 24,
-        transform: codeMode || minimal ? undefined : "translateX(-50%)",
-        zIndex: codeMode || minimal ? undefined : 6,
+        position: "relative",
+        left: undefined,
+        bottom: undefined,
+        transform: undefined,
+        zIndex: minimal ? undefined : 6,
         display: "flex",
         flexDirection: "column",
-        width: minimal ? "100%" : wideMode ? "min(1320px, 100%)" : "min(880px, calc(100% - 40px))",
-        marginBottom: codeMode ? "14px" : minimal ? 0 : "0",
-        padding: codeMode ? "0" : "10px 12px 12px",
+        width: minimal ? "100%" : wideMode ? "var(--chat-wide-axis-width)" : "var(--chat-composer-axis-width)",
+        marginBottom: codeMode ? "14px" : minimal ? 0 : "16px",
+        padding: codeMode ? "0" : "8px 10px 10px",
         background: commandModeActive ? commandComposerBackground : "var(--surface-page)",
         border: dragOver
           ? "2px dashed var(--command-accent, var(--state-info))"
           : commandModeActive
             ? "1px solid var(--command-border, var(--state-info))"
             : "1px solid var(--border-subtle)",
-        borderRadius: codeMode ? "var(--radius-md, 10px)" : "22px",
+        borderRadius: codeMode ? "var(--radius-md, 8px)" : "var(--radius-lg, 8px)",
         boxShadow: commandModeActive
-          ? "0 0 0 1px color-mix(in oklch, var(--command-accent, var(--state-info)) 12%, transparent), var(--shadow-soft)"
-          : "var(--shadow-soft)",
-        ...(isStreaming && !commandModeActive ? breathingGlowStyle : {}),
+          ? "0 0 0 1px color-mix(in oklch, var(--command-accent, var(--state-info)) 10%, transparent)"
+          : "none",
       }}
     >
       {codeMode && (
@@ -487,11 +463,6 @@ const buildDiffReviewFiles = (workingTree: GitChangeFile[], staged: GitChangeFil
       isBinary: file.isBinary,
     }];
   });
-
-/** Breathing glow applied to the composer container while streaming. */
-const breathingGlowStyle: React.CSSProperties = {
-  animation: "mc-composer-breathe 2.4s ease-in-out infinite",
-};
 
 const GoalBar = () => {
   const goal = useAppStore((s) => s.activeGoal);

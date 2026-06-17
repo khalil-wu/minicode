@@ -497,6 +497,28 @@ export interface ThinkingContentBlock {
   is_raw_provider_reasoning?: boolean;
 }
 export interface TextContentBlock { type: "text"; content: string; }
+export interface ProcessContentBlock {
+  type: "process";
+  id: string;
+  itemKind: "process_text" | "action_summary" | "observation" | "status" | "plan" | "tool_group" | string;
+  content: string;
+  title?: string;
+  summary?: string;
+  source?: "model" | "runtime" | "system" | "tool" | string;
+  status?: "running" | "completed" | "failed" | "info" | string;
+  role?: "assistant" | "runtime" | string;
+  visibility?: "timeline" | "compact" | "debug" | string;
+  loopId?: string;
+  iterationId?: string;
+  parentId?: string;
+  groupId?: string;
+  stepId?: string;
+  toolCallIds?: string[];
+  defaultCollapsed?: boolean;
+  seq?: number;
+  order?: number;
+  timestamp: number;
+}
 export interface ToolCallContentBlock { type: "tool_call"; record: ToolCallRecord; }
 export interface ProgressContentBlock {
   type: "progress";
@@ -520,7 +542,7 @@ export interface ProgressContentBlock {
 export interface AgentProgressEntry extends ProgressContentBlock {
   conversationId?: string;
 }
-export type ContentBlock = ThinkingContentBlock | TextContentBlock | ToolCallContentBlock | ProgressContentBlock;
+export type ContentBlock = ThinkingContentBlock | TextContentBlock | ProcessContentBlock | ToolCallContentBlock | ProgressContentBlock;
 
 export interface ChatMessage {
   id: string;
@@ -616,7 +638,6 @@ export interface ChatSlice {
   removeEmptyStreamingAssistant: (conversationId?: string) => void;
   interrupt: () => void;
   pauseStreaming: () => void;
-  resumeStreaming: () => void;
   requestConversationSwitch: (id: string) => void;
   applyConversationSwitched: (payload: { conversationId: string }) => void;
   switchConversation: (id: string) => void;
@@ -632,6 +653,10 @@ export interface ChatSlice {
     conversationId?: string,
     metadata?: Partial<Omit<ThinkingContentBlock, "type" | "content">>,
   ) => void;
+  appendProcessItem: (
+    item: Omit<ProcessContentBlock, "type" | "timestamp"> & { timestamp?: number },
+    conversationId?: string,
+  ) => void;
   appendProgress: (progress: Omit<ProgressContentBlock, "type" | "timestamp">, conversationId?: string) => void;
   appendToolCallBlock: (tc: ToolCallRecord, conversationId?: string) => void;
   updateToolCall: (
@@ -641,7 +666,7 @@ export interface ChatSlice {
     scope?: { iterationId?: string; stepId?: string },
   ) => void;
   finishStreaming: (conversationId?: string, usage?: MessageUsage, terminalStatus?: "completed" | "failed" | "interrupted") => void;
-  resumeStreaming: (conversationId: string, toolCallsPending?: PendingToolCallResume[]) => void;
+  resumeStreaming: (conversationId?: string, toolCallsPending?: PendingToolCallResume[]) => void;
   replaceStreamingText: (conversationId: string, fullText: string) => void;
   setConnected: (c: boolean) => void;
   setLastUsage: (u: ChatSlice["lastUsage"]) => void;

@@ -122,6 +122,16 @@ export interface ExecCellState {
   completedAt?: number;
 }
 
+export interface ExecGroupCellState {
+  kind: "exec_group";
+  id: string;
+  cells: ExecCellState[];
+  status: "running" | "done" | "failed";
+  collapsed: boolean;
+  startedAt: number;
+  completedAt?: number;
+}
+
 export interface DiffCellState {
   kind: "diff";
   id: string;
@@ -171,7 +181,7 @@ export interface ThinkingCellState {
   kind: "thinking";
   id: string;
   content: string;
-  source: "model_preamble" | "provider" | "reasoning";
+  source: "model_preamble" | "provider" | "reasoning" | "runtime";
   phase?: string; // Optional phase indicator (e.g., "analyzing", "planning")
   createdAt: number;
 }
@@ -186,6 +196,7 @@ export type HistoryCellState =
   | ActivityGroupCellState
   | PlanCellState
   | ExecCellState
+  | ExecGroupCellState
   | DiffCellState
   | ErrorCellState
   | AssistantMarkdownCellState

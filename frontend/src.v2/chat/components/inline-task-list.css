@@ -173,16 +173,7 @@
 
 .inline-task-icon-in-progress {
   color: var(--accent-primary);
-  animation: inline-task-spin 1s linear infinite;
-}
-
-@keyframes inline-task-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
+  animation: spin 1s linear infinite;
 }
 
 .inline-task-icon-pending {
@@ -287,12 +278,6 @@
   transform: scale(0.95);
 }
 
-.inline-task-divider {
-  height: 1px;
-  margin: 8px 0;
-  background: var(--border-subtle);
-}
-
 .inline-task-done-header {
   font-size: var(--text-xs);
   color: var(--state-success);
@@ -363,7 +348,7 @@
   background: var(--accent-primary);
   border: none;
   border-radius: var(--radius-sm);
-  color: white;
+  color: var(--text-on-accent);
   cursor: pointer;
   transition: var(--transition-fast);
 }

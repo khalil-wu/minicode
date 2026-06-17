@@ -246,10 +246,6 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     set({ isPaused: true });
     sendClientCommand({ type: "pause_streaming" });
   },
-  resumeStreaming: () => {
-    set({ isPaused: false });
-    sendClientCommand({ type: "resume_streaming" });
-  },
   requestConversationSwitch: (id) => {
     const targetId = id.trim();
     if (!targetId) return;
@@ -495,6 +491,34 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         return next;
       });
     }),
+  appendProcessItem: (item, conversationId) =>
+    set((s) => {
+      return updateMessagesForConversation(s, conversationId, (messages) => {
+        const idx = findLastStreamingIndex(messages);
+        if (idx < 0) return null;
+        const next = messages.slice();
+        const msg = next[idx];
+        const blocks = msg.blocks ? msg.blocks.slice() : [];
+        const processBlock = {
+          ...item,
+          type: "process" as const,
+          timestamp: item.timestamp ?? Date.now(),
+        };
+        const existingIdx = blocks.findIndex((block) =>
+          block.type === "process" && block.id === item.id,
+        );
+        if (existingIdx >= 0) {
+          blocks[existingIdx] = {
+            ...blocks[existingIdx],
+            ...processBlock,
+          };
+        } else {
+          blocks.push(processBlock);
+        }
+        next[idx] = { ...msg, isThinkingStreaming: item.status === "running", blocks };
+        return next;
+      });
+    }),
   appendProgress: (progress, conversationId) =>
     set((s) => {
       return updateMessagesForConversation(s, conversationId, (messages) => {
@@ -645,12 +669,14 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
 
       if (targetId && targetId !== s.conversationId) {
         return {
+          isPaused: false,
           conversationMessages: { ...s.conversationMessages, [targetId]: nextMessages },
           conversationStreaming: { ...s.conversationStreaming, [targetId]: true },
         };
       }
       return {
         messages: nextMessages,
+        isPaused: false,
         isStreaming: true,
         toolCallCount: s.toolCallCount + (toolCallsPending?.length ?? 0),
         ...cacheMessagesForConversation(s, targetId, nextMessages, true),

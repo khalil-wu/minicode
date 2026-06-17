@@ -22,7 +22,28 @@ export const ApprovalModal = () => {
   const queuedCount = visibleQueue.length;
   const [respondingId, setRespondingId] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
-  const timeoutRef = useRef<number | null>(null);
+  const clearTimers = useRef<Set<number>>(new Set());
+
+  const scheduleClear = (ids: string[]) => {
+    const id = window.setTimeout(() => {
+      clearTimers.current.delete(id);
+      if (ids.length === 1) {
+        useAppStore.getState().clearApproval(ids[0]);
+      } else {
+        useAppStore.getState().clearApprovals(ids);
+      }
+    }, 250);
+    clearTimers.current.add(id);
+  };
+
+  // Clean up pending timers on unmount only
+  useEffect(() => {
+    const timers = clearTimers.current;
+    return () => {
+      timers.forEach((id) => window.clearTimeout(id));
+      timers.clear();
+    };
+  }, []);
 
   const respond = useCallback((approved: boolean) => {
     if (!visibleApproval || respondingId === visibleApproval.requestId) return;
@@ -34,14 +55,7 @@ export const ApprovalModal = () => {
     ));
     if (sent) {
       useAppStore.getState().markApprovalSubmitted(visibleApproval.requestId);
-      // Clear any existing timeout
-      if (timeoutRef.current !== null) {
-        window.clearTimeout(timeoutRef.current);
-      }
-      timeoutRef.current = window.setTimeout(() => {
-        useAppStore.getState().clearApproval(visibleApproval.requestId);
-        timeoutRef.current = null;
-      }, 250);
+      scheduleClear([visibleApproval.requestId]);
     } else {
       useAppStore.getState().markApprovalError(visibleApproval.requestId, "Connection is offline");
       setRespondingId(null);
@@ -61,14 +75,7 @@ export const ApprovalModal = () => {
       else store.markApprovalError(item.requestId, "Connection is offline");
     }
     for (const id of submitted) store.markApprovalSubmitted(id);
-    // Clear any existing timeout
-    if (timeoutRef.current !== null) {
-      window.clearTimeout(timeoutRef.current);
-    }
-    timeoutRef.current = window.setTimeout(() => {
-      store.clearApprovals(submitted);
-      timeoutRef.current = null;
-    }, 250);
+    scheduleClear(submitted);
   }, [activeConversationId, visibleApproval]);
 
   useEffect(() => {
@@ -111,10 +118,6 @@ export const ApprovalModal = () => {
     window.addEventListener("keydown", handleKeyDown);
     return () => {
       window.clearTimeout(focusTimeoutId);
-      if (timeoutRef.current !== null) {
-        window.clearTimeout(timeoutRef.current);
-        timeoutRef.current = null;
-      }
       window.removeEventListener("keydown", handleKeyDown);
       previousActive?.focus();
     };

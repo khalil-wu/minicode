@@ -34,7 +34,7 @@ export function useVirtualScroll(
   const [scrollTop, setScrollTop] = useState(0);
   const [scrollHeight, setScrollHeight] = useState(0);
   const [isScrolling, setIsScrolling] = useState(false);
-  const scrollTimeoutRef = useRef<NodeJS.Timeout>();
+  const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
   const measurementsRef = useRef<Map<number, number>>(new Map());
 
   // Measure actual item sizes

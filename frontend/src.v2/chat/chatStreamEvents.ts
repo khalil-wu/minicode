@@ -22,6 +22,11 @@ const finalAnswerConversations = new Set<string>();
 
 const finalAnswerKey = (conversationId?: string): string => conversationId || "__active__";
 
+const clearLegacyStreamingTextForFinalAnswer = (conversationId?: string) => {
+  const state = useAppStore.getState();
+  state.replaceStreamingText(conversationId || state.conversationId || "", "");
+};
+
 const adoptGeneratedConversation = (conversationId?: string) => {
   const targetId = conversationId?.trim();
   if (!targetId) return;
@@ -199,6 +204,17 @@ const outputPreviewUpdates = (
   };
 };
 
+const progressStatusFromLoop = (
+  eventType: string,
+  status?: string,
+): "running" | "completed" | "failed" | "info" => {
+  if (eventType === "agent.loop.started") return "running";
+  if (status === "failed" || status === "interrupted") return "failed";
+  if (status === "running") return "running";
+  if (status === "info") return "info";
+  return "completed";
+};
+
 const appendSystemMessage = (message: ChatMessage, conversationId?: string) => {
   const state = useAppStore.getState();
   const targetId = conversationId || state.conversationId;
@@ -252,16 +268,22 @@ export const handleChatStreamEvent = (
       textStreamBuffer.flush();
       thinkingStreamBuffer?.flush();
       finalAnswerConversations.add(finalAnswerKey(conversationId));
+      clearLegacyStreamingTextForFinalAnswer(conversationId);
       const ev = e as unknown as { is_streaming?: boolean };
       s.setFinalAnswerStreaming(conversationId, ev.is_streaming ?? true);
       return true;
     }
     case "final_answer_delta": {
-      textStreamBuffer.flush();
       thinkingStreamBuffer?.flush();
+      const key = finalAnswerKey(conversationId);
+      if (!finalAnswerConversations.has(key)) {
+        textStreamBuffer.flush();
+        clearLegacyStreamingTextForFinalAnswer(conversationId);
+        finalAnswerConversations.add(key);
+      }
       const ev = e as unknown as { content?: string };
       if (ev.content) {
-        s.appendTextChunk(ev.content, conversationId);
+        textStreamBuffer.push(ev.content, conversationId);
       }
       return true;
     }
@@ -359,6 +381,85 @@ export const handleChatStreamEvent = (
         if (!(e as unknown as { is_error?: boolean }).is_error) {
           requestPreviewValidationForTool(toolCall.name);
         }
+      }
+      return true;
+    }
+    case "agent.loop.started":
+    case "agent.loop.completed": {
+      const ev = e as unknown as {
+        loop_id?: string;
+        iteration_id?: string;
+        status?: string;
+        title?: string;
+        summary?: string;
+        tool_call_count?: number;
+      };
+      const loopId = ev.loop_id || ev.iteration_id;
+      if (loopId) {
+        s.appendProgress({
+          id: `loop:${loopId}`,
+          stage: "status",
+          phase: "iteration",
+          status: progressStatusFromLoop(e.type, ev.status),
+          message: ev.summary || ev.title || (e.type === "agent.loop.started" ? "Agent is working" : "Agent step completed"),
+          label: ev.title || (e.type === "agent.loop.started" ? "Thinking" : "Processed"),
+          summary: ev.summary || ev.title,
+          visibility: "debug",
+          count: ev.tool_call_count,
+          iterationId: ev.iteration_id || loopId,
+        }, conversationId);
+      }
+      return true;
+    }
+    case "agent.item": {
+      const ev = e as unknown as {
+        id?: string;
+        item_id?: string;
+        kind?: string;
+        content?: string;
+        title?: string;
+        summary?: string;
+        status?: string;
+        role?: string;
+        source?: string;
+        visibility?: string;
+        loop_id?: string;
+        iteration_id?: string;
+        parent_id?: string;
+        group_id?: string;
+        step_id?: string;
+        tool_call_ids?: string[];
+        default_collapsed?: boolean;
+        created_at?: number;
+        order?: number;
+        seq?: number;
+      };
+      const content = ev.content || ev.summary || "";
+      const itemId = ev.item_id || ev.id;
+      if (itemId && content.trim() && ev.visibility !== "debug") {
+        textStreamBuffer.flush();
+        thinkingStreamBuffer?.flush();
+        s.appendProcessItem({
+          id: itemId,
+          itemKind: ev.kind || "process_text",
+          content,
+          title: ev.title,
+          summary: ev.summary,
+          status: ev.status,
+          role: ev.role,
+          source: ev.source,
+          visibility: ev.visibility,
+          loopId: ev.loop_id,
+          iterationId: ev.iteration_id,
+          parentId: ev.parent_id,
+          groupId: ev.group_id,
+          stepId: ev.step_id,
+          toolCallIds: ev.tool_call_ids,
+          defaultCollapsed: ev.default_collapsed,
+          timestamp: ev.created_at,
+          order: ev.order,
+          seq: ev.seq,
+        }, conversationId);
       }
       return true;
     }

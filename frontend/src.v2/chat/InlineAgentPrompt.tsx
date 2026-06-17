@@ -256,8 +256,8 @@ const diffStats = (diff: string) => {
 const shellStyle: React.CSSProperties = {
   display: "grid",
   gap: 6,
-  width: "min(980px, calc(100% - 44px))",
-  margin: "0 auto 8px",
+  width: "var(--chat-composer-axis-width)",
+  margin: "0 auto 10px",
   flexShrink: 0,
 };
 

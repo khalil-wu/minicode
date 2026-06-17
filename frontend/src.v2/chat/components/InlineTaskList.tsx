@@ -1,7 +1,9 @@
 import { CheckCircle2, Circle, Loader2, ListChecks, OctagonAlert, ChevronDown, ChevronRight, X, Plus, LayoutTemplate, BarChart3 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useAppStore } from "../../stores";
+import { createTodoItem } from "../../lib/todo-utils";
 import type { TodoItem } from "../../stores/types";
+import { useTaskStats } from "./useTaskStats";
 import { TaskTemplates } from "./TaskTemplates";
 import { TaskStats } from "./TaskStats";
 import "./inline-task-list.css";
@@ -10,30 +12,26 @@ export function InlineTaskList() {
   const todos = useAppStore((s) => s.todos);
   const isStreaming = useAppStore((s) => s.isStreaming);
   const addTodo = useAppStore((s) => s.addTodo);
+  const stats = useTaskStats();
   const [collapsed, setCollapsed] = useState(false);
   const [showCompleted, setShowCompleted] = useState(true);
   const [isAddingTask, setIsAddingTask] = useState(false);
   const [newTaskContent, setNewTaskContent] = useState("");
-  const [showTemplates, setShowTemplates] = useState(false);  // 🔧 新增
-  const [showStats, setShowStats] = useState(false);  // 🔧 新增
+  const [showTemplates, setShowTemplates] = useState(false);
+  const [showStats, setShowStats] = useState(false);
 
   if (todos.length === 0) return null;
 
   const active = todos
     .map((todo, index) => ({ todo, index: index + 1 }))
     .filter(({ todo }) => todo.status !== "completed");
-  const completed = todos.filter((t) => t.status === "completed");
-  const total = todos.length;
-  const completedCount = completed.length;
-  const progress = total > 0 ? (completedCount / total) * 100 : 0;
-  const allCompleted = active.length === 0 && completed.length > 0;
 
   // Auto-collapse when all tasks are completed
   useEffect(() => {
-    if (allCompleted && !isStreaming) {
+    if (stats.allCompleted && !isStreaming) {
       setCollapsed(true);
     }
-  }, [allCompleted, isStreaming]);
+  }, [stats.allCompleted, isStreaming]);
 
   // Show filtered tasks
   const displayTasks = showCompleted
@@ -42,12 +40,7 @@ export function InlineTaskList() {
 
   const handleAddTask = () => {
     if (!newTaskContent.trim()) return;
-    const newTodo: TodoItem = {
-      id: `todo-${Date.now()}`,
-      content: newTaskContent.trim(),
-      status: "pending",
-    };
-    addTodo(newTodo);
+    addTodo(createTodoItem(newTaskContent.trim()));
     setNewTaskContent("");
     setIsAddingTask(false);
   };
@@ -59,49 +52,49 @@ export function InlineTaskList() {
           type="button"
           className="inline-task-collapse-btn"
           onClick={() => setCollapsed(!collapsed)}
-          aria-label={collapsed ? "Expand tasks" : "Collapse tasks"}
+          aria-label={collapsed ? "展开任务" : "折叠任务"}
         >
           {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
         </button>
         <div className="inline-task-title">
           <ListChecks size={14} />
-          <span>Tasks</span>
-          {!collapsed && !allCompleted && (
+          <span>任务</span>
+          {!collapsed && !stats.allCompleted && (
             <>
               <div className="inline-task-progress-bar">
                 <div
                   className="inline-task-progress-fill"
-                  style={{ width: `${progress}%` }}
+                  style={{ width: `${stats.progress}%` }}
                 />
               </div>
               <span className="inline-task-progress-text">
-                {completedCount}/{total}
+                {stats.completedCount}/{stats.total}
               </span>
             </>
           )}
           {collapsed && (
             <span className="inline-task-collapsed-summary">
-              {allCompleted ? "✓ Complete" : `${completedCount}/${total}`}
+              {stats.allCompleted ? "✓ 已完成" : `${stats.completedCount}/${stats.total}`}
             </span>
           )}
         </div>
         {!collapsed && (
           <>
-            {completed.length > 0 && (
+            {stats.completed > 0 && (
               <button
                 type="button"
                 className="inline-task-filter-btn"
                 onClick={() => setShowCompleted(!showCompleted)}
-                title={showCompleted ? "Hide completed" : "Show completed"}
+                title={showCompleted ? "隐藏已完成" : "显示已完成"}
               >
-                {showCompleted ? "Hide" : "Show"} completed
+                {showCompleted ? "隐藏" : "显示"}已完成
               </button>
             )}
             <button
               type="button"
               className="inline-task-filter-btn"
               onClick={() => setShowStats(!showStats)}
-              title="View statistics"
+              title="查看统计"
             >
               <BarChart3 size={14} />
             </button>
@@ -109,7 +102,7 @@ export function InlineTaskList() {
               type="button"
               className="inline-task-filter-btn"
               onClick={() => setShowTemplates(!showTemplates)}
-              title="Load template"
+              title="加载模板"
             >
               <LayoutTemplate size={14} />
             </button>
@@ -132,10 +125,10 @@ export function InlineTaskList() {
             </div>
           )}
 
-          {allCompleted && (
+          {stats.allCompleted && (
             <div className="inline-task-done-header">
               <CheckCircle2 size={14} />
-              <span>All tasks complete</span>
+              <span>所有任务已完成</span>
             </div>
           )}
 
@@ -147,7 +140,7 @@ export function InlineTaskList() {
                   <input
                     type="text"
                     className="inline-task-add-input"
-                    placeholder="Enter task description..."
+                    placeholder="输入任务描述..."
                     value={newTaskContent}
                     onChange={(e) => setNewTaskContent(e.target.value)}
                     onKeyDown={(e) => {
@@ -165,7 +158,7 @@ export function InlineTaskList() {
                     onClick={handleAddTask}
                     disabled={!newTaskContent.trim()}
                   >
-                    Add
+                    添加
                   </button>
                   <button
                     type="button"
@@ -175,7 +168,7 @@ export function InlineTaskList() {
                       setNewTaskContent("");
                     }}
                   >
-                    Cancel
+                    取消
                   </button>
                 </div>
               ) : (
@@ -185,7 +178,7 @@ export function InlineTaskList() {
                   onClick={() => setIsAddingTask(true)}
                 >
                   <Plus size={12} />
-                  <span>Add task</span>
+                  <span>添加任务</span>
                 </button>
               )}
             </div>
@@ -194,7 +187,7 @@ export function InlineTaskList() {
       )}
 
       {/* 🔧 新增：模板选择器 */}
-      {showTemplates && <TaskTemplates onClose={() => setShowTemplates(false)} />}
+      {showTemplates && <TaskTemplates onApply={() => setShowTemplates(false)} />}
 
       {/* 🔧 新增：任务统计 */}
       {showStats && <TaskStats onClose={() => setShowStats(false)} />}

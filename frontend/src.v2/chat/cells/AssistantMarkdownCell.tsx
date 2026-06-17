@@ -1,4 +1,4 @@
-import { Copy, RotateCcw, Trash2, RotateCw, Quote } from "lucide-react";  // 🔧 添加 Quote
+import { Copy, RotateCcw, Trash2, RotateCw, Quote } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type React from "react";
 import type { AssistantMarkdownCellState } from "./cellTypes";
@@ -13,14 +13,12 @@ export function AssistantMarkdownCell({
   cell: AssistantMarkdownCellState;
 }) {
   const [copied, setCopied] = useState(false);
-  // ✅ P1-2: 打字机效果状态
   const [displayedContent, setDisplayedContent] = useState(
     cell.isStreaming ? "" : cell.markdownSource
   );
   const displayedLenRef = useRef(displayedContent.length);
   displayedLenRef.current = displayedContent.length;
 
-  // ✅ P3-4: 优化打字机效果 - rAF + ref追踪 + 追赶阈值
   useEffect(() => {
     if (!cell.isStreaming) {
       setDisplayedContent(cell.markdownSource);
@@ -30,7 +28,6 @@ export function AssistantMarkdownCell({
     const targetContent = cell.markdownSource;
     const targetLen = targetContent.length;
 
-    // 追赶阈值：如果积压超过150字符，跳过动画直接全量更新
     if (targetLen - displayedLenRef.current > 150) {
       setDisplayedContent(targetContent);
       return;
@@ -65,6 +62,8 @@ export function AssistantMarkdownCell({
 
   const recallMessage = useAppStore((s) => s.recallMessage);
   const deleteMessage = useAppStore((s) => s.deleteMessage);
+  const draft = useAppStore((s) => s.draft);
+  const setDraft = useAppStore((s) => s.setDraft);
   const sources = uniqueCitationSources(displayedContent, cell.citations);
   const displayMarkdown = sources.length
     ? stripInlineCitationMarkers(displayedContent, cell.citations)
@@ -115,27 +114,26 @@ export function AssistantMarkdownCell({
     deleteMessage(cell.messageId);
   }, [cell.messageId, deleteMessage]);
 
-  // 🔧 新增：引用回复功能
   const quoteReply = useCallback(() => {
     if (!cell.markdownSource) return;
-    const composerTextarea = document.querySelector('[data-composer-input]') as HTMLTextAreaElement;
-    if (composerTextarea) {
-      const quotedText = `> ${cell.markdownSource.split('\n').join('\n> ')}\n\n`;
-      composerTextarea.value = quotedText + composerTextarea.value;
-      composerTextarea.focus();
-      composerTextarea.setSelectionRange(quotedText.length, quotedText.length);
-    }
-  }, [cell.markdownSource]);
+    const quotedText = `> ${cell.markdownSource.split("\n").join("\n> ")}\n\n`;
+    setDraft(quotedText + draft);
+    requestAnimationFrame(() => {
+      const composerTextarea = document.querySelector("[data-composer-input]") as HTMLTextAreaElement | null;
+      if (composerTextarea) {
+        composerTextarea.focus();
+        composerTextarea.setSelectionRange(quotedText.length, quotedText.length);
+      }
+    });
+  }, [cell.markdownSource, draft, setDraft]);
 
   const regenerate = useCallback(async () => {
     if (!cell.messageId) return;
     const state = useAppStore.getState();
 
-    // Find the user message that triggered this response
     const index = state.messages.findIndex((item) => item.id === cell.messageId);
     if (index < 0) return;
 
-    // Find the preceding user message
     let userIndex = -1;
     for (let i = index - 1; i >= 0; i--) {
       if (state.messages[i]?.role === "user") {
@@ -155,7 +153,6 @@ export function AssistantMarkdownCell({
     });
     if (!ok) return;
 
-    // Delete this assistant message and all following messages
     const removeCount = state.messages.length - index;
     for (let i = 0; i < removeCount; i++) {
       const msg = state.messages[index];
@@ -164,11 +161,9 @@ export function AssistantMarkdownCell({
       }
     }
 
-    // Re-send the user message
     const userMessage = state.messages[userIndex];
     if (userMessage && userMessage.role === "user") {
       recallMessage(userMessage.id);
-      // Trigger send after a short delay
       setTimeout(() => {
         const sendBtn = document.querySelector('[data-send-button]') as HTMLButtonElement;
         if (sendBtn) sendBtn.click();
@@ -177,7 +172,7 @@ export function AssistantMarkdownCell({
   }, [cell.messageId, deleteMessage, recallMessage]);
 
   return (
-    <div className="assistant-cell-wrap">
+    <div className="assistant-cell-wrap" data-streaming={cell.isStreaming ? "true" : "false"}>
       <div className="assistant-cell-content md-prose">
         <MarkdownRenderer
           content={displayMarkdown}

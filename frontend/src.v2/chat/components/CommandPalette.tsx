@@ -15,6 +15,7 @@ import {
   Zap,
 } from "lucide-react";
 import { useAppStore } from "../../stores";
+import { createTodoItem } from "../../lib/todo-utils";
 import "./command-palette.css";
 
 interface Command {
@@ -54,6 +55,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
           addTodo({
             id: `todo-${Date.now()}`,
             content: "新任务",
+            activeForm: "",
             status: "pending",
           });
           onClose();
