@@ -13,7 +13,18 @@ DEFAULT_CONVERSATION_PERMISSION_MODE: ConversationPermissionMode = "confirm"
 
 
 def normalize_permission_mode(value: Any) -> ConversationPermissionMode:
-    mode = str(value or "").strip().lower()
+    mode = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "ask": "confirm",
+        "ask_permissions": "confirm",
+        "bypass_permissions": "bypass",
+        "full_access": "bypass",
+        "fullaccess": "bypass",
+        "danger_full_access": "bypass",
+        "dangerfullaccess": "bypass",
+        "acceptedits": "accept_edits",
+    }
+    mode = aliases.get(mode, mode)
     if mode in {"default", "plan", "confirm", "bypass", "auto", "accept_edits"}:
         return mode
     return "default"

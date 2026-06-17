@@ -41,8 +41,11 @@ def normalize_permission_mode(value: str) -> str | None:
         "off": "default",
         "ask": "confirm",
         "ask_permissions": "confirm",
+        "bypass_permissions": "bypass",
         "full_access": "bypass",
+        "fullaccess": "bypass",
         "danger_full_access": "bypass",
+        "dangerfullaccess": "bypass",
         "acceptedits": "accept_edits",
     }
     mode = aliases.get(normalized, normalized)

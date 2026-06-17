@@ -59,7 +59,11 @@ export function projectChatTurnToAgentLoop(
     Boolean(activeAnswerCell) ||
     Boolean(turn.finalAnswerCell?.isStreaming);
   const artifactCells = committedCells.filter(isDiffCell);
-  const processCells = committedCells.filter((cell) => !isDiffCell(cell));
+  const hideInlineSummary = Boolean(answerCell) || turn.status === "streaming";
+  const processCells = committedCells.filter((cell) => (
+    !isDiffCell(cell) &&
+    !(hideInlineSummary && isTurnSummaryCell(cell))
+  ));
   const timelineItems = buildAgentTimelineItems(processCells);
   const hasProcessContent =
     processCells.length > 0 ||
@@ -186,6 +190,10 @@ function mapStatus(status: ChatTurnState["status"]): AgentTurnStatus {
 
 function isDiffCell(cell: HistoryCellState): cell is DiffCellState {
   return cell.kind === "diff";
+}
+
+function isTurnSummaryCell(cell: HistoryCellState): cell is TurnSummaryCellState {
+  return cell.kind === "turn_summary";
 }
 
 function projectProcessCell(cell: AgentLoopProcessCell, seq: number): AgentTimelineItem | null {

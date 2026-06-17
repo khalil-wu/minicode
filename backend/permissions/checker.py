@@ -146,8 +146,11 @@ def normalize_permission_mode_token(mode: str | None) -> str:
     aliases = {
         "ask": "confirm",
         "ask_permissions": "confirm",
+        "bypass_permissions": "bypass",
         "full_access": "bypass",
+        "fullaccess": "bypass",
         "danger_full_access": "bypass",
+        "dangerfullaccess": "bypass",
         "acceptedits": "accept_edits",
     }
     candidate = aliases.get(normalized, normalized)

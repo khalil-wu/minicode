@@ -422,7 +422,7 @@ const toneColor = (tone: "normal" | "danger" | "info" | "warning") => {
 };
 
 const permissionTone = (mode: PermissionMode): "normal" | "danger" | "info" | "warning" =>
-  mode === "bypass" ? "warning" : mode === "auto" ? "info" : "normal";
+  mode === "auto" ? "info" : "normal";
 
 const permissionLabel = (mode: PermissionMode): string => {
   if (mode === "ask_permissions") return "Ask";

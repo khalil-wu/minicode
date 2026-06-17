@@ -14,7 +14,19 @@ _PERMISSION_MODE_ALIASES = {
     "auto": "auto",
     "default": "default",
     "confirm": "confirm",
+    "ask": "confirm",
+    "ask_permissions": "confirm",
     "off": "default",
+    "full_access": "bypass",
+    "full-access": "bypass",
+    "fullaccess": "bypass",
+    "full access": "bypass",
+    "danger_full_access": "bypass",
+    "danger-full-access": "bypass",
+    "dangerfullaccess": "bypass",
+    "bypass": "bypass",
+    "bypasspermissions": "bypass",
+    "bypass_permissions": "bypass",
 }
 
 _EFFORT_ALIASES = {

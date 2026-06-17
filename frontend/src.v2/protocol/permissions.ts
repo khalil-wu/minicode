@@ -6,19 +6,32 @@ export const DEFAULT_UI_PERMISSION_MODE: PermissionMode = "ask_permissions";
 
 export const normalizeUiPermissionMode = (mode: unknown): PermissionMode => {
   const normalized = String(mode ?? "").trim().toLowerCase();
-  if (normalized === "ask_permissions" || normalized === "confirm" || normalized === "ask") {
+  const canonical = normalized.replace(/[\s-]+/g, "_");
+  const compact = normalized.replace(/[\s_-]+/g, "");
+  if (
+    canonical === "ask_permissions" ||
+    normalized === "confirm" ||
+    normalized === "ask" ||
+    compact === "askpermissions"
+  ) {
     return "ask_permissions";
   }
   if (
     normalized === "bypass" ||
-    normalized === "bypasspermissions" ||
-    normalized === "full_access" ||
-    normalized === "full-access" ||
-    normalized === "danger-full-access"
+    canonical === "full_access" ||
+    canonical === "danger_full_access" ||
+    compact === "bypasspermissions" ||
+    compact === "fullaccess" ||
+    compact === "dangerfullaccess"
   ) {
     return "bypass";
   }
-  if (normalized === "auto" || normalized === "default" || normalized === "acceptedits" || normalized === "accept_edits") {
+  if (
+    normalized === "auto" ||
+    normalized === "default" ||
+    canonical === "accept_edits" ||
+    compact === "acceptedits"
+  ) {
     return "auto";
   }
   if (normalized === "plan") {

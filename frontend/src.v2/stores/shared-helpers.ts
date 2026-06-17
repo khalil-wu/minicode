@@ -428,6 +428,7 @@ export function conversationResetPayload(): Record<string, unknown> {
     pendingApproval: null,
     approvalQueue: [],
     pendingDiffReview: null,
+    diffReview: null,
     pendingAskUser: null,
     plan: null,
     todos: [],
