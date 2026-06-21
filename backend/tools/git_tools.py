@@ -21,6 +21,10 @@ from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 logger = logging.getLogger(__name__)
 
 
+def _decode_process_output(data: bytes | None) -> str:
+    return (data or b"").decode("utf-8", errors="replace")
+
+
 def _workspace_root(context: Any, fallback: Path) -> Path:
     if context and getattr(context, "workspace_root", None):
         return Path(context.workspace_root).resolve()
@@ -94,12 +98,12 @@ class GitStatusTool(BaseTool):
             stdout, stderr = await proc.communicate()
 
             if proc.returncode != 0:
-                error_msg = stderr.decode().strip()
+                error_msg = _decode_process_output(stderr).strip()
                 if "not a git repository" in error_msg.lower():
                     return self._success_result(f"{path_str} 不是 Git 仓库；跳过 Git 状态检查。")
                 return self._error_result(f"Git 命令失败: {error_msg}")
 
-            output = stdout.decode().strip()
+            output = _decode_process_output(stdout).strip()
             if not output:
                 output = "工作区干净，没有未提交的更改"
 
@@ -183,12 +187,12 @@ class GitDiffTool(BaseTool):
             stdout, stderr = await proc.communicate()
 
             if proc.returncode != 0:
-                error_msg = stderr.decode().strip()
+                error_msg = _decode_process_output(stderr).strip()
                 if "not a git repository" in error_msg.lower():
                     return self._success_result("当前工作区不是 Git 仓库；没有 Git diff。")
-                return self._error_result(f"Git 命令失败: {stderr.decode()}")
+                return self._error_result(f"Git 命令失败: {error_msg}")
 
-            output = stdout.decode().strip()
+            output = _decode_process_output(stdout).strip()
             if not output:
                 area = "暂存区" if staged else "工作区"
                 output = f"{area}没有变更"
@@ -275,12 +279,12 @@ class GitLogTool(BaseTool):
             stdout, stderr = await proc.communicate()
 
             if proc.returncode != 0:
-                error_msg = stderr.decode().strip()
+                error_msg = _decode_process_output(stderr).strip()
                 if "not a git repository" in error_msg.lower():
                     return self._success_result("当前工作区不是 Git 仓库；没有 Git 提交历史。")
-                return self._error_result(f"Git 命令失败: {stderr.decode()}")
+                return self._error_result(f"Git 命令失败: {error_msg}")
 
-            output = stdout.decode().strip()
+            output = _decode_process_output(stdout).strip()
             if not output:
                 output = "没有提交历史"
 
@@ -370,12 +374,12 @@ class GitCommitTool(BaseTool):
             stdout, stderr = await proc.communicate()
 
             if proc.returncode != 0:
-                error_msg = stderr.decode().strip()
+                error_msg = _decode_process_output(stderr).strip()
                 if "nothing to commit" in error_msg.lower():
                     return self._error_result("没有需要提交的更改")
                 return self._error_result(f"提交失败: {error_msg}")
 
-            output = stdout.decode().strip()
+            output = _decode_process_output(stdout).strip()
 
             return self._success_result(f"提交成功:\n{output}")
 

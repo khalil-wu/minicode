@@ -33,6 +33,46 @@ SEARCH_CACHE_MAX_ENTRIES = 128
 GREP_PARALLEL_FILE_THRESHOLD = 40
 GREP_MAX_WORKERS = 4
 _IGNORED_PATH_PARTS = {"__pycache__", "node_modules", ".git"}
+_GREP_OUTPUT_MODES = {"content", "files_with_matches", "count"}
+_GREP_TYPE_EXTENSIONS: dict[str, tuple[str, ...]] = {
+    "py": (".py",),
+    "python": (".py",),
+    "js": (".js", ".jsx"),
+    "javascript": (".js", ".jsx"),
+    "ts": (".ts", ".tsx"),
+    "typescript": (".ts", ".tsx"),
+    "tsx": (".tsx",),
+    "jsx": (".jsx",),
+    "go": (".go",),
+    "rust": (".rs",),
+    "rs": (".rs",),
+    "java": (".java",),
+    "c": (".c", ".h"),
+    "cpp": (".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"),
+    "cs": (".cs",),
+    "csharp": (".cs",),
+    "rb": (".rb",),
+    "ruby": (".rb",),
+    "php": (".php",),
+    "swift": (".swift",),
+    "kt": (".kt", ".kts"),
+    "kotlin": (".kt", ".kts"),
+    "md": (".md", ".markdown"),
+    "markdown": (".md", ".markdown"),
+    "json": (".json",),
+    "yaml": (".yaml", ".yml"),
+    "yml": (".yaml", ".yml"),
+    "toml": (".toml",),
+    "html": (".html", ".htm"),
+    "css": (".css",),
+    "scss": (".scss",),
+    "sh": (".sh", ".bash", ".zsh"),
+    "shell": (".sh", ".bash", ".zsh"),
+}
+
+
+def _decode_process_output(data: bytes | None) -> str:
+    return (data or b"").decode("utf-8", errors="replace")
 
 
 def _check_ripgrep() -> bool:
@@ -120,6 +160,82 @@ def _should_ignore_parts(parts: tuple[str, ...]) -> bool:
     return any(p.startswith(".") or p in _IGNORED_PATH_PARTS for p in parts) or is_windows_reserved_path(Path(*parts))
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "y", "on"}
+    return bool(value)
+
+
+def _coerce_nonnegative_int(value: Any, default: int = 0) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_output_mode(value: Any) -> str:
+    mode = str(value or "content").strip()
+    return mode if mode in _GREP_OUTPUT_MODES else "content"
+
+
+def _normalize_file_extensions(file_extensions: Any, file_type: Any = None) -> list[str]:
+    raw_extensions: list[Any]
+    if isinstance(file_extensions, str):
+        raw_extensions = [part for part in re.split(r"[\s,]+", file_extensions) if part]
+    elif isinstance(file_extensions, list):
+        raw_extensions = file_extensions
+    else:
+        raw_extensions = []
+
+    normalized = {
+        cleaned if cleaned.startswith(".") else f".{cleaned}"
+        for raw_ext in raw_extensions
+        if isinstance(raw_ext, str)
+        for cleaned in [raw_ext.strip()]
+        if cleaned
+    }
+
+    type_key = str(file_type or "").strip().lower()
+    if type_key:
+        normalized.update(_GREP_TYPE_EXTENSIONS.get(type_key, ()))
+
+    return sorted(normalized)
+
+
+def _split_glob_patterns(glob_pattern: str | None) -> list[str]:
+    if not glob_pattern:
+        return []
+    patterns: list[str] = []
+    for raw in str(glob_pattern).split():
+        if "{" in raw and "}" in raw:
+            patterns.append(raw)
+        else:
+            patterns.extend(part for part in raw.split(",") if part)
+    return [p for p in patterns if p]
+
+
+def _relative_display_path(file_path: Path, root_path: Path) -> str:
+    try:
+        return str(file_path.resolve().relative_to(root_path.resolve()))
+    except (OSError, ValueError):
+        return str(file_path)
+
+
+def _relativize_prefixed_line(line: str, root_path: Path) -> str:
+    root = str(root_path.resolve())
+    if line == root:
+        return "."
+    for separator in ("\\", "/"):
+        prefix = root + separator
+        if line.startswith(prefix):
+            return line[len(prefix):]
+    return line
+
+
 def _build_cache_key(prefix: str, payload: dict[str, Any]) -> str:
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
     return f"{prefix}:{serialized}"
@@ -191,6 +307,8 @@ def _grep_file_matches(
     root_path: Path,
     regex: re.Pattern[str],
     context_lines: int = 0,
+    output_mode: str = "content",
+    multiline: bool = False,
 ) -> list[str]:
     if not _is_within_path(file_path, root_path):
         return []
@@ -200,8 +318,42 @@ def _grep_file_matches(
         return []
 
     matches: list[str] = []
-    rel_path = file_path.relative_to(root_path)
+    rel_path = _relative_display_path(file_path, root_path)
+
+    if multiline:
+        regex_matches = list(regex.finditer(content))
+        if not regex_matches:
+            return []
+        if output_mode == "files_with_matches":
+            return [rel_path]
+        if output_mode == "count":
+            return [f"{rel_path}:{len(regex_matches)}"]
+
+        for match in regex_matches:
+            line_num = content.count("\n", 0, match.start()) + 1
+            excerpt = match.group(0).strip()
+            if len(excerpt) > 500:
+                excerpt = excerpt[:500] + "..."
+            excerpt = excerpt.replace("\r\n", "\n").replace("\n", "\\n")
+            matches.append(f"  {rel_path}:{line_num}: {excerpt}")
+            if len(matches) >= GREP_MAX_MATCHES:
+                break
+        return matches
+
     lines = content.split("\n")
+    matching_line_numbers = [
+        line_num
+        for line_num, line in enumerate(lines, 1)
+        if regex.search(line)
+    ]
+
+    if not matching_line_numbers:
+        return []
+
+    if output_mode == "files_with_matches":
+        return [rel_path]
+    if output_mode == "count":
+        return [f"{rel_path}:{len(matching_line_numbers)}"]
 
     for line_num, line in enumerate(lines, 1):
         if regex.search(line):
@@ -225,6 +377,8 @@ def _grep_candidates(
     root_path: Path,
     regex: re.Pattern[str],
     context_lines: int = 0,
+    output_mode: str = "content",
+    multiline: bool = False,
 ) -> tuple[list[str], int]:
     files_searched = len(candidate_files)
     if files_searched == 0:
@@ -233,7 +387,14 @@ def _grep_candidates(
     matches: list[str] = []
     if files_searched < GREP_PARALLEL_FILE_THRESHOLD:
         for file_path in candidate_files:
-            file_matches = _grep_file_matches(file_path, root_path, regex, context_lines)
+            file_matches = _grep_file_matches(
+                file_path,
+                root_path,
+                regex,
+                context_lines,
+                output_mode,
+                multiline,
+            )
             if not file_matches:
                 continue
             remaining = GREP_MAX_MATCHES - len(matches)
@@ -243,7 +404,14 @@ def _grep_candidates(
         return matches, files_searched
 
     max_workers = min(GREP_MAX_WORKERS, max(1, os.cpu_count() or 1))
-    worker = partial(_grep_file_matches, root_path=root_path, regex=regex, context_lines=context_lines)
+    worker = partial(
+        _grep_file_matches,
+        root_path=root_path,
+        regex=regex,
+        context_lines=context_lines,
+        output_mode=output_mode,
+        multiline=multiline,
+    )
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         for file_matches in executor.map(worker, candidate_files, chunksize=8):
             if not file_matches:
@@ -263,28 +431,48 @@ async def _grep_with_ripgrep(
     context_lines: int = 0,
     case_sensitive: bool = True,
     limit: int = GREP_MAX_MATCHES,
+    output_mode: str = "content",
+    multiline: bool = False,
+    file_type: str | None = None,
 ) -> tuple[str, bool]:
     """
     Execute grep using ripgrep (rg) binary.
 
     Returns (output_text, is_error).
     """
-    cmd = ["rg", "--line-number", "--no-heading", "--color=never"]
+    cmd = ["rg", "--color=never", "--max-columns", "500"]
+    if output_mode == "files_with_matches":
+        cmd.append("--files-with-matches")
+    elif output_mode == "count":
+        cmd.append("--count")
+    else:
+        cmd.extend(["--line-number", "--no-heading"])
+
     for reserved in ("nul", "con", "prn", "aux", "com[1-9]", "lpt[1-9]"):
         cmd.extend(["--glob", f"!**/{reserved}"])
         cmd.extend(["--glob", f"!**/{reserved}.*"])
 
+    if multiline:
+        cmd.extend(["-U", "--multiline-dotall"])
+
     if not case_sensitive:
         cmd.append("--ignore-case")
 
-    if context_lines > 0:
+    if context_lines > 0 and output_mode == "content":
         cmd.extend(["-C", str(context_lines)])
 
-    if glob_pattern:
-        cmd.extend(["--glob", glob_pattern])
+    for split_pattern in _split_glob_patterns(glob_pattern):
+        cmd.extend(["--glob", split_pattern])
 
-    cmd.extend(["--max-count", str(limit)])
-    cmd.append(pattern)
+    if file_type:
+        cmd.extend(["--type", file_type])
+
+    if output_mode == "content":
+        cmd.extend(["--max-count", str(limit)])
+    if pattern.startswith("-"):
+        cmd.extend(["-e", pattern])
+    else:
+        cmd.append(pattern)
     cmd.append(str(search_root))
 
     proc = await asyncio.create_subprocess_exec(
@@ -296,11 +484,17 @@ async def _grep_with_ripgrep(
     stdout, stderr = await proc.communicate()
 
     if proc.returncode not in (0, 1):  # 1 = no matches
-        return f"ripgrep error: {stderr.decode()}", True
+        error = _decode_process_output(stderr)
+        return f"ripgrep error: {error}", True
 
-    output = stdout.decode()
+    output = _decode_process_output(stdout)
     if not output:
         output = "(no matches)"
+    else:
+        output_lines = [_relativize_prefixed_line(line, search_root) for line in output.splitlines()]
+        if output_mode in {"files_with_matches", "count"}:
+            output_lines = output_lines[:limit]
+        output = "\n".join(output_lines)
 
     return output, False
 
@@ -341,6 +535,10 @@ class GlobFilesTool(BaseTool):
                         "type": "string",
                         "description": "The directory to search in. Defaults to the workspace root. Can be absolute or relative.",
                     },
+                    "path": {
+                        "type": "string",
+                        "description": "Alias for directory, matching Claude Code's Glob tool parameter. Omit to search the workspace root.",
+                    },
                 },
                 "required": ["pattern"],
             },
@@ -348,7 +546,7 @@ class GlobFilesTool(BaseTool):
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
         pattern = args.get("pattern", "")
-        directory = args.get("directory", ".")
+        directory = args.get("path") or args.get("directory", ".")
 
         if not pattern:
             return self._error_result("Missing 'pattern' parameter.")
@@ -377,8 +575,7 @@ class GlobFilesTool(BaseTool):
         if cached_result is not None:
             return self._success_result(cached_result)
 
-        matches: list[str] = []
-        match_count = 0
+        matches: list[tuple[str, float]] = []
         traversed = 0
         max_traversal = 50_000
 
@@ -398,10 +595,12 @@ class GlobFilesTool(BaseTool):
                 if not _is_within_path(file_path, path):
                     continue
 
-                matches.append(str(file_path.relative_to(path) if path != file_path else file_path))
-                match_count += 1
-                if match_count >= GLOB_MAX_MATCHES:
-                    break
+                display_path = str(file_path.relative_to(path) if path != file_path else file_path)
+                try:
+                    modified_at = file_path.stat().st_mtime
+                except OSError:
+                    modified_at = 0.0
+                matches.append((display_path, modified_at))
         except Exception as exc:
             return self._error_result(f"Invalid glob pattern or error reading directory: {exc}")
 
@@ -410,12 +609,14 @@ class GlobFilesTool(BaseTool):
             _search_cache_put(_glob_result_cache, cache_key, result)
             return self._success_result(result)
 
-        matches.sort()
-        header = f"Found {len(matches)} matching files for '{pattern}' in {directory}:"
-        if match_count >= GLOB_MAX_MATCHES:
+        matches.sort(key=lambda item: (-item[1], item[0]))
+        total_matches = len(matches)
+        display_matches = [match for match, _modified_at in matches[:GLOB_MAX_MATCHES]]
+        header = f"Found {len(display_matches)} matching files for '{pattern}' in {directory}:"
+        if total_matches > GLOB_MAX_MATCHES:
             header += f" (truncated to first {GLOB_MAX_MATCHES})"
 
-        result = header + "\n" + "\n".join("- " + m for m in matches)
+        result = header + "\n" + "\n".join("- " + m for m in display_matches)
         _search_cache_put(_glob_result_cache, cache_key, result)
         return self._success_result(result)
 
@@ -432,7 +633,7 @@ class GrepFilesTool(BaseTool):
     name = "grep_files"
     read_only = True
     description = (
-        "Search file contents using ripgrep (full regex support). Returns matching lines with file paths and line numbers.\n\n"
+        "Search file contents using ripgrep-style regex. Returns matching lines with file paths and line numbers by default.\n\n"
         "ALWAYS use grep_files for content search — NEVER invoke grep or rg via run_command.\n"
         "Supports: full regex (e.g. 'log.*Error', 'function\\s+\\w+'), glob filter, file type filter, "
         "output modes ('content' for lines, 'files_with_matches' for paths, 'count').\n"
@@ -460,23 +661,48 @@ class GrepFilesTool(BaseTool):
                         "type": "string",
                         "description": "Directory to search in. Defaults to the workspace root. Can be absolute or relative.",
                     },
+                    "path": {
+                        "type": "string",
+                        "description": "Alias for directory, matching Claude Code's Grep tool parameter. Omit to search the workspace root.",
+                    },
                     "file_extensions": {
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Limit search to specific file extensions (e.g., ['.py', '.js']). Empty or omitted searches all text files.",
                     },
+                    "type": {
+                        "type": "string",
+                        "description": "File type to search (e.g., 'py', 'js', 'ts', 'rust', 'go'). Maps to ripgrep --type when available.",
+                    },
+                    "output_mode": {
+                        "type": "string",
+                        "enum": ["content", "files_with_matches", "count"],
+                        "description": "Output mode: 'content' shows matching lines, 'files_with_matches' shows only file paths, 'count' shows per-file match counts. Defaults to 'content' for MiniCode compatibility.",
+                    },
                     "case_insensitive": {
                         "type": "boolean",
                         "description": "Whether to ignore case when matching. Defaults to false.",
+                    },
+                    "-i": {
+                        "type": "boolean",
+                        "description": "Alias for case_insensitive, matching ripgrep and Claude Code Grep.",
                     },
                     "context": {
                         "type": "integer",
                         "description": "Number of context lines to show before and after each match. Defaults to 0.",
                         "default": 0,
                     },
+                    "-C": {
+                        "type": "integer",
+                        "description": "Alias for context. Applies only with output_mode='content'.",
+                    },
                     "glob": {
                         "type": "string",
                         "description": "Glob pattern to filter which files to search (e.g., '**/*.py'). Optional.",
+                    },
+                    "multiline": {
+                        "type": "boolean",
+                        "description": "Enable multiline matching so patterns can span lines. Defaults to false.",
                     },
                 },
                 "required": ["pattern"],
@@ -485,11 +711,14 @@ class GrepFilesTool(BaseTool):
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
         pattern = args.get("pattern", "")
-        directory = args.get("directory", ".")
-        file_extensions = args.get("file_extensions", [])
-        case_insensitive = args.get("case_insensitive", False)
-        context_lines = args.get("context", 0)
+        directory = args.get("path") or args.get("directory", ".")
+        output_mode = _normalize_output_mode(args.get("output_mode"))
+        file_type = str(args.get("type") or "").strip()
+        file_extensions = _normalize_file_extensions(args.get("file_extensions", []), file_type)
+        case_insensitive = _as_bool(args.get("-i", args.get("case_insensitive", False)))
+        context_lines = _coerce_nonnegative_int(args.get("-C", args.get("context", 0)))
         glob_filter = args.get("glob")
+        multiline = _as_bool(args.get("multiline", False))
 
         if not pattern:
             return self._error_result("缺少 pattern 参数")
@@ -516,8 +745,11 @@ class GrepFilesTool(BaseTool):
                     "directory": str(path),
                     "pattern": pattern,
                     "glob": glob_filter or "",
+                    "output_mode": output_mode,
+                    "type": file_type,
                     "case_insensitive": bool(case_insensitive),
                     "context": int(context_lines),
+                    "multiline": bool(multiline),
                     "backend": "ripgrep",
                 },
             )
@@ -532,12 +764,15 @@ class GrepFilesTool(BaseTool):
                 context_lines=context_lines,
                 case_sensitive=not case_insensitive,
                 limit=GREP_MAX_MATCHES,
+                output_mode=output_mode,
+                multiline=multiline,
+                file_type=file_type or None,
             )
             if is_error:
                 return self._error_result(rg_output)
 
-            header = f"在 {directory} 中搜索 '{pattern}'"
-            if context_lines > 0:
+            header = f"在 {directory} 中搜索 '{pattern}'（模式: {output_mode}）"
+            if context_lines > 0 and output_mode == "content":
                 header += f"（上下文 {context_lines} 行）"
             result = header + "\n\n" + rg_output
             _search_cache_put(_grep_result_cache, cache_key, result)
@@ -546,27 +781,23 @@ class GrepFilesTool(BaseTool):
         # --- Python fallback backend ---
         try:
             flags = re.IGNORECASE if case_insensitive else 0
+            if multiline:
+                flags |= re.DOTALL | re.MULTILINE
             regex = re.compile(pattern, flags)
         except re.error as exc:
             return self._error_result(f"无效的正则表达式: {exc}")
-
-        normalized_extensions = sorted({
-            cleaned if cleaned.startswith(".") else f".{cleaned}"
-            for raw_ext in file_extensions
-            if isinstance(raw_ext, str)
-            for cleaned in [raw_ext.strip()]
-            if cleaned
-        })
 
         cache_key = _build_cache_key(
             "grep",
             {
                 "directory": str(path),
                 "pattern": pattern,
-                "file_extensions": normalized_extensions,
+                "file_extensions": file_extensions,
                 "case_insensitive": bool(case_insensitive),
                 "context": int(context_lines),
                 "glob": glob_filter or "",
+                "output_mode": output_mode,
+                "multiline": bool(multiline),
                 "backend": "python",
             },
         )
@@ -574,7 +805,7 @@ class GrepFilesTool(BaseTool):
         if cached_result is not None:
             return self._success_result(cached_result)
 
-        candidate_files = _collect_candidate_files(path, normalized_extensions)
+        candidate_files = _collect_candidate_files(path, file_extensions)
 
         # Apply glob pattern filter in Python fallback when specified
         if glob_filter:
@@ -588,6 +819,8 @@ class GrepFilesTool(BaseTool):
             path,
             regex,
             context_lines,
+            output_mode,
+            multiline,
         )
 
         if not matches:
@@ -595,10 +828,10 @@ class GrepFilesTool(BaseTool):
             _search_cache_put(_grep_result_cache, cache_key, result)
             return self._success_result(result)
 
-        header = f"在 {directory} 中搜索 '{pattern}'：找到 {len(matches)} 处匹配"
+        header = f"在 {directory} 中搜索 '{pattern}'：找到 {len(matches)} 条结果（模式: {output_mode}）"
         if len(matches) >= GREP_MAX_MATCHES:
             header += f"（已截断，上限 {GREP_MAX_MATCHES} 条）"
-        if context_lines > 0:
+        if context_lines > 0 and output_mode == "content":
             header += f"（上下文 {context_lines} 行）"
 
         result = header + "\n\n" + "\n".join(matches)

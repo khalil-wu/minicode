@@ -1,6 +1,7 @@
 "use strict";
 
 const path = require("node:path");
+const { StringDecoder } = require("node:string_decoder");
 
 // ---------------------------------------------------------------------------
 // State
@@ -108,6 +109,8 @@ function spawnSession(cwd) {
         cwd: resolvedCwd,
         env: sanitizedPtyEnv(),
       });
+      const stdoutDecoder = new StringDecoder("utf8");
+      const stderrDecoder = new StringDecoder("utf8");
 
       ptyProcess = {
         pid: sub.pid,
@@ -121,8 +124,22 @@ function spawnSession(cwd) {
           sub.kill();
         },
         onData: (cb) => {
-          sub.stdout.on("data", (chunk) => cb(chunk.toString("utf8")));
-          sub.stderr.on("data", (chunk) => cb(chunk.toString("utf8")));
+          sub.stdout.on("data", (chunk) => {
+            const text = stdoutDecoder.write(chunk);
+            if (text) cb(text);
+          });
+          sub.stdout.on("end", () => {
+            const text = stdoutDecoder.end();
+            if (text) cb(text);
+          });
+          sub.stderr.on("data", (chunk) => {
+            const text = stderrDecoder.write(chunk);
+            if (text) cb(text);
+          });
+          sub.stderr.on("end", () => {
+            const text = stderrDecoder.end();
+            if (text) cb(text);
+          });
         },
         onExit: (cb) => {
           sub.on("exit", (exitCode) => cb({ exitCode: exitCode ?? 0 }));

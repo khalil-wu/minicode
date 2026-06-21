@@ -1,7 +1,7 @@
 """
 Agent Loop - Single-loop + Recovery-ladder architecture.
 
-Inspired by Claude Code's agent harness pattern:
+Inspired by Claude Code's single-query-loop pattern:
   1. Context Pipeline  (before the call)
   2. Streaming Execution (during the call)
   3. Recovery Paths    (after the call)
@@ -29,12 +29,8 @@ from backend.agent.context import ContextBuilder
 from backend.agent.query_chain import QueryChainTracking
 from backend.agent.error_withholding import ErrorWithholdingController, RecoveryStrategy
 from backend.agent.message import AgentEvent
-from backend.agent.checkpoint import save_checkpoint, load_latest_checkpoint, clear_checkpoints
-from backend.agent.harness.answer_gate import (
-    AnswerGate,
-    user_message_missing_required_location,
-)
-from backend.agent.harness.guidance import build_harness_guidance
+from backend.agent.checkpoint import save_run_checkpoint, load_latest_checkpoint, clear_checkpoints
+from backend.agent.prompting import build_tool_runtime_guidance
 from backend.agent.policies import (
     DefaultReflectionPolicy,
     DefaultStreamRetryPolicy,
@@ -45,18 +41,14 @@ from backend.agent.progress import (
     agent_progress as _agent_progress,
 )
 from backend.agent.state import AgentState
-from backend.agent.streaming_executor import StreamingToolExecutor, is_tool_concurrency_safe
+from backend.agent.runtime import AgentRunStatus, AgentRuntime, default_runtime
 from backend.agent.tool_execution import (
+    StreamingToolExecutor,
     execute_tool_batch as _execute_tool_batch,
     repair_tool_call_sequence,
-    run_tool_with_timeout,
-    store_result,
     tool_call_is_safe_for_model_history,
-    tool_call_start_event,
-    tool_output_delta_events,
-    _tool_output_was_streamed,
 )
-from backend.agent.harness.guardrails import (
+from backend.agent.tool_guardrails import (
     ToolCallGuardrailController,
     guardrail_halt_response,
 )
@@ -79,8 +71,6 @@ logger = logging.getLogger(__name__)
 
 _POST_COMPACTION_HARD_LIMIT = 0.98
 LLM_STREAM_TIMEOUT_SECONDS = 120.0
-_TEXT_DRAFT_STREAM_THRESHOLD_CHARS = 180
-_TEXT_DRAFT_STREAM_THRESHOLD_AFTER_TOOLS_CHARS = 80
 _CLARIFICATION_TOOL_NAMES = {"ask_user"}
 _MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3
 _MAX_OUTPUT_FINISH_REASONS = {
@@ -117,6 +107,98 @@ _NO_WORKSPACE_GUIDANCE = (
     "No workspace folder is open in this desktop session. Answer from conversation context only. "
     "If the request needs local files, shell, git, preview, or workspace inspection, ask the user to open a folder first."
 )
+DELIVERY_REQUEST_RE = re.compile(
+    r"(write|create|edit|modify|update|delete|rename|run|test|build|install|"
+    r"implement|fix|generate|save|"
+    r"\u5199|\u521b\u5efa|\u4fee\u6539|\u66f4\u65b0|\u5220\u9664|\u91cd\u547d\u540d|"
+    r"\u8fd0\u884c|\u6d4b\u8bd5|\u6784\u5efa|\u5b89\u88c5|\u5b9e\u73b0|\u4fee\u590d|"
+    r"\u751f\u6210|\u4fdd\u5b58)",
+    re.I,
+)
+INTENTION_ONLY_RE = re.compile(
+    r"^\s*(i(?:'ll| will| am going to)\s+(?:do|check|look|try|work|handle|take|get|start|begin|make|create|write|edit|run|search|find|fix|implement|generate)\s|"
+    r"\u6211\u4f1a|\u6211\u5c06|\u6211\u6765|\u6211\u5148|\u63a5\u4e0b\u6765\u6211)",
+    re.I,
+)
+WEATHER_REQUEST_RE = re.compile(
+    r"\b(weather|forecast|temperature)\b|"
+    r"(\u5929\u6c14|\u6c14\u6e29|\u6e29\u5ea6|\u9884\u62a5|\u964d\u96e8|\u4e0b\u96e8)",
+    re.I,
+)
+LOCATION_HINT_RE = re.compile(
+    r"\b(?:in|at|for|near)\s+[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?\b|"
+    r"\b(?:Beijing|Shanghai|Guangzhou|Shenzhen|Hangzhou|Chengdu|Wuhan|Nanjing|Tianjin|Chongqing|"
+    r"Tokyo|Seoul|London|Paris|Berlin|New York|San Francisco|Los Angeles|Singapore)\b|"
+    r"(\u5317\u4eac|\u4e0a\u6d77|\u5e7f\u5dde|\u6df1\u5733|\u676d\u5dde|\u6210\u90fd|\u6b66\u6c49|"
+    r"\u5357\u4eac|\u5929\u6d25|\u91cd\u5e86|\u82cf\u5dde|\u897f\u5b89|\u957f\u6c99|\u4e1c\u4eac|"
+    r"\u9996\u5c14|\u4f26\u6566|\u5df4\u9ece|\u7ebd\u7ea6|\u65b0\u52a0\u5761)",
+    re.I,
+)
+LOCATION_CLARIFICATION_RE = re.compile(
+    r"\b(?:which|what)\b.{0,40}\b(?:city|location|area)\b|"
+    r"\b(?:city|location|area)\b.{0,40}\?|"
+    r"(\u54ea\u4e2a|\u54ea\u91cc|\u4ec0\u4e48).{0,24}(\u57ce\u5e02|\u5730\u70b9|\u5730\u533a)|"
+    r"(\u57ce\u5e02|\u5730\u70b9|\u5730\u533a).{0,24}(\u54ea\u4e2a|\u54ea\u91cc|\u4ec0\u4e48)",
+    re.I,
+)
+DEICTIC_LOCATION_RE = re.compile(
+    r"\b(?:near me|nearby|around me|around here|close by|in my area)\b|"
+    r"(\u9644\u8fd1|\u5468\u8fb9|\u8eab\u8fb9|\u8fd9\u9644\u8fd1)",
+    re.I,
+)
+LOCAL_RECOMMENDATION_RE = re.compile(
+    r"\b(?:restaurant|food|eat|meal|cafe|coffee|hotel|store|shop|things to do)\b|"
+    r"(\u597d\u5403|\u5403\u7684|\u9910\u5385|\u996d\u5e97|\u5496\u5561|\u9152\u5e97|"
+    r"\u8d85\u5e02|\u5546\u5e97|\u666f\u70b9|\u53bb\u54ea|\u73a9)",
+    re.I,
+)
+FAILURE_ACK_MARKERS = (
+    "\u5931\u8d25",
+    "\u65e0\u6cd5",
+    "\u672a\u80fd",
+    "\u4e0d\u80fd",
+    "\u51fa\u9519",
+    "\u9519\u8bef",
+    "\u88ab\u62d2\u7edd",
+    "\u6743\u9650",
+    "blocked",
+    "failed",
+    "failure",
+    "error",
+    "could not",
+    "cannot",
+    "can't",
+    "unable",
+    "permission",
+)
+WRITE_SUCCESS_MARKERS = (
+    "\u5df2\u521b\u5efa",
+    "\u5df2\u5199\u5165",
+    "\u5df2\u4fee\u6539",
+    "\u5df2\u66f4\u65b0",
+    "created",
+    "wrote",
+    "updated",
+    "modified",
+)
+NONFATAL_ERROR_KINDS = {
+    "missing_generated_content",
+    "routing_error",
+    "stale_evidence",
+    "repeat_guard",
+    "tool_disabled",
+}
+NONFATAL_PROJECTIONS = {"silent", "status", "warning"}
+MUTATION_TOOLS = {"write_file", "edit_file"}
+WEB_TOOLS = {"web_search", "search_web", "web_fetch", "fetch_web", "fetch_page", "fetch_url"}
+INLINE_CITATION_RE = re.compile(r"\[(?:\d+)\]")
+SNIPPET_UNCERTAINTY_RE = re.compile(
+    r"snippet-only|search snippets?|candidate evidence|unverified|could not verify|"
+    r"may|might|appears?|seems?|uncertain|no results?|could not find|couldn't find|not find|"
+    r"\u7247\u6bb5|\u5019\u9009|\u672a\u6838\u5b9e|\u65e0\u6cd5\u6838\u5b9e|\u4e0d\u786e\u5b9a|\u53ef\u80fd|\u4f3c\u4e4e|"
+    r"\u6ca1\u6709\u627e\u5230|\u672a\u627e\u5230|\u641c\u7d22\u7ed3\u679c\u4e0d\u8db3|\u8bc1\u636e\u4e0d\u8db3",
+    re.I,
+)
 
 # Session Context
 
@@ -139,92 +221,202 @@ class AgentLoopSessionContext:
     metadata: dict[str, Any] | None = None
 
 
-@dataclass
-class FinalAnswerController:
-    """Tracks final-answer streaming and allows draft retraction."""
+@dataclass(frozen=True)
+class AnswerGateResult:
+    ok: bool
+    feedback: str = ""
+    reason: str = ""
 
-    draft_text: str = ""
-    preamble_emitted: bool = False
-    final_started: bool = False
-    streamed_text: str = ""
-    hold_for_privacy: bool = False
 
-    def append(self, content: str) -> None:
-        if content:
-            self.draft_text += content
+def user_message_missing_required_location(user_message: str) -> bool:
+    """Return true when using tools would require a location the user omitted."""
+    text = user_message or ""
+    if LOCATION_HINT_RE.search(text):
+        return False
+    if WEATHER_REQUEST_RE.search(text):
+        return True
+    return bool(DEICTIC_LOCATION_RE.search(text) and LOCAL_RECOMMENDATION_RE.search(text))
 
-    def stream_delta(self, content: str) -> list[AgentEvent]:
-        if not content:
-            return []
-        if self.hold_for_privacy or _PRIVATE_REASONING_TAG_OPEN_RE.search(content):
-            self.hold_for_privacy = True
-            return []
-        events: list[AgentEvent] = []
-        if not self.final_started:
-            self.final_started = True
-            events.append(AgentEvent.final_answer_started())
-        self.streamed_text += content
-        events.append(AgentEvent.final_answer_delta(content))
-        return events
 
-    def retract(self, reason: str = "") -> AgentEvent | None:
-        if not self.final_started and not self.streamed_text:
-            return None
-        self.final_started = False
-        self.streamed_text = ""
-        return AgentEvent.final_answer_retracted(reason)
+class AnswerGate:
+    """Final-answer integrity checks owned by the main loop."""
 
-    def emit_final(self, final_text: str) -> list[AgentEvent]:
-        if not final_text:
-            return []
-        events: list[AgentEvent] = []
-        if (
-            self.streamed_text
-            and self.streamed_text != final_text
-            and not final_text.startswith(self.streamed_text)
-        ):
-            retracted = self.retract("replace_draft")
-            if retracted is not None:
-                events.append(retracted)
-        if not self.final_started:
-            self.final_started = True
-            events.append(AgentEvent.final_answer_started())
-        if self.streamed_text != final_text:
-            suffix = final_text[len(self.streamed_text):] if final_text.startswith(self.streamed_text) else final_text
-            if suffix:
-                self.streamed_text += suffix
-                events.append(AgentEvent.final_answer_delta(suffix))
-        return events
+    def __init__(self, max_retries: int = 2, *, enabled: bool = True) -> None:
+        self.max_retries = max_retries
+        self.enabled = enabled
 
-    def emit_preamble(self, *, iteration_id: str = "", loop_id: str = "") -> AgentEvent | None:
-        if self.preamble_emitted or not self.draft_text.strip():
-            return None
-        self.preamble_emitted = True
-        preamble = self.draft_text
-        self.draft_text = ""
-        item_id = f"{loop_id or iteration_id or 'loop'}:process"
-        return AgentEvent.agent_item(
-            id=item_id,
-            kind="process_text",
-            content=preamble,
-            loop_id=loop_id or iteration_id,
-            iteration_id=iteration_id,
-            role="assistant",
-            source="model",
-            status="completed",
-            title="Process",
-            summary=preamble.strip().splitlines()[0][:120],
-            visibility="timeline",
-            seq=1,
+    def evaluate(self, user_message: str, draft_reply: str, state: Any) -> AnswerGateResult:
+        if not self.enabled:
+            return AnswerGateResult(ok=True)
+        retry_count = int(getattr(state, "answer_gate_retries", 0) or 0)
+        if retry_count >= self.max_retries:
+            return AnswerGateResult(ok=True)
+
+        text = (draft_reply or "").strip()
+        if not text:
+            return AnswerGateResult(ok=True)
+
+        if self._weather_request_missing_location(user_message or "", text, state):
+            return self._retry(
+                state,
+                retry_count,
+                reason="missing_weather_location",
+                feedback=(
+                    "The weather request is missing a city or area. "
+                    "Ask one concise city/location question first; do not assume a location."
+                ),
+            )
+
+        if self._looks_like_unexecuted_commitment(user_message or "", text, state):
+            return self._retry(
+                state,
+                retry_count,
+                reason="unexecuted_commitment",
+                feedback=(
+                    "The draft only promises or plans the work without executing it. "
+                    "If tools can complete it, call them now. Otherwise, state the concrete limitation."
+                ),
+            )
+
+        if self._claims_success_without_mutation(text, state):
+            return self._retry(
+                state,
+                retry_count,
+                reason="unverified_file_change",
+                feedback=(
+                    "Do not claim a file was created or edited without a successful "
+                    "write_file/edit_file result. Perform the write or say no file was written."
+                ),
+            )
+
+        if self._unacknowledged_recent_tool_failure(text, state):
+            failure = self._last_fatal_tool_failure(state)
+            return self._retry(
+                state,
+                retry_count,
+                reason="unacknowledged_tool_failure",
+                feedback=(
+                    "A recent tool failure must be acknowledged before giving a final answer. "
+                    f"Tool: {self._record_field(failure, 'tool_name') or 'unknown'}; "
+                    f"kind: {self._record_field(failure, 'error_kind') or 'unknown'}; "
+                    f"reason: {self._record_field(failure, 'tool_output') or self._record_field(failure, 'user_summary') or 'no details'}."
+                ),
+            )
+
+        if self._web_answer_lacks_citation(text, state):
+            return self._retry(
+                state,
+                retry_count,
+                reason="missing_web_citation",
+                feedback=(
+                    "Your answer relies on web evidence but has no inline citation marker. "
+                    "Add [1]/[2] markers tied to the relevant web_search/web_fetch result. "
+                    "Do not add a separate Sources/References section or raw URLs; the UI renders source links from tool metadata. "
+                    "If you only have search snippets, say the evidence is snippet-only and answer with uncertainty."
+                ),
+            )
+
+        return AnswerGateResult(ok=True)
+
+    @staticmethod
+    def _retry(state: Any, retry_count: int, *, reason: str, feedback: str) -> AnswerGateResult:
+        setattr(state, "answer_gate_retries", retry_count + 1)
+        return AnswerGateResult(ok=False, reason=reason, feedback=feedback)
+
+    @classmethod
+    def _weather_request_missing_location(cls, user_message: str, text: str, state: Any) -> bool:
+        if not user_message_missing_required_location(user_message):
+            return False
+        if cls._has_fetched_web_evidence(state):
+            return False
+        if LOCATION_CLARIFICATION_RE.search(text or ""):
+            return False
+        return True
+
+    @staticmethod
+    def _records(state: Any) -> list[Any]:
+        records = getattr(state, "tool_calls", []) or []
+        return list(records)
+
+    @staticmethod
+    def _record_field(record: Any, field: str) -> str:
+        if record is None:
+            return ""
+        value = getattr(record, field, "")
+        return str(value or "").strip()
+
+    @staticmethod
+    def _looks_like_unexecuted_commitment(user_message: str, text: str, state: Any) -> bool:
+        if not DELIVERY_REQUEST_RE.search(user_message):
+            return False
+        if any(getattr(tc, "status", "") == "success" for tc in (getattr(state, "tool_calls", None) or [])):
+            return False
+        if not INTENTION_ONLY_RE.search(text):
+            return False
+        return not any(marker in text.lower() for marker in FAILURE_ACK_MARKERS)
+
+    @classmethod
+    def _claims_success_without_mutation(cls, text: str, state: Any) -> bool:
+        lowered = text.lower()
+        if not any(marker in lowered for marker in WRITE_SUCCESS_MARKERS):
+            return False
+        return not any(
+            cls._record_field(record, "status") == "success"
+            and cls._record_field(record, "tool_name") in MUTATION_TOOLS
+            for record in cls._records(state)
         )
 
-    def reset(self) -> None:
-        self.draft_text = ""
-        self.preamble_emitted = False
-        self.final_started = False
-        self.streamed_text = ""
-        self.hold_for_privacy = False
+    @classmethod
+    def _last_fatal_tool_failure(cls, state: Any) -> Any | None:
+        for record in reversed(cls._records(state)):
+            status = cls._record_field(record, "status")
+            if status not in {"error", "failed", "blocked"}:
+                continue
+            if cls._record_field(record, "projection") in NONFATAL_PROJECTIONS:
+                continue
+            if cls._record_field(record, "error_kind") in NONFATAL_ERROR_KINDS:
+                continue
+            return record
+        return None
 
+    @classmethod
+    def _unacknowledged_recent_tool_failure(cls, text: str, state: Any) -> bool:
+        if cls._last_fatal_tool_failure(state) is None:
+            return False
+        lowered = text.lower()
+        return not any(marker in lowered for marker in FAILURE_ACK_MARKERS)
+
+    @classmethod
+    def _has_fetched_web_evidence(cls, state: Any) -> bool:
+        return any(
+            cls._record_field(record, "status") == "success"
+            and (
+                cls._record_field(record, "evidence_type") == "fetched"
+                or cls._record_field(record, "tool_name") == "web_fetch"
+            )
+            for record in cls._records(state)
+        )
+
+    @classmethod
+    def _has_successful_web_evidence(cls, state: Any) -> bool:
+        return any(
+            cls._record_field(record, "status") == "success"
+            and (
+                cls._record_field(record, "tool_name") in WEB_TOOLS
+                or cls._record_field(record, "evidence_type") in {"candidate", "fetched"}
+            )
+            for record in cls._records(state)
+        )
+
+    @classmethod
+    def _web_answer_lacks_citation(cls, text: str, state: Any) -> bool:
+        if not cls._has_successful_web_evidence(state):
+            return False
+        if INLINE_CITATION_RE.search(text):
+            return False
+        if SNIPPET_UNCERTAINTY_RE.search(text):
+            return False
+        return True
 
 @dataclass(frozen=True, slots=True)
 class _RecoveryProfile:
@@ -243,6 +435,8 @@ class _RecoveryProfile:
     provider_error_type: str = ""
     emit_failed_progress: bool = True
     allow_last_resort: bool = True
+    allow_partial_text_commit: bool = True
+    live_text_streaming: bool = False
 
 
 # Recovery helpers
@@ -330,10 +524,6 @@ _THINKING_TAG_RE = re.compile(
     r"<(?:thinking|reasoning|internal)[^>]*>.*?</(?:thinking|reasoning|internal)>",
     re.DOTALL | re.IGNORECASE,
 )
-_PRIVATE_REASONING_TAG_OPEN_RE = re.compile(
-    r"<(?:thinking|reasoning|internal)\b",
-    re.IGNORECASE,
-)
 
 
 def _scrub_thinking_tags(text: str) -> str:
@@ -400,7 +590,36 @@ def _runtime_action_summary_event(
         group_id=iteration_id,
         step_id=f"{iteration_id}:action",
         tool_call_ids=[tc.id for tc in tool_calls],
+        display_scope="activity",
         seq=1,
+    )
+
+
+def _model_process_text_event(
+    content: str,
+    tool_calls: list[ToolCallEvent],
+    *,
+    iteration_id: str,
+    source: str,
+) -> AgentEvent | None:
+    text = content.strip()
+    if not text or not tool_calls:
+        return None
+    return AgentEvent.agent_item(
+        id=f"{iteration_id}:model-process:{source}",
+        kind="process_text",
+        content=text,
+        loop_id=iteration_id,
+        iteration_id=iteration_id,
+        role="assistant",
+        source=source,
+        status="completed",
+        visibility="timeline",
+        group_id=iteration_id,
+        step_id=f"{iteration_id}:model-process",
+        tool_call_ids=[tc.id for tc in tool_calls],
+        display_scope="activity",
+        seq=0,
     )
 
 
@@ -519,7 +738,7 @@ def _fallback_copy(state: AgentState, *, reason: str = "") -> dict[str, str]:
             intro = stock_reason or "\u6a21\u578b\u5728\u751f\u6210\u6700\u7ec8\u56de\u590d\u524d\u88ab\u4e2d\u65ad\u3002"
         return {
             "intro": intro,
-            "retrieved": "\u4ee5\u4e0b\u662f\u5df2\u83b7\u53d6\u7684\u4fe1\u606f\uff1a",
+            "retrieved": "\u57fa\u4e8e\u5df2\u5b8c\u6210\u5de5\u5177\u7ed3\u679c\u7684\u6062\u590d\u6458\u8981\uff1a",
             "read_file": "\u6587\u4ef6\u5185\u5bb9\u5df2\u8bfb\u53d6\uff1b\u7531\u4e8e\u5185\u5bb9\u8f83\u957f\uff0c\u5b8c\u6574\u5185\u5bb9\u5df2\u4fdd\u5b58\u4e3a\u5185\u90e8\u4ea7\u7269\u3002",
             "read_artifact": "\u5185\u90e8\u4ea7\u7269\u5df2\u8bfb\u53d6\uff1b\u5185\u5bb9\u8f83\u957f\uff0c\u6062\u590d\u6458\u8981\u4e2d\u5df2\u7701\u7565\u539f\u59cb\u5185\u5bb9\uff0c\u907f\u514d\u628a\u539f\u59cb\u6587\u4ef6\u5185\u5bb9\u5f53\u6210\u6700\u7ec8\u56de\u7b54\u3002",
             "candidate": "\u90e8\u5206\u7ed3\u679c\u4ec5\u4e3a\u5019\u9009\u8bc1\u636e\uff0c\u8bf7\u4f5c\u4e3a\u53c2\u8003\u7ebf\u7d22\u800c\u975e\u5b8c\u5168\u786e\u8ba4\u7684\u7ed3\u8bba\u3002",
@@ -527,11 +746,46 @@ def _fallback_copy(state: AgentState, *, reason: str = "") -> dict[str, str]:
 
     return {
         "intro": stock_reason or "The model was interrupted before producing a final reply.",
-        "retrieved": "Here is the information already retrieved:",
+        "retrieved": "Recovery summary based on completed tool results:",
         "read_file": "File content was read; due to length, the full content is saved as an internal artifact.",
         "read_artifact": "Internal artifact was read; raw content is omitted from this recovery summary to avoid treating the original file content as the final answer.",
         "candidate": "Some of these results are only candidate evidence; treat them as reference clues, not fully confirmed conclusions.",
     }
+
+
+def _fallback_final_text_event(content: str) -> AgentEvent:
+    return AgentEvent.text_chunk(content, source="fallback", visibility="final", phase="final")
+
+
+def _fallback_recovery_text_event(content: str) -> AgentEvent:
+    # A stitched recovery summary (intro + last tool outputs) is not a model
+    # answer. Route it as a visible timeline note instead of occupying the
+    # final-answer slot — the tool results it restates are already shown as
+    # activity cells. Keep Tier 2's real non-streaming answer as final.
+    return AgentEvent.text_chunk(content, source="fallback", visibility="timeline", phase="recover")
+
+
+def _fallback_recovery_progress_event(
+    state: AgentState,
+    *,
+    event_id: str,
+    summary: str,
+) -> AgentEvent:
+    chinese = _prefers_chinese_fallback(state)
+    return _agent_progress(
+        "\u6b63\u5728\u4f7f\u7528\u5df2\u5b8c\u6210\u7684\u5de5\u5177\u7ed3\u679c\u751f\u6210\u6062\u590d\u6458\u8981"
+        if chinese else
+        "Using completed tool results to produce a recovery answer",
+        stage="status",
+        status="completed",
+        id=event_id,
+        phase="recover",
+        label="\u6062\u590d\u6458\u8981" if chinese else "Recovery",
+        summary=summary,
+        visibility="timeline",
+        step_id=f"recover:{state.iterations}",
+        iteration_id=_iteration_id(state),
+    )
 
 
 def _tool_result_fallback_reply(state: AgentState, *, reason: str = "") -> str:
@@ -641,51 +895,6 @@ def _usage_done_event(usage: UsageInfo) -> AgentEvent:
     )
 
 
-async def _execute_single_tool_streaming(
-    tc: ToolCallEvent,
-    *,
-    tool_registry: ToolRegistry,
-    tool_ctx: ToolExecutionContext,
-    ctx: ContextBuilder,
-    state: AgentState,
-    iteration_id: str,
-    guardrail_controller: ToolCallGuardrailController | None = None,
-) -> AsyncIterator[AgentEvent]:
-    """Execute a single tool call for the StreamingToolExecutor.
-
-    Runs the tool via run_tool_with_timeout (pure execution, no validation).
-    Emits start event, output deltas, and stores the result in context/state.
-    Validation is handled separately before tools are dispatched to the executor.
-
-    Reserved for future mid-stream execution path where tools begin executing
-    as their arguments complete during LLM streaming.
-    """
-    import time as _time
-    from backend.agent.tool_execution import _tool_start_times
-
-    started_epoch = _time.time()
-    _tool_start_times(state)[tc.id] = started_epoch
-
-    # Emit tool_call start event
-    yield tool_call_start_event(tc, started_epoch=started_epoch, iteration_id=iteration_id)
-
-    # Execute the tool with timeout
-    result = await run_tool_with_timeout(tc, tool_registry, tool_ctx)
-
-    # Emit output delta events (for streaming command output)
-    if not _tool_output_was_streamed(tool_ctx, tc.id):
-        for event in tool_output_delta_events(tc, result):
-            yield event
-
-    # Store result in context and state (synchronous, safe to call from async)
-    yield store_result(
-        tc, result, ctx, state,
-        iteration_id=iteration_id,
-        guardrail_controller=guardrail_controller,
-        tool_registry=tool_registry,
-    )
-
-
 async def _try_emergency_compact(state: AgentState, ctx: ContextBuilder) -> bool:
     """Emergency compaction: summarize history to free up context space."""
     try:
@@ -695,7 +904,10 @@ async def _try_emergency_compact(state: AgentState, ctx: ContextBuilder) -> bool
                 logger.info("[ErrorWithholding] Emergency compaction succeeded")
                 return True
         elif hasattr(ctx, 'compact'):
-            await ctx.compact(force=True)
+            try:
+                await ctx.compact(force=True)
+            except TypeError:
+                return False
             logger.info("[ErrorWithholding] Forced compaction succeeded")
             return True
     except Exception as exc:
@@ -712,8 +924,6 @@ async def _degrade_and_finish(
     usage: UsageInfo,
     full_text: str,
     pending_tool_calls: list[ToolCallEvent],
-    text_buffer: str,
-    streamed_text: bool,
     profile: _RecoveryProfile,
 ) -> AsyncIterator[AgentEvent]:
     """Finish a failed model turn through one shared degradation ladder.
@@ -725,14 +935,22 @@ async def _degrade_and_finish(
 
     # Tier 1: if the model already produced plain text, preserve it as the
     # answer rather than throwing it away.
-    if full_text.strip() and not pending_tool_calls:
-        if text_buffer:
-            yield AgentEvent.text_chunk(text_buffer)
-        elif not streamed_text:
-            yield AgentEvent.text_chunk(full_text)
+    if profile.allow_partial_text_commit and full_text.strip() and not pending_tool_calls:
         ctx.append_assistant(full_text)
         state.reply = full_text
         state.stopped_reason = profile.partial_stopped_reason
+        if profile.live_text_streaming:
+            # Partial text already streamed live; seal it as the (partial) final
+            # answer without re-emitting content.
+            yield AgentEvent.text_chunk(
+                "",
+                source="partial",
+                visibility="final",
+                phase="final",
+                finalize=True,
+            )
+        else:
+            yield AgentEvent.text_chunk(full_text, source="partial", visibility="final")
         yield _agent_progress(
             profile.completed_message,
             stage="status",
@@ -773,20 +991,12 @@ async def _degrade_and_finish(
                 ctx.append_assistant(last_resort_reply)
                 state.reply = last_resort_reply
                 state.stopped_reason = profile.recovered_stopped_reason
-                yield _agent_progress(
-                    "Recovered with non-streaming fallback",
-                    stage="status",
-                    status="completed",
-                    id=profile.event_id,
-                    phase="recover",
-                    label="Recovered",
+                yield _fallback_recovery_progress_event(
+                    state,
+                    event_id=profile.event_id,
                     summary=profile.recovered_summary,
-                    visibility="timeline",
-                    step_id=f"recover:{state.iterations}",
-                    iteration_id=_iteration_id(state),
                 )
-                yield AgentEvent.final_answer_delta(last_resort_reply)
-                yield AgentEvent.final_answer_committed(last_resort_reply)
+                yield _fallback_final_text_event(last_resort_reply)
                 yield _usage_done_event(usage)
                 return
         except (asyncio.TimeoutError, Exception) as last_exc:
@@ -859,6 +1069,11 @@ async def _manage_context_budget(
             summary = await ctx.full_compact()
         logger.info("Emergency compaction: %s", summary[:120] if summary else "(empty)")
         yield AgentEvent.context_compacted(summary=summary)
+        if hook_mgr and hook_mgr.has_hooks(HookEvent.POST_COMPACT):
+            try:
+                await hook_mgr.run_post_compact()
+            except Exception as exc:
+                logger.warning("post_compact hook failed: %s", exc)
         usage_pct = getattr(ctx, "token_usage", 0) / max(budget.total, 1)
         if usage_pct >= _POST_COMPACTION_HARD_LIMIT:
             yield AgentEvent.error(
@@ -880,6 +1095,11 @@ async def _manage_context_budget(
             summary = await ctx.compact()
         logger.info("Compaction done: %s", summary[:80] if summary else "(empty)")
         yield AgentEvent.context_compacted(summary=summary)
+        if hook_mgr and hook_mgr.has_hooks(HookEvent.POST_COMPACT):
+            try:
+                await hook_mgr.run_post_compact()
+            except Exception as exc:
+                logger.warning("post_compact hook failed: %s", exc)
         usage_pct = getattr(ctx, "token_usage", 0) / max(budget.total, 1)
         if usage_pct >= _POST_COMPACTION_HARD_LIMIT:
             yield AgentEvent.error(
@@ -934,6 +1154,7 @@ async def run_agent_loop(
         emit_event = emit_event or session_context.emit_event
         metadata = metadata or session_context.metadata
 
+    metadata = dict(metadata or {})
     settings = agent_settings or AgentSettings()
     if (
         settings.stream_timeout_seconds == AgentSettings.stream_timeout_seconds
@@ -946,6 +1167,41 @@ async def run_agent_loop(
     )
     state = state or AgentState(user_message=user_message, max_iterations=settings.max_iterations)
     state.max_total_retries = max(0, int(settings.turn_error_budget))
+    runtime: AgentRuntime = metadata.get("agent_runtime") if isinstance(metadata.get("agent_runtime"), AgentRuntime) else default_runtime()
+    run_record = runtime.start_run(
+        conversation_id=str(getattr(state, "conversation_id", "") or metadata.get("conversation_id", "") or ""),
+        parent_run_id=str(metadata.get("parent_run_id", "") or ""),
+        role=str(metadata.get("agent_role", "main") or "main"),
+        task_id=task_id,
+        session_id=session_id,
+        budget=budget,
+        run_id=str(metadata.get("run_id", "") or "") or None,
+    )
+    metadata.setdefault("run_id", run_record.run_id)
+    metadata.setdefault("agent_runtime", runtime)
+    run_completed_emitted = False
+
+    def _complete_run_record(
+        status: AgentRunStatus,
+        *,
+        summary: str = "",
+        error: str = "",
+    ) -> AgentEvent | None:
+        nonlocal run_completed_emitted
+        if run_completed_emitted:
+            return None
+        record = runtime.complete_run(run_record.run_id, status, summary=summary, error=error)
+        run_completed_emitted = True
+        return AgentEvent.agent_run_completed(record or run_record)
+
+    yield AgentEvent.agent_run_started(run_record)
+    yield AgentEvent.agent_phase_updated(
+        run_record.run_id,
+        "plan",
+        summary="Preparing agent context",
+        role=run_record.role,
+        conversation_id=run_record.conversation_id,
+    )
 
     # 🆕 Preprocess @mention references
     workspace_root_for_refs = None
@@ -1023,7 +1279,6 @@ async def run_agent_loop(
     )
 
     full_text = ""
-    final_answer = FinalAnswerController()
     max_output_recovery_count = 0
     max_output_recovered_text = ""
     next_user_message = user_message
@@ -1047,8 +1302,14 @@ async def run_agent_loop(
     # Record user message
     ctx.append_user(user_message)
 
-    # Hook: user_prompt_submit
+    # Hook: session_start (fires once per session, on the first turn)
     hook_mgr = get_hook_manager()
+    if hook_mgr and session_id and hook_mgr.has_hooks(HookEvent.SESSION_START):
+        session_hook = await hook_mgr.run_session_start_once(session_id)
+        if session_hook.has_feedback:
+            ctx.append_user(session_hook.feedback)
+
+    # Hook: user_prompt_submit
     if hook_mgr and hook_mgr.has_hooks(HookEvent.USER_PROMPT_SUBMIT):
         prompt_hook = await hook_mgr.run_user_prompt_submit(user_message)
         if prompt_hook.has_feedback:
@@ -1076,7 +1337,7 @@ async def run_agent_loop(
             "Ask one concise location question before using tools."
         )
     mcp_instructions = _collect_mcp_instructions()
-    state.harness_guidance = build_harness_guidance(base_tool_schemas, mcp_instructions)
+    state.tool_runtime_guidance = build_tool_runtime_guidance(base_tool_schemas, mcp_instructions)
 
     # Resume from checkpoint if available (long-running task recovery)
     if session_id and (metadata or {}).get("resume_from_checkpoint"):
@@ -1084,6 +1345,7 @@ async def run_agent_loop(
         if checkpoint:
             logger.info(f"Resuming from checkpoint: session={session_id}, iterations={checkpoint.iterations}")
             state.iterations = checkpoint.iterations
+            state.max_iterations = max(state.max_iterations, checkpoint.iterations + settings.max_iterations)
             state.reply = checkpoint.reply
             state.active_skills = checkpoint.active_skills
             state.disabled_tools = set(checkpoint.disabled_tools)
@@ -1094,6 +1356,10 @@ async def run_agent_loop(
             # Restore tool_calls (convert dicts back to ToolCallRecord)
             from backend.agent.state import ToolCallRecord
             state.tool_calls = [ToolCallRecord(**tc) for tc in checkpoint.tool_calls]
+            metadata.setdefault("run_id", checkpoint.run_id or run_record.run_id)
+            metadata.setdefault("conversation_id", checkpoint.conversation_id or run_record.conversation_id)
+            if checkpoint.resume_payload:
+                metadata.update({k: v for k, v in checkpoint.resume_payload.items() if k not in {"run_id", "conversation_id"}})
             yield AgentEvent(
                 type="system_notice",
                 data={
@@ -1141,8 +1407,12 @@ async def run_agent_loop(
                         reason=f"已达到最大迭代次数限制（{settings.max_iterations}次）。"
                     )
                     if fallback_text:
-                        yield AgentEvent.final_answer_delta(fallback_text)
-                        yield AgentEvent.final_answer_committed(fallback_text)
+                        yield _fallback_recovery_progress_event(
+                            state,
+                            event_id=f"agent:max-iterations:fallback:{state.iterations}",
+                            summary="Max iterations reached; using completed tool results",
+                        )
+                        yield _fallback_recovery_text_event(fallback_text)
                         ctx.append_assistant(fallback_text)
                         state.reply = fallback_text
                         logger.info("Generated forced summary after max_iterations")
@@ -1152,6 +1422,13 @@ async def run_agent_loop(
                     recoverable=True, error_type="budget",
                 )
                 state.stopped_reason = "max_iterations"
+                completed_event = _complete_run_record(
+                    "failed",
+                    summary="Max iterations reached",
+                    error="max_iterations",
+                )
+                if completed_event is not None:
+                    yield completed_event
                 break
 
             # Termination: stagnation hard stop (safety net — guardrail controller handles most cases)
@@ -1167,6 +1444,13 @@ async def run_agent_loop(
                         recoverable=True, error_type="stagnant",
                     )
                     state.stopped_reason = "stagnation"
+                    completed_event = _complete_run_record(
+                        "failed",
+                        summary="Stagnation stop",
+                        error="stagnation",
+                    )
+                    if completed_event is not None:
+                        yield completed_event
                     break
                 logger.debug(
                     "Continuing after %d blocked calls without repeated-call detail",
@@ -1177,7 +1461,7 @@ async def run_agent_loop(
             tool_schemas = _filter_disabled_tool_schemas(base_tool_schemas, state.disabled_tools)
             if clarification_only:
                 tool_schemas = _filter_clarification_tool_schemas(tool_schemas)
-            state.harness_guidance = build_harness_guidance(tool_schemas, mcp_instructions)
+            state.tool_runtime_guidance = build_tool_runtime_guidance(tool_schemas, mcp_instructions)
 
             async for ev in _manage_context_budget(ctx, state, budget, tool_schemas):
                 yield ev
@@ -1197,6 +1481,14 @@ async def run_agent_loop(
             state.iterations += 1
             iteration_id = _iteration_id(state)
             loop_started_at = _epoch_ms()
+            runtime.update_phase(run_record.run_id, "execute", summary="Model deciding next action")
+            yield AgentEvent.agent_phase_updated(
+                run_record.run_id,
+                "execute",
+                summary="Model deciding next action",
+                role=run_record.role,
+                conversation_id=run_record.conversation_id,
+            )
             yield AgentEvent.loop_started(
                 loop_id=iteration_id,
                 iteration_id=iteration_id,
@@ -1208,17 +1500,36 @@ async def run_agent_loop(
             # Stream the LLM response (with retry ladder)
             full_text = ""
             pending_tool_calls: list[ToolCallEvent] = []
+            saw_partial_tool_call = False
+            final_tool_batch_received = False
             usage = UsageInfo()
             finish_reason = ""
             stream_attempt = 0
-            text_buffer = ""
-            streamed_text = False
-            streamed_text_started = False
-            process_text_emitted = False
+            stream_recovery_attempted = False
             runtime_action_summary_emitted = False
-            preamble_text = ""
-            final_answer.reset()
+            process_text_emitted = False
+            streaming_tool_executor = StreamingToolExecutor(
+                state=state,
+                tool_registry=tool_registry,
+                permission_checker=permission_checker,
+                permission_context=permission_context,
+                tool_ctx=tool_ctx,
+                stagnation_limit=settings.stagnation_limit,
+            )
             _thinking_chars = 0  # guard: break out of endless thinking loops
+
+            def _merge_pending_tool_calls(incoming: list[ToolCallEvent]) -> None:
+                nonlocal pending_tool_calls
+                if not incoming:
+                    return
+                by_id = {tc.id: index for index, tc in enumerate(pending_tool_calls)}
+                for tc in incoming:
+                    index = by_id.get(tc.id)
+                    if index is None:
+                        by_id[tc.id] = len(pending_tool_calls)
+                        pending_tool_calls.append(tc)
+                    else:
+                        pending_tool_calls[index] = tc
 
             try:
                 while True:
@@ -1241,26 +1552,8 @@ async def run_agent_loop(
                         first_event = False
                         if event.type == StreamEventType.TEXT_CHUNK:
                             full_text += event.content
-                            text_buffer += event.content
-                            final_answer.append(event.content)
-                            draft_stream_threshold = (
-                                _TEXT_DRAFT_STREAM_THRESHOLD_AFTER_TOOLS_CHARS
-                                if state.tool_calls
-                                else _TEXT_DRAFT_STREAM_THRESHOLD_CHARS
-                            )
-                            if (
-                                streamed_text_started
-                                or len(full_text.strip()) >= draft_stream_threshold
-                            ):
-                                delta_content = event.content if streamed_text_started else final_answer.draft_text
-                                streamed_text_started = True
-                                # Stream incrementally so the frontend can render tokens
-                                # as they arrive (typewriter effect). If tool calls appear
-                                # later, the retract mechanism will undo the streamed text
-                                # and re-emit it as a thinking preamble.
-                                for _ev in final_answer.stream_delta(delta_content):
-                                    streamed_text = True
-                                    yield _ev
+                            if settings.live_text_streaming and event.content:
+                                yield AgentEvent.text_chunk(_scrub_thinking_tags(event.content))
                         elif event.type == StreamEventType.THINKING_CHUNK:
                             _thinking_chars += len(event.content or "")
                             yield AgentEvent.thinking_chunk(
@@ -1279,45 +1572,27 @@ async def run_agent_loop(
                         elif event.type == StreamEventType.IMAGE_CHUNK:
                             yield AgentEvent.image_chunk(event.image_data, event.image_media_type)
                         elif event.type == StreamEventType.TOOL_CALL_START:
-                            # Text before tool calls is part of the model's reasoning.
-                            # Emit once as thinking_delta so it stays in the transcript as reasoning.
-                            if full_text and not process_text_emitted:
-                                retracted = final_answer.retract("tool_call_started")
-                                if retracted is not None:
-                                    yield retracted
-                                preamble_event = final_answer.emit_preamble(
-                                    iteration_id=iteration_id,
-                                    loop_id=iteration_id,
-                                )
-                                if preamble_event is not None:
-                                    yield preamble_event
-                                    preamble_text = full_text
-                                    full_text = ""
-                                # Clear draft to prevent duplicate preamble on next tool call
-                                final_answer.draft_text = ""
-                                process_text_emitted = True
-                                text_buffer = ""
+                            saw_partial_tool_call = True
                         elif event.type == StreamEventType.TOOL_CALL_DELTA:
-                            pass
+                            saw_partial_tool_call = True
                         elif event.type == StreamEventType.TOOL_CALL:
-                            pending_tool_calls = event.tool_calls
-                            if pending_tool_calls and full_text and not process_text_emitted:
-                                retracted = final_answer.retract("tool_call_started")
-                                if retracted is not None:
-                                    yield retracted
-                                preamble_event = final_answer.emit_preamble(
+                            _merge_pending_tool_calls(event.tool_calls)
+                            saw_partial_tool_call = saw_partial_tool_call or bool(pending_tool_calls)
+                            if event.tool_calls_final:
+                                final_tool_batch_received = True
+                            else:
+                                streaming_tool_executor.add_tools(event.tool_calls)
+                            if pending_tool_calls and full_text.strip() and not process_text_emitted and not settings.live_text_streaming:
+                                process_event = _model_process_text_event(
+                                    full_text,
+                                    pending_tool_calls,
                                     iteration_id=iteration_id,
-                                    loop_id=iteration_id,
+                                    source="post_tool" if state.tool_calls else "model_preamble",
                                 )
-                                if preamble_event is not None:
-                                    yield preamble_event
-                                    preamble_text = full_text
-                                    full_text = ""
-                                # Clear draft to prevent duplicate preamble on next tool call
-                                final_answer.draft_text = ""
-                                process_text_emitted = True
-                                text_buffer = ""
-                            if pending_tool_calls and not process_text_emitted and not runtime_action_summary_emitted:
+                                if process_event is not None:
+                                    yield process_event
+                                    process_text_emitted = True
+                            if pending_tool_calls and not runtime_action_summary_emitted:
                                 action_event = _runtime_action_summary_event(
                                     pending_tool_calls,
                                     iteration_id=iteration_id,
@@ -1325,12 +1600,19 @@ async def run_agent_loop(
                                 if action_event is not None:
                                     yield action_event
                                     runtime_action_summary_emitted = True
+                            if pending_tool_calls and event.tool_calls_final:
+                                # A complete tool-call block is enough to hand
+                                # control to the tool executor. Do not wait for a
+                                # trailing provider DONE frame; adapters can emit
+                                # that after tool_calls only to carry usage.
+                                break
                         elif event.type == StreamEventType.DONE:
                             usage = event.usage
                             finish_reason = event.finish_reason
                         elif event.type == StreamEventType.ERROR:
                             # Recovery ladder: retry transient errors
                             classification = classify_llm_error(event.content)
+                            incomplete_tool_stream = saw_partial_tool_call and not pending_tool_calls
                             if not full_text and not pending_tool_calls and not classification.fatal:
                                 decision = stream_retry_policy.decide_retry(event.content, stream_attempt)
                                 if decision.should_retry:
@@ -1355,7 +1637,11 @@ async def run_agent_loop(
                                     should_retry = True
                                     break
                             # Error withholding: try recovery before surfacing
-                            if error_controller.is_withholdable(
+                            can_withhold_error = (
+                                not stream_recovery_attempted
+                                and not incomplete_tool_stream
+                            )
+                            if can_withhold_error and error_controller.is_withholdable(
                                 classification.error_type,
                                 has_partial_text=bool(full_text),
                                 has_tool_calls=bool(pending_tool_calls),
@@ -1383,6 +1669,7 @@ async def run_agent_loop(
 
                                 if recovered:
                                     error_controller.clear()
+                                    stream_recovery_attempted = True
                                     should_retry = True
                                     break
 
@@ -1397,8 +1684,6 @@ async def run_agent_loop(
                                 usage=usage,
                                 full_text=full_text,
                                 pending_tool_calls=pending_tool_calls,
-                                text_buffer=text_buffer,
-                                streamed_text=streamed_text,
                                 profile=_RecoveryProfile(
                                     event_id=f"agent:recover:{state.iterations}",
                                     completed_message="Model stream interrupted; saved partial content",
@@ -1408,17 +1693,31 @@ async def run_agent_loop(
                                     failed_summary="Model stream failed",
                                     partial_stopped_reason="partial_stream_error",
                                     recovered_stopped_reason="recovered_stream_error",
-                                    failed_stopped_reason=classification.error_type if classification.fatal else "api_error",
-                                    error_message=_format_llm_error(event.content),
-                                    error_type=classification.error_type,
-                                    recoverable=not classification.fatal,
+                                    failed_stopped_reason=(
+                                        "incomplete_tool_stream"
+                                        if incomplete_tool_stream
+                                        else classification.error_type if classification.fatal else "api_error"
+                                    ),
+                                    error_message=(
+                                        "模型开始生成工具调用，但工具参数流没有完整结束。请重试本轮请求。"
+                                        if incomplete_tool_stream
+                                        else _format_llm_error(event.content)
+                                    ),
+                                    error_type=(
+                                        "incomplete_tool_stream"
+                                        if incomplete_tool_stream
+                                        else classification.error_type
+                                    ),
+                                    recoverable=True if incomplete_tool_stream else not classification.fatal,
                                     provider_error_type=classification.provider_error_type,
                                     emit_failed_progress=False,
-                                    allow_last_resort=not classification.fatal,
+                                    allow_last_resort=not classification.fatal and not incomplete_tool_stream,
+                                    allow_partial_text_commit=not saw_partial_tool_call,
+                                    live_text_streaming=settings.live_text_streaming,
                                 ),
                             ):
                                 yield ev
-                            return
+                            break
 
                     if should_retry:
                         continue
@@ -1435,8 +1734,6 @@ async def run_agent_loop(
                     usage=usage,
                     full_text=full_text,
                     pending_tool_calls=pending_tool_calls,
-                    text_buffer=text_buffer,
-                    streamed_text=streamed_text,
                     profile=_RecoveryProfile(
                         event_id=f"agent:timeout:{state.iterations}",
                         completed_message="Model response timed out; saved partial content",
@@ -1450,10 +1747,12 @@ async def run_agent_loop(
                         error_message="Model response timed out. Tool results already collected remain in context; please retry.",
                         error_type="timeout",
                         recoverable=True,
+                        allow_partial_text_commit=not saw_partial_tool_call,
+                        live_text_streaming=settings.live_text_streaming,
                     ),
                 ):
                     yield ev
-                return
+                break
 
             except Exception as exc:
                 logger.error("LLM call failed: %s", exc, exc_info=True)
@@ -1467,8 +1766,6 @@ async def run_agent_loop(
                     usage=usage,
                     full_text=full_text,
                     pending_tool_calls=pending_tool_calls,
-                    text_buffer=text_buffer,
-                    streamed_text=streamed_text,
                     profile=_RecoveryProfile(
                         event_id=f"agent:error:{state.iterations}",
                         completed_message="Model request failed; saved partial content",
@@ -1484,10 +1781,15 @@ async def run_agent_loop(
                         recoverable=not classification.fatal,
                         provider_error_type=classification.provider_error_type,
                         allow_last_resort=not classification.fatal,
+                        allow_partial_text_commit=not saw_partial_tool_call,
+                        live_text_streaming=settings.live_text_streaming,
                     ),
                 ):
                     yield ev
-                return
+                break
+
+            if state.stopped_reason:
+                break
 
             record_actual_usage = getattr(ctx, "record_actual_usage", None)
             if callable(record_actual_usage):
@@ -1502,18 +1804,23 @@ async def run_agent_loop(
             if full_text and "<" in full_text:
                 scrubbed = _scrub_thinking_tags(full_text)
                 if scrubbed != full_text:
-                    retracted = final_answer.retract("scrub_private_reasoning")
-                    if retracted is not None:
-                        yield retracted
+                    # Text streamed live with leaked reasoning tags. Keep the
+                    # protocol append-only; future message/tombstone semantics
+                    # should handle true replacement if needed.
                     full_text = scrubbed
-                    final_answer.reset()
-                    final_answer.append(scrubbed)
+
+            if saw_partial_tool_call and (not pending_tool_calls or not final_tool_batch_received):
+                streaming_tool_executor.cancel_remaining()
+                yield AgentEvent.error(
+                    message="模型开始生成工具调用，但工具参数流没有完整结束。请重试本轮请求。",
+                    recoverable=True,
+                    error_type="incomplete_tool_stream",
+                )
+                state.stopped_reason = "incomplete_tool_stream"
+                break
 
             if _is_max_output_finish_reason(finish_reason):
                 if max_output_recovery_count < _MAX_OUTPUT_TOKENS_RECOVERY_LIMIT:
-                    retracted = final_answer.retract("max_output_recovery")
-                    if retracted is not None:
-                        yield retracted
                     if full_text:
                         max_output_recovered_text += full_text
                         ctx.append_assistant(full_text)
@@ -1573,16 +1880,24 @@ async def run_agent_loop(
                     state.transition = "empty_reply_fallback"
                     full_text = _tool_result_fallback_reply(state, reason="模型多次返回空回复。")
                     if full_text:
-                        yield AgentEvent.final_answer_delta(full_text)
-                        yield AgentEvent.final_answer_committed(full_text)
+                        yield _fallback_recovery_progress_event(
+                            state,
+                            event_id=f"agent:empty-reply:fallback:{state.iterations}",
+                            summary="Empty model reply; using completed tool results",
+                        )
+                        yield _fallback_recovery_text_event(full_text)
                         state.stopped_reason = "completed"
                         yield _usage_done_event(usage)
                     else:
                         failed_tool_reply = _failed_tool_result_fallback_reply(state)
                         if failed_tool_reply:
                             full_text = failed_tool_reply
-                            yield AgentEvent.final_answer_delta(full_text)
-                            yield AgentEvent.final_answer_committed(full_text)
+                            yield _fallback_recovery_progress_event(
+                                state,
+                                event_id=f"agent:empty-reply:failed-tools:{state.iterations}",
+                                summary="Empty model reply; surfacing failed tool details",
+                            )
+                            yield _fallback_recovery_text_event(full_text)
                             yield AgentEvent.error(
                                 message="Tool calls failed and the model did not produce a final reply.",
                                 recoverable=True,
@@ -1615,11 +1930,9 @@ async def run_agent_loop(
                         user_message, candidate_text, tool_results=state.tool_calls
                     )
                     if hook_result.has_feedback and not state.stop_hook_feedback_used:
-                        retracted = final_answer.retract("stop_hook_feedback")
-                        if retracted is not None:
-                            yield retracted
                         state.stop_hook_feedback_used = True
                         state.transition = "stop_hook_feedback"
+                        yield AgentEvent.text_replace("")
                         ctx.append_assistant(candidate_text)
                         ctx.append_user(hook_result.feedback)
                         full_text = ""
@@ -1632,9 +1945,6 @@ async def run_agent_loop(
                     recent_results = state.tool_calls[-3:]
                     all_failed = all(_is_failed_tool_record(r) for r in recent_results)
                     if all_failed and len(recent_results) >= 2:
-                        retracted = final_answer.retract("heal_retry")
-                        if retracted is not None:
-                            yield retracted
                         state.heal_attempts += 1
                         state.total_retries += 1
                         if state.total_retries > state.max_total_retries:
@@ -1645,6 +1955,7 @@ async def run_agent_loop(
                             state.stopped_reason = "max_retries"
                             yield _usage_done_event(usage)
                             break
+                        yield AgentEvent.text_replace("")
                         ctx.append_assistant(candidate_text)
                         ctx.append_user(
                             "你最近的工具调用全部失败了。请修复根本原因并重试，"
@@ -1663,6 +1974,19 @@ async def run_agent_loop(
                     and state.has_unverified_mutations
                     and state.verify_attempts < state.max_verify_attempts
                 ):
+                    runtime.update_phase(run_record.run_id, "verify", summary=f"Running {settings.verify_command}")
+                    yield AgentEvent.agent_phase_updated(
+                        run_record.run_id,
+                        "verify",
+                        summary=f"Running {settings.verify_command}",
+                        role=run_record.role,
+                        conversation_id=run_record.conversation_id,
+                    )
+                    yield AgentEvent.verification_started(
+                        run_record.run_id,
+                        command=settings.verify_command,
+                        conversation_id=run_record.conversation_id,
+                    )
                     yield _agent_progress(
                         "正在运行验证命令",
                         stage="status",
@@ -1679,6 +2003,13 @@ async def run_agent_loop(
                         settings.verify_command,
                         tool_ctx.workspace_root,
                         settings.verify_timeout_seconds,
+                    )
+                    yield AgentEvent.verification_result(
+                        run_record.run_id,
+                        passed=verify_ok,
+                        output=verify_output,
+                        command=settings.verify_command,
+                        conversation_id=run_record.conversation_id,
                     )
                     if verify_ok:
                         state.mark_mutations_verified()
@@ -1709,10 +2040,8 @@ async def run_agent_loop(
                             step_id=f"verify:{state.iterations}",
                             iteration_id=_iteration_id(state),
                         )
-                        retracted = final_answer.retract("verify_failed")
-                        if retracted is not None:
-                            yield retracted
                         state.transition = "verify_failed_retry"
+                        yield AgentEvent.text_replace("")
                         ctx.append_assistant(candidate_text)
                         ctx.append_user(
                             f"你的修改未通过验证命令 `{settings.verify_command}`（非零退出码）。"
@@ -1725,9 +2054,13 @@ async def run_agent_loop(
 
                 answer_gate_result = answer_gate.evaluate(user_message, candidate_text, state)
                 if not answer_gate_result.ok and answer_gate_result.feedback:
-                    retracted = final_answer.retract("answer_gate_retry")
-                    if retracted is not None:
-                        yield retracted
+                    if candidate_text.strip():
+                        yield AgentEvent.stream_resume(
+                            getattr(state, "conversation_id", "") or "",
+                            None,
+                            accumulated_text=candidate_text,
+                        )
+                    yield AgentEvent.text_replace("")
                     ctx.append_assistant(candidate_text)
                     _reset_history_after_draft_retry(ctx, candidate_text)
                     state.total_retries += 1
@@ -1745,28 +2078,56 @@ async def run_agent_loop(
                     continue
 
                 final_text = candidate_text
+                runtime.update_phase(run_record.run_id, "final", summary="Preparing final answer")
+                yield AgentEvent.agent_phase_updated(
+                    run_record.run_id,
+                    "final",
+                    summary="Preparing final answer",
+                    role=run_record.role,
+                    conversation_id=run_record.conversation_id,
+                )
                 reflection = await reflection_policy.maybe_reflect(
                     user_message,
                     final_text,
                     state,
                     llm,
                 )
+                addendum_text = ""
                 if reflection and reflection.verdict == "revise" and reflection.addendum:
                     addendum = reflection.addendum
                     if not addendum.startswith("\n"):
                         addendum = f"\n\n{addendum}"
                     final_text = f"{final_text}{addendum}"
                     full_text = final_text
+                    addendum_text = addendum
 
                 if final_text:
-                    for final_event in final_answer.emit_final(final_text):
-                        yield final_event
-                    # Do NOT emit text_chunk here — final_answer_delta already
-                    # carries the content. Emitting both causes duplication on
-                    # the frontend (agent_runner appends both to assistant_blocks).
-                    ctx.append_assistant(final_text)
+                    if settings.live_text_streaming:
+                        # Base answer already streamed live token-by-token; only
+                        # a post-stream reflection addendum needs emitting, then a
+                        # contentless finalize seals the streamed block as final.
+                        if addendum_text:
+                            yield AgentEvent.text_chunk(addendum_text)
+                        yield AgentEvent.text_chunk(
+                            "",
+                            source="model_final",
+                            visibility="final",
+                            phase="final",
+                            finalize=True,
+                        )
+                    else:
+                        yield AgentEvent.text_chunk(final_text, source="model_final", visibility="final")
+                    ctx.append_assistant(
+                        # Truncation recovery already appended the earlier partial
+                        # blocks to history (one per recovery iteration). Append
+                        # only the unrecovered tail here so the recovered text
+                        # isn't duplicated in context. state.reply keeps the full
+                        # concatenation for display.
+                        final_text[len(max_output_recovered_text):]
+                        if max_output_recovered_text
+                        else final_text
+                    )
                     state.reply = final_text
-                    yield AgentEvent.final_answer_committed(final_text)
                 loop_completed_at = _epoch_ms()
                 yield AgentEvent.loop_completed(
                     loop_id=iteration_id,
@@ -1779,6 +2140,9 @@ async def run_agent_loop(
                     tool_call_count=0,
                 )
                 state.stopped_reason = "completed"
+                completed_event = _complete_run_record("completed", summary="Final answer committed")
+                if completed_event is not None:
+                    yield completed_event
                 yield AgentEvent.done(
                     input_tokens=usage.input_tokens,
                     output_tokens=usage.output_tokens,
@@ -1794,24 +2158,6 @@ async def run_agent_loop(
             # prematurely in long agentic sessions.
             state.empty_reply_retries = 0
 
-            # 🔧 修复：检测工具调用过多，提前警告并生成总结
-            consecutive_tool_calls = 0
-            if state.iterations >= 2:
-                # 检查最近 3 次迭代是否都只有工具调用没有文本
-                for i in range(max(0, state.iterations - 3), state.iterations):
-                    consecutive_tool_calls += 1
-
-                if consecutive_tool_calls >= 5 and state.iterations >= settings.max_iterations * 0.7:
-                    # 已经进行了 70% 的迭代，且连续都是工具调用
-                    logger.warning(
-                        "Excessive tool calls detected: %d consecutive, iteration %d/%d",
-                        consecutive_tool_calls, state.iterations, settings.max_iterations
-                    )
-                    yield AgentEvent.error(
-                        message=f"检测到连续工具调用过多（{consecutive_tool_calls}次）。将在下次迭代强制生成总结。",
-                        recoverable=True, error_type="warning",
-                    )
-
             # Execute tool calls. Only schema-safe calls are written into LLM
             # history; malformed calls still produce UI/state events and
             # runtime guidance, but are not sent back to strict gateways.
@@ -1825,7 +2171,7 @@ async def run_agent_loop(
             if history_tool_calls:
                 # Preserve model's reasoning text alongside tool_calls
                 # (Anthropic/OpenAI pattern: assistant message = text + tool_use)
-                ctx.append_assistant_tool_calls(history_tool_calls, content=preamble_text or full_text)
+                ctx.append_assistant_tool_calls(history_tool_calls, content=full_text)
             elif full_text.strip():
                 # Unsafe tool calls still need an assistant message so the
                 # history is valid (no orphaned tool_result messages).
@@ -1842,8 +2188,10 @@ async def run_agent_loop(
                 tool_ctx=tool_ctx,
                 stagnation_limit=settings.stagnation_limit,
                 guardrail_controller=guardrail_controller,
+                prefetched_results=streaming_tool_executor.prefetched_results,
             ):
                 yield ev
+            streaming_tool_executor.cancel_remaining()
 
             loop_completed_at = _epoch_ms()
             tool_call_count = len(pending_tool_calls)
@@ -1862,13 +2210,6 @@ async def run_agent_loop(
                 tool_call_count=tool_call_count,
             )
 
-            # NOTE: StreamingToolExecutor is integrated via _execute_tool_batch →
-            # flush_queue → batch_tool_calls, which already parallelises
-            # concurrency-safe tools via asyncio.gather.  The full streaming
-            # (mid-LLM-response) execution path is architecturally ready but
-            # requires LLM adapter changes (TOOL_CALL_DELTA → complete argument
-            # parsing) that are tracked as a follow-up.
-
             # Guardrail halt: progressive stagnation detected by the controller
             if guardrail_controller.halt_decision is not None:
                 decision = guardrail_controller.halt_decision
@@ -1885,14 +2226,35 @@ async def run_agent_loop(
         state.stopped_reason = "interrupted"
         if full_text:
             ctx.append_assistant(full_text)
+        completed_event = _complete_run_record("cancelled", summary="Interrupted", error="cancelled")
+        if completed_event is not None:
+            yield completed_event
         raise
+
+    # Ensure the run record is always marked complete. Several termination paths
+    # (empty_reply, max_retries, budget_exceeded, incomplete_tool_stream,
+    # tool_error, and the _degrade_and_finish ladder) break out of the loop
+    # without calling _complete_run_record, which would leave the run stuck in
+    # "running" and never emit agent.run.completed. _complete_run_record is
+    # idempotent (guarded by run_completed_emitted), so this is a no-op when an
+    # inner path already completed it (max_iterations, stagnation, final answer).
+    if not run_completed_emitted:
+        stop = state.stopped_reason or "unknown"
+        status = "completed" if stop == "completed" else "failed"
+        completed_event = _complete_run_record(
+            status,
+            summary="Final answer committed" if stop == "completed" else f"Run ended: {stop}",
+            error="" if stop == "completed" else stop,
+        )
+        if completed_event is not None:
+            yield completed_event
 
     # Phase 3: Post-session checkpoint and memory
     # Save checkpoint if the task didn't complete naturally (timeout/error/interrupt)
     # so it can be resumed later with /resume.
     if state.stopped_reason not in ("completed", None) and session_id:
         try:
-            save_checkpoint(
+            save_run_checkpoint(
                 session_id=session_id,
                 user_message=user_message,
                 iterations=state.iterations,
@@ -1904,6 +2266,13 @@ async def run_agent_loop(
                 stopped_reason=state.stopped_reason,
                 last_mutation_index=state._last_mutation_index,
                 last_verified_mutation_index=state.last_verified_mutation_index,
+                run_id=run_record.run_id,
+                conversation_id=str(getattr(state, "conversation_id", "") or ""),
+                resume_payload={
+                    "run_id": run_record.run_id,
+                    "conversation_id": str(getattr(state, "conversation_id", "") or ""),
+                    "role": run_record.role,
+                },
             )
         except Exception as exc:
             logger.debug("Checkpoint save failed: %s", exc)

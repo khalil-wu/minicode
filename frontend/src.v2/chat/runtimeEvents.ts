@@ -1,9 +1,25 @@
 import { useAppStore } from "../stores";
-import type { ServerEvent, TaskUpdateEvent } from "../protocol/events";
+import type {
+  AgentPhaseUpdatedEvent,
+  AgentProgressEvent,
+  AgentRunCompletedEvent,
+  AgentRunStartedEvent,
+  AgentRunUpdatedEvent,
+  PlanStepUpdatedEvent,
+  PlanUpdatedEvent,
+  ServerEvent,
+  SubagentProgressEvent,
+  SubagentStartEvent,
+  TaskUpdateEvent,
+  VerificationResultEvent,
+  VerificationStartedEvent,
+} from "../protocol/events";
 import type { McpServerStatus } from "../stores/types";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { fromBackendPermissionMode } from "../protocol/permissions";
+import { withDerivedCapabilitySummary } from "../protocol/capabilities";
 import { pushToast } from "../overlays/ToastContainer";
+import { addInspectorPayload, maybeAutoRoutePanel } from "./displayRouting";
 
 const subagentProgressSummary = (ev: {
   detail?: string;
@@ -36,26 +52,35 @@ const todoPatchFromEvent = (
   activeForm: ev.activeForm ?? activeFormFallback,
 });
 
+const todosFromSnapshot = (
+  ev: TaskUpdateEvent & { todos?: unknown },
+) => {
+  if (!Array.isArray(ev.todos)) return null;
+  return ev.todos
+    .filter((todo): todo is {
+      todo_id?: string;
+      id?: string;
+      status?: string;
+      content?: string;
+      activeForm?: string;
+    } => Boolean(todo && typeof todo === "object"))
+    .map((todo) => ({
+      id: String(todo.id ?? todo.todo_id ?? "").trim(),
+      status: todo.status as "pending" | "in_progress" | "completed" | "blocked",
+      content: String(todo.content ?? ""),
+      activeForm: String(todo.activeForm ?? todo.content ?? ""),
+    }))
+    .filter((todo) =>
+      Boolean(todo.id) &&
+      ["pending", "in_progress", "completed", "blocked"].includes(todo.status),
+    );
+};
+
 export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boolean => {
   const s = useAppStore.getState();
   switch (e.type) {
     case "agent.progress": {
-      const ev = e as unknown as {
-        id?: string;
-        stage?: "status" | "planning" | "tool" | "approval" | "verification" | "final";
-        phase?: "orienting" | "planning" | "model" | "tool" | "approval" | "verify" | "final" | "recover" | "status";
-        status?: "running" | "completed" | "failed" | "info";
-        message?: string;
-        label?: string;
-        summary?: string;
-        visibility?: "timeline" | "compact" | "debug";
-        detail?: string;
-        tool_call_id?: string;
-        tool_name?: string;
-        group_id?: string;
-        step_id?: string;
-        count?: number;
-      };
+      const ev = e as AgentProgressEvent;
       const message = String(ev.message ?? "").trim();
       // Don't show debug-visibility progress in chat timeline (e.g. iteration counters)
       const isDebug = ev.visibility === "debug";
@@ -75,10 +100,117 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
           groupId: ev.group_id,
           stepId: ev.step_id,
           count: ev.count,
+          displayScope: ev.display_scope,
+          panelHint: ev.panel_hint,
+          requiresAttention: ev.requires_attention,
         };
         if (!isDebug) s.appendProgress(progress, conversationId);
         s.appendAgentProgress(progress, conversationId);
+        maybeAutoRoutePanel(ev);
       }
+      return true;
+    }
+    case "agent.run.started":
+    case "agent.run.updated":
+    case "agent.run.completed": {
+      const ev = e as AgentRunStartedEvent | AgentRunUpdatedEvent | AgentRunCompletedEvent;
+      const runId = String(ev.run_id || "").trim();
+      if (!runId) return true;
+      const status = ev.type === "agent.run.completed"
+        ? (ev.status === "failed" || ev.status === "cancelled" ? "failed" : "completed")
+        : "running";
+      s.appendAgentProgress({
+        id: `agent-run:${runId}`,
+        stage: status === "completed" ? "final" : "planning",
+        phase: ev.phase === "verify" ? "verify" : ev.phase === "final" ? "final" : "planning",
+        status,
+        message: ev.summary || (status === "running" ? "Agent run started" : "Agent run completed"),
+        label: ev.role || "agent",
+        summary: ev.error || ev.summary,
+        visibility: "timeline",
+        displayScope: ev.display_scope,
+        panelHint: ev.panel_hint,
+        requiresAttention: ev.requires_attention,
+      }, ev.conversation_id || conversationId);
+      maybeAutoRoutePanel(ev);
+      return true;
+    }
+    case "agent.phase.updated": {
+      const ev = e as AgentPhaseUpdatedEvent;
+      const runId = String(ev.run_id || "").trim();
+      if (!runId) return true;
+      const phase = ev.phase === "verify" ? "verify"
+        : ev.phase === "final" ? "final"
+          : ev.phase === "recover" ? "recover"
+            : ev.phase === "execute" ? "tool"
+              : "planning";
+      s.appendAgentProgress({
+        id: `agent-phase:${runId}:${ev.phase || "plan"}`,
+        stage: phase === "verify" ? "verification" : phase === "final" ? "final" : "planning",
+        phase,
+        status: (ev.status === "completed" || ev.status === "failed" ? ev.status : "running"),
+        message: ev.summary || `Agent ${ev.phase || "phase"}`,
+        label: ev.role || "agent",
+        summary: ev.summary,
+        visibility: "timeline",
+        displayScope: ev.display_scope,
+        panelHint: ev.panel_hint,
+        requiresAttention: ev.requires_attention,
+      }, ev.conversation_id || conversationId);
+      maybeAutoRoutePanel(ev);
+      return true;
+    }
+    case "verification.started": {
+      const ev = e as VerificationStartedEvent;
+      const runId = String(ev.run_id || "").trim();
+      if (!runId) return true;
+      s.appendAgentProgress({
+        id: `verification:${runId}`,
+        stage: "verification",
+        phase: "verify",
+        status: "running",
+        message: "Checking work",
+        label: "verify",
+        summary: ev.command,
+        visibility: "timeline",
+        displayScope: ev.display_scope,
+        panelHint: ev.panel_hint,
+        requiresAttention: ev.requires_attention,
+      }, ev.conversation_id || conversationId);
+      addInspectorPayload("message", `verification:${runId}`, {
+        event: "verification.started",
+        command: ev.command,
+        run_id: runId,
+      });
+      maybeAutoRoutePanel(ev, "plan");
+      return true;
+    }
+    case "verification.result": {
+      const ev = e as VerificationResultEvent;
+      const runId = String(ev.run_id || "").trim();
+      if (!runId) return true;
+      s.appendAgentProgress({
+        id: `verification:${runId}`,
+        stage: "verification",
+        phase: "verify",
+        status: ev.passed ? "completed" : "failed",
+        message: ev.passed ? "Verification passed" : "Verification failed",
+        label: "verify",
+        summary: ev.command,
+        detail: ev.output,
+        visibility: "timeline",
+        displayScope: ev.display_scope,
+        panelHint: ev.panel_hint,
+        requiresAttention: ev.requires_attention ?? !ev.passed,
+      }, ev.conversation_id || conversationId);
+      addInspectorPayload("message", `verification:${runId}`, {
+        event: "verification.result",
+        run_id: runId,
+        passed: Boolean(ev.passed),
+        command: ev.command,
+        output: ev.output,
+      });
+      maybeAutoRoutePanel({ ...ev, requires_attention: ev.requires_attention ?? !ev.passed }, "plan");
       return true;
     }
     case "context_usage": {
@@ -114,12 +246,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       return true;
     }
     case "plan_updated": {
-      const ev = e as unknown as {
-        plan_id?: string;
-        status?: string;
-        current_step?: number;
-        steps?: { id?: string; title?: string; status?: string; detail?: string }[];
-      };
+      const ev = e as PlanUpdatedEvent;
       if (!Array.isArray(ev.steps)) return true;
       const validStatus = new Set(["pending", "running", "done", "skipped", "failed"]);
       s.setPlan({
@@ -135,21 +262,16 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
           status: (step.status && validStatus.has(step.status) ? step.status : "pending") as
             "pending" | "running" | "done" | "skipped" | "failed",
         })),
-      });
+      }, conversationId);
       // SidebarRight auto-switches to the Plan tab when status is "executing".
       return true;
     }
     case "plan_step_updated": {
-      const ev = e as unknown as {
-        plan_id?: string;
-        step_id?: string;
-        step_index?: number;
-        status?: "pending" | "running" | "done" | "skipped" | "failed";
-        title?: string;
-        detail?: string;
-        current_step?: number;
-      };
-      const current = useAppStore.getState().plan;
+      const ev = e as PlanStepUpdatedEvent;
+      const currentState = useAppStore.getState();
+      const current = conversationId && conversationId !== currentState.conversationId
+        ? currentState.conversationAgentStates?.[conversationId]?.plan
+        : currentState.plan;
       if (!current || (ev.plan_id && current.planId !== ev.plan_id)) return true;
       const index = typeof ev.step_index === "number"
         ? ev.step_index
@@ -167,7 +289,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         steps,
         currentStep: ev.current_step ?? index,
         status: current.status === "completed" || current.status === "cancelled" ? current.status : "executing",
-      });
+      }, conversationId);
       return true;
     }
     case "task.update": {
@@ -180,9 +302,18 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         }
         return true;
       }
+      const snapshotTodos = todosFromSnapshot(ev);
+      if (snapshotTodos) {
+        s.setTodos(snapshotTodos, conversationId);
+        return true;
+      }
       if (!("todo_id" in ev) || !ev.todo_id) return true;
 
-      const existing = useAppStore.getState().todos.find((todo) => todo.id === ev.todo_id);
+      const currentState = useAppStore.getState();
+      const visibleTodos = conversationId && conversationId !== currentState.conversationId
+        ? currentState.conversationAgentStates?.[conversationId]?.todos ?? []
+        : currentState.todos;
+      const existing = visibleTodos.find((todo) => todo.id === ev.todo_id);
       if (existing) {
         const patch = todoPatchFromEvent(ev, existing.activeForm);
         if (
@@ -190,39 +321,39 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
           existing.content !== patch.content ||
           existing.activeForm !== patch.activeForm
         ) {
-          s.updateTodo(ev.todo_id, patch);
+          s.updateTodo(ev.todo_id, patch, conversationId);
         }
       } else {
         const patch = todoPatchFromEvent(ev, "");
-        useAppStore.setState({
-          todos: [
-            ...useAppStore.getState().todos,
-            {
-              id: ev.todo_id,
-              ...patch,
-            },
-          ],
-        });
+        s.addTodo({
+          id: ev.todo_id,
+          ...patch,
+        }, conversationId);
       }
       return true;
     }
-    case "subagent.start":
-      s.addSubagent({ id: e.subagent_id, role: e.role, status: "running" });
-      if (!useAppStore.getState().rightStackTabLocked) {
-        s.setRightStackTab("subagents", { automatic: true });
-      }
+    case "subagent.start": {
+      const ev = e as SubagentStartEvent;
+      s.addSubagent({ id: ev.subagent_id, role: ev.role || "subagent", status: "running", summary: ev.prompt, parentRunId: ev.parent_run_id }, conversationId);
+      addInspectorPayload("subagent", ev.subagent_id, {
+        event: "subagent.start",
+        role: ev.role,
+        prompt: ev.prompt,
+        parent_run_id: ev.parent_run_id,
+        record: ev.record,
+      });
+      if (isActiveConversationEvent(conversationId)) maybeAutoRoutePanel(ev, "subagents");
       return true;
+    }
     case "subagent.progress": {
-      const ev = e as unknown as {
-        subagent_id?: string;
-        iteration?: number;
-        max_iterations?: number;
-        tool_name?: string;
-        detail?: string;
-      };
+      const ev = e as SubagentProgressEvent;
       const subagentId = String(ev.subagent_id || "").trim();
       if (!subagentId) return true;
-      const existing = useAppStore.getState().subagents.find((subagent) => subagent.id === subagentId);
+      const currentState = useAppStore.getState();
+      const visibleSubagents = conversationId && conversationId !== currentState.conversationId
+        ? currentState.conversationAgentStates?.[conversationId]?.subagents ?? []
+        : currentState.subagents;
+      const existing = visibleSubagents.find((subagent) => subagent.id === subagentId);
       const patch = {
         status: "running" as const,
         summary: subagentProgressSummary(ev),
@@ -232,29 +363,49 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         detail: ev.detail,
       };
       if (existing) {
-        s.updateSubagent(subagentId, patch);
+        s.updateSubagent(subagentId, patch, conversationId);
       } else {
-        s.addSubagent({ id: subagentId, role: "subagent", ...patch });
+        s.addSubagent({ id: subagentId, role: "subagent", ...patch }, conversationId);
       }
-      if (!useAppStore.getState().rightStackTabLocked) {
-        s.setRightStackTab("subagents", { automatic: true });
-      }
+      addInspectorPayload("subagent", subagentId, {
+        event: "subagent.progress",
+        iteration: ev.iteration,
+        max_iterations: ev.max_iterations,
+        tool_name: ev.tool_name,
+        detail: ev.detail,
+      });
+      if (isActiveConversationEvent(conversationId)) maybeAutoRoutePanel(ev, "subagents");
       return true;
     }
     case "subagent.done": {
-      const existing = useAppStore.getState().subagents.find((subagent) => subagent.id === e.subagent_id);
+      const currentState = useAppStore.getState();
+      const visibleSubagents = conversationId && conversationId !== currentState.conversationId
+        ? currentState.conversationAgentStates?.[conversationId]?.subagents ?? []
+        : currentState.subagents;
+      const existing = visibleSubagents.find((subagent) => subagent.id === e.subagent_id);
       if (existing) {
         s.updateSubagent(e.subagent_id, {
           status: e.error ? "error" : "done",
           summary: e.error || e.summary || existing.summary,
-        });
+        }, conversationId);
       } else {
         s.addSubagent({
           id: e.subagent_id,
           role: "subagent",
           status: e.error ? "error" : "done",
           summary: e.error || e.summary || "",
-        });
+        }, conversationId);
+      }
+      addInspectorPayload("subagent", e.subagent_id, {
+        event: "subagent.done",
+        summary: e.summary,
+        error: e.error,
+        record: (e as unknown as { record?: unknown }).record,
+        cancel_requested: (e as unknown as { cancel_requested?: boolean }).cancel_requested,
+        cancelled: (e as unknown as { cancelled?: boolean }).cancelled,
+      });
+      if (isActiveConversationEvent(conversationId)) {
+        maybeAutoRoutePanel(e as unknown as { display_scope?: string; panel_hint?: string; requires_attention?: boolean }, "subagents");
       }
       return true;
     }
@@ -295,6 +446,11 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       }
       return true;
     }
+    case "runtime.capabilities": {
+      const ev = e as unknown as { capabilities?: Parameters<typeof withDerivedCapabilitySummary>[0] };
+      s.setRuntimeCapabilities(withDerivedCapabilitySummary(ev.capabilities) ?? null);
+      return true;
+    }
     case "mcp.lifecycle": {
       // Per-server lifecycle: update the matching connector compactly. Consumed
       // here (returns true) so it is never rendered as chat text.
@@ -329,6 +485,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       } else {
         s.setMcpServers([...servers, { name, status: "offline", ...patch }]);
       }
+      sendClientCommand({ type: "runtime.capabilities.inspect", source: "mcp.lifecycle" });
       return true;
     }
     case "mcp.progress": {

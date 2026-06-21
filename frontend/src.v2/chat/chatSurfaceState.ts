@@ -414,7 +414,8 @@ function aggregateContiguousWebRun(webRun: TurnActivityItem[]): TurnActivityItem
   return result;
 }
 
-function isHiddenProcessActivity(item: TurnActivityItem): boolean {
+function isInternalProcessActivity(item: TurnActivityItem): boolean {
+  if (isRuntimeActionSummary(item) && !isVisibleRuntimeActionSummary(item)) return true;
   if (item.kind === "progress") {
     const text = (item.progress ?? [])
       .map((progress) => [
@@ -431,30 +432,62 @@ function isHiddenProcessActivity(item: TurnActivityItem): boolean {
     }
   }
   return (
-    item.kind === "agentMessage" ||
-    item.kind === "processNote" ||
     item.kind === "providerReasoning" ||
     item.kind === "reasoning"
   );
 }
 
-function isInterleavedAgentMessageActivity(
+function isRuntimeActionSummary(item: TurnActivityItem): boolean {
+  return item.kind === "processNote" && item.source === "runtime" && item.itemKind === "action_summary";
+}
+
+function isVisibleRuntimeActionSummary(item: TurnActivityItem): boolean {
+  if (!isRuntimeActionSummary(item)) return false;
+  return item.blocks.some((block) => {
+    if (block.type !== "process") return false;
+    const scope = String(block.displayScope ?? "").toLowerCase();
+    return (
+      block.itemKind === "action_summary" &&
+      block.source === "runtime" &&
+      Boolean(block.content?.trim()) &&
+      block.visibility !== "debug" &&
+      scope !== "inspector" &&
+      scope !== "silent"
+    );
+  });
+}
+
+function isVisibleAgentMessageActivity(
   item: TurnActivityItem,
-  index: number,
-  items: TurnActivityItem[],
+  _index: number,
+  _items: TurnActivityItem[],
 ): boolean {
   if (item.kind !== "agentMessage" || !item.content?.trim()) return false;
-  const previousTool = [...items.slice(0, index)].reverse().find((candidate) => Boolean(candidate.records?.length));
-  const nextTool = items.slice(index + 1).find((candidate) => Boolean(candidate.records?.length));
-  return Boolean(previousTool && nextTool && previousTool.kind !== nextTool.kind);
+  // Claude Code-style transcript: model-authored prose between tool calls is
+  // part of the visible process narrative. The final answer is still selected
+  // separately by turn projection, so this only affects non-final text blocks.
+  return true;
 }
 
 function isVisibleThinkingActivity(item: TurnActivityItem): boolean {
+  const processBlocks = item.blocks.filter((block) => block.type === "process");
+  if (
+    item.kind === "processNote" &&
+    processBlocks.some((block) =>
+      block.itemKind === "process_text" &&
+      Boolean(block.content?.trim()) &&
+      block.visibility !== "debug",
+    )
+  ) {
+    return true;
+  }
+
   const isThinkingKind =
     item.kind === "processNote" ||
     item.kind === "providerReasoning" ||
     item.kind === "reasoning";
   if (!isThinkingKind || !item.content?.trim()) return false;
+  if (isRuntimeActionSummary(item) && !isVisibleRuntimeActionSummary(item)) return false;
 
   const thinkingBlocks = item.blocks.filter((block) => block.type === "thinking");
   if (thinkingBlocks.length === 0) return item.kind !== "providerReasoning";
@@ -470,7 +503,10 @@ function isVisibleThinkingActivity(item: TurnActivityItem): boolean {
 
 function thinkingSourceForItem(item: TurnActivityItem): ThinkingCellState["source"] {
   if (item.kind === "processNote" && item.source === "runtime") return "runtime";
+  if (item.kind === "processNote" && item.source === "post_tool") return "post_tool";
   if (item.kind === "processNote") return "model_preamble";
+  if (item.kind === "agentMessage" && item.source === "post_tool") return "post_tool";
+  if (item.kind === "agentMessage") return "model_preamble";
   if (item.kind === "providerReasoning") return "provider";
   return "reasoning";
 }
@@ -562,22 +598,44 @@ function mergeActivityItemRecords(
 }
 
 function aggregateTodoActivityItems(items: TurnActivityItem[]): TurnActivityItem[] {
-  let firstTodo: TurnActivityItem | null = null;
+  // Only merge ADJACENT todo_write activity items. The earlier version merged
+  // every later todo item into the first occurrence, which pulled non-adjacent
+  // todo updates ahead of the tool calls that happened between them and broke
+  // the timeline order (e.g. [todo, read, todo] became [todo(merged), read]).
   const result: TurnActivityItem[] = [];
 
   for (const item of items) {
-    if (!isTodoActivityItem(item)) {
-      result.push(item);
+    const previous = result.at(-1);
+    if (previous && isTodoActivityItem(previous) && isTodoActivityItem(item)) {
+      mergeActivityItemRecords(previous, item);
       continue;
     }
-    if (!firstTodo) {
-      firstTodo = item;
-      result.push(item);
-      continue;
-    }
-    mergeActivityItemRecords(firstTodo, item);
+    result.push(item);
   }
 
+  return result;
+}
+
+function canMergeContextActivityItems(existing: TurnActivityItem, item: TurnActivityItem): boolean {
+  if (existing.kind !== item.kind) return false;
+  return item.kind === "fileRead" || item.kind === "workspaceSearch";
+}
+
+function aggregateContextActivityItems(items: TurnActivityItem[]): TurnActivityItem[] {
+  const result: TurnActivityItem[] = [];
+
+  for (const item of items) {
+    const previous = result.at(-1);
+    if (
+      previous &&
+      item.records?.length &&
+      canMergeContextActivityItems(previous, item)
+    ) {
+      mergeActivityItemRecords(previous, item);
+      continue;
+    }
+    result.push(item);
+  }
   return result;
 }
 
@@ -613,37 +671,20 @@ function aggregateActivityItems(
       isStreaming: options.isStreaming,
     });
     const visibleThinkingActivity = isVisibleThinkingActivity(withoutGuard);
-    const visibleInterleavedAgentMessage = isInterleavedAgentMessageActivity(withoutGuard, index, items);
+    const visibleAgentMessage = isVisibleAgentMessageActivity(withoutGuard, index, items);
     const hiddenGenericIteration = !developerMode &&
       isGenericIterationProgress(withoutGuard) &&
       !isFinalAnswerDraftProgress;
     return !hiddenGenericIteration &&
-      (!isHiddenProcessActivity(withoutGuard) || visibleThinkingActivity || visibleInterleavedAgentMessage) &&
+      (!isInternalProcessActivity(withoutGuard) || visibleThinkingActivity || visibleAgentMessage) &&
       (developerMode || !isHiddenSchemaFailureActivity(withoutGuard))
       ? [withoutGuard]
       : [];
   });
   const todoAggregated = aggregateTodoActivityItems(visibleItems);
-  const webAggregated = aggregateWebActivityItems(todoAggregated);
-  const aggregateKinds = new Set<TurnActivityItem["kind"]>(["workspaceSearch", "fileRead"]);
-  const grouped = new Map<TurnActivityItem["kind"], TurnActivityItem>();
-  const result: TurnActivityItem[] = [];
-
-  for (const item of webAggregated) {
-    if (!aggregateKinds.has(item.kind)) {
-      result.push(item);
-      continue;
-    }
-    const existing = grouped.get(item.kind);
-    if (!existing) {
-      grouped.set(item.kind, item);
-      result.push(item);
-      continue;
-    }
-    mergeActivityItemRecords(existing, item);
-  }
-
-  return result;
+  const contextAggregated = aggregateContextActivityItems(todoAggregated);
+  const webAggregated = aggregateWebActivityItems(contextAggregated);
+  return webAggregated;
 }
 
 function isFinalAnswerDraftIterationProgress(
@@ -680,6 +721,26 @@ function diffTotals(records: ToolCallRecord[]) {
     },
     { added: 0, deleted: 0 },
   );
+}
+
+const CREATED_PATCH_RE = /^(?:new file mode\b|---\s+\/dev\/null$)/m;
+const DELETED_PATCH_RE = /^(?:deleted file mode\b|\+\+\+\s+\/dev\/null$)/m;
+
+function inferDiffChangeType(
+  record: ToolCallRecord,
+  stats: { plus: number; minus: number },
+): NonNullable<DiffFileChange["changeType"]> {
+  const patch = record.diff?.patch ?? "";
+  if (DELETED_PATCH_RE.test(patch) || /(?:delete|remove)/i.test(record.name)) {
+    return "deleted";
+  }
+  if (
+    CREATED_PATCH_RE.test(patch) ||
+    (record.name === "write_file" && stats.minus === 0)
+  ) {
+    return "created";
+  }
+  return "updated";
 }
 
 // ── Cell Extractors ─────────────────────────────────────────────────
@@ -777,7 +838,7 @@ function buildDiffCellForFileChangeItems(
   const allRecords = fileChangeItems.flatMap((i) => i.records ?? []).filter((record) => (
     record.name !== "todo_write" &&
     (isFileChangeTool(record.name) || Boolean(record.diff)) &&
-    (Boolean(extractToolTarget(record)) || Boolean(record.diff?.patch))
+    (Boolean(extractToolTarget(record)) || Boolean(record.diff))
   ));
   if (allRecords.length === 0) return null;
   const totals = diffTotals(allRecords);
@@ -794,6 +855,7 @@ function buildDiffCellForFileChangeItems(
       patch: record.diff?.patch,
       additions: stats.plus,
       deletions: stats.minus,
+      changeType: inferDiffChangeType(record, stats),
       isLarge: stats.plus + stats.minus > 200,
     });
   }
@@ -808,7 +870,7 @@ function buildDiffCellForFileChangeItems(
       deleted: totals.deleted,
       modifiedFiles: files.length,
     },
-    collapsed: files.length > 3,
+    collapsed: true,
     createdAt: fileChangeItems[0]?.startedAt ?? Date.now(),
   };
 }
@@ -820,10 +882,25 @@ function buildThinkingCell(
   return {
     kind: "thinking",
     id: `${assistantMsg.id}-thinking-${item.id}`,
-    content: item.content ?? "",
+    content: visibleProcessContent(item),
     source: thinkingSourceForItem(item),
     createdAt: item.startedAt ?? assistantMsg.timestamp,
   };
+}
+
+function visibleProcessContent(item: TurnActivityItem): string {
+  if (item.content?.trim()) return item.content;
+  return item.blocks
+    .flatMap((block) => {
+      if (
+        (block.type === "process" || block.type === "thinking" || block.type === "text") &&
+        block.content?.trim()
+      ) {
+        return [block.content];
+      }
+      return [];
+    })
+    .join("");
 }
 
 function buildProcessNoteCell(
@@ -833,7 +910,7 @@ function buildProcessNoteCell(
   return {
     kind: "thinking",
     id: `${assistantMsg.id}-process-${item.id}`,
-    content: item.content ?? "",
+    content: visibleProcessContent(item),
     source: thinkingSourceForItem(item),
     createdAt: item.startedAt ?? assistantMsg.timestamp,
   };
@@ -911,7 +988,7 @@ function buildOrderedProcessCells(
   let emittedAnyErrors = false;
 
   for (const [index, item] of items.entries()) {
-    if (isInterleavedAgentMessageActivity(item, index, items)) {
+    if (isVisibleAgentMessageActivity(item, index, items)) {
       const cell = buildProcessNoteCell(item, options.assistantMsg);
       orderedCells.push(cell);
       const errorCells = buildErrorCellsForItem(item, options.assistantMsg, options.hasFinalAnswer);
@@ -1396,6 +1473,19 @@ function buildTurn(
         copyable: true,
         createdAt: assistantMsg.timestamp,
         isStreaming: Boolean(assistantMsg.isStreaming),
+        source:
+          projection.finalAnswerSource === "send_message" ||
+          projection.finalAnswerSource === "fallback" ||
+          projection.finalAnswerSource === "partial"
+            ? projection.finalAnswerSource
+            : "stream",
+        attachments: assistantMsg.replyAttachments?.length
+          ? assistantMsg.replyAttachments.map((a) => ({
+              path: a.path,
+              size: a.size,
+              isImage: a.isImage,
+            }))
+          : undefined,
       }
     : null;
 
@@ -1449,21 +1539,74 @@ function buildTurn(
     startedAt: userMsg?.timestamp ?? assistantMsg.timestamp,
     completedAt: assistantMsg.isStreaming
       ? undefined
-      : assistantMsg.timestamp,
+      : assistantMsg.completedAt ?? assistantMsg.timestamp,
   };
 }
 
 // ── Public API ──────────────────────────────────────────────────────
 
+/**
+ * Turn projection cache. A turn is a pure function of (userMsg, assistantMsg,
+ * isStreaming, viewMode, plan). The store replaces a message object only when
+ * that message changes, so completed history messages keep a stable reference
+ * and reuse their cached projection verbatim — only the streaming turn rebuilds
+ * per event. Keeps MessageList's per-event work O(active turn), not O(history).
+ */
+interface CachedTurnEntry {
+  userMsg: ChatMessage | null;
+  isStreaming: boolean;
+  viewMode: string;
+  plan: unknown;
+  turn: ChatTurnState;
+}
+const turnProjectionCache = new WeakMap<ChatMessage, CachedTurnEntry>();
+
+function projectAssistantTurnCached(
+  assistantMsg: ChatMessage,
+  userMsg: ChatMessage | null,
+  isStreaming: boolean,
+  viewMode: string,
+  plan: unknown,
+  applyStreamingOverride: boolean,
+): ChatTurnState {
+  const cached = turnProjectionCache.get(assistantMsg);
+  if (
+    cached &&
+    cached.userMsg === userMsg &&
+    cached.isStreaming === isStreaming &&
+    cached.viewMode === viewMode &&
+    cached.plan === plan
+  ) {
+    return cached.turn;
+  }
+  const turn = buildTurn(userMsg, assistantMsg);
+  // Override streaming status with global flag (only for user-led turns, to
+  // preserve the original per-branch behaviour).
+  if (applyStreamingOverride && turn.status === "streaming" && !isStreaming) {
+    turn.status = "completed";
+  }
+  turnProjectionCache.set(assistantMsg, { userMsg, isStreaming, viewMode, plan, turn });
+  return turn;
+}
+
+const isTransientCommandBacklogSystemMessage = (msg: ChatMessage): boolean =>
+  msg.role === "system" &&
+  /^Error:\s*Too many pending commands; please wait for current work to finish\.?$/i.test(msg.content.trim());
+
 export function projectMessagesToTurns(
   messages: ChatMessage[],
   isStreaming: boolean,
 ): ChatTurnState[] {
+  const { viewMode, plan } = useAppStore.getState();
   const turns: ChatTurnState[] = [];
   let i = 0;
 
   while (i < messages.length) {
     const msg = messages[i];
+    if (isTransientCommandBacklogSystemMessage(msg)) {
+      i += 1;
+      continue;
+    }
 
     if (msg.role === "user") {
       const userMsg = msg;
@@ -1471,11 +1614,9 @@ export function projectMessagesToTurns(
         i + 1 < messages.length && messages[i + 1]?.role === "assistant"
           ? messages[i + 1]
           : null;
-      const turn = buildTurn(userMsg, assistantMsg);
-      // Override streaming status with global flag
-      if (assistantMsg && turn.status === "streaming" && !isStreaming) {
-        turn.status = "completed";
-      }
+      const turn = assistantMsg
+        ? projectAssistantTurnCached(assistantMsg, userMsg, isStreaming, viewMode, plan, true)
+        : buildTurn(userMsg, null);
       turns.push(turn);
       i += assistantMsg ? 2 : 1;
     } else if (msg.role === "system") {
@@ -1495,7 +1636,7 @@ export function projectMessagesToTurns(
       });
       i += 1;
     } else if (msg.role === "assistant") {
-      turns.push(buildTurn(null, msg));
+      turns.push(projectAssistantTurnCached(msg, null, isStreaming, viewMode, plan, false));
       i += 1;
     } else {
       // Unknown role: skip it rather than breaking the transcript.
@@ -1512,6 +1653,10 @@ function findProjectedTurnStartIndexes(messages: ChatMessage[]): number[] {
 
   while (i < messages.length) {
     const msg = messages[i];
+    if (isTransientCommandBacklogSystemMessage(msg)) {
+      i += 1;
+      continue;
+    }
     if (msg.role === "user") {
       starts.push(i);
       const assistantMsg =

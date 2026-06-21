@@ -58,7 +58,13 @@ export const mergeCitationsWithWebSearchFallback = (
   const base = [...(messageCitations ?? [])];
   const citedIndexes = extractInlineCitationIndexes(markdownSource);
   if (citedIndexes.size === 0) {
-    return base.some(citationUrl) ? base : [];
+    return [];
+  }
+
+  if (base.some((citation) => citationUrl(citation))) {
+    return base.map((citation, index) =>
+      citedIndexes.has(index + 1) ? citation : { source: "", range: [0, 0] as [number, number] },
+    );
   }
 
   const indexedSources = extractWebSearchIndexedSources(blocks);

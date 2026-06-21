@@ -8,14 +8,14 @@
   "main": "main.js",
   "type": "commonjs",
   "scripts": {
-    "dev": "set ELECTRON_RUN_AS_NODE=&& electron .",
-    "start": "set ELECTRON_RUN_AS_NODE=&& electron .",
+    "dev": "chcp 65001 > nul && set PYTHONUTF8=1&& set PYTHONIOENCODING=utf-8&& set ELECTRON_RUN_AS_NODE=&& electron .",
+    "start": "chcp 65001 > nul && set PYTHONUTF8=1&& set PYTHONIOENCODING=utf-8&& set ELECTRON_RUN_AS_NODE=&& electron .",
     "build:frontend": "npm --prefix ../frontend run build",
-    "build:frontend:desktop": "set MINICODE_VITE_RELATIVE_BASE=1&& npm --prefix ../frontend run build",
-    "start:client": "npm run build:frontend:desktop && set ELECTRON_RUN_AS_NODE=&& electron .",
-    "start:client:devfrontend": "set MINICODE_FRONTEND_URL=http://127.0.0.1:5173&& set ELECTRON_RUN_AS_NODE=&& electron .",
-    "pack:dir": "npm run build:frontend:desktop && set ELECTRON_RUN_AS_NODE=&& electron-builder --dir",
-    "dist:win": "npm run build:frontend:desktop && set ELECTRON_RUN_AS_NODE=&& electron-builder --win nsis"
+    "build:frontend:desktop": "chcp 65001 > nul && set MINICODE_VITE_RELATIVE_BASE=1&& npm --prefix ../frontend run build",
+    "start:client": "npm run build:frontend:desktop && chcp 65001 > nul && set PYTHONUTF8=1&& set PYTHONIOENCODING=utf-8&& set ELECTRON_RUN_AS_NODE=&& electron .",
+    "start:client:devfrontend": "chcp 65001 > nul && set PYTHONUTF8=1&& set PYTHONIOENCODING=utf-8&& set MINICODE_FRONTEND_URL=http://127.0.0.1:5173&& set ELECTRON_RUN_AS_NODE=&& electron .",
+    "pack:dir": "npm run build:frontend:desktop && chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=&& electron-builder --dir",
+    "dist:win": "npm run build:frontend:desktop && chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=&& electron-builder --win nsis"
   },
   "devDependencies": {
     "electron": "^33.2.0",

@@ -1,6 +1,7 @@
 "use strict";
 
 const { spawn } = require("node:child_process");
+const { StringDecoder } = require("node:string_decoder");
 
 // ---------------------------------------------------------------------------
 // State
@@ -101,6 +102,8 @@ function startBackendSidecar() {
     env: {
       ...process.env,
       PYTHONUNBUFFERED: "1",
+      PYTHONUTF8: "1",
+      PYTHONIOENCODING: "utf-8",
       MINICODE_BACKEND_HOST: backendHost,
       MINICODE_BACKEND_PORT: String(resolvedBackendPort),
       MINICODE_API_BASE_URL: resolvedApiBaseUrl,
@@ -114,13 +117,26 @@ function startBackendSidecar() {
   backendProcess = child;
   backendManagedByApp = true;
 
+  const stdoutDecoder = new StringDecoder("utf8");
+  const stderrDecoder = new StringDecoder("utf8");
+  const writeDecoded = (decoder, writer, chunk) => {
+    const text = decoder.write(chunk);
+    if (text) writer(`[backend] ${text}`);
+  };
+  const flushDecoded = (decoder, writer) => {
+    const text = decoder.end();
+    if (text) writer(`[backend] ${text}`);
+  };
+
   child.stdout?.on("data", (chunk) => {
-    writeStdout(`[backend] ${chunk}`);
+    writeDecoded(stdoutDecoder, writeStdout, chunk);
   });
+  child.stdout?.on("end", () => flushDecoded(stdoutDecoder, writeStdout));
 
   child.stderr?.on("data", (chunk) => {
-    writeStderr(`[backend] ${chunk}`);
+    writeDecoded(stderrDecoder, writeStderr, chunk);
   });
+  child.stderr?.on("end", () => flushDecoded(stderrDecoder, writeStderr));
 
   child.on("exit", (code, signal) => {
     const reason = signal ? `signal=${signal}` : `code=${code}`;

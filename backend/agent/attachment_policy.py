@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 from typing import Any
 
 
@@ -48,15 +49,28 @@ def build_attachment_input_plan(
 
         used_native = False
         if kind == "image" and data:
-            if _fits_limit(size_bytes, NATIVE_IMAGE_LIMIT_BYTES):
+            metadata_hint = _attachment_source_hint(artifact_id, fallback="the attachment metadata")
+            if not _supports_native_images(mode, llm):
+                hints.append(
+                    f"- {file_name}: the active model/API does not support native image input, "
+                    "so the image pixels were not sent to the model. "
+                    f"Only stored metadata is available via {metadata_hint}; "
+                    "switch to a vision-capable model to inspect the image itself."
+                )
+            elif _fits_limit(size_bytes, NATIVE_IMAGE_LIMIT_BYTES):
                 images.append({"media_type": media_type or "image/png", "data": data})
                 used_native = True
             else:
                 hints.append(
                     f"- {file_name}: native image input skipped because the file is too large; "
-                    f"use read_artifact('{artifact_id}') for stored metadata if needed."
+                    f"use {metadata_hint} for stored metadata if needed."
                 )
         elif media_type == PDF_MEDIA_TYPE and data:
+            text_hint = _attachment_source_hint(
+                artifact_id,
+                doc_id,
+                fallback="the extracted attachment text if available",
+            )
             if _supports_native_pdf(mode) and _fits_limit(size_bytes, NATIVE_PDF_LIMIT_BYTES):
                 documents.append(
                     {
@@ -69,15 +83,19 @@ def build_attachment_input_plan(
             elif not _supports_native_pdf(mode):
                 hints.append(
                     f"- {file_name}: the active API format does not accept native PDF input; "
-                    f"use read_artifact('{artifact_id}') or doc_id {doc_id or 'unknown'} for extracted text."
+                    f"use {text_hint} for extracted text."
                 )
             else:
                 hints.append(
                     f"- {file_name}: native PDF input skipped because it exceeds the safe request limit; "
-                    f"use read_artifact('{artifact_id}') or doc_id {doc_id or 'unknown'} for extracted text."
+                    f"use {text_hint} for extracted text."
                 )
 
         if parse_error:
+            diagnostic_hint = _attachment_source_hint(
+                artifact_id,
+                fallback="the attachment diagnostic metadata",
+            )
             if used_native and media_type == PDF_MEDIA_TYPE:
                 hints.append(
                     f"- {file_name}: text extraction failed, but the native PDF is attached for the model to read. "
@@ -87,7 +105,7 @@ def build_attachment_input_plan(
                 hints.append(
                     f"- {file_name}: PDF/text extraction failed and no native PDF was attached to this model request. "
                     f"Do not summarize or interpret the document body from the title alone. "
-                    f"Use read_artifact('{artifact_id}') only to inspect the diagnostic, or ask the user to retry with a supported PDF parser/model."
+                    f"Use {diagnostic_hint} only to inspect the diagnostic, or ask the user to retry with a supported PDF parser/model."
                 )
             continue
 
@@ -105,6 +123,20 @@ def build_attachment_input_plan(
                 hints.append(f"- {file_name}: parsed text is available via {source_hint}{chunk_hint}.")
 
     return AttachmentInputPlan(images=images, documents=documents, text_hints=_dedupe(hints))
+
+
+def _attachment_source_hint(
+    artifact_id: str,
+    doc_id: str = "",
+    *,
+    fallback: str,
+) -> str:
+    sources: list[str] = []
+    if artifact_id:
+        sources.append(f"read_artifact('{artifact_id}')")
+    if doc_id:
+        sources.append(f"doc_id {doc_id}")
+    return " or ".join(sources) if sources else fallback
 
 
 def _detect_llm_wire_mode(llm: Any | None) -> str:
@@ -131,6 +163,46 @@ def _detect_llm_wire_mode(llm: Any | None) -> str:
 
 def _supports_native_pdf(mode: str) -> bool:
     return mode in {"auto", "openai_responses", "anthropic"}
+
+
+def _supports_native_images(mode: str, llm: Any | None) -> bool:
+    if mode == "auto":
+        return True
+    if mode == "anthropic":
+        return True
+
+    settings = getattr(llm, "_settings", None)
+    model = str(getattr(settings, "model", "") or "").strip().lower()
+    base_url = str(getattr(settings, "base_url", "") or "").strip().lower()
+    host = urlsplit(base_url).netloc.lower()
+
+    if "deepseek" in host or "deepseek" in model:
+        return False
+    if ("dashscope" in host or "aliyuncs.com" in host or "qwen" in model) and not any(
+        marker in model for marker in ("vl", "vision", "omni")
+    ):
+        return False
+    if "siliconflow" in host and not any(marker in model for marker in ("vl", "vision", "omni", "gpt-4o", "gemini")):
+        return False
+
+    vision_markers = (
+        "gpt-4o",
+        "gpt-4.1",
+        "gpt-5",
+        "o3",
+        "o4",
+        "claude",
+        "gemini",
+        "vision",
+        "vl",
+        "omni",
+        "qvq",
+    )
+    if any(marker in model for marker in vision_markers):
+        return True
+    if "api.openai.com" in host:
+        return True
+    return False
 
 
 def _fits_limit(size_bytes: int, limit: int) -> bool:

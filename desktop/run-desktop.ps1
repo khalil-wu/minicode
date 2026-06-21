@@ -1,5 +1,20 @@
 $ErrorActionPreference = "Stop"
 
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+try {
+  [Console]::OutputEncoding = $utf8NoBom
+  [Console]::InputEncoding = $utf8NoBom
+  $OutputEncoding = $utf8NoBom
+} catch {
+  # Some launchers do not attach a real console; env vars below still keep
+  # Python/Node subprocess output UTF-8.
+}
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
+if ($IsWindows -or $env:OS -eq "Windows_NT") {
+  chcp.com 65001 | Out-Null
+}
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Resolve-Path (Join-Path $scriptDir "..")
 
