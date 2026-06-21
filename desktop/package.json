@@ -53,7 +53,18 @@
       },
       {
         "from": "../backend",
-        "to": "backend"
+        "to": "backend",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/.pytest_cache/**",
+          "!**/.ruff_cache/**",
+          "!**/*.pyc",
+          "!**/*.pyo",
+          "!**/*.log",
+          "!**/nul",
+          "!tests/**"
+        ]
       },
       {
         "from": "../pyproject.toml",
