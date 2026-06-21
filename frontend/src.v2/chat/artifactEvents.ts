@@ -1,17 +1,26 @@
 import { useAppStore } from "../stores";
-import type { ServerEvent } from "../protocol/events";
+import type {
+  ArtifactPreviewEvent,
+  CitationAddEvent,
+  InspectorUpdateEvent,
+  ServerEvent,
+} from "../protocol/events";
+import { maybeAutoRoutePanel } from "./displayRouting";
+
+interface ArtifactContentEvent {
+  type: "artifact_content";
+  artifact_id?: string;
+  content?: string;
+  preview?: string;
+  media_type?: string;
+  url?: string;
+}
 
 export const handleArtifactEvent = (e: ServerEvent, conversationId?: string): boolean => {
   const s = useAppStore.getState();
   switch (e.type) {
     case "artifact_content": {
-      const ev = e as unknown as {
-        artifact_id?: string;
-        content?: string;
-        preview?: string;
-        media_type?: string;
-        url?: string;
-      };
+      const ev = e as ArtifactContentEvent;
       if (ev.artifact_id) {
         s.setPreviewArtifact({
           artifactId: ev.artifact_id,
@@ -25,14 +34,7 @@ export const handleArtifactEvent = (e: ServerEvent, conversationId?: string): bo
       return true;
     }
     case "artifact.preview": {
-      const ev = e as unknown as {
-        artifact_id: string;
-        kind: "file" | "diff" | "image" | "json" | "code" | "text";
-        summary: string;
-        bytes?: number;
-        media_type?: string;
-        url?: string;
-      };
+      const ev = e as ArtifactPreviewEvent;
       useAppStore.setState((st) => {
         const targetId = conversationId || st.conversationId || undefined;
         const isActive = !targetId || targetId === st.conversationId;
@@ -71,14 +73,7 @@ export const handleArtifactEvent = (e: ServerEvent, conversationId?: string): bo
       return true;
     }
     case "citation.add": {
-      const ev = e as unknown as {
-        message_id: string;
-        source: string;
-        range: [number, number];
-        label?: string;
-        url?: string;
-        title?: string;
-      };
+      const ev = e as CitationAddEvent;
       useAppStore.setState((st) => {
         const targetId = conversationId || st.conversationId || undefined;
         const isActive = !targetId || targetId === st.conversationId;
@@ -112,17 +107,14 @@ export const handleArtifactEvent = (e: ServerEvent, conversationId?: string): bo
       return true;
     }
     case "inspector.update": {
-      const ev = e as unknown as {
-        target_kind: "message" | "tool_call" | "artifact" | "subagent" | "budget";
-        target_id: string;
-        payload: Record<string, unknown>;
-      };
+      const ev = e as InspectorUpdateEvent;
       s.addInspectorEntry({
         targetKind: ev.target_kind,
         targetId: ev.target_id,
         payload: ev.payload,
         timestamp: Date.now(),
       });
+      maybeAutoRoutePanel(ev, "inspector");
       return true;
     }
     default:

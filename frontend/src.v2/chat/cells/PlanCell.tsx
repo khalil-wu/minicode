@@ -65,8 +65,9 @@ export function PlanCell({ cell }: { cell: PlanCellState }) {
                 type: "plan.edit",
                 plan_id: planId,
                 action: "accept",
-                accept: true,
-              } as any);
+                steps: protocolPlanSteps(cell),
+                current_step: currentPlanStepIndex(cell),
+              });
             }}
           >
             <Play size={13} />
@@ -81,8 +82,9 @@ export function PlanCell({ cell }: { cell: PlanCellState }) {
                 type: "plan.edit",
                 plan_id: planId,
                 action: "reject",
-                regenerate: true,
-              } as any);
+                steps: protocolPlanSteps(cell),
+                current_step: currentPlanStepIndex(cell),
+              });
             }}
           >
             <RefreshCcw size={13} />
@@ -92,6 +94,38 @@ export function PlanCell({ cell }: { cell: PlanCellState }) {
       )}
     </div>
   );
+}
+
+function protocolPlanSteps(cell: PlanCellState) {
+  return cell.steps.map((step) => ({
+    id: step.id,
+    title: step.title,
+    detail: step.description,
+    status: protocolStepStatus(step.status),
+  }));
+}
+
+function protocolStepStatus(status: PlanCellState["steps"][number]["status"]) {
+  switch (status) {
+    case "completed":
+      return "done" as const;
+    case "in_progress":
+      return "running" as const;
+    case "blocked":
+      return "failed" as const;
+    case "cancelled":
+      return "skipped" as const;
+    case "pending":
+    default:
+      return "pending" as const;
+  }
+}
+
+function currentPlanStepIndex(cell: PlanCellState): number {
+  const active = cell.steps.findIndex((step) => step.status === "in_progress");
+  if (active >= 0) return active;
+  const next = cell.steps.findIndex((step) => step.status !== "completed");
+  return next >= 0 ? next : cell.steps.length;
 }
 
 function StepMark({

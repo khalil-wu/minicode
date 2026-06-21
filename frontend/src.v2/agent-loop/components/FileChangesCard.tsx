@@ -1,16 +1,26 @@
 import { useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, FileCode2, FileSearch, RotateCcw } from "lucide-react";
 import type { DiffCellState } from "../../chat/cells/cellTypes";
+import {
+  diffCellTitle,
+  diffChangeBreakdownLabel,
+  diffFileChangeType,
+  diffFileChangeTypeLabel,
+} from "../../chat/cells/diffCellLabels";
 import { sendClientCommand } from "../../protocol/ws-outbox";
 import { useAppStore } from "../../stores";
 
 const FILE_LIMIT = 3;
 
 export function FileChangesCard({ cell }: { cell: DiffCellState }) {
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(!cell.collapsed);
   const [showAllFiles, setShowAllFiles] = useState(false);
   const reviewableFiles = useMemo(
     () => cell.files.filter((file) => file.patch),
+    [cell.files],
+  );
+  const breakdownLabel = useMemo(
+    () => diffChangeBreakdownLabel(cell.files),
     [cell.files],
   );
   const visibleFiles = showAllFiles ? cell.files : cell.files.slice(0, FILE_LIMIT);
@@ -72,10 +82,15 @@ export function FileChangesCard({ cell }: { cell: DiffCellState }) {
             <FileCode2 size={15} />
           </span>
           <span className="agent-loop-file-card-title">
-            <span>已编辑 {cell.summary.modifiedFiles} 个文件</span>
-            <span className="agent-loop-file-stats">
-              <span className="agent-loop-file-added">+{cell.summary.added}</span>
-              <span className="agent-loop-file-removed">-{cell.summary.deleted}</span>
+            <span>{diffCellTitle(cell)}</span>
+            <span className="agent-loop-file-meta-row">
+              <span className="agent-loop-file-stats">
+                <span className="agent-loop-file-added">+{cell.summary.added}</span>
+                <span className="agent-loop-file-removed">-{cell.summary.deleted}</span>
+              </span>
+              {breakdownLabel && (
+                <span className="agent-loop-file-breakdown">{breakdownLabel}</span>
+              )}
             </span>
           </span>
         </button>
@@ -114,6 +129,9 @@ export function FileChangesCard({ cell }: { cell: DiffCellState }) {
 }
 
 function FileChangeRow({ file }: { file: DiffCellState["files"][number] }) {
+  const changeType = diffFileChangeType(file);
+  const changeLabel = diffFileChangeTypeLabel(file);
+
   const openFile = () => {
     const store = useAppStore.getState();
     const label = file.path.split(/[/\\]/).filter(Boolean).pop() ?? file.path;
@@ -149,6 +167,9 @@ function FileChangeRow({ file }: { file: DiffCellState["files"][number] }) {
         <FileCode2 size={12} />
         <span>{shortPath(file.path)}</span>
       </button>
+      <span className={`agent-loop-file-kind agent-loop-file-kind-${changeType}`}>
+        {changeLabel}
+      </span>
       <span className="agent-loop-file-row-stats">
         <span className="agent-loop-file-added">+{file.additions}</span>
         <span className="agent-loop-file-removed">-{file.deletions}</span>

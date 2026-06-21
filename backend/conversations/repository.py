@@ -18,6 +18,7 @@ from .models import (
     DEFAULT_CONVERSATION_PERMISSION_MODE,
     ConversationRecord,
     ConversationSummary,
+    normalize_permission_mode,
     utc_now_iso,
 )
 
@@ -226,7 +227,12 @@ class ConversationRepository:
         record = self.get_conversation(conversation_id)
         if record is None:
             return None
-        record.permission_mode = permission_mode
+        next_mode = normalize_permission_mode(permission_mode)
+        if next_mode == "plan" and record.permission_mode != "plan":
+            record.permission_previous_mode = record.permission_mode
+        elif next_mode != "plan":
+            record.permission_previous_mode = ""
+        record.permission_mode = next_mode
         return self._persist_meta_only(record)
 
     def update_permission_rules(

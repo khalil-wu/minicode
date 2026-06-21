@@ -8,7 +8,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from backend.agent.harness.contracts import ToolSpec
+    from backend.tools.contracts import ToolSpec
     from backend.permissions.context import PermissionContext, ToolExecutionContext
 
 
@@ -45,6 +45,7 @@ class ToolResult:
     status: str | None = None
     provider: str | None = None
     provider_error_type: str | None = None
+    display_scope: str | None = None
 
     def to_context_string(self) -> str:
         """Return the compact representation injected into model context.

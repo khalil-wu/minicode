@@ -215,7 +215,10 @@ class RunCommandTool(BaseTool):
         "Do NOT use run_command to list directories — use list_files instead.\n\n"
         "Reserve run_command for: builds, installs, git operations, process management, scripts, "
         "package managers, and anything that genuinely needs a shell.\n"
-        "For long-running servers, use run_in_background mode."
+        "For long-running servers, watchers, or dev processes, use run_in_background mode instead of sleep/poll loops.\n"
+        "Quote paths that contain spaces, prefer cwd over inline cd, and use absolute paths when practical.\n"
+        "For git: never skip hooks (--no-verify, --no-gpg-sign) or run destructive git commands "
+        "(reset --hard, checkout ., restore ., clean -f, branch -D, push --force) unless the user explicitly requests it."
     )
     permission = PermissionLevel.CONFIRM
     # Self-bounds stdout/stderr (MAX_OUTPUT_LENGTH) and artifacts large output.
@@ -283,7 +286,7 @@ class RunCommandTool(BaseTool):
         )
 
     def get_spec(self):
-        from backend.agent.harness.contracts import ToolSpec
+        from backend.tools.contracts import ToolSpec
 
         return ToolSpec(
             name=self.name,

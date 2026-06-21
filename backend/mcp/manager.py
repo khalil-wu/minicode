@@ -202,6 +202,10 @@ class MCPServerManager:
         self._servers: dict[str, MCPServerState] = {}
         self._on_status_change = on_status_change
         self._health_tasks: dict[str, asyncio.Task[Any]] = {}
+        # OAuth tokens for HTTP MCP servers, persisted alongside the MCP config.
+        from backend.mcp.oauth import TokenStore
+
+        self._token_store = TokenStore(self._config_path.parent / "mcp_tokens.json")
         # Monotonic counter bumped on every server status change. Consumers
         # (tool registry schema cache) include it in their cache key so a
         # connect/disconnect/reconnect invalidates stale tool schemas.
@@ -576,6 +580,7 @@ class MCPServerManager:
             transport=transport,
             url=config.url,
             timeout=20.0,
+            token_store=self._token_store if transport == MCPTransport.HTTP else None,
         )
 
     @staticmethod

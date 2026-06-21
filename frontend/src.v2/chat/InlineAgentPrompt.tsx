@@ -4,11 +4,12 @@ import {
   ExternalLink,
   FileDiff,
   MessageSquare,
+  ShieldCheck,
   X,
 } from "lucide-react";
-import { getWebSocket } from "../hooks/useWebSocket";
 import { useAppStore } from "../stores";
 import { buildApprovalResponseCommand, buildAskUserResponseCommand } from "../protocol/prompt-responses";
+import { sendClientCommand } from "../protocol/ws-outbox";
 import type { PendingApproval, PendingAskUser, PendingDiffReview } from "../stores/types";
 import { pendingPromptTargetsConversation } from "../lib/pending-prompts";
 import { ToolGlyph, toolDisplayName, summarizeArgs, humanizeKey } from "./toolUtils";
@@ -53,20 +54,48 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
   const total = 1 + queue.length;
   const displayName = toolDisplayName(request.toolName);
 
+  useEffect(() => {
+    setResponding(false);
+  }, [request.requestId]);
+
   const respond = (allowed: boolean) => {
     if (responding) return;
     setResponding(true);
-    getWebSocket()?.send(buildApprovalResponseCommand(request.requestId, allowed ? "approve" : "reject", request.protocol));
-    useAppStore.getState().clearApproval(request.requestId);
+    const sent = sendClientCommand(buildApprovalResponseCommand(request.requestId, allowed ? "approve" : "reject", request.protocol));
+    if (sent) {
+      useAppStore.getState().clearApproval(request.requestId);
+    } else {
+      useAppStore.getState().markApprovalError(request.requestId, "Connection is offline");
+      setResponding(false);
+    }
   };
 
   const allowAll = () => {
     const store = useAppStore.getState();
     const all = [request, ...queue];
+    const submitted: string[] = [];
     for (const item of all) {
-      getWebSocket()?.send(buildApprovalResponseCommand(item.requestId, "approve", item.protocol));
+      const sent = sendClientCommand(buildApprovalResponseCommand(item.requestId, "approve", item.protocol));
+      if (sent) submitted.push(item.requestId);
+      else store.markApprovalError(item.requestId, "Connection is offline");
     }
-    store.clearApprovals(all.map((item) => item.requestId));
+    if (submitted.length > 0) store.clearApprovals(submitted);
+  };
+
+  // "Always allow <prefix>": persist a Bash(prefix:*) content rule so future
+  // commands with the same prefix skip prompting, then approve this one.
+  const commandText = String(request.args?.command ?? request.args?.cmd ?? "");
+  const alwaysPrefix = deriveCommandPrefix(commandText);
+  const alwaysAllowPrefix = () => {
+    if (alwaysPrefix) {
+      sendClientCommand({
+        type: "permissions.content_rule.add",
+        rule: `Bash(${alwaysPrefix}:*)`,
+        deny: false,
+        source: "approval.always_allow_prefix",
+      });
+    }
+    respond(true);
   };
 
   return (
@@ -96,6 +125,9 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
             Next: {queue.map((item) => toolDisplayName(item.toolName)).join(", ")}
           </div>
         )}
+        {request.status === "error" && request.error && (
+          <div style={errorStyle}>{request.error}</div>
+        )}
       </div>
 
       <div style={compactButtonRowStyle}>
@@ -107,6 +139,19 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
           <Check size={13} />
           Allow
         </button>
+        {alwaysPrefix && (
+          <button
+            type="button"
+            onClick={alwaysAllowPrefix}
+            disabled={responding}
+            style={accentButtonStyle}
+            aria-label={`Always allow ${alwaysPrefix} commands without prompting`}
+            title={`Always allow "${alwaysPrefix}" commands without prompting`}
+          >
+            <ShieldCheck size={13} />
+            Always {alwaysPrefix}
+          </button>
+        )}
         {queue.length > 0 && (
           <button type="button" onClick={allowAll} disabled={responding} style={accentButtonStyle} aria-label="Allow all pending tool requests">
             Allow all
@@ -122,7 +167,8 @@ const DiffApprovalCard = ({ request }: { request: PendingDiffReview }) => {
   const stats = useMemo(() => diffStats(request.diff), [request.diff]);
 
   const respond = (allowed: boolean) => {
-    getWebSocket()?.send(buildApprovalResponseCommand(request.requestId, allowed ? "approve" : "reject", request.protocol));
+    const sent = sendClientCommand(buildApprovalResponseCommand(request.requestId, allowed ? "approve" : "reject", request.protocol));
+    if (!sent) return;
     const current = useAppStore.getState().diffReview;
     if (current?.requestId === request.requestId) {
       useAppStore.getState().setDiffReviewState({
@@ -192,8 +238,8 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
   }, [request.requestId]);
 
   const respond = (text: string) => {
-    getWebSocket()?.send(buildAskUserResponseCommand(request.requestId, text, request.protocol));
-    useAppStore.getState().clearAskUser();
+    const sent = sendClientCommand(buildAskUserResponseCommand(request.requestId, text, request.protocol));
+    if (sent) useAppStore.getState().clearAskUser();
   };
 
   return (
@@ -257,11 +303,30 @@ const diffStats = (diff: string) => {
   return { plus, minus, preview };
 };
 
+/**
+ * Derive a sensible "always allow" prefix from a shell command, so approving
+ * `npm run build` suggests `npm run:*`. Two-token prefix for tools with
+ * meaningful subcommands (npm/git/cargo/...), otherwise the binary alone.
+ */
+const TWO_TOKEN_BINS = new Set([
+  "npm", "pnpm", "yarn", "git", "cargo", "go", "python", "python3",
+  "pip", "pip3", "npx", "docker", "kubectl", "make", "rustup", "uv",
+]);
+
+export const deriveCommandPrefix = (command: string): string => {
+  const trimmed = String(command || "").trim().replace(/^\$\s*/, "");
+  const tokens = trimmed.split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return "";
+  const bin = tokens[0];
+  if (tokens.length >= 2 && TWO_TOKEN_BINS.has(bin)) return `${bin} ${tokens[1]}`;
+  return bin;
+};
+
 const shellStyle: React.CSSProperties = {
   display: "grid",
   gap: 6,
-  width: "var(--chat-composer-axis-width)",
-  margin: "0 auto 10px",
+  width: "100%",
+  margin: "0 0 8px",
   flexShrink: 0,
 };
 
@@ -391,6 +456,11 @@ const queueStyle: React.CSSProperties = {
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
+};
+
+const errorStyle: React.CSSProperties = {
+  color: "var(--state-danger)",
+  fontSize: "var(--text-xs)",
 };
 
 const buttonRowStyle: React.CSSProperties = {

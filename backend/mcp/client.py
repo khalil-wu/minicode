@@ -382,6 +382,7 @@ class MCPClient:
         transport: MCPTransport = MCPTransport.STDIO,
         url: str | None = None,
         timeout: float = 30.0,
+        token_store: Any = None,
     ) -> None:
         """
         初始化 MCP 客户端。
@@ -394,6 +395,7 @@ class MCPClient:
             transport: 传输方式
             url: HTTP SSE 端点（HTTP 模式）
             timeout: 请求超时（秒）
+            token_store: 可选的 OAuth TokenStore（HTTP 模式注入 Bearer token）
         """
         self.server_name = server_name
         self._command = command
@@ -403,6 +405,9 @@ class MCPClient:
         self._url = url
         self._http_endpoint = (url or "").strip() or None
         self._timeout = timeout
+        # OAuth: load any persisted bearer token for this server.
+        self._token_store = token_store
+        self._tokens = token_store.get(server_name) if token_store is not None else None
 
         # 运行时状态
         self._process: asyncio.subprocess.Process | None = None
@@ -419,6 +424,23 @@ class MCPClient:
         self._sync_process: subprocess.Popen[bytes] | None = None
         self._sync_stdout_thread: threading.Thread | None = None
         self._sync_stderr_thread: threading.Thread | None = None
+
+    # ── OAuth token management ──────────────────────────────
+    def set_tokens(self, tokens: Any) -> None:
+        """Store OAuth tokens after the manager completes authorization."""
+        self._tokens = tokens
+        if self._token_store is not None and tokens is not None:
+            self._token_store.set(self.server_name, tokens)
+
+    def clear_tokens(self) -> None:
+        """Drop cached OAuth tokens (e.g. after a final 401)."""
+        self._tokens = None
+        if self._token_store is not None:
+            self._token_store.clear(self.server_name)
+
+    @property
+    def has_valid_token(self) -> bool:
+        return self._tokens is not None and not self._tokens.is_expired()
 
     @property
     def connected(self) -> bool:
@@ -970,14 +992,24 @@ class MCPClient:
             return _RpcError(code=-32700, message="Parse error in request payload")
 
         try:
+            headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            }
+            # OAuth: attach a persisted bearer token if we have one.
+            if self._tokens and self._tokens.access_token:
+                headers["Authorization"] = self._tokens.authorization_header()
             resp = await self._http_client.post(
                 self._http_request_url(),
                 json=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "application/json, text/event-stream",
-                },
+                headers=headers,
             )
+            # 401 → token missing/expired: surface a needs-auth signal so the
+            # manager can refresh or prompt for authorization, rather than
+            # silently treating it as a generic failure.
+            if resp.status_code == 401:
+                logger.warning("[MCP:%s] HTTP 401 — OAuth token missing or expired", self.server_name)
+                return _RpcError(code=-32001, message="authentication required")
             resp.raise_for_status()
             return self._parse_http_rpc_result(resp, req_id)
         except Exception as exc:

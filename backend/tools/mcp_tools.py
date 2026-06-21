@@ -34,7 +34,7 @@ class ListMcpResourcesTool(BaseTool):
         self._mcp_manager = mcp_manager
 
     def get_spec(self):
-        from backend.agent.harness.contracts import ToolSpec
+        from backend.tools.contracts import ToolSpec
 
         return ToolSpec(
             name=self.name,
@@ -98,7 +98,7 @@ class ReadMcpResourceTool(BaseTool):
         self._artifact_store = artifact_store
 
     def get_spec(self):
-        from backend.agent.harness.contracts import ToolSpec
+        from backend.tools.contracts import ToolSpec
 
         return ToolSpec(
             name=self.name,

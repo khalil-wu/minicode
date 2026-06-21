@@ -84,6 +84,9 @@ async def handle_conversation_switch(session: "WebSocketSession", data: dict[str
     if target is None:
         await emit_conversation_not_found(session, conversation_id)
         return True
+    if getattr(target, "archived", False):
+        await session._send_conversation_list()
+        return True
     session.active_conversation_id = target.id
     await session._switch_workspace_for_conversation(target, announce=True)
     is_hydrating = session._load_active_conversation_snapshot(target.id, target.context_snapshot, notify=True)
@@ -126,6 +129,9 @@ async def _activate_conversation_or_blank(session: "WebSocketSession", preferred
         candidate = session.conversation_repo.get_conversation(preferred_id)
         if candidate is not None and not getattr(candidate, "archived", False):
             target = candidate
+        else:
+            _clear_active_conversation_runtime(session)
+            return
 
     if target is None:
         conversations = [
@@ -133,8 +139,6 @@ async def _activate_conversation_or_blank(session: "WebSocketSession", preferred
             for item in session.conversation_repo.list_conversations()
             if not getattr(item, "archived", False)
         ]
-        if not conversations:
-            conversations = session.conversation_repo.list_conversations()
         if conversations:
             target = session.conversation_repo.get_conversation(conversations[0].id)
 
@@ -156,8 +160,6 @@ async def handle_conversation_list(session: "WebSocketSession", data: dict[str, 
         active = session.conversation_repo.get_conversation(session.active_conversation_id)
         if active is None or getattr(active, "archived", False):
             await _activate_conversation_or_blank(session)
-    else:
-        await _activate_conversation_or_blank(session)
     await session._send_conversation_list()
     return True
 
@@ -692,6 +694,42 @@ async def _cleanup_conversation_worktree(session: "WebSocketSession", conversati
     return result
 
 
+async def handle_permissions_content_rule_add(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    """Persist a global Tool(content) permission rule (settings.json).
+
+    Drives the approval dialog's "always allow/deny this" action. The runtime
+    PermissionChecker is rebuilt from load_config() on each tool call, so the
+    saved rule takes effect immediately for subsequent calls.
+    """
+    from backend.config import add_permission_content_rule
+
+    rule = str(data.get("rule") or "").strip()
+    deny = bool(data.get("deny", False))
+    if not rule:
+        await session._emit_command_result(
+            "permissions.content_rule.add",
+            "Rule is required, e.g. Bash(npm run:*) or Edit(src/**)",
+            level="warning",
+        )
+        return True
+    try:
+        updated = add_permission_content_rule(rule, deny=deny)
+    except Exception as exc:  # surface any persistence error to the UI
+        await session._emit_command_result(
+            "permissions.content_rule.add",
+            f"Failed to save rule: {exc}",
+            level="error",
+        )
+        return True
+    await session._emit_command_result(
+        "permissions.content_rule.add",
+        f"{'Denied' if deny else 'Allowed'} rule saved: {rule}",
+        level="success",
+        data={"rule": rule, "deny": deny, "rules": updated},
+    )
+    return True
+
+
 HANDLERS: dict[str, Any] = {
     "conversation.create": handle_conversation_create,
     "conversation.switch": handle_conversation_switch,
@@ -708,4 +746,5 @@ HANDLERS: dict[str, Any] = {
     "conversation.permission.rules.list": handle_conversation_permission_rules_list,
     "conversation.permission.rules.add": handle_conversation_permission_rules_add,
     "conversation.permission.rules.remove": handle_conversation_permission_rules_remove,
+    "permissions.content_rule.add": handle_permissions_content_rule_add,
 }

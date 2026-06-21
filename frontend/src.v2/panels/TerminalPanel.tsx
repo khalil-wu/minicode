@@ -6,6 +6,11 @@ import { useAppStore } from "../stores";
 import { desktop, isDesktop, ptyKill, ptyList, ptyResize, ptySpawn, ptyWrite } from "../desktop/runtime";
 import type { TerminalSessionInfo } from "../stores/types";
 import { sendClientCommand } from "../protocol/ws-outbox";
+import {
+  NEW_TERMINAL_SESSION_EVENT,
+  consumeNewTerminalSessionRequest,
+  hasPendingNewTerminalSessionRequest,
+} from "./terminalRequests";
 
 type XtermLike = {
   cols: number;
@@ -31,7 +36,6 @@ type FitAddonLike = {
 type XtermWithOptions = XtermLike & { options: { theme?: Record<string, string> } };
 
 const DEV_SERVER_URL_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):\d+(?:[/?#][^\s'"<>]*)?/gi;
-const AGENT_COMMAND_SESSION_ID = "agent-command-stream";
 
 const normalizeDetectedUrl = (url: string): string =>
   url.replace(/^https?:\/\/0\.0\.0\.0/i, (prefix) => prefix.replace("0.0.0.0", "localhost"));
@@ -45,8 +49,6 @@ const portFromUrl = (url: string): number | null => {
     return null;
   }
 };
-
-const toTerminalNewlines = (value: string): string => value.replace(/\r?\n/g, "\r\n");
 
 const shellName = (session: TerminalSessionInfo, index: number): string =>
   session.shell?.split(/[/\\]/).pop()?.replace(/\.(exe|cmd|ps1)$/i, "") || `shell ${index + 1}`;
@@ -108,6 +110,7 @@ export const TerminalPanel = () => {
   const inputQueueRef = useRef<Record<string, string[]>>({});
   const webLineRef = useRef("");
   const mountedRef = useRef(true);
+  const createSessionRef = useRef<() => Promise<void>>(async () => {});
   const terminalSessions = useAppStore((s) => s.terminalSessions);
   const activeTerminalSessionId = useAppStore((s) => s.activeTerminalSessionId);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
@@ -154,25 +157,6 @@ export const TerminalPanel = () => {
       session_id: sessionId,
       exit_code: exitCode,
     });
-  };
-
-  const ensureAgentCommandSession = (activate = false) => {
-    const store = useAppStore.getState();
-    store.upsertTerminalSession({
-      id: AGENT_COMMAND_SESSION_ID,
-      shell: "Agent commands",
-      cwd: workingDirectory || "",
-      status: "running",
-      createdAt: Date.now(),
-    });
-    if (!outputBufferRef.current[AGENT_COMMAND_SESSION_ID]) {
-      outputBufferRef.current[AGENT_COMMAND_SESSION_ID] = "Agent command stream\r\n";
-    }
-    if (activate || !store.activeTerminalSessionId) {
-      store.setActiveTerminalSession(AGENT_COMMAND_SESSION_ID);
-      activeRef.current = AGENT_COMMAND_SESSION_ID;
-      redrawActiveSession();
-    }
   };
 
   useEffect(() => {
@@ -289,19 +273,6 @@ export const TerminalPanel = () => {
         appendOutput(e.session_id, `\r\n[Process exited with code ${e.exit_code ?? 0}]\r\n`);
       } else if (e.type === "terminal.list") {
         if (mountedRef.current) setBooting(false);
-      } else if (e.type === "tool_call" && (e.result_kind === "command" || /run_command|terminal|shell|bash|powershell|cmd/i.test(e.name ?? ""))) {
-        ensureAgentCommandSession(true);
-        const command = e.args?.command || e.command || e.name || "command";
-        appendOutput(AGENT_COMMAND_SESSION_ID, `\r\n$ ${command}\r\n`);
-      } else if (e.type === "tool_output_delta" && e.output) {
-        ensureAgentCommandSession();
-        appendOutput(AGENT_COMMAND_SESSION_ID, toTerminalNewlines(e.output));
-      } else if (e.type === "tool_result" && e.result_kind === "command") {
-        ensureAgentCommandSession();
-        const status = e.status || (e.exit_code && e.exit_code !== 0 ? "failed" : "completed");
-        appendOutput(AGENT_COMMAND_SESSION_ID, `\r\n[agent command ${status}]\r\n`);
-        const current = useAppStore.getState().terminalSessions.find((session) => session.id === AGENT_COMMAND_SESSION_ID);
-        if (current) useAppStore.getState().upsertTerminalSession({ ...current, status: "exited" });
       }
     });
 
@@ -369,6 +340,7 @@ export const TerminalPanel = () => {
 
   useEffect(() => {
     if (!terminalReady || booting || terminalSessions.length > 0 || autoCreateAttemptedRef.current) return;
+    if (hasPendingNewTerminalSessionRequest()) return;
     if (!termRef.current) return;
     autoCreateAttemptedRef.current = true;
     void createSession();
@@ -471,13 +443,21 @@ export const TerminalPanel = () => {
       if (mountedRef.current) setAutoCreating(false);
     }
   };
+  createSessionRef.current = createSession;
+
+  useEffect(() => {
+    if (!terminalReady || booting) return;
+    const openRequestedTerminal = () => {
+      if (!consumeNewTerminalSessionRequest()) return;
+      void createSessionRef.current();
+    };
+    openRequestedTerminal();
+    window.addEventListener(NEW_TERMINAL_SESSION_EVENT, openRequestedTerminal);
+    return () => window.removeEventListener(NEW_TERMINAL_SESSION_EVENT, openRequestedTerminal);
+  }, [terminalReady, booting]);
 
   const killSession = (sessionId: string) => {
     delete outputBufferRef.current[sessionId];
-    if (sessionId === AGENT_COMMAND_SESSION_ID) {
-      useAppStore.getState().removeTerminalSession(sessionId);
-      return;
-    }
     if (isDesktop()) {
       void ptyKill(sessionId);
       useAppStore.getState().removeTerminalSession(sessionId);

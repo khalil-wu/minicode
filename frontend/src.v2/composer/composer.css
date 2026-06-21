@@ -165,7 +165,7 @@
 }
 
 .composer-send-btn:hover:not(:disabled) {
-  background: #FF8800;
+  background: var(--accent-primary);
   box-shadow: var(--shadow-md);
   transform: scale(1.05);
 }

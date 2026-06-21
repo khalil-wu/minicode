@@ -2,6 +2,7 @@ import { useAppStore } from "../stores";
 import type {
   ConnectorsMarketplaceListEvent,
   EnvListEvent,
+  FileChangedEvent,
   GitPrStatusEvent,
   SchedulerListEvent,
   ServerEvent,
@@ -41,7 +42,7 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
       return true;
     }
     case "file.changed": {
-      const ev = e as unknown as { path?: string; event?: string; timestamp?: number };
+      const ev = e as FileChangedEvent & { timestamp?: number };
       if (ev.path) {
         s.addFileChange({ path: ev.path, event: ev.event ?? "change", timestamp: ev.timestamp ?? Date.now() });
         s.requestGitChanges();
@@ -74,8 +75,18 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
       return true;
     }
     case "terminal.list": {
-      if (e.sessions) {
-        s.setTerminalSessions(e.sessions
+      const ev = e as unknown as {
+        sessions?: {
+          session_id?: string;
+          pid?: number;
+          shell?: string;
+          cwd?: string;
+          is_alive?: boolean;
+          started_at?: number;
+        }[];
+      };
+      if (ev.sessions) {
+        s.setTerminalSessions(ev.sessions
           .filter((session) => typeof session.session_id === "string" && session.session_id.length > 0)
           .map((session) => ({
             id: session.session_id!,
@@ -119,9 +130,24 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
       return true;
     }
     case "mcp_status": {
-      if (e.servers) {
+      const ev = e as unknown as {
+        servers?: {
+          name: string;
+          status: string;
+          tools?: number;
+          tools_count?: number;
+          transport?: string;
+          error?: string;
+          phase?: string;
+          recoverable?: boolean;
+          requires_user_action?: boolean;
+          setup_hint?: string;
+          docs_url?: string;
+        }[];
+      };
+      if (ev.servers) {
         const prev = useAppStore.getState().mcpServers;
-        s.setMcpServers(e.servers.map((srv) => ({
+        s.setMcpServers(ev.servers.map((srv) => ({
           name: srv.name,
           status: srv.status as "connected" | "disconnected" | "error" | "reconnecting",
           tools: srv.tools_count ?? srv.tools,
@@ -133,7 +159,7 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
           setupHint: srv.setup_hint,
           docsUrl: srv.docs_url,
         })));
-        for (const srv of e.servers) {
+        for (const srv of ev.servers) {
           const was = prev.find((p) => p.name === srv.name);
           if (!was && srv.status === "connected") {
             pushToast(`MCP: ${srv.name} connected`, "success");

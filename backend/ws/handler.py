@@ -58,6 +58,7 @@ from backend.workspace.state import clear_active_workspace_root, get_active_work
 logger = logging.getLogger(__name__)
 
 MAX_PENDING_COMMAND_TASKS = 100
+COMMAND_BACKLOG_ERROR_INTERVAL_SECONDS = 2.0
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{4,64}$")
 
 
@@ -72,10 +73,7 @@ def _invalidate_runtime_status_cache() -> None:
 
 CONVERSATION_SCOPED_EVENT_TYPES = {
     "text_chunk",
-    "final_answer_started",
-    "final_answer_delta",
-    "final_answer_retracted",
-    "final_answer_committed",
+    "text_replace",
     "image_chunk",
     "thinking_delta",
     "thinking",
@@ -172,6 +170,7 @@ class WebSocketSession(
         self._command_semaphore = asyncio.Semaphore(20)  # max 20 concurrent commands
         self._command_tasks: set[asyncio.Task[Any]] = set()
         self._max_command_tasks = MAX_PENDING_COMMAND_TASKS
+        self._last_command_backlog_error_at = 0.0
         self._ws_send_lock = asyncio.Lock()
         self._use_control_protocol = bool(use_control_protocol)
         self._is_connected = True
@@ -565,13 +564,26 @@ class WebSocketSession(
             else []
         )
         pending_approvals = self._pending_approval_runtime_items()
-        workspace_root = self._workspace_root_for_conversation()
         active = self.active_conversation
+        if active is not None and getattr(active, "archived", False):
+            active = None
+            self.active_conversation_id = None
+        workspace_root = self._workspace_root_for_conversation()
         workspace_scope = workspace_scope_for(
             workspace_root=getattr(active, "workspace_root", "") if active is not None else "",
             worktree_path=getattr(active, "worktree_path", "") if active is not None else "",
         )
-        permission_profile = permission_profile_for_mode(self.permission_context.mode)
+        permission_payload = self._runtime_permission_payload(workspace_scope=workspace_scope)
+        if (
+            active is not None
+            and workspace_scope == "computer"
+            and self.permission_context.mode == DEFAULT_CONVERSATION_PERMISSION_MODE
+        ):
+            permission_payload = {
+                **permission_payload,
+                "profile": "auto",
+                "sandbox_status": sandbox_status_for("auto"),
+            }
         return {
             "session_id": self.session_id,
             "parent_session_id": None,
@@ -584,16 +596,120 @@ class WebSocketSession(
             "selected_model": self.selected_model or None,
             "invoked_skill_names": invoked_skill_names,
             "permission_mode": self.permission_context.mode,
-            "permission_profile": permission_profile,
+            "permission_profile": permission_payload["profile"],
             "permission_source": self.permission_context.source,
             "workspace_scope": workspace_scope,
-            "sandbox_status": sandbox_status_for(permission_profile),
+            "sandbox_status": permission_payload["sandbox_status"],
             "mcp": self._mcp_summary(),
+            "capabilities": self.runtime_capability_summary(permission_payload=permission_payload),
             "task_summary": task_summary,
             "running_tasks": running_tasks[:5],
             "pending_approval_count": len(pending_approvals),
             "pending_approvals": pending_approvals[:5],
         }
+
+    def _runtime_permission_payload(
+        self,
+        *,
+        workspace_scope: str | None = None,
+    ) -> dict[str, Any]:
+        profile = permission_profile_for_mode(self.permission_context.mode)
+        return {
+            "mode": self.permission_context.mode,
+            "profile": profile,
+            "source": self.permission_context.source,
+            "workspace_scope": workspace_scope or getattr(self.permission_context, "workspace_scope", "computer"),
+            "sandbox_status": sandbox_status_for(profile),
+        }
+
+    def runtime_capability_summary(
+        self,
+        *,
+        permission_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Compact per-session capability contract for runtime snapshots."""
+        self.refresh_tool_registry_if_mcp_changed(allow_when_busy=False)
+        permission = permission_payload or self._runtime_permission_payload()
+        try:
+            summary = self.tool_registry.build_capability_summary(
+                permission_checker=self.permission_checker,
+                permission_context=self.permission_context,
+            )
+        except Exception as exc:
+            logger.debug("session %s capability summary failed: %s", self.session_id, exc)
+            summary = {
+                "tools_total": 0,
+                "direct_tools": 0,
+                "core_tools": 0,
+                "deferred_tools": 0,
+                "hidden_tools": 0,
+                "mcp_proxy_tools": 0,
+                "commands": 0,
+                "skills": 0,
+                "mcp_resource_bridge": False,
+                "deferred_bridge": False,
+                "skill_bridge": False,
+            }
+        return {
+            "version": self.tool_registry.version,
+            "summary": summary,
+            "permission": permission,
+            "mcp_registry_version": self._mcp_registry_version_snapshot,
+        }
+
+    def runtime_capability_snapshot(self) -> dict[str, Any]:
+        """Full per-session capability contract, including current permissions."""
+        from backend.commands.catalog import get_enabled_composer_command_catalog
+
+        self.refresh_tool_registry_if_mcp_changed()
+        budget = int(getattr(getattr(self.config, "token_budget", None), "tool_schemas", 6000) or 6000)
+        snapshot = self.tool_registry.build_snapshot(
+            budget=budget,
+            permission_checker=self.permission_checker,
+            permission_context=self.permission_context,
+            mcp_registry_version=self._mcp_registry_version_snapshot,
+        )
+        snapshot["composer_commands"] = get_enabled_composer_command_catalog()
+        if self.skill_manager is not None and not snapshot.get("skills"):
+            loader = getattr(self.skill_manager, "_loader", None)
+            if loader is not None:
+                skills: list[dict[str, Any]] = []
+                for name in loader.list_skill_names():
+                    meta = loader.get_meta(name)
+                    entry: dict[str, Any] = {
+                        "name": name,
+                        "description": getattr(meta, "description", "") if meta else "",
+                    }
+                    if meta:
+                        entry.update({
+                            "version": getattr(meta, "version", ""),
+                            "triggers": getattr(meta, "triggers", []),
+                            "tools_required": getattr(meta, "tools_required", []),
+                            "source_level": getattr(meta, "source_level", "builtin"),
+                        })
+                    skills.append(entry)
+                snapshot["skills"] = skills
+                snapshot["summary"] = {
+                    **dict(snapshot.get("summary") or {}),
+                    "skills": len(skills),
+                }
+        snapshot["permission"] = self._runtime_permission_payload()
+        snapshot["mcp_registry_version"] = self._mcp_registry_version_snapshot
+        return snapshot
+
+    def runtime_capabilities_payload(self, *, source: str = "session") -> dict[str, Any]:
+        return {
+            "type": "runtime.capabilities",
+            "session_id": self.session_id,
+            "source": source,
+            "capabilities": self.runtime_capability_snapshot(),
+        }
+
+    async def _send_runtime_capabilities(self, *, source: str = "session") -> None:
+        await self._send_ws_payload(
+            self.runtime_capabilities_payload(source=source),
+            log_context="runtime.capabilities",
+        )
 
     def _mcp_summary(self) -> dict[str, Any]:
         """Compact MCP summary for the runtime snapshot: counts + short statuses.
@@ -779,13 +895,17 @@ class WebSocketSession(
                 else:
                     self._prune_command_tasks()
                     if len(self._command_tasks) >= self._max_command_tasks:
-                        await self._send_event(
-                            AgentEvent.error(
-                                "Too many pending commands; please wait for current work to finish.",
-                                recoverable=True,
-                                error_type="rate_limit",
+                        now = asyncio.get_running_loop().time()
+                        if now - self._last_command_backlog_error_at >= COMMAND_BACKLOG_ERROR_INTERVAL_SECONDS:
+                            self._last_command_backlog_error_at = now
+                            await self._send_event(
+                                AgentEvent.error(
+                                    "Too many pending commands; please wait for current work to finish.",
+                                    recoverable=True,
+                                    error_type="rate_limit",
+                                    error_code="command.backlog",
+                                )
                             )
-                        )
                         continue
 
                     async def _guarded_handle(command, connection_generation):
@@ -1266,6 +1386,9 @@ class WebSocketSession(
     async def _send_conversation_list(self) -> None:
         conversations = [item.to_dict() for item in self.conversation_repo.list_conversations()]
         active = self.active_conversation
+        if active is not None and getattr(active, "archived", False):
+            active = None
+            self.active_conversation_id = None
         await self._send_ws_payload(
             {
                 "type": "conversation.list",
@@ -1288,17 +1411,13 @@ class WebSocketSession(
                 sorted(event.data.keys()),
             )
             return
-        if event.type in {"text_chunk", "final_answer_delta"}:
+        if event.type == "text_chunk":
             chunk = str(event.data.get("content", ""))
             append_stream_text(
                 getattr(self, "_conversation_streams", {}),
                 str(target_conversation_id or ""),
                 chunk,
             )
-        elif event.type == "final_answer_retracted":
-            stream_state = getattr(self, "_conversation_streams", {}).get(str(target_conversation_id or ""))
-            if stream_state is not None:
-                stream_state["accumulated_text"] = ""
 
         payload = self._build_ws_payload(event)
         if target_conversation_id:

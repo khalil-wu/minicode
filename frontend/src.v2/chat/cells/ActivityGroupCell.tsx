@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type React from "react";
 import { CheckCircle2, ChevronDown, ChevronRight, Loader2, TriangleAlert } from "lucide-react";
 import type { ActivityCellState } from "./cellTypes";
@@ -15,13 +15,19 @@ import "./cells.css";
 export function ActivityGroupCell({
   cells,
   isActive = false,
+  defaultCollapsed = false,
 }: {
   cells: ActivityCellState[];
   isActive?: boolean;
+  defaultCollapsed?: boolean;
 }) {
   const status = groupStatus(cells, isActive);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(() => !defaultCollapsed);
+  const groupIdentity = useMemo(() => cells.map((cell) => cell.id).join("|"), [cells]);
+  const previousGroupIdentity = useRef(groupIdentity);
+  const userToggledRef = useRef(false);
   const summaryItems = useMemo(() => buildSummaryItems(cells), [cells]);
+  const previewItems = useMemo(() => buildPreviewItems(cells), [cells]);
 
   const progress = useMemo(() => {
     const completed = cells.filter(c => c.status === "done").reduce((sum, cell) => sum + recordCount(cell), 0);
@@ -31,9 +37,20 @@ export function ActivityGroupCell({
     return { completed, failed, running, total };
   }, [cells]);
 
+  // Only re-sync to defaultCollapsed when it actually flips — NOT on every
+  // stream tick. The previous deps ([cells, ..., status]) reset `expanded`
+  // whenever the rebuilt `cells` array reference changed (every event during
+  // streaming), discarding the user's manual collapse/expand.
   useEffect(() => {
-    setExpanded(false);
-  }, [cells, status]);
+    if (previousGroupIdentity.current !== groupIdentity) {
+      previousGroupIdentity.current = groupIdentity;
+      userToggledRef.current = false;
+      setExpanded(!defaultCollapsed);
+      return;
+    }
+    if (userToggledRef.current) return;
+    setExpanded(!defaultCollapsed);
+  }, [defaultCollapsed, groupIdentity]);
 
   if (cells.length === 0) return null;
 
@@ -43,7 +60,6 @@ export function ActivityGroupCell({
   const progressLabel = kind === "context"
     ? `${progress.total} 个来源`
     : `${progress.completed + progress.failed}/${progress.total}`;
-  const showDoneSummary = status !== "done";
 
   const groupStateClass = `activity-group-cell-${status}`;
 
@@ -54,7 +70,10 @@ export function ActivityGroupCell({
         aria-label={effectiveExpanded ? "Collapse activity details" : "Expand activity details"}
         aria-expanded={effectiveExpanded}
         data-toggleable="true"
-        onClick={() => setExpanded((value) => !value)}
+        onClick={() => {
+          userToggledRef.current = true;
+          setExpanded((value) => !value);
+        }}
         className="activity-group-header"
       >
         {effectiveExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
@@ -75,7 +94,19 @@ export function ActivityGroupCell({
               </span>
             ))}
           </span>
-        ) : !effectiveExpanded && showDoneSummary ? (
+        ) : !effectiveExpanded && previewItems.length > 0 ? (
+          <span className="activity-group-preview-list">
+            {previewItems.map((item) => (
+              <span key={item.key} className="activity-group-preview-item" title={item.title || item.text}>
+                <span className="activity-group-preview-label">{item.label}</span>
+                <span className="activity-group-preview-text">{item.text}</span>
+                {item.meta && (
+                  <span className="activity-group-preview-meta">{item.meta}</span>
+                )}
+              </span>
+            ))}
+          </span>
+        ) : !effectiveExpanded && summaryItems.length > 0 ? (
           <span className="activity-group-summary">
             {summaryItems.map((item) => (
               <span key={item} className="activity-group-pill">
@@ -90,7 +121,8 @@ export function ActivityGroupCell({
           {cells.map((cell) => (
             <ActivityCell
               key={cell.id}
-              cell={{ ...cell, collapsed: false }}
+              cell={cell}
+              forceExpanded
               isActive={isActive && cell.status === "running"}
             />
           ))}

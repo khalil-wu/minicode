@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import type { ExecCellState } from "./cellTypes";
 import { shortCommand } from "./activityCellHelpers";
+import { extractCommandCommentLabel } from "../../lib/command-comment-label";
 import "./cells.css";
 
 const streamOutputText = (full: string | undefined, preview: string[]): string =>
@@ -74,6 +75,10 @@ export function ExecCell({
             : "已取消";
   const title = commandTitle(cell.status);
   const commandPreview = shortCommand(cell.command).replace(/^\$\s*/, "");
+  // Prefer a leading `# comment` as the human-readable label (what the model
+  // wrote for the user to read); fall back to the raw command preview. The full
+  // command stays available via the title tooltip and the expanded shell block.
+  const commandLabel = extractCommandCommentLabel(cell.command) ?? commandPreview;
 
   const duration =
     cell.durationMs != null
@@ -121,7 +126,7 @@ export function ExecCell({
             <StatusIcon status={cell.status} />
           </span>
           <span className="exec-cell-title">{title}</span>
-          <span className="exec-cell-command-preview" title={cell.command}>{commandPreview}</span>
+          <span className="exec-cell-command-preview" title={cell.command}>{commandLabel}</span>
           <span className="exec-cell-meta">
             {statusLabel}
             {duration ? ` · ${duration}` : ""}

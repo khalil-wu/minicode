@@ -105,7 +105,7 @@ class AgentState:
     # Last recovery transition reason, for observability/debugging. Not load-bearing.
     transition: str = ""
     disabled_tools: set[str] = field(default_factory=set)
-    harness_guidance: str = ""
+    tool_runtime_guidance: str = ""
     loop_guidance: list[str] = field(default_factory=list)
 
     def disable_tools(self, names: set[str], guidance: str = "") -> None:

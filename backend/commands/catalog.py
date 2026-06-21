@@ -174,6 +174,15 @@ _BUILTIN_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "availability": _availability(scope="websocket"),
     },
     {
+        "name": "runtime.capabilities.inspect",
+        "label": "runtime.capabilities.inspect",
+        "description": "Inspect current runtime tool, command, skill, MCP, and permission capability exposure.",
+        "type": "protocol",
+        "source": "builtin",
+        "enabled": True,
+        "availability": _availability(scope="websocket"),
+    },
+    {
         "name": "read_artifact",
         "label": "read_artifact",
         "description": "Read a stored artifact body by artifact id.",
@@ -563,6 +572,58 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "search_text": "local usage cost token context budget",
         "type": "local",
         "kind": "local",
+        "source": "builtin",
+        "enabled": True,
+        "availability": _availability(scope="session"),
+    },
+    {
+        "id": "cmd-context-local",
+        "name": "context",
+        "command": "context",
+        "label": "/context",
+        "description": "查看上下文 token 用量和压缩阈值",
+        "template": "/context",
+        "search_text": "local context token budget compact",
+        "type": "local",
+        "kind": "local",
+        "source": "builtin",
+        "enabled": True,
+        "availability": _availability(scope="session"),
+    },
+    {
+        "id": "cmd-cost-local",
+        "name": "cost",
+        "command": "cost",
+        "label": "/cost",
+        "description": "查看当前会话成本和各模型用量",
+        "template": "/cost",
+        "search_text": "local cost usage spend price",
+        "type": "local",
+        "kind": "local",
+        "source": "builtin",
+        "enabled": True,
+        "availability": _availability(scope="session"),
+    },
+    {
+        "id": "cmd-init-template",
+        "name": "init",
+        "command": "init",
+        "label": "/init",
+        "description": "分析代码库并生成 CLAUDE.md 项目说明",
+        "template": (
+            "Analyze this codebase and create a CLAUDE.md file at the workspace root "
+            "documenting, concisely and accurately:\n"
+            "- Build, lint, and test commands (verify them before writing)\n"
+            "- Code style and naming conventions\n"
+            "- High-level architecture and key modules\n"
+            "- Important patterns and gotchas a new contributor must know\n"
+            "Read the actual config files (package.json, pyproject.toml, etc.) to get "
+            "commands right. Keep it short and useful — do not pad. Write the file with "
+            "the write_file tool when done."
+        ),
+        "search_text": "template init claudemd documentation bootstrap",
+        "type": "template",
+        "kind": "template",
         "source": "builtin",
         "enabled": True,
         "availability": _availability(scope="session"),

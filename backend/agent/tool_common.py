@@ -1,4 +1,4 @@
-"""Shared constants and utilities for the agent harness subsystem."""
+"""Shared constants and utilities for agent tool runtime helpers."""
 
 from __future__ import annotations
 

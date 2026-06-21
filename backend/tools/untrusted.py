@@ -1,7 +1,7 @@
 """Wrap untrusted external/observed content so the model treats it as data.
 
 Terminal output, fetched web pages, and other content that originates outside
-the harness can carry prompt-injection payloads. Wrapping it in explicit
+the agent runtime can carry prompt-injection payloads. Wrapping it in explicit
 ``<untrusted_tool_result>`` markers tells the model to treat the block as data,
 not instructions. The marker text matches the one used by web_fetch/web_search
 so the model sees a uniform contract across tools.

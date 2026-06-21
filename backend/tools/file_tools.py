@@ -258,7 +258,7 @@ class ReadFileTool(BaseTool):
         self._artifact_store = artifact_store
 
     def get_spec(self):
-        from backend.agent.harness.contracts import ToolSpec
+        from backend.tools.contracts import ToolSpec
 
         return ToolSpec(
             name=self.name,
@@ -418,13 +418,15 @@ class WriteFileTool(BaseTool):
         "Create a new file or completely replace an existing file's contents. Returns line count and content hash.\n\n"
         "Do NOT use run_command with echo/heredoc to create files — use write_file instead.\n"
         "Use edit_file when only small portions change. Use write_file when most content is new.\n"
-        "Read the file first with read_file before overwriting.\n\n"
+        "Read the file first with read_file before overwriting; existing files require the latest content_hash as expected_hash.\n"
+        "Do not create documentation files (*.md) or README files unless the user explicitly requested them.\n"
+        "Only use emojis in files if the user explicitly requests them.\n\n"
         "The file will be created with UTF-8 encoding. Parent directories are created automatically."
     )
     permission = PermissionLevel.DIFF_REVIEW
 
     def get_spec(self):
-        from backend.agent.harness.contracts import ToolSpec
+        from backend.tools.contracts import ToolSpec
 
         return ToolSpec(
             name=self.name,
@@ -565,14 +567,18 @@ class EditFileTool(BaseTool):
         "Make targeted string replacements in an existing file. Returns the edit summary and content hash.\n\n"
         "Do NOT use run_command with sed/awk to edit files — use edit_file instead.\n"
         "Use edit_file for targeted string replacements. Use write_file when most content is new.\n"
-        "Read the file first with read_file to get exact content for old_string matching.\n\n"
+        "Read the file first with read_file to get exact content for old_string matching and pass the latest content_hash as expected_hash.\n"
+        "When copying from read_file output, never include the line number prefix in old_string or new_string.\n"
+        "Prefer the smallest old_string that is clearly unique, usually 2-4 adjacent lines; avoid huge 10+ line context blocks when less is enough.\n"
+        "Use replace_all for intentional across-file renames or repeated replacements.\n"
+        "Only use emojis in files if the user explicitly requests them.\n\n"
         "The old_string must exactly match the text to replace (including whitespace and indentation) "
         "and must be unique within the file; include enough surrounding context to ensure uniqueness."
     )
     permission = PermissionLevel.DIFF_REVIEW
 
     def get_spec(self):
-        from backend.agent.harness.contracts import ToolSpec
+        from backend.tools.contracts import ToolSpec
 
         return ToolSpec(
             name=self.name,
@@ -728,7 +734,7 @@ class ListFilesTool(BaseTool):
     permission = PermissionLevel.AUTO
 
     def get_spec(self):
-        from backend.agent.harness.contracts import ToolSpec
+        from backend.tools.contracts import ToolSpec
 
         return ToolSpec(
             name=self.name,

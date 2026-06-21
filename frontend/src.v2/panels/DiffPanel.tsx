@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { Check, CheckCircle, Code2, Columns2, ExternalLink, FileDiff, GitBranch, MessageCircle, Minus, Plus, RefreshCw, RotateCcw, Rows3, X, XCircle } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Check, CheckCircle, ChevronDown, Code2, Columns2, ExternalLink, FileDiff, GitBranch, MessageCircle, Minus, Plus, RefreshCw, RotateCcw, Rows3, X, XCircle } from "lucide-react";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { useAppStore } from "../stores";
 import { buildApprovalResponseCommand } from "../protocol/prompt-responses";
@@ -8,6 +8,7 @@ import { useColorizedLines, extractFilePathFromDiff, guessLanguageFromPath } fro
 import { MonacoDiffView } from "../components/MonacoDiffView";
 
 type DiffViewMode = "unified" | "split" | "monaco";
+type ChangeScope = "review" | "history" | "git";
 const HISTORY_PREVIEW_LINE_LIMIT = 180;
 const INLINE_COLORIZE_LINE_LIMIT = 900;
 
@@ -68,11 +69,14 @@ export const DiffPanel = () => {
   const messages = useAppStore((s) => s.messages);
   const diffReview = useAppStore((s) => s.diffReview);
   const gitChanges = useAppStore((s) => s.gitChanges);
-  const [activeTab, setActiveTab] = useState<"review" | "history" | "git">(diffReview ? "review" : "history");
+  const [activeScope, setActiveScope] = useState<ChangeScope>(diffReview ? "review" : "git");
+  const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
+  const scopeMenuRef = useRef<HTMLDivElement | null>(null);
   const [diffViewMode, setDiffViewMode] = useState<DiffViewMode>("unified");
 
   useEffect(() => {
-    if (diffReview) setActiveTab("review");
+    if (diffReview) setActiveScope("review");
+    else setActiveScope((scope) => scope === "review" ? "git" : scope);
   }, [diffReview]);
 
   const historySources = useMemo(() => {
@@ -96,24 +100,77 @@ export const DiffPanel = () => {
     }
     return items.reverse();
   }, [messages]);
+  const gitChangeCount = gitChanges.workingTree.length + gitChanges.staged.length + gitChanges.untracked.length;
+  const visibleScope = activeScope === "review" && !diffReview ? "git" : activeScope;
+  const scopeOptions = [
+    ...(diffReview ? [{ value: "review" as const, label: "Pending review", count: 1 }] : []),
+    { value: "history" as const, label: "Last turn", count: historySources.length },
+    { value: "git" as const, label: "Uncommitted", count: gitChangeCount },
+  ];
+  const visibleScopeOption = scopeOptions.find((option) => option.value === visibleScope) ?? scopeOptions[0];
+
+  useEffect(() => {
+    if (!scopeMenuOpen) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!scopeMenuRef.current?.contains(event.target as Node)) setScopeMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setScopeMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [scopeMenuOpen]);
 
   return (
     <div className="h-full flex flex-col min-h-0">
-      <div className="flex items-center gap-0.5 px-2 shrink-0" style={{ borderBottom: "1px solid var(--border-subtle)", background: "var(--surface-page)" }}>
-        <TabButton active={activeTab === "review"} onClick={() => setActiveTab("review")} badge={diffReview ? 1 : 0}>
-          Review
-        </TabButton>
-        <TabButton active={activeTab === "history"} onClick={() => setActiveTab("history")} badge={historySources.length}>
-          History
-        </TabButton>
-        <TabButton active={activeTab === "git"} onClick={() => setActiveTab("git")} badge={gitChanges.workingTree.length + gitChanges.staged.length}>
-          Git Changes
-        </TabButton>
+      <div className="flex items-center gap-2 px-2 shrink-0" style={diffToolbarStyle}>
+        <div ref={scopeMenuRef} className="relative inline-flex items-center gap-1.5 min-w-0" style={{ color: "var(--text-muted)" }}>
+          <FileDiff size={14} />
+          <button
+            type="button"
+            aria-label={`Diff source: ${visibleScopeOption.label}${visibleScopeOption.count ? ` ${visibleScopeOption.count}` : ""}`}
+            aria-haspopup="listbox"
+            aria-expanded={scopeMenuOpen}
+            onClick={() => setScopeMenuOpen((open) => !open)}
+            style={scopeTriggerStyle}
+          >
+            <span className="truncate">{visibleScopeOption.label}</span>
+            {visibleScopeOption.count > 0 && (
+              <span style={scopeCountStyle}>{visibleScopeOption.count}</span>
+            )}
+            <ChevronDown size={13} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
+          </button>
+          {scopeMenuOpen && (
+            <div role="listbox" aria-label="Diff source" style={scopeMenuStyle}>
+              {scopeOptions.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  role="option"
+                  aria-selected={visibleScope === option.value}
+                  onClick={() => {
+                    setActiveScope(option.value);
+                    setScopeMenuOpen(false);
+                  }}
+                  style={scopeOptionStyle(visibleScope === option.value)}
+                >
+                  <span className="truncate">{option.label}</span>
+                  {option.count > 0 && <span style={scopeCountStyle}>{option.count}</span>}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         <span className="flex-1" />
         {diffViewMode !== "monaco" && (
           <button
             onClick={() => setDiffViewMode(diffViewMode === "unified" ? "split" : "unified")}
             title={diffViewMode === "unified" ? "Switch to split view" : "Switch to unified view"}
+            aria-label={diffViewMode === "unified" ? "Switch to split view" : "Switch to unified view"}
             className="w-6 h-[22px]"
             style={{ ...iconButtonStyle }}
           >
@@ -123,6 +180,7 @@ export const DiffPanel = () => {
         <button
           onClick={() => setDiffViewMode(diffViewMode === "monaco" ? "unified" : "monaco")}
           title={diffViewMode === "monaco" ? "Switch to unified view" : "Switch to Monaco diff view"}
+          aria-label={diffViewMode === "monaco" ? "Switch to unified view" : "Switch to Monaco diff view"}
           className="w-6 h-[22px]"
           style={{
             ...iconButtonStyle,
@@ -134,9 +192,9 @@ export const DiffPanel = () => {
         </button>
       </div>
       <div className="flex-1 min-h-0 overflow-hidden">
-        {activeTab === "review" && <ReviewTab diffReview={diffReview} viewMode={diffViewMode} />}
-        {activeTab === "history" && <HistoryTab sources={historySources} viewMode={diffViewMode} />}
-        {activeTab === "git" && <GitChangesTab viewMode={diffViewMode} />}
+        {visibleScope === "review" && <ReviewTab diffReview={diffReview} viewMode={diffViewMode} />}
+        {visibleScope === "history" && <HistoryTab sources={historySources} viewMode={diffViewMode} />}
+        {visibleScope === "git" && <GitChangesTab viewMode={diffViewMode} />}
       </div>
     </div>
   );
@@ -469,27 +527,74 @@ const fileDecisionBtnStyle: React.CSSProperties = {
   flexShrink: 0,
 };
 
-// ── Tab Button ───────────────────────────────────────────────────
+const diffToolbarStyle: React.CSSProperties = {
+  minHeight: 38,
+  borderBottom: "1px solid var(--border-subtle)",
+  background: "var(--surface-page)",
+};
 
-const TabButton = ({ active, onClick, badge, children }: { active: boolean; onClick: () => void; badge?: number; children: React.ReactNode }) => (
-  <button
-    onClick={onClick}
-    className="inline-flex items-center gap-1.5 px-2.5 pt-[7px] pb-[5px] border-0 cursor-pointer"
-    style={{
-      borderBottom: active ? "2px solid var(--accent-primary)" : "2px solid transparent",
-      background: "transparent",
-      color: active ? "var(--text-primary)" : "var(--text-muted)",
-      fontSize: "var(--text-xs)",
-    }}
-  >
-    {children}
-    {badge != null && badge > 0 && (
-      <span className="rounded-lg px-1.5 leading-4" style={{ background: "var(--accent-primary)", color: "var(--text-on-accent)", fontSize: 10 }}>
-        {badge}
-      </span>
-    )}
-  </button>
-);
+const scopeTriggerStyle: React.CSSProperties = {
+  minHeight: 28,
+  maxWidth: 210,
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  border: "1px solid var(--border-subtle)",
+  borderRadius: "var(--radius-md, 8px)",
+  background: "var(--surface-base)",
+  color: "var(--text-primary)",
+  fontSize: "var(--text-sm)",
+  fontWeight: 700,
+  padding: "0 8px",
+  cursor: "pointer",
+  boxShadow: "0 1px 1px color-mix(in oklch, var(--text-primary) 6%, transparent)",
+};
+
+const scopeMenuStyle: React.CSSProperties = {
+  position: "absolute",
+  top: "calc(100% + 5px)",
+  left: 20,
+  zIndex: 20,
+  width: 210,
+  padding: 4,
+  border: "1px solid var(--border-subtle)",
+  borderRadius: "var(--radius-md, 8px)",
+  background: "var(--surface-raised)",
+  boxShadow: "var(--shadow-strong, var(--shadow-md))",
+};
+
+const scopeOptionStyle = (active: boolean): React.CSSProperties => ({
+  width: "100%",
+  minHeight: 28,
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  padding: "0 8px",
+  border: 0,
+  borderRadius: "var(--radius-sm, 5px)",
+  background: active ? "var(--surface-active)" : "transparent",
+  color: active ? "var(--text-primary)" : "var(--text-secondary)",
+  cursor: "pointer",
+  fontSize: "var(--text-sm)",
+  fontWeight: active ? 700 : 500,
+  textAlign: "left",
+});
+
+const scopeCountStyle: React.CSSProperties = {
+  minWidth: 18,
+  height: 18,
+  padding: "0 5px",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  borderRadius: 999,
+  background: "color-mix(in oklch, var(--accent-primary) 12%, transparent)",
+  border: "1px solid color-mix(in oklch, var(--accent-primary) 28%, transparent)",
+  color: "var(--accent-primary)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 10,
+  flexShrink: 0,
+};
 
 // ── Review Tab ───────────────────────────────────────────────────
 
@@ -707,7 +812,7 @@ const HistoryTab = ({ sources, viewMode }: { sources: { id: string; name: string
   );
 };
 
-// ── Git Changes Tab ──────────────────────────────────────────────
+// ── Working Tree Tab ─────────────────────────────────────────────
 
 const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
   const gitChanges = useAppStore((s) => s.gitChanges);
@@ -771,7 +876,7 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
   if (allFiles.length === 0 && gitChanges.untracked.length === 0) {
     return (
       <div className="flex-1 grid place-items-center p-4" style={{ color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>
-        Working tree clean. No uncommitted changes.
+        No uncommitted changes.
       </div>
     );
   }
@@ -785,7 +890,7 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
         <div className="flex flex-col gap-1.5" style={{ fontSize: "var(--text-xs)" }}>
           <div className="flex items-center gap-1.5">
             <GitBranch size={13} color="var(--accent-primary)" />
-            <span className="flex-1 font-bold" style={{ color: "var(--text-primary)" }}>Git Changes</span>
+            <span className="flex-1 font-bold" style={{ color: "var(--text-primary)" }}>Uncommitted changes</span>
             <button onClick={requestGitChanges} title="Refresh" aria-label="Refresh git changes" className="w-[22px] h-5" style={iconButtonStyle}>
               <RefreshCw size={11} className={gitChanges.loading ? "spin" : ""} />
             </button>

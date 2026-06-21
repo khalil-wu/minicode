@@ -424,10 +424,21 @@ _LOCAL_FILE_TOOL_PATTERNS = [
     "find_references",
 ]
 
-def _is_bypass_local_file_tool(tool_name: str, context: PermissionContext | None) -> bool:
-    return context is not None and context.mode == "bypass" and any(
-        fnmatch.fnmatch(tool_name, pattern) for pattern in _LOCAL_FILE_TOOL_PATTERNS
-    )
+_DEFAULT_PATH_DENYLIST = tuple(PermissionSettings().path_denylist)
+_DEFAULT_PATH_DENYLIST_NORMALIZED = frozenset(
+    pattern.replace("\\", "/").strip() for pattern in _DEFAULT_PATH_DENYLIST
+)
+
+
+def _bypass_denylist(configured: list[str]) -> list[str]:
+    """Keep built-in secret/repo guards in bypass, skip custom workspace policy."""
+    configured_normalized = {
+        pattern.replace("\\", "/").strip()
+        for pattern in configured
+    }
+    if _DEFAULT_PATH_DENYLIST_NORMALIZED.issubset(configured_normalized):
+        return list(_DEFAULT_PATH_DENYLIST)
+    return []
 
 
 class PermissionChecker:
@@ -444,11 +455,32 @@ class PermissionChecker:
         self._workspace_root = (workspace_root or Path.cwd()).resolve()
         self._sandbox = SandboxValidator(self._workspace_root)
         self._rule_matcher = PermissionRuleMatcher(self._workspace_root)
+        # Pre-parse content rules (Tool(content) syntax) once.
+        from backend.permissions.content_rules import parse_content_rules
+
+        self._content_allow = parse_content_rules(list(getattr(settings, "content_allow_rules", [])))
+        self._content_deny = parse_content_rules(list(getattr(settings, "content_deny_rules", [])))
 
     def with_workspace_root(self, workspace_root: Path | str | None) -> "PermissionChecker":
         if workspace_root is None:
             return self
         return PermissionChecker(self._settings, Path(workspace_root))
+
+    def _content_rule_decision(
+        self,
+        tool_name: str,
+        args: dict[str, Any] | None,
+    ) -> PermissionLevel | None:
+        """Evaluate parsed Tool(content) rules. Returns ALWAYS_DENY, AUTO, or None."""
+        from backend.permissions.content_rules import rule_matches_call
+
+        for rule in self._content_deny:
+            if rule_matches_call(rule, tool_name, args):
+                return PermissionLevel.ALWAYS_DENY
+        for rule in self._content_allow:
+            if rule_matches_call(rule, tool_name, args):
+                return PermissionLevel.AUTO
+        return None
 
     def build_context(
         self,
@@ -503,6 +535,16 @@ class PermissionChecker:
             if override is not None:
                 return override
 
+        # Content-level rules (Tool(content) syntax). A deny rule wins in every
+        # mode (safety); an allow rule forces AUTO except in plan mode (plan is
+        # strict read-only regardless of allow rules).
+        content_decision = self._content_rule_decision(tool_name, args)
+        if content_decision == PermissionLevel.ALWAYS_DENY:
+            return PermissionLevel.ALWAYS_DENY
+        if content_decision == PermissionLevel.AUTO and (context is None or context.mode != "plan"):
+            return PermissionLevel.AUTO
+
+        if context is not None:
             if context.mode == "confirm" and self._matches(tool_name, _READ_ONLY_NETWORK_TOOL_PATTERNS):
                 return PermissionLevel.CONFIRM
             if context.mode == "auto" and _network_target_requires_confirmation(tool_name, args, context):
@@ -524,7 +566,7 @@ class PermissionChecker:
                 mode_level = PermissionLevel.AUTO
             elif context.mode == "auto":
                 if self._matches(tool_name, _WRITE_TOOL_PATTERNS):
-                    mode_level = PermissionLevel.AUTO
+                    mode_level = PermissionLevel.DIFF_REVIEW
                 elif _network_target_requires_confirmation(tool_name, args, context):
                     mode_level = PermissionLevel.CONFIRM
                 elif tool is not None and self._tool_invocation_is_read_only(tool, args):
@@ -688,6 +730,8 @@ class PermissionChecker:
                 path_denylist = list(context.filesystem_constraints["denylist"])
             if "allowlist" in context.filesystem_constraints:
                 path_allowlist = list(context.filesystem_constraints["allowlist"])
+            if context.mode == "bypass":
+                path_denylist = _bypass_denylist(path_denylist)
 
         for deny_pattern in path_denylist:
             normalized_deny = deny_pattern.replace("\\", "/").strip()
@@ -745,8 +789,9 @@ class PermissionChecker:
         # tools may legitimately use fields named "path" for remote resources.
         if args:
             if self._matches(tool_name, _LOCAL_FILE_TOOL_PATTERNS):
-                if _is_bypass_local_file_tool(tool_name, context):
-                    return None
+                # Bypass skips the workspace allowlist (full workspace access)
+                # below, but the denylist/sandbox safety check still runs — .git,
+                # secrets, and settings stay protected even in bypass.
                 file_path = args.get("file_path") or args.get("directory") or args.get("path")
                 if tool_name == "list_files" and str(file_path or "").strip() in {"", "."}:
                     file_path = None
@@ -762,7 +807,7 @@ class PermissionChecker:
                         f"禁止的路径模式: {self._settings.path_denylist}。"
                     )
 
-                if file_path:
+                if file_path and not (context is not None and context.mode == "bypass"):
                     operation = "write" if self._matches(tool_name, _WRITE_TOOL_PATTERNS) else "read"
                     allowed, reason = self.validate_file_operation(str(file_path), operation)
                     if not allowed:

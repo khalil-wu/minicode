@@ -12,7 +12,12 @@ export function ThinkingCell({ cell, isStreaming = false }: { cell: ThinkingCell
   }, [isStreaming]);
 
   const hasContent = Boolean(cell.content?.trim());
-  const renderAsProcessText = hasContent && (cell.source === "model_preamble" || cell.source === "runtime" || cell.source === "reasoning");
+  const renderAsProcessText = hasContent && (
+    cell.source === "model_preamble" ||
+    cell.source === "post_tool" ||
+    cell.source === "runtime" ||
+    cell.source === "reasoning"
+  );
   if (renderAsProcessText) {
     return (
       <div className="thinking-cell thinking-cell-process" data-source={cell.source}>
@@ -61,6 +66,7 @@ export function ThinkingCell({ cell, isStreaming = false }: { cell: ThinkingCell
 
 function labelForSource(source: ThinkingCellState["source"], isStreaming: boolean): string {
   if (source === "model_preamble") return "过程";
+  if (source === "post_tool") return "过程";
   if (source === "runtime") return "正在处理";
   if (source === "provider") return isStreaming ? "正在思考" : "思考过程";
   return isStreaming ? "正在思考" : "思考过程";

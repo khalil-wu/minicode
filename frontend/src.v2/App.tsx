@@ -2,7 +2,6 @@ import { lazy, Suspense } from "react";
 import { WorkbenchShell } from "./shell/WorkbenchShell";
 import { QuickOpen } from "./overlays/QuickOpen";
 import { ToastContainer } from "./overlays/ToastContainer";
-import { ApprovalModal } from "./overlays/ApprovalModal";  // 🔧 新增
 import { AskUserPrompt } from "./overlays/AskUserPrompt";  // 🔧 新增
 import { DiffReviewModal } from "./overlays/DiffReviewModal";  // 🔧 新增
 import { useWebSocketConnection } from "./hooks/useWebSocket";
@@ -37,7 +36,6 @@ export const App = () => {
         <WorkbenchShell />
       </SafeBoundary>
       <SharedBackdrop />
-      <ApprovalModal />  {/* 🔧 新增：权限审批对话框 */}
       <AskUserPrompt />  {/* 🔧 新增：用户提问对话框 */}
       <DiffReviewModal />  {/* 🔧 新增：代码审查对话框 */}
       <ChunkErrorBoundary>

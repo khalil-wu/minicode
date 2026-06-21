@@ -32,6 +32,9 @@ export interface ToolCallRecord {
   stepId?: string;
   iterationId?: string;
   phase?: string;
+  displayScope?: string;
+  panelHint?: string;
+  requiresAttention?: boolean;
   startedAt: number;
   finishedAt?: number;
   outputPreview?: string;
@@ -163,6 +166,9 @@ export const reduceToolCallStart = (
     stepId: e.step_id,
     iterationId: e.iteration_id,
     phase: e.phase,
+    displayScope: e.display_scope,
+    panelHint: e.panel_hint,
+    requiresAttention: e.requires_attention,
   });
   return next;
 };
@@ -208,6 +214,9 @@ export const reduceToolCallResult = (
     durationMs: e.duration_ms,
     iterationId: e.iteration_id ?? existing.iterationId,
     phase: e.phase ?? existing.phase,
+    displayScope: e.display_scope ?? existing.displayScope,
+    panelHint: e.panel_hint ?? existing.panelHint,
+    requiresAttention: e.requires_attention ?? existing.requiresAttention,
     diff: normalizeToolDiff(e.diff) ?? existing.diff,
     finishedAt: now,
   });

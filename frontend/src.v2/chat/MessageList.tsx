@@ -6,6 +6,7 @@ import { workspaceDisplayName } from "../lib/workspace-display";
 import { projectMessagesToTurns, projectRecentMessagesToTurns } from "./chatSurfaceState";
 import { ChatTurn } from "./components/ChatTurn";
 import { openWorkspaceFolder } from "../workspace/openWorkspaceFolder";
+import { hasVisibleActiveConversation } from "./activeConversation";
 
 const RECENT_TURN_WINDOW = 40;
 
@@ -24,8 +25,7 @@ export const MessageList = () => {
   const [faded, setFaded] = useState(false);
   const [showAllHistory, setShowAllHistory] = useState(false);
 
-  // 如果没有active conversation且conversations为空，不显示messages
-  const shouldShowMessages = conversationId !== null || conversations.length > 0;
+  const shouldShowMessages = hasVisibleActiveConversation(conversationId, conversations);
 
   const projectedTurns = useMemo(
     () => !shouldShowMessages
@@ -145,7 +145,7 @@ export const MessageList = () => {
           opacity: faded ? 0 : 1,
         }}
       >
-        {messages.length === 0 ? (
+        {!shouldShowMessages || messages.length === 0 ? (
           <>
             <EmptyState />
           </>
@@ -219,6 +219,7 @@ export const MessageList = () => {
 };
 
 const EmptyState = () => {
+  const appMode = useAppStore((s) => s.appMode);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const currentModel = useAppStore((s) => s.currentModel);
   const settingsOpen = useAppStore((s) => s.settingsOpen);
@@ -235,7 +236,7 @@ const EmptyState = () => {
       window.dispatchEvent(new CustomEvent("minicode:settings-tab", { detail: "provider" }));
     }, 0);
   };
-  const startChat = () => createConversation({ bindWorkspace: hasProjectWorkspace });
+  const startChat = () => createConversation({ appMode, bindWorkspace: hasProjectWorkspace });
 
   return (
     <div className="workbench-empty-state">

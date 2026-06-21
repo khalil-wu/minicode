@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
-from backend.agent.harness.contracts import ToolSpec
-from backend.agent.harness._common import WEB_SEARCH_TOOL_NAMES, WEB_FETCH_TOOL_NAMES
+from backend.tools.contracts import ToolSpec
+from backend.agent.tool_common import WEB_SEARCH_TOOL_NAMES, WEB_FETCH_TOOL_NAMES
 
 if TYPE_CHECKING:
     from backend.tools.registry import ToolRegistry

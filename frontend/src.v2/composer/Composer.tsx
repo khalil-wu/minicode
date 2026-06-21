@@ -10,6 +10,8 @@ import { ComposerTextarea } from "./ComposerTextarea";
 import { MenuOverlay } from "./MenuOverlay";
 import { FooterRow } from "./FooterRow";
 import { uploadComposerFiles } from "./uploads";
+import { InlineAgentPrompt } from "../chat/InlineAgentPrompt";
+import { InlineTaskList } from "../chat/components/InlineTaskList";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { buildContextFallback, buildContextPayload } from "./contextPayload";
 import {
@@ -19,6 +21,8 @@ import {
   resolveRuntimeSlashMenuSelection,
   syncRuntimeSlashPanelForDraft,
 } from "../lib/runtime-commands";
+
+let initialCatalogRequested = false;
 
 export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const draft = useAppStore((s) => s.draft);
@@ -62,8 +66,6 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const activeSlashCommand = selectedSlashCommand ?? getActiveRuntimeSlashCommand(draft);
   const commandModeActive = Boolean(activeSlashCommand && !slashPanelOpen);
   const changedFiles = [...gitChanges.workingTree, ...gitChanges.staged];
-  const additions = changedFiles.reduce((sum, file) => sum + file.additions, 0);
-  const deletions = changedFiles.reduce((sum, file) => sum + file.deletions, 0);
   const hasGitChanges = changedFiles.length > 0 || gitChanges.untracked.length > 0;
 
   const openDiffReview = () => {
@@ -339,11 +341,14 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     return () => document.removeEventListener("mousedown", onClickOutside);
   }, [closeSlashPanel, closeMentionPanel]);
 
-  // Request full command list from backend on mount
+  // Request full command/skill lists once; websocket reconnect already refreshes
+  // command metadata, so repeated Composer remounts should not spam the backend.
   useEffect(() => {
+    if (minimal || initialCatalogRequested) return;
+    initialCatalogRequested = true;
     sendClientCommand({ type: "commands.list" });
     sendClientCommand({ type: "skills.list" });
-  }, []);
+  }, [minimal]);
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
@@ -358,45 +363,40 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   };
 
   return (
-    <div
-      ref={containerRef}
-      onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-      onDragLeave={() => setDragOver(false)}
-      onDrop={handleDrop}
-      className="composer-container relative mx-auto flex flex-col transition-[background_140ms_ease,border-color_300ms_ease,box-shadow_140ms_ease]"
-      style={{
-        position: "relative",
-        left: undefined,
-        bottom: undefined,
-        transform: undefined,
-        zIndex: minimal ? undefined : 6,
-        display: "flex",
-        flexDirection: "column",
-        width: minimal ? "100%" : wideMode ? "var(--chat-wide-axis-width)" : "var(--chat-composer-axis-width)",
-        marginBottom: codeMode ? "14px" : minimal ? 0 : "16px",
-        padding: codeMode ? "0" : "8px 10px 10px",
-        background: commandModeActive ? commandComposerBackground : "var(--surface-page)",
-        border: dragOver
-          ? "2px dashed var(--command-accent, var(--state-info))"
-          : commandModeActive
-            ? "1px solid var(--command-border, var(--state-info))"
-            : "1px solid var(--border-subtle)",
-        borderRadius: codeMode ? "var(--radius-md, 8px)" : "var(--radius-lg, 8px)",
-        boxShadow: commandModeActive
-          ? "0 0 0 1px color-mix(in oklch, var(--command-accent, var(--state-info)) 10%, transparent)"
-          : "none",
-      }}
-    >
+    <>
+      {!minimal && <InlineTaskList wide={wideMode} />}
+      <div
+        ref={containerRef}
+        onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={handleDrop}
+        className="composer-container relative mx-auto flex flex-col transition-[background_140ms_ease,border-color_300ms_ease,box-shadow_140ms_ease]"
+        style={{
+          position: "relative",
+          left: undefined,
+          bottom: undefined,
+          transform: undefined,
+          zIndex: minimal ? undefined : 6,
+          display: "flex",
+          flexDirection: "column",
+          width: minimal ? "100%" : wideMode ? "var(--chat-wide-axis-width)" : "var(--chat-composer-axis-width)",
+          marginBottom: codeMode ? "14px" : minimal ? 0 : "16px",
+          padding: codeMode ? "0" : "8px 10px 10px",
+          background: commandModeActive ? commandComposerBackground : "var(--surface-page)",
+          border: dragOver
+            ? "2px dashed var(--command-accent, var(--state-info))"
+            : commandModeActive
+              ? "1px solid var(--command-border, var(--state-info))"
+              : "1px solid var(--border-subtle)",
+          borderRadius: codeMode ? "var(--radius-md, 8px)" : "var(--radius-lg, 8px)",
+          boxShadow: commandModeActive
+            ? "0 0 0 1px color-mix(in oklch, var(--command-accent, var(--state-info)) 10%, transparent)"
+            : "none",
+        }}
+      >
       {codeMode && (
         <div className="min-h-[36px] flex items-center gap-3 px-3 text-sm" style={{ borderBottom: "1px solid var(--border-subtle)" }}>
           <span className="flex-1" />
-          {(additions > 0 || deletions > 0 || gitChanges.untracked.length > 0) && (
-            <span className="inline-flex items-center gap-[5px] h-[26px] px-[10px] rounded-sm font-mono font-bold" style={{ background: "var(--surface-base)", border: "1px solid var(--border-subtle)" }}>
-              {additions > 0 && <span style={{ color: "var(--state-success)" }}>+{additions.toLocaleString()}</span>}
-              {deletions > 0 && <span style={{ color: "var(--state-danger)" }}>-{deletions.toLocaleString()}</span>}
-              {gitChanges.untracked.length > 0 && <span style={{ color: "var(--text-muted)" }}>+{gitChanges.untracked.length} files</span>}
-            </span>
-          )}
           {hasGitChanges && (
             <button
               type="button"
@@ -416,6 +416,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         </div>
       )}
       {activeGoal && <GoalBar />}
+      <InlineAgentPrompt />
       <ContextChipRegion />
       <AttachmentStrip />
       <ComposerTextarea
@@ -448,7 +449,8 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         placement={minimal ? "below" : "above"}
       />
       <FooterRow sendState={sendState} onSend={sendState === "stop" ? stopRun : submit} compact={codeMode} minimal={minimal} />
-    </div>
+      </div>
+    </>
   );
 };
 

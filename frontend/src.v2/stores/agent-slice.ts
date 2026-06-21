@@ -1,47 +1,240 @@
 import type { StateCreator } from "zustand";
-import type { AppStore, AgentSlice } from "./types";
+import type { AgentSlice } from "./types";
 import {
   progressConversationKey,
   automaticRightPanelState,
 } from "./shared-helpers";
+import { hasVisiblePlanSteps } from "../lib/planVisibility";
+import type { AgentProgressEntry, AppStore, ConversationAgentState, ProgressContentBlock } from "./types";
+
+const SERIAL_MAIN_PROGRESS_STAGES = new Set<ProgressContentBlock["stage"]>([
+  "planning",
+  "verification",
+  "final",
+  "status",
+]);
+
+function shouldSerializeMainAgentProgress(progress: Omit<ProgressContentBlock, "type" | "timestamp">): boolean {
+  return (
+    progress.status === "running" &&
+    SERIAL_MAIN_PROGRESS_STAGES.has(progress.stage) &&
+    progress.stage !== "tool" &&
+    progress.stage !== "approval"
+  );
+}
+
+function completePreviousMainAgentProgress(
+  items: AgentProgressEntry[],
+  key: string,
+  next: Omit<ProgressContentBlock, "type" | "timestamp">,
+  timestamp: number,
+): AgentProgressEntry[] {
+  if (!shouldSerializeMainAgentProgress(next)) return items;
+  return items.map((item) => {
+    if (item.conversationId !== key) return item;
+    if (item.id === next.id) return item;
+    if (item.status !== "running") return item;
+    if (!SERIAL_MAIN_PROGRESS_STAGES.has(item.stage)) return item;
+    if (item.stage === "tool" || item.stage === "approval") return item;
+    return { ...item, status: "completed", timestamp };
+  });
+}
+
+function emptyConversationAgentState(): ConversationAgentState {
+  return {
+    plan: null,
+    todos: [],
+    subagents: [],
+    agentProgress: [],
+  };
+}
+
+function cloneConversationAgentState(state: ConversationAgentState): ConversationAgentState {
+  return {
+    plan: state.plan,
+    todos: state.todos.slice(),
+    subagents: state.subagents.slice(),
+    agentProgress: state.agentProgress.slice(),
+  };
+}
+
+function liveConversationAgentState(s: AppStore): ConversationAgentState {
+  return {
+    plan: s.plan,
+    todos: s.todos.slice(),
+    subagents: s.subagents.slice(),
+    agentProgress: s.agentProgress.slice(),
+  };
+}
+
+function targetConversationId(s: AppStore, conversationId?: string): string | undefined {
+  return conversationId || s.conversationId || undefined;
+}
+
+function isActiveConversationTarget(s: AppStore, conversationId?: string): boolean {
+  const targetId = targetConversationId(s, conversationId);
+  return !targetId || targetId === s.conversationId;
+}
+
+function getStoredConversationAgentState(s: AppStore, conversationId: string): ConversationAgentState {
+  if (conversationId === s.conversationId) return liveConversationAgentState(s);
+  return cloneConversationAgentState(s.conversationAgentStates?.[conversationId] ?? emptyConversationAgentState());
+}
+
+function storeConversationAgentState(
+  s: AppStore,
+  conversationId: string,
+  state: ConversationAgentState,
+): Record<string, ConversationAgentState> {
+  return {
+    ...(s.conversationAgentStates ?? {}),
+    [conversationId]: cloneConversationAgentState(state),
+  };
+}
 
 export const createAgentSlice: StateCreator<AppStore, [], [], AgentSlice> = (set, get) => ({
   plan: null,
   todos: [],
   subagents: [],
   agentProgress: [],
+  conversationAgentStates: {},
   runtimeSession: null,
+  runtimeCapabilities: null,
   budgetBuckets: [],
   totalBudgetPercent: 0,
-  setPlan: (p) =>
-    set((s) => ({
-      plan: p,
-      ...(p && p.status !== "completed" && p.status !== "cancelled"
-        ? automaticRightPanelState(s, "plan")
-        : {}),
-    })),
+  setPlan: (p, conversationId) =>
+    set((s) => {
+      const targetId = targetConversationId(s, conversationId);
+      const active = isActiveConversationTarget(s, targetId);
+      if (!active && targetId) {
+        const targetState = getStoredConversationAgentState(s, targetId);
+        return {
+          conversationAgentStates: storeConversationAgentState(s, targetId, {
+            ...targetState,
+            plan: p,
+          }),
+        };
+      }
+      const patch = {
+        plan: p,
+        ...(targetId
+          ? {
+              conversationAgentStates: storeConversationAgentState(s, targetId, {
+                ...liveConversationAgentState(s),
+                plan: p,
+              }),
+            }
+          : {}),
+        ...(hasVisiblePlanSteps(p) && p?.status !== "completed" && p?.status !== "cancelled"
+          ? automaticRightPanelState(s, "plan")
+          : {}),
+      };
+      return patch;
+    }),
   updatePlanStep: (idx, status) =>
     set((s) => {
       if (!s.plan) return s;
       const steps = s.plan.steps.slice();
       if (idx < 0 || idx >= steps.length) return s;
       steps[idx] = { ...steps[idx], status };
-      return { plan: { ...s.plan, steps } };
+      const plan = { ...s.plan, steps };
+      return {
+        plan,
+        ...(s.conversationId
+          ? {
+              conversationAgentStates: storeConversationAgentState(s, s.conversationId, {
+                ...liveConversationAgentState(s),
+                plan,
+              }),
+            }
+          : {}),
+      };
     }),
-  setTodos: (t) => set({ todos: t }),
-  addTodo: (todo) =>
-    set((s) => ({
-      todos: [...s.todos, todo],
-    })),
-  removeTodo: (id) =>
-    set((s) => ({
-      todos: s.todos.filter((todo) => todo.id !== id),
-    })),
-  updateTodo: (id, patch) =>
+  setTodos: (t, conversationId) =>
     set((s) => {
-      const index = s.todos.findIndex((todo) => todo.id === id);
+      const targetId = targetConversationId(s, conversationId);
+      const active = isActiveConversationTarget(s, targetId);
+      if (!active && targetId) {
+        const targetState = getStoredConversationAgentState(s, targetId);
+        return {
+          conversationAgentStates: storeConversationAgentState(s, targetId, {
+            ...targetState,
+            todos: t.slice(),
+          }),
+        };
+      }
+      return {
+        todos: t,
+        ...(targetId
+          ? {
+              conversationAgentStates: storeConversationAgentState(s, targetId, {
+                ...liveConversationAgentState(s),
+                todos: t.slice(),
+              }),
+            }
+          : {}),
+      };
+    }),
+  addTodo: (todo, conversationId) =>
+    set((s) => {
+      const targetId = targetConversationId(s, conversationId);
+      const active = isActiveConversationTarget(s, targetId);
+      const targetState = active ? liveConversationAgentState(s) : targetId ? getStoredConversationAgentState(s, targetId) : liveConversationAgentState(s);
+      const todos = [...targetState.todos, todo];
+      if (!active && targetId) {
+        return {
+          conversationAgentStates: storeConversationAgentState(s, targetId, {
+            ...targetState,
+            todos,
+          }),
+        };
+      }
+      return {
+        todos,
+        ...(targetId
+          ? {
+              conversationAgentStates: storeConversationAgentState(s, targetId, {
+                ...targetState,
+                todos,
+              }),
+            }
+          : {}),
+      };
+    }),
+  removeTodo: (id, conversationId) =>
+    set((s) => {
+      const targetId = targetConversationId(s, conversationId);
+      const active = isActiveConversationTarget(s, targetId);
+      const targetState = active ? liveConversationAgentState(s) : targetId ? getStoredConversationAgentState(s, targetId) : liveConversationAgentState(s);
+      const todos = targetState.todos.filter((todo) => todo.id !== id);
+      if (!active && targetId) {
+        return {
+          conversationAgentStates: storeConversationAgentState(s, targetId, {
+            ...targetState,
+            todos,
+          }),
+        };
+      }
+      return {
+        todos,
+        ...(targetId
+          ? {
+              conversationAgentStates: storeConversationAgentState(s, targetId, {
+                ...targetState,
+                todos,
+              }),
+            }
+          : {}),
+      };
+    }),
+  updateTodo: (id, patch, conversationId) =>
+    set((s) => {
+      const targetId = targetConversationId(s, conversationId);
+      const active = isActiveConversationTarget(s, targetId);
+      const targetState = active ? liveConversationAgentState(s) : targetId ? getStoredConversationAgentState(s, targetId) : liveConversationAgentState(s);
+      const index = targetState.todos.findIndex((todo) => todo.id === id);
       if (index < 0) return s;
-      const current = s.todos[index];
+      const current = targetState.todos[index];
       const nextTodo = { ...current, ...patch };
       if (
         current.status === nextTodo.status &&
@@ -50,70 +243,257 @@ export const createAgentSlice: StateCreator<AppStore, [], [], AgentSlice> = (set
       ) {
         return s;
       }
-      const todos = s.todos.slice();
+      const todos = targetState.todos.slice();
       todos[index] = nextTodo;
       const hasRunningTask = todos.some((todo) => todo.status === "in_progress");
+      if (!active && targetId) {
+        return {
+          conversationAgentStates: storeConversationAgentState(s, targetId, {
+            ...targetState,
+            todos,
+          }),
+        };
+      }
       return {
         todos,
         ...(hasRunningTask ? automaticRightPanelState(s, "tasks") : {}),
+        ...(targetId
+          ? {
+              conversationAgentStates: storeConversationAgentState(s, targetId, {
+                ...targetState,
+                todos,
+              }),
+            }
+          : {}),
       };
     }),
-  addSubagent: (sa) =>
-    set((s) => ({
-      subagents: [
-        ...s.subagents.filter((existing) => existing.id !== sa.id),
+  addSubagent: (sa, conversationId) =>
+    set((s) => {
+      const targetId = targetConversationId(s, conversationId);
+      const active = isActiveConversationTarget(s, targetId);
+      const targetState = active ? liveConversationAgentState(s) : targetId ? getStoredConversationAgentState(s, targetId) : liveConversationAgentState(s);
+      const subagents = [
+        ...targetState.subagents.filter((existing) => existing.id !== sa.id),
         sa,
-      ].slice(-20),
-    })),
-  updateSubagent: (id, patch) =>
-    set((s) => ({
-      subagents: s.subagents.map((sa) => (sa.id === id ? { ...sa, ...patch } : sa)),
-    })),
-  removeSubagent: (id) =>
-    set((s) => ({ subagents: s.subagents.filter((sa) => sa.id !== id) })),
+      ].slice(-20);
+      if (!active && targetId) {
+        return {
+          conversationAgentStates: storeConversationAgentState(s, targetId, {
+            ...targetState,
+            subagents,
+          }),
+        };
+      }
+      return {
+        subagents,
+        ...(targetId
+          ? {
+              conversationAgentStates: storeConversationAgentState(s, targetId, {
+                ...targetState,
+                subagents,
+              }),
+            }
+          : {}),
+      };
+    }),
+  updateSubagent: (id, patch, conversationId) =>
+    set((s) => {
+      const targetId = targetConversationId(s, conversationId);
+      const active = isActiveConversationTarget(s, targetId);
+      const targetState = active ? liveConversationAgentState(s) : targetId ? getStoredConversationAgentState(s, targetId) : liveConversationAgentState(s);
+      const subagents = targetState.subagents.map((sa) => (sa.id === id ? { ...sa, ...patch } : sa));
+      if (!active && targetId) {
+        return {
+          conversationAgentStates: storeConversationAgentState(s, targetId, {
+            ...targetState,
+            subagents,
+          }),
+        };
+      }
+      return {
+        subagents,
+        ...(targetId
+          ? {
+              conversationAgentStates: storeConversationAgentState(s, targetId, {
+                ...targetState,
+                subagents,
+              }),
+            }
+          : {}),
+      };
+    }),
+  removeSubagent: (id, conversationId) =>
+    set((s) => {
+      const targetId = targetConversationId(s, conversationId);
+      const active = isActiveConversationTarget(s, targetId);
+      const targetState = active ? liveConversationAgentState(s) : targetId ? getStoredConversationAgentState(s, targetId) : liveConversationAgentState(s);
+      const subagents = targetState.subagents.filter((sa) => sa.id !== id);
+      if (!active && targetId) {
+        return {
+          conversationAgentStates: storeConversationAgentState(s, targetId, {
+            ...targetState,
+            subagents,
+          }),
+        };
+      }
+      return {
+        subagents,
+        ...(targetId
+          ? {
+              conversationAgentStates: storeConversationAgentState(s, targetId, {
+                ...targetState,
+                subagents,
+              }),
+            }
+          : {}),
+      };
+    }),
   setRuntimeSession: (session) => set({ runtimeSession: session }),
+  setRuntimeCapabilities: (capabilities) => set({ runtimeCapabilities: capabilities }),
   appendAgentProgress: (progress, conversationId) =>
     set((s) => {
       const timestamp = Date.now();
-      const key = progressConversationKey(conversationId || s.conversationId || undefined);
+      const targetId = targetConversationId(s, conversationId);
+      const active = isActiveConversationTarget(s, targetId);
+      const key = progressConversationKey(targetId);
+      const targetState = active ? liveConversationAgentState(s) : targetId ? getStoredConversationAgentState(s, targetId) : liveConversationAgentState(s);
       const entry = {
         ...progress,
         type: "progress" as const,
         timestamp,
         conversationId: key,
       };
-      const existingIdx = s.agentProgress.findIndex((item) =>
+      const existingIdx = targetState.agentProgress.findIndex((item) =>
         item.conversationId === key && item.id === progress.id,
       );
-      // Don't auto-pop right panel for tool-level progress.
-      // Only auto-open for plan-related phases.
-      const rightPanelPatch = entry.status === "running" && entry.stage === "planning"
-        ? automaticRightPanelState(s, "plan")
+      const rightPanelPatch = active && entry.status === "running" && entry.stage === "planning"
+        ? automaticRightPanelState(s, "tasks")
         : {};
+      const serializedProgress = completePreviousMainAgentProgress(targetState.agentProgress, key, progress, timestamp);
+      let agentProgress: AgentProgressEntry[];
       if (existingIdx >= 0) {
-        const next = s.agentProgress.slice();
+        const next = serializedProgress.slice();
         next[existingIdx] = entry;
-        return { agentProgress: next.slice(-80), ...rightPanelPatch };
+        agentProgress = next.slice(-80);
+      } else {
+        agentProgress = [...serializedProgress, entry].slice(-80);
       }
-      return { agentProgress: [...s.agentProgress, entry].slice(-80), ...rightPanelPatch };
+      if (!active && targetId) {
+        return {
+          conversationAgentStates: storeConversationAgentState(s, targetId, {
+            ...targetState,
+            agentProgress,
+          }),
+        };
+      }
+      return {
+        agentProgress,
+        ...(targetId
+          ? {
+              conversationAgentStates: storeConversationAgentState(s, targetId, {
+                ...targetState,
+                agentProgress,
+              }),
+            }
+          : {}),
+        ...rightPanelPatch,
+      };
     }),
   finishAgentProgress: (conversationId, status = "completed") =>
     set((s) => {
-      const key = progressConversationKey(conversationId || s.conversationId || undefined);
+      const targetId = targetConversationId(s, conversationId);
+      const active = isActiveConversationTarget(s, targetId);
+      const key = progressConversationKey(targetId);
       const timestamp = Date.now();
+      const targetState = active ? liveConversationAgentState(s) : targetId ? getStoredConversationAgentState(s, targetId) : liveConversationAgentState(s);
+      const agentProgress = targetState.agentProgress.map((item) =>
+        item.conversationId === key && item.status === "running"
+          ? { ...item, status, timestamp }
+          : item,
+      );
+      if (!active && targetId) {
+        return {
+          conversationAgentStates: storeConversationAgentState(s, targetId, {
+            ...targetState,
+            agentProgress,
+          }),
+        };
+      }
       return {
-        agentProgress: s.agentProgress.map((item) =>
-          item.conversationId === key && item.status === "running"
-            ? { ...item, status, timestamp }
-            : item,
-        ),
+        agentProgress,
+        ...(targetId
+          ? {
+              conversationAgentStates: storeConversationAgentState(s, targetId, {
+                ...targetState,
+                agentProgress,
+              }),
+            }
+          : {}),
       };
     }),
   clearAgentProgress: (conversationId) =>
     set((s) => {
-      const key = progressConversationKey(conversationId || s.conversationId || undefined);
+      const targetId = targetConversationId(s, conversationId);
+      const active = isActiveConversationTarget(s, targetId);
+      const key = progressConversationKey(targetId);
+      const targetState = active ? liveConversationAgentState(s) : targetId ? getStoredConversationAgentState(s, targetId) : liveConversationAgentState(s);
+      const agentProgress = targetState.agentProgress.filter((item) => item.conversationId !== key);
+      if (!active && targetId) {
+        return {
+          conversationAgentStates: storeConversationAgentState(s, targetId, {
+            ...targetState,
+            agentProgress,
+          }),
+        };
+      }
       return {
-        agentProgress: s.agentProgress.filter((item) => item.conversationId !== key),
+        agentProgress,
+        ...(targetId
+          ? {
+              conversationAgentStates: storeConversationAgentState(s, targetId, {
+                ...targetState,
+                agentProgress,
+              }),
+            }
+          : {}),
+      };
+    }),
+  snapshotAgentState: (conversationId) =>
+    set((s) => {
+      const targetId = targetConversationId(s, conversationId);
+      if (!targetId) return s;
+      return {
+        conversationAgentStates: storeConversationAgentState(s, targetId, liveConversationAgentState(s)),
+      };
+    }),
+  restoreAgentState: (conversationId) =>
+    set((s) => {
+      const targetId = targetConversationId(s, conversationId);
+      if (!targetId) {
+        return {
+          plan: null,
+          todos: [],
+          subagents: [],
+          agentProgress: [],
+        };
+      }
+      const stored = cloneConversationAgentState(s.conversationAgentStates?.[targetId] ?? emptyConversationAgentState());
+      return {
+        ...stored,
+        conversationAgentStates: storeConversationAgentState(s, targetId, stored),
+      };
+    }),
+  clearConversationAgentState: (conversationId) =>
+    set((s) => {
+      const next = { ...(s.conversationAgentStates ?? {}) };
+      delete next[conversationId];
+      if (s.conversationId !== conversationId) return { conversationAgentStates: next };
+      return {
+        plan: null,
+        todos: [],
+        subagents: [],
+        agentProgress: [],
+        conversationAgentStates: next,
       };
     }),
   setBudget: (buckets, total) =>

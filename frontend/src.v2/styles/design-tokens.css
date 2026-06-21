@@ -22,8 +22,8 @@
   --border-rail: #D6D3D1;         /* 左边框（⎿）*/
 
   /* ========== 强调色 ========== */
-  --accent-primary: #3B82F6;      /* 蓝色（链接、选中）*/
-  --accent-orange: #FA8A6E;       /* 珊瑚色（发送按钮）*/
+  --accent-primary: #2563EB;      /* 蓝色（链接、选中）- Codex Blue */
+  --accent-orange: #2563EB;       /* 蓝色（发送按钮）- Codex Blue */
   --success-green: #22C55E;       /* 成功（+N）*/
   --error-red: #EF4444;           /* 错误（-N）*/
   --warning-yellow: #FFCC00;      /* 警告 */

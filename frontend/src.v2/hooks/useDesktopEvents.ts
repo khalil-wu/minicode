@@ -8,12 +8,15 @@ export const useDesktopEvents = () => {
     if (!isDesktop()) return;
 
     const handlers: Record<string, () => void> = {
-      "new-conversation": () => useAppStore.getState().createConversation(),
+      "new-conversation": () => {
+        const store = useAppStore.getState();
+        store.createConversation({ appMode: store.appMode, bindWorkspace: Boolean(store.workingDirectory) });
+      },
       "open-settings": () => useAppStore.getState().toggleSettings(),
       "toggle-terminal": () => useAppStore.getState().toggleDock(),
       "toggle-sidebar": () => {
-        const cur = useAppStore.getState().leftSidebarWidth;
-        useAppStore.setState({ leftSidebarWidth: cur > 0 ? 0 : 280 });
+        const store = useAppStore.getState();
+        store.setLeftSidebarWidth(store.leftSidebarWidth > 0 ? 0 : 320);
       },
       "open-import-modal": () => {
         void openWorkspaceFolder();

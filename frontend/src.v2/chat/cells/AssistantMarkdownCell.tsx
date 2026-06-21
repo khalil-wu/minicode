@@ -1,9 +1,9 @@
-import { Copy, RotateCcw, Trash2, RotateCw, Quote } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { ChevronDown, ChevronUp, Copy, Quote, RotateCcw, RotateCw, Trash2 } from "lucide-react";
+import { useCallback, useState } from "react";
 import type React from "react";
-import type { AssistantMarkdownCellState } from "./cellTypes";
+import type { AssistantMarkdownCellState, AssistantReplyAttachment } from "./cellTypes";
 import type { Citation } from "../../stores/types";
-import { MarkdownRenderer } from "../messages/MarkdownRenderer";
+import { MarkdownRenderer, stripModelAuthoredSources } from "../messages/MarkdownRenderer";
 import { useAppStore } from "../../stores";
 import "./cells.css";
 
@@ -13,68 +13,27 @@ export function AssistantMarkdownCell({
   cell: AssistantMarkdownCellState;
 }) {
   const [copied, setCopied] = useState(false);
-  const [displayedContent, setDisplayedContent] = useState(
-    cell.isStreaming ? "" : cell.markdownSource
-  );
-  const displayedLenRef = useRef(displayedContent.length);
-  displayedLenRef.current = displayedContent.length;
-
-  useEffect(() => {
-    if (!cell.isStreaming) {
-      setDisplayedContent(cell.markdownSource);
-      return;
-    }
-
-    const targetContent = cell.markdownSource;
-    const targetLen = targetContent.length;
-
-    if (targetLen - displayedLenRef.current > 150) {
-      setDisplayedContent(targetContent);
-      return;
-    }
-
-    if (displayedLenRef.current >= targetLen) {
-      return;
-    }
-
-    let animationFrameId: number;
-    let lastUpdate = performance.now();
-    const charsPerSecond = 200;
-    const msPerChar = 1000 / charsPerSecond;
-
-    const animate = (timestamp: number) => {
-      const elapsed = timestamp - lastUpdate;
-      if (elapsed >= msPerChar) {
-        const charsToAdd = Math.max(1, Math.floor(elapsed / msPerChar));
-        const nextLength = Math.min(displayedLenRef.current + charsToAdd, targetLen);
-        setDisplayedContent(targetContent.slice(0, nextLength));
-        lastUpdate = timestamp;
-      }
-
-      if (displayedLenRef.current < targetLen) {
-        animationFrameId = requestAnimationFrame(animate);
-      }
-    };
-
-    animationFrameId = requestAnimationFrame(animate);
-    return () => cancelAnimationFrame(animationFrameId);
-  }, [cell.markdownSource, cell.isStreaming]);
-
+  const [sourcesExpanded, setSourcesExpanded] = useState(false);
   const recallMessage = useAppStore((s) => s.recallMessage);
   const deleteMessage = useAppStore((s) => s.deleteMessage);
   const draft = useAppStore((s) => s.draft);
   const setDraft = useAppStore((s) => s.setDraft);
-  const sources = uniqueCitationSources(displayedContent, cell.citations);
-  const displayMarkdown = sources.length
-    ? stripInlineCitationMarkers(displayedContent, cell.citations)
-    : displayedContent;
+  const rawMarkdown = cell.markdownSource;
+  const displayMarkdown = stripModelAuthoredSources(rawMarkdown);
+  const sources = uniqueCitationSources(rawMarkdown, cell.citations);
+  const visibleSources = sourcesExpanded ? sources : sources.slice(0, 3);
+  const hiddenSourceCount = Math.max(0, sources.length - visibleSources.length);
+  // Attribute the reply's origin without diverging visually in this phase.
+  // "send_message" marks an explicit BriefTool reply; "stream" (default) is
+  // final-answer text streamed after the tool work.
+  const replySource = cell.source === "send_message" ? "send_message" : "stream";
 
   const copy = useCallback(() => {
-    navigator.clipboard.writeText(cell.markdownSource).then(() => {
+    navigator.clipboard.writeText(displayMarkdown).then(() => {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1200);
     });
-  }, [cell.markdownSource]);
+  }, [displayMarkdown]);
 
   const recall = useCallback(async () => {
     if (!cell.messageId) return;
@@ -115,8 +74,8 @@ export function AssistantMarkdownCell({
   }, [cell.messageId, deleteMessage]);
 
   const quoteReply = useCallback(() => {
-    if (!cell.markdownSource) return;
-    const quotedText = `> ${cell.markdownSource.split("\n").join("\n> ")}\n\n`;
+    if (!displayMarkdown) return;
+    const quotedText = `> ${displayMarkdown.split("\n").join("\n> ")}\n\n`;
     setDraft(quotedText + draft);
     requestAnimationFrame(() => {
       const composerTextarea = document.querySelector("[data-composer-input]") as HTMLTextAreaElement | null;
@@ -125,7 +84,7 @@ export function AssistantMarkdownCell({
         composerTextarea.setSelectionRange(quotedText.length, quotedText.length);
       }
     });
-  }, [cell.markdownSource, draft, setDraft]);
+  }, [displayMarkdown, draft, setDraft]);
 
   const regenerate = useCallback(async () => {
     if (!cell.messageId) return;
@@ -172,46 +131,82 @@ export function AssistantMarkdownCell({
   }, [cell.messageId, deleteMessage, recallMessage]);
 
   return (
-    <div className="assistant-cell-wrap" data-streaming={cell.isStreaming ? "true" : "false"}>
+    <div
+      className="assistant-cell-wrap"
+      data-streaming={cell.isStreaming ? "true" : "false"}
+      data-source={replySource}
+    >
       <div className="assistant-cell-content md-prose">
         <MarkdownRenderer
           content={displayMarkdown}
           isStreaming={cell.isStreaming || false}
+          citations={cell.citations}
         />
-        {sources.length > 0 && (
-          <div className="assistant-cell-sources">
-            <div className="assistant-cell-sources-title">来源</div>
-            <div className="assistant-cell-sources-list">
-              {sources.map((source) => (
-                <a
-                  key={source.url}
-                  href={source.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  title={source.title || source.url}
-                  className="assistant-cell-source-link"
-                >
-                  {source.label}
-                </a>
+        {cell.attachments && cell.attachments.length > 0 && (
+          <div className="assistant-cell-attachments">
+            <div className="assistant-cell-sources-title">附件</div>
+            <div className="assistant-cell-attachments-list">
+              {cell.attachments.map((attachment) => (
+                <AttachmentChip key={attachment.path} attachment={attachment} />
               ))}
             </div>
           </div>
         )}
       </div>
-      <div className="assistant-cell-actions">
-        {cell.copyable && (
-          <button
-            type="button"
-            onClick={copy}
-            title={copied ? "已复制" : "复制回复"}
-            aria-label={copied ? "已复制" : "复制回复"}
-            className="cell-action-btn"
-          >
-            <Copy size={12} />
-          </button>
+      <div className="assistant-cell-actions" data-has-sources={sources.length > 0 ? "true" : "false"}>
+        {sources.length > 0 && (
+          <div className="assistant-cell-source-strip" aria-label="引用来源">
+            {visibleSources.map((source) => (
+              <a
+                key={source.url}
+                href={source.url}
+                target="_blank"
+                rel="noreferrer"
+                title={source.title || source.url}
+                className="assistant-cell-source-chip"
+              >
+                <span className="assistant-cell-source-favicon" aria-hidden="true" />
+                <span className="assistant-cell-source-label">{source.label}</span>
+              </a>
+            ))}
+            {hiddenSourceCount > 0 && (
+              <button
+                type="button"
+                className="assistant-cell-source-more"
+                onClick={() => setSourcesExpanded(true)}
+                aria-label={`再显示 ${hiddenSourceCount} 个来源`}
+              >
+                <ChevronDown size={12} aria-hidden="true" />
+                再显示 {hiddenSourceCount} 个
+              </button>
+            )}
+            {sourcesExpanded && sources.length > 3 && (
+              <button
+                type="button"
+                className="assistant-cell-source-more"
+                onClick={() => setSourcesExpanded(false)}
+                aria-label="收起来源"
+              >
+                <ChevronUp size={12} aria-hidden="true" />
+                收起
+              </button>
+            )}
+          </div>
         )}
-        {cell.messageId && (
-          <>
+        <div className="assistant-cell-action-buttons">
+          {cell.copyable && (
+            <button
+              type="button"
+              onClick={copy}
+              title={copied ? "已复制" : "复制回复"}
+              aria-label={copied ? "已复制" : "复制回复"}
+              className="cell-action-btn"
+            >
+              <Copy size={12} />
+            </button>
+          )}
+          {cell.messageId && (
+            <>
             <button
               type="button"
               onClick={quoteReply}
@@ -248,8 +243,9 @@ export function AssistantMarkdownCell({
             >
               <Trash2 size={12} />
             </button>
-          </>
-        )}
+            </>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -260,10 +256,52 @@ function citationHref(citation: Citation | undefined): string {
   return /^https?:\/\//i.test(candidate) ? candidate : "";
 }
 
+function AttachmentChip({ attachment }: { attachment: AssistantReplyAttachment }) {
+  const openAttachment = () => {
+    const store = useAppStore.getState();
+    const label = attachment.path.split(/[/\\]/).filter(Boolean).pop() ?? attachment.path;
+    store.openEditorFile(attachment.path, label);
+    store.setRightStackTab("inspector");
+  };
+
+  const fileName = attachment.path.split(/[/\\]/).filter(Boolean).pop() || attachment.path;
+  const sizeLabel = formatFileSize(attachment.size);
+
+  return (
+    <button
+      type="button"
+      className="assistant-cell-attachment"
+      title={attachment.path}
+      onClick={openAttachment}
+    >
+      <span className="assistant-cell-attachment-kind" aria-hidden="true">
+        {attachment.isImage ? "[image]" : "[file]"}
+      </span>
+      <span className="assistant-cell-attachment-name">{fileName}</span>
+      <span className="assistant-cell-attachment-size">({sizeLabel})</span>
+    </button>
+  );
+}
+
+function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "?";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function sourceLabel(url: string): string {
   try {
     const parsed = new URL(url);
     return parsed.hostname.replace(/^www\./i, "");
+  } catch {
+    return url;
+  }
+}
+
+function sourceKey(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./i, "").toLowerCase();
   } catch {
     return url;
   }
@@ -277,8 +315,9 @@ function uniqueCitationSources(content: string, citations: AssistantMarkdownCell
   for (const [index, citation] of citations.entries()) {
     if (!citedIndexes.has(index + 1)) continue;
     const url = citationHref(citation);
-    if (!url || seen.has(url)) continue;
-    seen.add(url);
+    const key = sourceKey(url);
+    if (!url || seen.has(key)) continue;
+    seen.add(key);
     sources.push({
       url,
       label: citation.label || sourceLabel(url),
@@ -295,21 +334,4 @@ function extractInlineCitationIndexes(content: string): Set<number> {
     if (Number.isFinite(index) && index > 0) indexes.add(index);
   }
   return indexes;
-}
-
-function stripInlineCitationMarkers(content: string, citations: AssistantMarkdownCellState["citations"] = []): string {
-  const linkedIndexes = new Set(
-    citations
-      .map((citation, index) => citationHref(citation) ? index + 1 : 0)
-      .filter((index) => index > 0),
-  );
-  if (linkedIndexes.size === 0) return content;
-  return content
-    .replace(/\[(\d+)\]/g, (match, rawIndex) =>
-      linkedIndexes.has(Number(rawIndex)) ? "" : match,
-    )
-    .replace(/\s+([,.;:!?，。；：！？])/g, "$1")
-    .replace(/[ \t]{2,}/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
 }

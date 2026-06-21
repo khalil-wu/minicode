@@ -1,38 +1,8 @@
+import type { DiffCellState } from "../chat/cells/cellTypes";
+
 export type AgentTurnStatus = "running" | "completed" | "failed" | "stopped";
 
 export type AgentTimelineStatus = "pending" | "running" | "completed" | "failed";
-
-export interface AgentTurnState {
-  turnId: string;
-  status: AgentTurnStatus;
-  userMessage: {
-    id: string;
-    content: string;
-    createdAt: string;
-  };
-  timeline: AgentTimelineItem[];
-  finalAnswer?: {
-    id: string;
-    content: string;
-    status: "streaming" | "completed";
-  };
-  summary: AgentTurnSummary;
-  ui: {
-    processCollapsed: boolean;
-    expandedItemIds: string[];
-    selectedArtifactId?: string;
-  };
-}
-
-export interface AgentTurnSummary {
-  durationMs?: number;
-  commandCount: number;
-  searchCount: number;
-  readCount: number;
-  editedFileCount: number;
-  sourceCount: number;
-  testCount: number;
-}
 
 export type AgentTimelineItem =
   | ProcessItem
@@ -70,7 +40,8 @@ export interface ActivityGroupItem {
   summary: string;
   status: "running" | "completed" | "failed";
   details: ActivityDetail[];
-  defaultCollapsed: true;
+  defaultCollapsed: boolean;
+  emphasis?: "inline" | "group";
 }
 
 export type ActivityDetail =
@@ -99,6 +70,7 @@ export interface FileChangesItem {
   id: string;
   type: "file_changes";
   seq: number;
+  cell: DiffCellState;
   added: number;
   removed: number;
   files: {

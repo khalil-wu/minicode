@@ -86,6 +86,10 @@ class StreamEvent:
     tool_calls: list[ToolCallEvent] = field(default_factory=list)
     tool_call_start: ToolCallStartEvent | None = None
     tool_call_delta: ToolCallDeltaEvent | None = None
+    # True when this TOOL_CALL event contains the final, complete batch for the
+    # assistant message. Adapters may emit earlier TOOL_CALL events with
+    # tool_calls_final=False as individual tool_use blocks become complete.
+    tool_calls_final: bool = True
     usage: UsageInfo = field(default_factory=UsageInfo)
     image_data: str = ""
     image_media_type: str = ""

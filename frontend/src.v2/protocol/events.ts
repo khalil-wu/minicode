@@ -24,10 +24,7 @@ export type {
   StreamingServerEventType,
   StreamingClientCommandType,
   TextChunkEvent,
-  FinalAnswerStartedEvent,
-  FinalAnswerDeltaEvent,
-  FinalAnswerRetractedEvent,
-  FinalAnswerCommittedEvent,
+  TextReplaceEvent,
   ThinkingDeltaEvent,
   ToolCallEvent,
   ToolErrorInfo,
@@ -36,7 +33,14 @@ export type {
   AgentLoopEvent,
   AgentItemEvent,
   AgentProgressEvent,
+  AgentRunStartedEvent,
+  AgentRunUpdatedEvent,
+  AgentRunCompletedEvent,
+  AgentPhaseUpdatedEvent,
+  VerificationStartedEvent,
+  VerificationResultEvent,
   ApprovalRequestEvent,
+  ApprovalFileDiffEvent,
   ApprovalCancelledEvent,
   AskUserEvent,
   DoneEvent,
@@ -58,6 +62,9 @@ export type {
   PlanStepUpdatedEvent,
   PlanUpdatedEvent,
   TaskEditCommand,
+  PlanEditCommand,
+  AgentResumeCommand,
+  VerificationRunCommand,
   SubagentCancelCommand,
   InspectorFocusCommand,
 } from "./streaming-types";
@@ -153,9 +160,17 @@ export type {
   CommandResultEvent,
   EnvListEvent,
   GitPrStatusEvent,
+  GitDiffFilePayload,
+  GitDiffWorkingTreeEvent,
+  GitDiffStagedEvent,
+  GitDiffActionEvent,
+  RunCheckpointRecord,
+  RunCheckpointListEvent,
+  RunCheckpointResumeEvent,
   EnvListCommand,
   EnvSetCommand,
   EnvDeleteCommand,
+  RunCheckpointListCommand,
 } from "./workspace-types";
 
 export type {
@@ -170,6 +185,7 @@ export type {
   ConnectorsMarketplaceListEvent,
   SkillsListEvent,
   SkillsMarketplaceListEvent,
+  RuntimeCapabilitiesEvent,
   ClientCommandAckEvent,
   SessionSnapshotPayload,
   SessionWorkspacePayload,
@@ -184,6 +200,7 @@ export type {
   SchedulerToggleCommand,
   ConnectorsMarketplaceListCommand,
   ConnectorsMarketplaceInstallCommand,
+  RuntimeCapabilitiesInspectCommand,
 } from "./common-types";
 
 // ──────────────────────────────────────────────────────────────────
@@ -234,6 +251,7 @@ export interface UntypedServerEvent {
   type: Exclude<
     ServerEventType,
     | "text_chunk"
+    | "text_replace"
     | "thinking_delta"
     | "thinking"
     | "tool_call"
@@ -241,6 +259,10 @@ export interface UntypedServerEvent {
     | "tool_output_delta"
     | "agent.loop.started"
     | "agent.loop.completed"
+    | "agent.run.started"
+    | "agent.run.updated"
+    | "agent.run.completed"
+    | "agent.phase.updated"
     | "agent.item"
     | "agent.progress"
     | "approval_request"
@@ -259,6 +281,8 @@ export interface UntypedServerEvent {
     | "subagent.event"
     | "subagent.progress"
     | "subagent.done"
+    | "verification.started"
+    | "verification.result"
     | "citation.add"
     | "artifact.preview"
     | "inspector.update"
@@ -288,6 +312,7 @@ export interface UntypedServerEvent {
     | "skills.marketplace.list"
     | "session.restored"
     | "session.synced"
+    | "runtime.capabilities"
     | "preview.servers.updated"
     | "preview.server.detected"
     | "preview.server.stopped"
@@ -314,6 +339,8 @@ export interface UntypedClientCommand {
     | "interrupt"
     | "ping"
     | "task.edit"
+    | "agent.resume"
+    | "verification.run"
     | "subagent.cancel"
     | "inspector.focus"
     | "terminal.create"
@@ -327,6 +354,7 @@ export interface UntypedClientCommand {
     | "terminal.exec"
     | "llm.model.set"
     | "llm.config.set"
+    | "runtime.capabilities.inspect"
     | "skills.list"
     | "skills.marketplace.list"
     | "skills.install"
@@ -366,10 +394,7 @@ export interface UntypedClientCommand {
 
 import type {
   TextChunkEvent,
-  FinalAnswerStartedEvent,
-  FinalAnswerDeltaEvent,
-  FinalAnswerRetractedEvent,
-  FinalAnswerCommittedEvent,
+  TextReplaceEvent,
   ThinkingDeltaEvent,
   ToolCallEvent,
   ToolResultEvent,
@@ -377,7 +402,14 @@ import type {
   AgentLoopEvent,
   AgentItemEvent,
   AgentProgressEvent,
+  AgentRunStartedEvent,
+  AgentRunUpdatedEvent,
+  AgentRunCompletedEvent,
+  AgentPhaseUpdatedEvent,
+  VerificationStartedEvent,
+  VerificationResultEvent,
   ApprovalRequestEvent,
+  ApprovalFileDiffEvent,
   ApprovalCancelledEvent,
   AskUserEvent,
   DoneEvent,
@@ -438,6 +470,11 @@ import type {
   CommandResultEvent,
   EnvListEvent,
   GitPrStatusEvent,
+  GitDiffWorkingTreeEvent,
+  GitDiffStagedEvent,
+  GitDiffActionEvent,
+  RunCheckpointListEvent,
+  RunCheckpointResumeEvent,
 } from "./workspace-types";
 
 import type {
@@ -450,6 +487,7 @@ import type {
   ConnectorsMarketplaceListEvent,
   SkillsListEvent,
   SkillsMarketplaceListEvent,
+  RuntimeCapabilitiesEvent,
   ClientCommandAckEvent,
   SessionRestoredEvent,
   SessionSyncedEvent,
@@ -463,10 +501,7 @@ export interface ServerEventEnvelope {
 
 type ServerEventPayload =
   | TextChunkEvent
-  | FinalAnswerStartedEvent
-  | FinalAnswerDeltaEvent
-  | FinalAnswerRetractedEvent
-  | FinalAnswerCommittedEvent
+  | TextReplaceEvent
   | ThinkingDeltaEvent
   | ToolCallEvent
   | ToolResultEvent
@@ -474,7 +509,14 @@ type ServerEventPayload =
   | AgentLoopEvent
   | AgentItemEvent
   | AgentProgressEvent
+  | AgentRunStartedEvent
+  | AgentRunUpdatedEvent
+  | AgentRunCompletedEvent
+  | AgentPhaseUpdatedEvent
+  | VerificationStartedEvent
+  | VerificationResultEvent
   | ApprovalRequestEvent
+  | ApprovalFileDiffEvent
   | ApprovalCancelledEvent
   | AskUserEvent
   | DoneEvent
@@ -500,6 +542,11 @@ type ServerEventPayload =
   | McpProgressEvent
   | EnvListEvent
   | GitPrStatusEvent
+  | GitDiffWorkingTreeEvent
+  | GitDiffStagedEvent
+  | GitDiffActionEvent
+  | RunCheckpointListEvent
+  | RunCheckpointResumeEvent
   | SchedulerListEvent
   | ConnectorsMarketplaceListEvent
   | FileChangedEvent
@@ -518,6 +565,7 @@ type ServerEventPayload =
   | LlmModelUpdatedEvent
   | SkillsListEvent
   | SkillsMarketplaceListEvent
+  | RuntimeCapabilitiesEvent
   | ClientCommandAckEvent
   | SessionRestoredEvent
   | SessionSyncedEvent
@@ -560,6 +608,9 @@ import type {
 
 import type {
   TaskEditCommand,
+  PlanEditCommand,
+  AgentResumeCommand,
+  VerificationRunCommand,
   SubagentCancelCommand,
   InspectorFocusCommand,
 } from "./streaming-types";
@@ -596,12 +647,14 @@ import type {
   SchedulerToggleCommand,
   ConnectorsMarketplaceListCommand,
   ConnectorsMarketplaceInstallCommand,
+  RuntimeCapabilitiesInspectCommand,
 } from "./common-types";
 
 import type {
   EnvListCommand,
   EnvSetCommand,
   EnvDeleteCommand,
+  RunCheckpointListCommand,
 } from "./workspace-types";
 
 export interface ClientCommandEnvelope {
@@ -615,6 +668,9 @@ type ClientCommandPayload =
   | InterruptCommand
   | PingCommand
   | TaskEditCommand
+  | PlanEditCommand
+  | AgentResumeCommand
+  | VerificationRunCommand
   | SubagentCancelCommand
   | InspectorFocusCommand
   | TerminalCreateCommand
@@ -637,9 +693,11 @@ type ClientCommandPayload =
   | SchedulerToggleCommand
   | ConnectorsMarketplaceListCommand
   | ConnectorsMarketplaceInstallCommand
+  | RuntimeCapabilitiesInspectCommand
   | EnvListCommand
   | EnvSetCommand
   | EnvDeleteCommand
+  | RunCheckpointListCommand
   | ReadArtifactCommand
   | ConversationCreateCommand
   | ConversationSwitchCommand
@@ -668,10 +726,7 @@ export type ClientCommand = ClientCommandPayload & ClientCommandEnvelope;
 export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEventType>([
   // Streaming text + tool execution
   "text_chunk",
-  "final_answer_started",
-  "final_answer_delta",
-  "final_answer_retracted",
-  "final_answer_committed",
+  "text_replace",
   "image_chunk",
   "thinking_delta",
   "thinking",
@@ -680,6 +735,10 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   "tool_output_delta",
   "agent.loop.started",
   "agent.loop.completed",
+  "agent.run.started",
+  "agent.run.updated",
+  "agent.run.completed",
+  "agent.phase.updated",
   "agent.item",
   "agent.progress",
   "task.update",
@@ -695,6 +754,8 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   "subagent.event",
   "subagent.progress",
   "subagent.done",
+  "verification.started",
+  "verification.result",
   "citation.add",
   "inspector.update",
   "plan_step_updated",
@@ -748,6 +809,8 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   "git.pr_status",
   "checkpoint.list",
   "checkpoint.rewound",
+  "checkpoint.run.list",
+  "checkpoint.run.resume",
   "guidelines.updated",
   "permission.mode.updated",
   "permission.rules.updated",
@@ -761,6 +824,7 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   "connectors.marketplace.list",
   "session.restored",
   "session.synced",
+  "runtime.capabilities",
   "client.command.ack",
   "pong",
   "control_request",
@@ -809,17 +873,20 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "conversation.permission.rules.list",
   "conversation.permission.rules.add",
   "conversation.permission.rules.remove",
+  "permissions.content_rule.add",
   // Session inspection
   "session.tasks.inspect",
   "session.status.inspect",
   "session.usage.inspect",
   "session.permissions.inspect",
+  "runtime.capabilities.inspect",
   // LLM
   "llm.model.set",
   "llm.config.set",
   // Checkpoints
   "checkpoint.list",
   "checkpoint.rewind",
+  "checkpoint.run.list",
   // Terminal
   "terminal.create",
   "terminal.input",
@@ -841,7 +908,10 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "session.sync",
   // Streaming / task management
   "task.edit",
+  "plan.edit",
   "task.stop",
+  "agent.resume",
+  "verification.run",
   "subagent.cancel",
   "inspector.focus",
   // Skills / commands catalog

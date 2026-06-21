@@ -10,7 +10,7 @@ from backend.attachments.store import AttachmentStore
 from backend.commands.catalog import get_builtin_command_catalog
 from backend.config import load_config
 from backend.permissions.checker import PermissionChecker
-from backend.tools.agent_tools import AskUserTool, ReadArtifactTool, TaskTool
+from backend.tools.agent_tools import AskUserTool, BriefTool, ReadArtifactTool, TaskTool
 from backend.tools.command_tool import RunCommandTool
 from backend.tools.file_tools import (
     EditFileTool,
@@ -70,6 +70,7 @@ def _build_tool_registry(
 
     # Agent helper tools
     registry.register(AskUserTool())
+    registry.register(BriefTool())
     registry.register(
         ReadArtifactTool(
             artifact_store,

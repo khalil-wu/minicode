@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 from typing import Any, TYPE_CHECKING
 
 from backend.agent.message import AgentEvent
 from backend.config import get_available_models
+from backend.ws.utils import normalize_permission_mode
 
 if TYPE_CHECKING:
     from backend.ws.handler import WebSocketSession
@@ -43,6 +46,49 @@ async def handle_checkpoint_rewind(session: "WebSocketSession", data: dict[str, 
     return True
 
 
+async def handle_run_checkpoint_list(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    from backend.agent.checkpoint import get_checkpoint_dir
+    from backend.agent.runtime import default_runtime
+    import json
+
+    session_id = str(data.get("session_id") or session.session_id or "").strip()
+    conversation_id = str(data.get("conversation_id") or session.active_conversation_id or "").strip()
+    checkpoints: list[dict[str, Any]] = []
+    if session_id:
+        checkpoint_dir = get_checkpoint_dir(session_id)
+        for path in sorted(checkpoint_dir.glob("*.json"), reverse=True)[:50]:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if conversation_id and str(payload.get("conversation_id") or "").strip() != conversation_id:
+                continue
+            checkpoints.append(
+                {
+                    "run_id": str(payload.get("run_id") or ""),
+                    "session_id": str(payload.get("session_id") or session_id),
+                    "conversation_id": str(payload.get("conversation_id") or ""),
+                    "iteration": int(payload.get("iterations") or 0),
+                    "iterations": int(payload.get("iterations") or 0),
+                    "stopped_reason": payload.get("stopped_reason"),
+                    "timestamp": payload.get("timestamp"),
+                    "created_at": payload.get("timestamp"),
+                }
+            )
+    runtime_snapshot = default_runtime().list_runs(conversation_id=conversation_id, include_subagents=True)
+    await session._send_ws_payload(
+        {
+            "type": "checkpoint.run.list",
+            "session_id": session_id,
+            "conversation_id": conversation_id,
+            "checkpoints": checkpoints,
+            **runtime_snapshot,
+        },
+        log_context="checkpoint.run.list",
+    )
+    return True
+
+
 async def handle_task_edit(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     todo_id = str(data.get("todo_id", "")).strip()
     status = str(data.get("status", "")).strip()
@@ -56,15 +102,322 @@ async def handle_task_edit(session: "WebSocketSession", data: dict[str, Any]) ->
     return True
 
 
+def _normalize_plan_steps(raw_steps: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_steps, list):
+        return []
+    valid_statuses = {"pending", "running", "done", "skipped", "failed"}
+    steps: list[dict[str, Any]] = []
+    for index, raw_step in enumerate(raw_steps):
+        if not isinstance(raw_step, dict):
+            continue
+        title = str(raw_step.get("title") or raw_step.get("step") or "").strip()
+        if not title:
+            continue
+        status = str(raw_step.get("status") or "pending").strip()
+        steps.append({
+            "id": str(raw_step.get("id") or f"step-{index}"),
+            "title": title,
+            "status": status if status in valid_statuses else "pending",
+            **({"detail": str(raw_step.get("detail"))} if raw_step.get("detail") else {}),
+        })
+    return steps
+
+
+async def _start_plan_followup_run(
+    session: "WebSocketSession",
+    *,
+    plan_id: str,
+    action: str,
+    message: str,
+) -> None:
+    target_conversation_id = str(session.active_conversation_id or "").strip()
+    if not target_conversation_id:
+        session._ensure_active_conversation()
+        target_conversation_id = str(session.active_conversation_id or "").strip()
+    if not target_conversation_id:
+        await session._send_event(AgentEvent.error("No active conversation for plan.edit", recoverable=True))
+        return
+
+    running_for_target = session._conversation_run_tasks.get(target_conversation_id)
+    if running_for_target and not running_for_target.done():
+        await session._send_event(
+            AgentEvent(
+                type="error",
+                data={
+                    "message": "A response is already running in this conversation. Resolve it before editing the plan.",
+                    "recoverable": True,
+                    "error_type": "tool",
+                    "error_code": "agent.busy",
+                    "conversation_id": target_conversation_id,
+                },
+            )
+        )
+        return
+
+    managed_run = session.task_manager.create(
+        "agent.run",
+        session._run_agent(
+            message,
+            conversation_id=target_conversation_id,
+            metadata={"plan_id": plan_id, "plan_action": action},
+        ),
+    )
+    session._conversation_run_tasks[target_conversation_id] = managed_run.task
+    session._conversation_run_task_ids[target_conversation_id] = managed_run.id
+    if target_conversation_id == session.active_conversation_id:
+        session._active_run_task = managed_run.task
+        session._active_task_id = managed_run.id
+    session._schedule_task_runtime_update()
+
+    async def _wait_and_cleanup() -> None:
+        try:
+            if managed_run.task is not None:
+                await managed_run.task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.error("Plan follow-up run failed: %s", exc, exc_info=True)
+            error_event = AgentEvent.error(
+                f"Plan follow-up run failed: {exc}",
+                recoverable=True,
+                error_type="api",
+            )
+            error_event.data["conversation_id"] = target_conversation_id
+            await session._send_event(error_event)
+        finally:
+            if session._conversation_run_tasks.get(target_conversation_id) is managed_run.task:
+                session._conversation_run_tasks.pop(target_conversation_id, None)
+            if session._conversation_run_task_ids.get(target_conversation_id) == managed_run.id:
+                session._conversation_run_task_ids.pop(target_conversation_id, None)
+            session._conversation_run_locks.pop(target_conversation_id, None)
+            if session._active_run_task is managed_run.task:
+                session._active_run_task = None
+            if session._active_task_id == managed_run.id:
+                session._active_task_id = None
+            session._schedule_task_runtime_update()
+
+    asyncio.create_task(_wait_and_cleanup())
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _exit_plan_mode_for_accept(session: "WebSocketSession") -> None:
+    conversation_id = str(getattr(session, "active_conversation_id", "") or "").strip()
+    context = getattr(session, "permission_context", None)
+    context_mode = str(getattr(context, "mode", "") or "").strip()
+    conversation_was_plan = False
+    conversation_updated = False
+    restore_mode = "auto"
+
+    repo = getattr(session, "conversation_repo", None)
+    if conversation_id and repo is not None:
+        record = None
+        get_conversation = getattr(repo, "get_conversation", None)
+        if callable(get_conversation):
+            record = get_conversation(conversation_id)
+            conversation_was_plan = str(getattr(record, "permission_mode", "") or "").strip() == "plan"
+            previous_mode = normalize_permission_mode(str(getattr(record, "permission_previous_mode", "") or ""))
+            if previous_mode and previous_mode != "plan":
+                restore_mode = previous_mode
+        if conversation_was_plan:
+            update_permission_mode = getattr(repo, "update_permission_mode", None)
+            if callable(update_permission_mode):
+                conversation_updated = update_permission_mode(conversation_id, restore_mode) is not None
+
+    should_exit = context_mode == "plan" or conversation_was_plan
+    if not should_exit:
+        return
+
+    set_mode = getattr(session, "_set_permission_context_mode", None)
+    context_changed = False
+    if callable(set_mode):
+        context_changed = bool(set_mode(restore_mode, source="plan.edit"))
+
+    if context_changed or context_mode == "plan":
+        emit_mode = getattr(session, "_emit_permission_mode_updated", None)
+        if callable(emit_mode):
+            await _maybe_await(emit_mode())
+        send_runtime = getattr(session, "_send_task_runtime_update", None)
+        if callable(send_runtime):
+            await _maybe_await(send_runtime())
+
+    if conversation_updated:
+        send_conversations = getattr(session, "_send_conversation_list", None)
+        if callable(send_conversations):
+            await _maybe_await(send_conversations())
+
+
+async def handle_plan_edit(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    plan_id = str(data.get("plan_id") or data.get("planId") or "plan").strip() or "plan"
+    action = str(data.get("action") or "").strip().lower()
+    if action not in {"accept", "reject"}:
+        await session._send_event(AgentEvent.error("plan.edit requires action 'accept' or 'reject'", recoverable=True))
+        return True
+
+    steps = _normalize_plan_steps(data.get("steps"))
+    current_step = int(data.get("current_step") or data.get("currentStep") or 0)
+    status = "accepted" if action == "accept" else "cancelled"
+    event = AgentEvent.plan_updated(
+        plan_id=plan_id,
+        steps=steps,
+        status=status,
+        current_step=current_step,
+        explanation="Plan accepted by user." if action == "accept" else "Plan rejected by user.",
+    )
+    if session.active_conversation_id:
+        event.data["conversation_id"] = session.active_conversation_id
+    await session._send_event(event)
+
+    if action == "accept":
+        await _exit_plan_mode_for_accept(session)
+        await _start_plan_followup_run(
+            session,
+            plan_id=plan_id,
+            action=action,
+            message=(
+                "用户已批准当前执行计划。请按这个计划开始实施；先把第一步标记为 in_progress，"
+                "然后执行、验证，并在推进时持续更新计划状态。"
+            ),
+        )
+    else:
+        await session._emit_command_result(
+            "plan.edit",
+            "Plan rejected. Ask the agent for a revised plan with the desired changes.",
+            level="warning",
+            data={"plan_id": plan_id, "action": action},
+        )
+    return True
+
+
 async def handle_subagent_cancel(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     subagent_id = str(data.get("subagent_id", "")).strip()
     if not subagent_id:
         await session._send_event(AgentEvent.error("subagent_id is required", recoverable=True))
         return True
+    cancelled = False
+    task_manager = getattr(session, "task_manager", None)
+    if task_manager is not None:
+        try:
+            cancelled = bool(task_manager.cancel(subagent_id))
+        except Exception:
+            cancelled = False
+    product_manager = getattr(session, "_product_task_manager", None)
+    if not cancelled and product_manager is not None:
+        try:
+            cancelled = product_manager.cancel_task(subagent_id) is not None
+        except Exception:
+            cancelled = False
     event = AgentEvent.subagent_done(subagent_id=subagent_id, error="cancelled by user")
+    event.data["cancel_requested"] = True
+    event.data["cancelled"] = cancelled
     if session.active_conversation_id:
         event.data["conversation_id"] = session.active_conversation_id
     await session._send_event(event)
+    return True
+
+
+async def handle_agent_resume(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    from backend.agent.checkpoint import load_latest_run_checkpoint
+
+    session_id = session.session_id
+    if not session_id:
+        await session._emit_command_result("agent.resume", "No active session ID. Cannot resume.", level="error")
+        return True
+
+    checkpoint = load_latest_run_checkpoint(session_id)
+    if checkpoint is None:
+        await session._send_ws_payload(
+            {
+                "type": "checkpoint.run.resume",
+                "resumed": False,
+                "message": "No incomplete run checkpoint found.",
+            },
+            log_context="checkpoint.run.resume",
+        )
+        return True
+
+    conversation_id = str(data.get("conversation_id") or checkpoint.conversation_id or session.active_conversation_id or "").strip()
+    if not conversation_id:
+        await session._emit_command_result("agent.resume", "No active conversation. Cannot resume.", level="error")
+        return True
+
+    await session._send_ws_payload(
+        {
+            "type": "checkpoint.run.resume",
+            "resumed": True,
+            "session_id": session_id,
+            "conversation_id": conversation_id,
+            "run_id": checkpoint.run_id,
+            "iteration": checkpoint.iterations,
+            "stopped_reason": checkpoint.stopped_reason,
+        },
+        log_context="checkpoint.run.resume",
+    )
+    await session._run_agent(
+        user_message=checkpoint.user_message,
+        conversation_id=conversation_id,
+        metadata={
+            "resume_from_checkpoint": True,
+            "run_id": checkpoint.run_id,
+            "conversation_id": conversation_id,
+        },
+    )
+    return True
+
+
+async def handle_verification_run(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    from backend.agent.loop import _run_verify_command
+    from backend.agent.runtime import new_run_id
+
+    config = getattr(session, "config", None)
+    command = str(getattr(getattr(config, "agent", None), "verify_command", "") or "").strip()
+    supplied_command = str(data.get("command") or "").strip()
+    if supplied_command and supplied_command != command:
+        await session._emit_command_result(
+            "verification.run",
+            "Ad hoc verification commands are not allowed. Configure agent.verify_command instead.",
+            level="error",
+        )
+        return True
+    if not command:
+        await session._emit_command_result("verification.run", "No verify command configured.", level="warning")
+        return True
+    workspace_root = session._workspace_root_for_conversation(
+        session.conversation_repo.get_conversation(session.active_conversation_id or "")
+    ) if session.active_conversation_id else None
+    if workspace_root is None:
+        workspace_root = getattr(session, "workspace_root", None)
+    if workspace_root is None:
+        await session._emit_command_result("verification.run", "No workspace is available for verification.", level="error")
+        return True
+
+    run_id = new_run_id("verify")
+    await session._send_event(AgentEvent.verification_started(run_id, command=command, conversation_id=session.active_conversation_id or ""))
+    try:
+        timeout = float(data.get("timeout_seconds") or getattr(getattr(config, "agent", None), "verify_timeout_seconds", 120.0) or 120.0)
+    except (TypeError, ValueError):
+        timeout = float(getattr(getattr(config, "agent", None), "verify_timeout_seconds", 120.0) or 120.0)
+    timeout = max(1.0, min(timeout, 600.0))
+    passed, output = await _run_verify_command(command, workspace_root, timeout)
+    await session._send_event(
+        AgentEvent.verification_result(
+            run_id,
+            passed=passed,
+            output=output,
+            command=command,
+            conversation_id=session.active_conversation_id or "",
+        )
+    )
+    await session._emit_command_result(
+        "verification.run",
+        "Verification passed." if passed else "Verification failed.",
+        level="success" if passed else "error",
+        data={"run_id": run_id, "passed": passed, "output": output},
+    )
     return True
 
 
@@ -390,8 +743,12 @@ async def handle_llm_config_set(session: "WebSocketSession", data: dict[str, Any
 HANDLERS: dict[str, Any] = {
     "checkpoint.list": handle_checkpoint_list,
     "checkpoint.rewind": handle_checkpoint_rewind,
+    "checkpoint.run.list": handle_run_checkpoint_list,
     "task.edit": handle_task_edit,
+    "plan.edit": handle_plan_edit,
+    "agent.resume": handle_agent_resume,
     "subagent.cancel": handle_subagent_cancel,
+    "verification.run": handle_verification_run,
     "inspector.focus": handle_inspector_focus,
     "llm.model.set": handle_model_command,
     "read_artifact": handle_read_artifact_command,

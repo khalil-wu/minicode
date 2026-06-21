@@ -1,4 +1,5 @@
 import type { GoalInfo, PlanStep, RuntimeSessionSnapshot } from "../protocol/events";
+import type { AgentCapabilitiesPayload } from "../protocol/capabilities";
 import type { ToolCallRecord } from "../lib/tool-call-reducer";
 
 // ── UI Slice ──────────────────────────────────────────────────────
@@ -172,6 +173,16 @@ export interface DiffLineComment {
   content: string;
 }
 
+export interface ConversationWorkbenchState {
+  diffReview: DiffReviewState | null;
+  previewArtifact: ArtifactContentState | null;
+  livePreviewUrl: string | null;
+  activeTerminalSessionId: string | null;
+  rightStackTab: RightStackTab;
+  rightPanelOpen: boolean;
+  rightStackTabLocked: boolean;
+}
+
 export interface GitChangeFile {
   path: string;
   patch?: string;
@@ -217,6 +228,7 @@ export interface UISlice {
   workingDirectory: string;
   workspaceGit: WorkspaceGitState | null;
   diffReview: DiffReviewState | null;
+  conversationWorkbenchStates: Record<string, ConversationWorkbenchState>;
   previewArtifact: ArtifactContentState | null;
   livePreviewUrl: string | null;
   previewServers: PreviewServerInfo[];
@@ -253,6 +265,9 @@ export interface UISlice {
   setWorkingDirectory: (d: string) => void;
   setWorkspaceGit: (state: WorkspaceGitState | null) => void;
   setDiffReviewState: (state: DiffReviewState | null) => void;
+  snapshotWorkbenchState: (conversationId?: string) => void;
+  restoreWorkbenchState: (conversationId?: string) => void;
+  clearConversationWorkbenchState: (conversationId: string) => void;
   updateDiffReviewFile: (path: string, patch: Partial<DiffReviewFile>) => void;
   setDiffReviewSelectedPath: (path: string | undefined) => void;
   setDiffFileDecision: (path: string, decision: "approved" | "rejected") => void;
@@ -492,11 +507,18 @@ export interface MessageAttachmentRef {
 export interface ThinkingContentBlock {
   type: "thinking";
   content: string;
-  source?: "provider" | "model_preamble" | "runtime" | string;
+  source?: "provider" | "model_preamble" | "post_tool" | "runtime" | string;
   visibility?: "debug" | "timeline" | "compact" | string;
   is_raw_provider_reasoning?: boolean;
 }
-export interface TextContentBlock { type: "text"; content: string; }
+export interface TextContentBlock {
+  type: "text";
+  content: string;
+  source?: "stream" | "send_message" | string;
+  visibility?: "final" | "timeline" | "debug" | string;
+  role?: "assistant" | "runtime" | string;
+  phase?: "final" | "model" | "tool" | "recover" | string;
+}
 export interface ProcessContentBlock {
   type: "process";
   id: string;
@@ -515,6 +537,9 @@ export interface ProcessContentBlock {
   stepId?: string;
   toolCallIds?: string[];
   defaultCollapsed?: boolean;
+  displayScope?: string;
+  panelHint?: RightStackTab | string;
+  requiresAttention?: boolean;
   seq?: number;
   order?: number;
   timestamp: number;
@@ -537,6 +562,9 @@ export interface ProgressContentBlock {
   stepId?: string;
   count?: number;
   iterationId?: string;
+  displayScope?: string;
+  panelHint?: RightStackTab | string;
+  requiresAttention?: boolean;
   timestamp: number;
 }
 export interface AgentProgressEntry extends ProgressContentBlock {
@@ -555,10 +583,24 @@ export interface ChatMessage {
   citations?: Citation[];
   usage?: MessageUsage;
   timestamp: number;
+  completedAt?: number;
   isStreaming?: boolean;
   isThinkingStreaming?: boolean;
   resumeState?: "resumed";
   terminalStatus?: "completed" | "failed" | "interrupted";
+  /** Attachments carried by a BriefTool (send_message) reply on this message.
+   * Rendered as the focused assistant reply. */
+  replyAttachments?: ReplyAttachmentMeta[];
+}
+
+/** Metadata for a BriefTool reply attachment (local-first, no upload). */
+export interface ReplyAttachmentMeta {
+  /** Absolute or workspace-relative file path. */
+  path: string;
+  /** File size in bytes. */
+  size: number;
+  /** True for previewable image formats. */
+  isImage: boolean;
 }
 
 export interface ConversationMeta {
@@ -641,13 +683,23 @@ export interface ChatSlice {
   requestConversationSwitch: (id: string) => void;
   applyConversationSwitched: (payload: { conversationId: string }) => void;
   switchConversation: (id: string) => void;
-  createConversation: (options?: { bindWorkspace?: boolean; workspaceRoot?: string }) => void;
+  createConversation: (options?: { bindWorkspace?: boolean; workspaceRoot?: string; appMode?: AppMode }) => void;
   removeConversation: (id: string) => void;
   getVisibleMessages: (conversationId?: string | null) => ChatMessage[];
   setActiveGoal: (goal: ConversationGoal | null, conversationId?: string) => void;
   hydrateConversationMessages: (id: string, messages: ChatMessage[], options?: { activate?: boolean; isStreaming?: boolean }) => void;
-  appendTextChunk: (content: string, conversationId?: string) => void;
-  setFinalAnswerStreaming: (conversationId: string | undefined, isStreaming: boolean) => void;
+  appendTextChunk: (
+    content: string,
+    conversationId?: string,
+    source?: string,
+    metadata?: Partial<Omit<TextContentBlock, "type" | "content" | "source">>,
+  ) => void;
+  setFinalAnswerAttachments: (conversationId: string | undefined, attachments: ReplyAttachmentMeta[]) => void;
+  finalizeStreamingText: (
+    conversationId: string | undefined,
+    source?: string,
+    metadata?: Partial<Omit<TextContentBlock, "type" | "content" | "source">>,
+  ) => void;
   appendThinkingChunk: (
     content: string,
     conversationId?: string,
@@ -667,7 +719,12 @@ export interface ChatSlice {
   ) => void;
   finishStreaming: (conversationId?: string, usage?: MessageUsage, terminalStatus?: "completed" | "failed" | "interrupted") => void;
   resumeStreaming: (conversationId?: string, toolCallsPending?: PendingToolCallResume[]) => void;
-  replaceStreamingText: (conversationId: string, fullText: string) => void;
+  replaceStreamingText: (
+    conversationId: string,
+    fullText: string,
+    source?: string,
+    metadata?: Partial<Omit<TextContentBlock, "type" | "content" | "source">>,
+  ) => void;
   setConnected: (c: boolean) => void;
   setLastUsage: (u: ChatSlice["lastUsage"]) => void;
   ensureSideChat: (id: string) => void;
@@ -694,7 +751,7 @@ export type PendingToolCallResume = {
 
 // ── Composer Slice ────────────────────────────────────────────────
 
-export type PermissionMode = "ask_permissions" | "auto" | "bypass";
+export type PermissionMode = "ask_permissions" | "plan" | "auto" | "bypass";
 
 export interface ComposerAttachment {
   id: string;
@@ -765,6 +822,7 @@ export interface SubagentState {
   role: string;
   status: "running" | "done" | "error";
   summary?: string;
+  parentRunId?: string;
   iteration?: number;
   maxIterations?: number;
   currentTool?: string;
@@ -777,27 +835,40 @@ export interface BudgetBucket {
   limit: number;
 }
 
+export interface ConversationAgentState {
+  plan: PlanState | null;
+  todos: TodoItem[];
+  subagents: SubagentState[];
+  agentProgress: AgentProgressEntry[];
+}
+
 export interface AgentSlice {
   plan: PlanState | null;
   todos: TodoItem[];
   subagents: SubagentState[];
   agentProgress: AgentProgressEntry[];
+  conversationAgentStates: Record<string, ConversationAgentState>;
   runtimeSession: RuntimeSessionSnapshot | null;
+  runtimeCapabilities: AgentCapabilitiesPayload | null;
   budgetBuckets: BudgetBucket[];
   totalBudgetPercent: number;
-  setPlan: (p: PlanState | null) => void;
+  setPlan: (p: PlanState | null, conversationId?: string) => void;
   updatePlanStep: (idx: number, status: PlanStep["status"]) => void;
-  setTodos: (t: TodoItem[]) => void;
-  updateTodo: (id: string, patch: Partial<TodoItem>) => void;
-  addTodo: (todo: TodoItem) => void;
-  removeTodo: (id: string) => void;
-  addSubagent: (s: SubagentState) => void;
-  updateSubagent: (id: string, patch: Partial<SubagentState>) => void;
-  removeSubagent: (id: string) => void;
+  setTodos: (t: TodoItem[], conversationId?: string) => void;
+  updateTodo: (id: string, patch: Partial<TodoItem>, conversationId?: string) => void;
+  addTodo: (todo: TodoItem, conversationId?: string) => void;
+  removeTodo: (id: string, conversationId?: string) => void;
+  addSubagent: (s: SubagentState, conversationId?: string) => void;
+  updateSubagent: (id: string, patch: Partial<SubagentState>, conversationId?: string) => void;
+  removeSubagent: (id: string, conversationId?: string) => void;
   setRuntimeSession: (session: RuntimeSessionSnapshot | null) => void;
+  setRuntimeCapabilities: (capabilities: AgentCapabilitiesPayload | null) => void;
   appendAgentProgress: (progress: Omit<ProgressContentBlock, "type" | "timestamp">, conversationId?: string) => void;
   finishAgentProgress: (conversationId?: string, status?: "completed" | "failed") => void;
   clearAgentProgress: (conversationId?: string) => void;
+  snapshotAgentState: (conversationId?: string) => void;
+  restoreAgentState: (conversationId?: string) => void;
+  clearConversationAgentState: (conversationId: string) => void;
   setBudget: (buckets: BudgetBucket[], total: number) => void;
 }
 

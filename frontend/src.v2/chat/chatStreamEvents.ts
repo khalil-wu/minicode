@@ -11,21 +11,13 @@ import { pushToast } from "../overlays/ToastContainer";
 import type { ChatMessage, ChatSlice, PendingToolCallResume } from "../stores/types";
 import { normalizeAgentErrorMessage } from "./errorMessages";
 import { resetSendDeduplication } from "./sendChatMessage";
+import { addInspectorPayload, maybeAutoRoutePanel } from "./displayRouting";
 
 interface ChatStreamHandlers {
   textStreamBuffer: StreamBuffer;
   /** @deprecated thinking goes directly to appendThinkingChunk. Remove in v0.4.0 */
   thinkingStreamBuffer?: StreamBuffer;
 }
-
-const finalAnswerConversations = new Set<string>();
-
-const finalAnswerKey = (conversationId?: string): string => conversationId || "__active__";
-
-const clearLegacyStreamingTextForFinalAnswer = (conversationId?: string) => {
-  const state = useAppStore.getState();
-  state.replaceStreamingText(conversationId || state.conversationId || "", "");
-};
 
 const adoptGeneratedConversation = (conversationId?: string) => {
   const targetId = conversationId?.trim();
@@ -86,6 +78,10 @@ const isRawProviderErrorText = (content: string): boolean =>
 
 const isStaleApprovalResponseError = (content: string): boolean =>
   /^(?:Approval|Question) request '.+' is no longer pending$/i.test(content.trim());
+
+const isTransientCommandBacklogError = (err: { error_type?: string; error_code?: string }, message: string): boolean =>
+  err.error_code === "command.backlog" ||
+  (err.error_type === "rate_limit" && /too many pending commands/i.test(message));
 
 const recoverMissingConversation = (conversationId?: string) => {
   const missingId = conversationId?.trim();
@@ -254,6 +250,18 @@ const usageFromDoneEvent = (e: ServerEvent): NonNullable<ChatSlice["lastUsage"]>
   } : undefined;
 };
 
+const textEventMetadata = (ev: {
+  visibility?: string;
+  role?: string;
+  phase?: string;
+}) => {
+  const metadata: { visibility?: string; role?: string; phase?: string } = {};
+  if (ev.visibility !== undefined) metadata.visibility = ev.visibility;
+  if (ev.role !== undefined) metadata.role = ev.role;
+  if (ev.phase !== undefined) metadata.phase = ev.phase;
+  return Object.keys(metadata).length ? metadata : undefined;
+};
+
 export const handleChatStreamEvent = (
   e: ServerEvent,
   conversationId: string | undefined,
@@ -264,43 +272,6 @@ export const handleChatStreamEvent = (
   const { textStreamBuffer, thinkingStreamBuffer } = handlers;
   adoptGeneratedConversation(conversationId);
   switch (e.type) {
-    case "final_answer_started": {
-      textStreamBuffer.flush();
-      thinkingStreamBuffer?.flush();
-      finalAnswerConversations.add(finalAnswerKey(conversationId));
-      clearLegacyStreamingTextForFinalAnswer(conversationId);
-      const ev = e as unknown as { is_streaming?: boolean };
-      s.setFinalAnswerStreaming(conversationId, ev.is_streaming ?? true);
-      return true;
-    }
-    case "final_answer_delta": {
-      thinkingStreamBuffer?.flush();
-      const key = finalAnswerKey(conversationId);
-      if (!finalAnswerConversations.has(key)) {
-        textStreamBuffer.flush();
-        clearLegacyStreamingTextForFinalAnswer(conversationId);
-        finalAnswerConversations.add(key);
-      }
-      const ev = e as unknown as { content?: string };
-      if (ev.content) {
-        textStreamBuffer.push(ev.content, conversationId);
-      }
-      return true;
-    }
-    case "final_answer_retracted": {
-      textStreamBuffer.flush();
-      thinkingStreamBuffer?.flush();
-      s.replaceStreamingText(conversationId || s.conversationId || "", "");
-      return true;
-    }
-    case "final_answer_committed": {
-      textStreamBuffer.flush();
-      thinkingStreamBuffer?.flush();
-      finalAnswerConversations.delete(finalAnswerKey(conversationId));
-      const ev = e as unknown as { is_streaming?: boolean };
-      s.setFinalAnswerStreaming(conversationId, ev.is_streaming ?? false);
-      return true;
-    }
     case "thinking_delta":
     case "thinking": {
       const ev = e as unknown as {
@@ -324,13 +295,35 @@ export const handleChatStreamEvent = (
       return true;
     }
     case "text_chunk": {
-      if (
-        !finalAnswerConversations.has(finalAnswerKey(conversationId)) &&
-        e.content != null &&
-        !isRawProviderErrorText(e.content)
-      ) {
-        textStreamBuffer.push(e.content, conversationId);
+      const ev = e as unknown as {
+        content?: string;
+        source?: string;
+        visibility?: string;
+        role?: string;
+        phase?: string;
+        finalize?: boolean;
+        attachments?: Array<{ path: string; size: number; is_image: boolean }>;
+      };
+      if (ev.finalize) {
+        // Contentless seal: the answer was streamed live token-by-token; re-tag
+        // the last streamed text block as the final answer without re-emitting.
+        textStreamBuffer.flush();
+        s.finalizeStreamingText(conversationId || "", ev.source, textEventMetadata(ev));
+      } else if (ev.content != null && !isRawProviderErrorText(ev.content)) {
+        textStreamBuffer.push(ev.content, conversationId, ev.source, textEventMetadata(ev));
       }
+      if (Array.isArray(ev.attachments) && ev.attachments.length > 0) {
+        s.setFinalAnswerAttachments(
+          conversationId,
+          ev.attachments.map((a) => ({ path: a.path, size: a.size, isImage: a.is_image })),
+        );
+      }
+      return true;
+    }
+    case "text_replace": {
+      const ev = e as unknown as { content?: string; source?: string; visibility?: string; role?: string; phase?: string };
+      textStreamBuffer.flush();
+      s.replaceStreamingText(conversationId || "", ev.content ?? "", ev.source, textEventMetadata(ev));
       return true;
     }
     case "image_chunk": {
@@ -347,11 +340,33 @@ export const handleChatStreamEvent = (
       const scope = toolCallScopeFromEvent(e);
       const existing = findToolCall(e.id, conversationId, scope);
       if (existing) {
-        s.updateToolCall(e.id, { args: e.args ?? {}, status: "running" }, conversationId, scope);
+        s.updateToolCall(e.id, {
+          args: e.args ?? {},
+          status: "running",
+          displayHint: e.display_hint,
+          inputSummary: e.input_summary,
+          resultKind: e.result_kind,
+          activityKind: e.activity_kind,
+          displayScope: e.display_scope,
+          panelHint: e.panel_hint,
+          requiresAttention: e.requires_attention,
+        }, conversationId, scope);
       } else {
         const record = reduceToolCallStart(new Map(), e).get(e.id);
         if (record) s.appendToolCallBlock(record, conversationId);
       }
+      addInspectorPayload("tool_call", e.id, {
+        event: "tool_call",
+        name: e.name,
+        args: e.args ?? {},
+        result_kind: e.result_kind,
+        activity_kind: e.activity_kind,
+        display_hint: e.display_hint,
+        input_summary: e.input_summary,
+        iteration_id: e.iteration_id,
+        phase: e.phase,
+      });
+      maybeAutoRoutePanel(e, e.name === "task" ? "subagents" : undefined);
       return true;
     }
     case "tool_output_delta": {
@@ -359,6 +374,11 @@ export const handleChatStreamEvent = (
       if (delta.id && delta.output) {
         const existing = findToolCall(delta.id, conversationId);
         s.updateToolCall(delta.id, outputPreviewUpdates(existing, delta.output, delta.stream), conversationId);
+        addInspectorPayload("tool_call", delta.id, {
+          event: "tool_output_delta",
+          stream: delta.stream ?? "stdout",
+          output: delta.output,
+        });
       }
       return true;
     }
@@ -368,6 +388,11 @@ export const handleChatStreamEvent = (
         const commandTool = latestRunningCommandTool(conversationId);
         if (commandTool) {
           s.updateToolCall(commandTool.id, outputPreviewUpdates(commandTool, ev.content, ev.stream), conversationId);
+          addInspectorPayload("tool_call", commandTool.id, {
+            event: "command_output_chunk",
+            stream: ev.stream ?? "stdout",
+            output: ev.content,
+          });
         }
       }
       return true;
@@ -382,6 +407,21 @@ export const handleChatStreamEvent = (
           requestPreviewValidationForTool(toolCall.name);
         }
       }
+      addInspectorPayload("tool_call", e.id, {
+        event: "tool_result",
+        status: e.status,
+        is_error: e.is_error,
+        summary: e.summary,
+        display_summary: e.display_summary,
+        artifact_id: e.artifact_id,
+        diff: e.diff,
+        source_url: e.source_url,
+        content_preview: e.content_preview,
+        error_info: e.error_info,
+        developer_detail: e.developer_detail,
+        projection: e.projection,
+      });
+      maybeAutoRoutePanel(e, e.diff ? "diff" : undefined);
       return true;
     }
     case "agent.loop.started":
@@ -430,6 +470,9 @@ export const handleChatStreamEvent = (
         step_id?: string;
         tool_call_ids?: string[];
         default_collapsed?: boolean;
+        display_scope?: string;
+        panel_hint?: string;
+        requires_attention?: boolean;
         created_at?: number;
         order?: number;
         seq?: number;
@@ -456,17 +499,20 @@ export const handleChatStreamEvent = (
           stepId: ev.step_id,
           toolCallIds: ev.tool_call_ids,
           defaultCollapsed: ev.default_collapsed,
+          displayScope: ev.display_scope,
+          panelHint: ev.panel_hint,
+          requiresAttention: ev.requires_attention,
           timestamp: ev.created_at,
           order: ev.order,
           seq: ev.seq,
         }, conversationId);
+        maybeAutoRoutePanel(ev);
       }
       return true;
     }
     case "done": {
       textStreamBuffer.flush();
       thinkingStreamBuffer?.flush();
-      finalAnswerConversations.delete(finalAnswerKey(conversationId));
       const usage = usageFromDoneEvent(e);
       if (usage && (!conversationId || conversationId === useAppStore.getState().conversationId)) {
         s.setLastUsage(usage);
@@ -483,7 +529,6 @@ export const handleChatStreamEvent = (
     case "error": {
       textStreamBuffer.flush();
       thinkingStreamBuffer?.flush();
-      finalAnswerConversations.delete(finalAnswerKey(conversationId));
       const err = e as unknown as { message?: string; tool_call_id?: string; request_id?: string; error_type?: string; error_code?: string; provider_error_type?: string };
       const rawMessage = err.message ?? "An error occurred.";
       if (isStaleApprovalResponseError(rawMessage)) {
@@ -495,6 +540,10 @@ export const handleChatStreamEvent = (
         return true;
       }
       const message = normalizeAgentErrorMessage(rawMessage);
+      if (isTransientCommandBacklogError(err, rawMessage)) {
+        pushToast(message, "warning", 3000);
+        return true;
+      }
       pushToast(message, "error", 6000);
       s.removeEmptyStreamingAssistant(conversationId);
       if (err.error_code === "workspace_missing") {

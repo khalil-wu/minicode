@@ -30,6 +30,13 @@ def normalize_permission_mode(value: Any) -> ConversationPermissionMode:
     return "default"
 
 
+def _normalize_previous_permission_mode(value: Any) -> ConversationPermissionMode | str:
+    if not str(value or "").strip():
+        return ""
+    mode = normalize_permission_mode(value)
+    return "" if mode == "plan" else mode
+
+
 def normalize_permission_rule_level(value: Any) -> ConversationPermissionRuleLevel | None:
     raw = str(getattr(value, "value", value) or "").strip().lower()
     aliases = {
@@ -133,6 +140,7 @@ class ConversationRecord:
     updated_at: str = field(default_factory=utc_now_iso)
     memory_mode: ConversationMemoryMode = "none"
     permission_mode: ConversationPermissionMode = DEFAULT_CONVERSATION_PERMISSION_MODE
+    permission_previous_mode: ConversationPermissionMode | str = ""
     permission_deny_rules: list[str] = field(default_factory=list)
     permission_overrides: dict[str, ConversationPermissionRuleLevel] = field(default_factory=dict)
     summary: str = ""
@@ -195,6 +203,7 @@ class ConversationRecord:
             permission_mode=normalize_permission_mode(
                 payload.get("permission_mode", DEFAULT_CONVERSATION_PERMISSION_MODE)
             ),
+            permission_previous_mode=_normalize_previous_permission_mode(payload.get("permission_previous_mode", "")),
             permission_deny_rules=normalize_permission_deny_rules(payload.get("permission_deny_rules", [])),
             permission_overrides=normalize_permission_overrides(payload.get("permission_overrides", {})),
             summary=str(payload.get("summary") or ""),

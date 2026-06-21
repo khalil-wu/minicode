@@ -1,4 +1,4 @@
-import { ClipboardCopy, Globe, RefreshCw, FileText, X, ExternalLink, Play, Square, Maximize2, Minimize2 } from "lucide-react";
+import { Check, ChevronDown, ClipboardCopy, Globe, RefreshCw, FileText, X, ExternalLink, Play, Square, Maximize2, Minimize2 } from "lucide-react";
 import { useState, useEffect, useRef, type MutableRefObject } from "react";
 import { useAppStore } from "../stores";
 import type { PreviewLaunchConfigInfo, PreviewLaunchProcessInfo, PreviewVerificationInfo } from "../stores/types";
@@ -36,6 +36,21 @@ const previewSandboxForUrl = (url: string | null): string =>
     : "allow-scripts allow-forms allow-popups allow-modals";
 
 type PreviewMode = "live" | "artifact";
+type PreviewZoom = "fit" | number;
+
+const ZOOM_OPTIONS: { value: PreviewZoom; label: string }[] = [
+  { value: "fit", label: "Fit" },
+  { value: 0.5, label: "50%" },
+  { value: 0.75, label: "75%" },
+  { value: 1, label: "100%" },
+  { value: 1.25, label: "125%" },
+  { value: 1.5, label: "150%" },
+];
+
+const zoomOptionValue = (zoom: PreviewZoom): string => String(zoom);
+const zoomLabel = (zoom: PreviewZoom): string =>
+  ZOOM_OPTIONS.find((option) => zoomOptionValue(option.value) === zoomOptionValue(zoom))?.label
+  ?? (zoom === "fit" ? "Fit" : `${Math.round(zoom * 100)}%`);
 
 export const PreviewPanel = () => {
   const previewArtifact = useAppStore((s) => s.previewArtifact);
@@ -54,7 +69,7 @@ export const PreviewPanel = () => {
   const [iframeKey, setIframeKey] = useState(0);
   const [refreshFlash, setRefreshFlash] = useState(false);
   const [expanded, setExpanded] = useState(false);
-  const [zoom, setZoom] = useState<"fit" | number>("fit");
+  const [zoom, setZoom] = useState<PreviewZoom>("fit");
   const [ctrlPressed, setCtrlPressed] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
 
@@ -269,6 +284,79 @@ const ModeTab = ({
   </button>
 );
 
+const ZoomPicker = ({
+  zoom,
+  onZoom,
+  align = "left",
+  compactHeight = 24,
+}: {
+  zoom: PreviewZoom;
+  onZoom: (zoom: PreviewZoom) => void;
+  align?: "left" | "right";
+  compactHeight?: number;
+}) => {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!ref.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  return (
+    <div ref={ref} style={{ position: "relative", flexShrink: 0 }}>
+      <button
+        type="button"
+        aria-label={`Preview zoom: ${zoomLabel(zoom)}`}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        title="Preview zoom"
+        onClick={() => setOpen((current) => !current)}
+        style={zoomTriggerStyle(open, compactHeight)}
+      >
+        <span>{zoomLabel(zoom)}</span>
+        <ChevronDown size={12} style={{ color: "var(--text-muted)" }} />
+      </button>
+      {open && (
+        <div role="listbox" aria-label="Preview zoom" style={zoomMenuStyle(align)}>
+          {ZOOM_OPTIONS.map((option) => {
+            const active = zoomOptionValue(option.value) === zoomOptionValue(zoom);
+            return (
+              <button
+                key={zoomOptionValue(option.value)}
+                type="button"
+                role="option"
+                aria-selected={active}
+                onClick={() => {
+                  onZoom(option.value);
+                  setOpen(false);
+                }}
+                style={zoomOptionStyle(active)}
+              >
+                <span style={{ width: 16, display: "inline-flex", justifyContent: "center", color: active ? "var(--accent-primary)" : "transparent" }}>
+                  <Check size={12} />
+                </span>
+                <span>{option.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const LiveView = ({
   urlInput,
   setUrlInput,
@@ -315,7 +403,7 @@ const LiveView = ({
   refreshFlash: boolean;
   onExpand: () => void;
   zoom: "fit" | number;
-  onZoom: (z: "fit" | number) => void;
+  onZoom: (z: PreviewZoom) => void;
   ctrlPressed: boolean;
 }) => {
   const visibleVerification = previewVerification?.url === livePreviewUrl ? previewVerification : null;
@@ -377,25 +465,7 @@ const LiveView = ({
       <button type="button" onClick={() => onNavigate(urlInput)} style={primaryBtnStyle}>
         Go
       </button>
-      <select
-        value={String(zoom)}
-        onChange={(e) => onZoom(e.target.value === "fit" ? "fit" : Number(e.target.value))}
-        className="h-6 px-1 border outline-none text-xs"
-        style={{
-          borderColor: "var(--border-subtle)",
-          borderRadius: "var(--radius-sm, 4px)",
-          background: "var(--surface-base)",
-          color: "var(--text-primary)",
-          fontSize: "var(--text-xs)",
-        }}
-      >
-        <option value="fit">Fit</option>
-        <option value={0.5}>50%</option>
-        <option value={0.75}>75%</option>
-        <option value={1}>100%</option>
-        <option value={1.25}>125%</option>
-        <option value={1.5}>150%</option>
-      </select>
+      <ZoomPicker zoom={zoom} onZoom={onZoom} />
       <button type="button" title="Detect dev servers" aria-label="Detect dev servers" onClick={onDetect} style={secondaryBtnStyle}>
         Detect
       </button>
@@ -411,8 +481,8 @@ const LiveView = ({
       </button>
       <button
         type="button"
-        title="Open in browser"
-        aria-label="Open in browser"
+        title="Open externally"
+        aria-label="Open externally"
         onClick={onOpenExternal}
         disabled={!livePreviewUrl}
         style={iconBtnStyle(!livePreviewUrl)}
@@ -431,8 +501,8 @@ const LiveView = ({
       </button>
       <button
         type="button"
-        title="Verify app preview"
-        aria-label="Verify app preview"
+        title="Check preview"
+        aria-label="Check preview"
         onClick={() => livePreviewUrl && getWebSocket()?.send({ type: "preview.verify", url: livePreviewUrl })}
         disabled={!livePreviewUrl}
         style={!livePreviewUrl ? disabledSecondaryBtnStyle : secondaryBtnStyle}
@@ -441,8 +511,8 @@ const LiveView = ({
       </button>
       <button
         type="button"
-        title="Show app preview server logs"
-        aria-label="Show app preview server logs"
+        title="Show server logs"
+        aria-label="Show server logs"
         onClick={onToggleLogs}
         disabled={!activeLaunchProcess}
         style={!activeLaunchProcess ? disabledSecondaryBtnStyle : secondaryBtnStyle}
@@ -697,7 +767,7 @@ const LiveView = ({
             flexDirection: "column",
             overflow: zoom === "fit" ? "hidden" : "auto",
             position: "relative",
-            background: "#f6f6f4",
+            background: "var(--surface-base)",
           }}
         >
           {ctrlPressed && (
@@ -754,7 +824,7 @@ const LiveView = ({
                     transformOrigin: "0 0",
                   }),
               border: 0,
-              background: "white",
+              background: "var(--surface-base)",
               display: "block",
             }}
           />
@@ -818,7 +888,7 @@ const ExpandedLivePreview = ({
   onOpenExternal: () => void;
   onClose: () => void;
   zoom: "fit" | number;
-  onZoom: (z: "fit" | number) => void;
+  onZoom: (z: PreviewZoom) => void;
   ctrlPressed: boolean;
 }) => {
   const handleWheel = (e: React.WheelEvent) => {
@@ -893,28 +963,8 @@ const ExpandedLivePreview = ({
         <button type="button" onClick={() => onNavigate(urlInput)} style={primaryBtnStyle}>
           Go
         </button>
-        <select
-          value={String(zoom)}
-          onChange={(e) => onZoom(e.target.value === "fit" ? "fit" : Number(e.target.value))}
-          style={{
-            height: 26,
-            padding: "0 4px",
-            border: "1px solid var(--border-subtle)",
-            borderRadius: "var(--radius-sm, 4px)",
-            background: "var(--surface-base)",
-            color: "var(--text-primary)",
-            fontSize: "var(--text-xs)",
-            outline: "none",
-          }}
-        >
-          <option value="fit">Fit</option>
-          <option value={0.5}>50%</option>
-          <option value={0.75}>75%</option>
-          <option value={1}>100%</option>
-          <option value={1.25}>125%</option>
-          <option value={1.5}>150%</option>
-        </select>
-        <button type="button" title="Open in browser" aria-label="Open in browser" onClick={onOpenExternal} disabled={!livePreviewUrl} style={iconBtnStyle(!livePreviewUrl)}>
+        <ZoomPicker zoom={zoom} onZoom={onZoom} align="right" compactHeight={26} />
+        <button type="button" title="Open externally" aria-label="Open externally" onClick={onOpenExternal} disabled={!livePreviewUrl} style={iconBtnStyle(!livePreviewUrl)}>
           <ExternalLink size={14} />
         </button>
         <button type="button" title="Close expanded app preview" aria-label="Close expanded app preview" onClick={onClose} style={iconBtnStyle(false)}>
@@ -938,7 +988,7 @@ const ExpandedLivePreview = ({
             flexDirection: "column",
             overflow: zoom === "fit" ? "hidden" : "auto",
             position: "relative",
-            background: "#f6f6f4",
+            background: "var(--surface-base)",
           }}
         >
           {ctrlPressed && (
@@ -992,7 +1042,7 @@ const ExpandedLivePreview = ({
                     transformOrigin: "0 0",
                   }),
               border: 0,
-              background: "white",
+              background: "var(--surface-base)",
               display: "block",
             }}
           />
@@ -1230,3 +1280,51 @@ const chipBtnStyle: React.CSSProperties = {
   fontFamily: "var(--font-mono)",
   cursor: "pointer",
 };
+
+const zoomTriggerStyle = (open: boolean, height: number): React.CSSProperties => ({
+  height,
+  minWidth: 68,
+  padding: "0 7px",
+  border: "1px solid var(--border-subtle)",
+  borderRadius: "var(--radius-sm, 4px)",
+  background: open ? "var(--surface-soft)" : "var(--surface-base)",
+  color: "var(--text-secondary)",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 6,
+  fontSize: "var(--text-xs)",
+  fontFamily: "var(--font-ui)",
+  cursor: "pointer",
+});
+
+const zoomMenuStyle = (align: "left" | "right"): React.CSSProperties => ({
+  position: "absolute",
+  top: "calc(100% + 5px)",
+  left: align === "left" ? 0 : "auto",
+  right: align === "right" ? 0 : "auto",
+  zIndex: 30,
+  minWidth: 112,
+  padding: 5,
+  border: "1px solid var(--border-subtle)",
+  borderRadius: "var(--radius-md, 8px)",
+  background: "var(--surface-raised)",
+  boxShadow: "var(--shadow-strong, var(--shadow-md))",
+});
+
+const zoomOptionStyle = (active: boolean): React.CSSProperties => ({
+  width: "100%",
+  minHeight: 28,
+  padding: "0 7px",
+  border: 0,
+  borderRadius: "var(--radius-sm, 5px)",
+  background: active ? "color-mix(in oklch, var(--accent-primary) 9%, var(--surface-page))" : "transparent",
+  color: active ? "var(--text-primary)" : "var(--text-secondary)",
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+  fontSize: "var(--text-xs)",
+  fontFamily: "var(--font-ui)",
+  cursor: "pointer",
+  textAlign: "left",
+});

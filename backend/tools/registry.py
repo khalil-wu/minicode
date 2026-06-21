@@ -14,7 +14,7 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from backend.permissions.checker import PermissionChecker
     from backend.permissions.context import PermissionContext
-    from backend.agent.harness.toolsets import ToolsetPolicy
+    from backend.tools.toolsets import ToolsetPolicy
 
 from backend.permissions.context import ToolExecutionContext
 from backend.tools.base import BaseTool, ToolResult, PermissionLevel
@@ -111,8 +111,8 @@ class CapabilityRegistry:
         tool; ``direct`` marks those that belong in this turn's direct list.
         Deferred tools keep their schema so the deferred catalog can reuse it.
         """
-        from backend.agent.harness.contracts import ToolSchemaView
-        from backend.agent.harness.toolsets import ToolsetPolicy
+        from backend.tools.contracts import ToolSchemaView
+        from backend.tools.toolsets import ToolsetPolicy
 
         active_policy = toolset_policy or ToolsetPolicy.default()
         views: list[ToolSchemaView] = []
@@ -134,7 +134,7 @@ class CapabilityRegistry:
             direct = direct and not denied
             schema = tool.get_schema().to_openai_tool() if exposure != "hidden" else None
             meta = tool.to_runtime_metadata()
-            if level is not None and not denied:
+            if level is not None:
                 meta = {**meta, "permission": level.value}
             views.append(
                 ToolSchemaView(
@@ -197,17 +197,35 @@ class CapabilityRegistry:
         budget: int = 6000,
         *,
         toolset_policy: 'ToolsetPolicy | None' = None,
+        permission_checker: 'PermissionChecker | None' = None,
+        permission_context: 'PermissionContext | None' = None,
+        mcp_registry_version: int = 0,
     ) -> dict[str, Any]:
         """Return a stable capability snapshot for UI/runtime consumers."""
-        views = self.build_schema_views(toolset_policy=toolset_policy)
+        views = self.build_schema_views(
+            toolset_policy=toolset_policy,
+            permission_checker=permission_checker,
+            permission_context=permission_context,
+        )
         return {
             "version": self._version,
-            "tools": deepcopy(self.get_schemas(budget, toolset_policy=toolset_policy)),
+            "tools": deepcopy(
+                self.get_schemas(
+                    budget,
+                    permission_checker=permission_checker,
+                    permission_context=permission_context,
+                    toolset_policy=toolset_policy,
+                    mcp_registry_version=mcp_registry_version,
+                )
+            ),
             "tool_views": [
                 self._build_tool_view_metadata(view)
                 for view in sorted(views, key=lambda item: item.name)
             ],
-            "tool_runtime_metadata": self.get_runtime_metadata(),
+            "tool_runtime_metadata": self.get_runtime_metadata(
+                permission_checker=permission_checker,
+                permission_context=permission_context,
+            ),
             "commands": [
                 self._build_named_metadata(name, metadata)
                 for name, metadata in sorted(self._commands.items())
@@ -219,6 +237,21 @@ class CapabilityRegistry:
             "summary": self._build_capability_summary(views),
         }
 
+    def build_capability_summary(
+        self,
+        *,
+        toolset_policy: 'ToolsetPolicy | None' = None,
+        permission_checker: 'PermissionChecker | None' = None,
+        permission_context: 'PermissionContext | None' = None,
+    ) -> dict[str, Any]:
+        """Return the compact capability summary without materializing schemas."""
+        views = self.build_schema_views(
+            toolset_policy=toolset_policy,
+            permission_checker=permission_checker,
+            permission_context=permission_context,
+        )
+        return self._build_capability_summary(views)
+
     def has_tool(self, name: str) -> bool:
         return name in self._tools
 
@@ -226,7 +259,7 @@ class CapabilityRegistry:
         return self._tools.get(name)
 
     def get_tool_spec(self, name: str):
-        from backend.agent.harness.catalog import tool_spec_for
+        from backend.tools.catalog import tool_spec_for
 
         return tool_spec_for(name, self)
 
@@ -241,7 +274,7 @@ class CapabilityRegistry:
         toolset_policy: 'ToolsetPolicy | None' = None,
         mcp_registry_version: int = 0,
     ) -> list[dict[str, Any]]:
-        from backend.agent.harness.toolsets import ToolsetPolicy
+        from backend.tools.toolsets import ToolsetPolicy
 
         active_policy = toolset_policy or ToolsetPolicy.default()
         # mcp_registry_version is folded into the cache key so an MCP
@@ -264,7 +297,7 @@ class CapabilityRegistry:
 
         # Single source of truth: derive direct schemas from ToolSchemaView.
         # A view has a non-None schema iff it is directly visible and not denied.
-        from backend.agent.harness.schema import postprocess_tool_schema
+        from backend.tools.schema import postprocess_tool_schema
 
         views = self.build_schema_views(
             toolset_policy=active_policy,

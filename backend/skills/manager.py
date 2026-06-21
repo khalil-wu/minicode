@@ -18,6 +18,7 @@ Skills 生命周期管理器（DESIGN.md §五.3）。
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from backend.skills.loader import SkillLoader, SkillFull, SkillMeta
@@ -87,10 +88,13 @@ class SkillManager:
                 continue
 
             meta = self._loader.get_meta(name)
-            if not meta or not meta.triggers:
+            if not meta:
                 continue
 
-            # 关键词匹配
+            if _message_mentions_skill_name(msg_lower, name):
+                candidates.append(name)
+                continue
+
             for trigger in meta.triggers:
                 if trigger.lower() in msg_lower:
                     candidates.append(name)
@@ -164,7 +168,7 @@ class SkillManager:
         parts: list[str] = []
         used = 0
 
-        for name, full in self._active.items():
+        for name, full in reversed(list(self._active.items())):
             tokens = full.token_estimate
             if used + tokens > budget:
                 # 预算不足，只放 Layer 1 摘要
@@ -241,3 +245,20 @@ class SkillManager:
                     new_meta.name, conflict_name, conflict_name,
                 )
                 self.deactivate(conflict_name)
+
+
+def _message_mentions_skill_name(message: str, skill_name: str) -> bool:
+    """Detect explicit $skill, /skill, or plain skill-name mentions."""
+    normalized = skill_name.strip().lower()
+    if not normalized:
+        return False
+    variants = {
+        normalized,
+        normalized.replace("_", "-"),
+        normalized.replace("-", "_"),
+    }
+    for variant in variants:
+        pattern = rf"(?<![\w.-])[$/]?{re.escape(variant)}(?![\w.-])"
+        if re.search(pattern, message):
+            return True
+    return False

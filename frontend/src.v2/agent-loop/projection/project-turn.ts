@@ -58,10 +58,9 @@ export function projectChatTurnToAgentLoop(
   const answerIsStreaming =
     Boolean(activeAnswerCell) ||
     Boolean(turn.finalAnswerCell?.isStreaming);
-  const artifactCells = committedCells.filter(isDiffCell);
+  const artifactCells: DiffCellState[] = [];
   const hideInlineSummary = Boolean(answerCell) || turn.status === "streaming";
   const processCells = committedCells.filter((cell) => (
-    !isDiffCell(cell) &&
     !(hideInlineSummary && isTurnSummaryCell(cell))
   ));
   const timelineItems = buildAgentTimelineItems(processCells);
@@ -72,7 +71,7 @@ export function projectChatTurnToAgentLoop(
     processCells.length > 0 &&
     Boolean(turn.finalAnswerCell) &&
     !answerIsStreaming &&
-    turn.status === "completed";
+    turn.status !== "streaming";
 
   return {
     id: turn.id,
@@ -99,12 +98,23 @@ export function buildAgentTimelineItems(cells: AgentLoopProcessCell[]): AgentTim
   for (const cell of cells) {
     const item = projectProcessCell(cell, seq);
     if (!item) continue;
-    items.push(item);
-    seq += 1;
+    const projectedItems = Array.isArray(item) ? item : [item];
+    items.push(...projectedItems);
+    seq += projectedItems.length;
   }
 
   return items;
 }
+
+const ACTION_CHAIN_ACTIVITY_KINDS = new Set<ActivityCellState["activityKind"]>([
+  "webSearch",
+  "workspaceSearch",
+  "fileRead",
+  "commandExecution",
+  "fileChange",
+  "mcpToolCall",
+  "genericTool",
+]);
 
 export function formatTurnDuration(turn: ChatTurnState): string {
   const start = turn.startedAt;
@@ -188,15 +198,11 @@ function mapStatus(status: ChatTurnState["status"]): AgentTurnStatus {
   return "completed";
 }
 
-function isDiffCell(cell: HistoryCellState): cell is DiffCellState {
-  return cell.kind === "diff";
-}
-
 function isTurnSummaryCell(cell: HistoryCellState): cell is TurnSummaryCellState {
   return cell.kind === "turn_summary";
 }
 
-function projectProcessCell(cell: AgentLoopProcessCell, seq: number): AgentTimelineItem | null {
+function projectProcessCell(cell: AgentLoopProcessCell, seq: number): AgentTimelineItem | AgentTimelineItem[] | null {
   switch (cell.kind) {
     case "thinking":
       return processItemFromThinking(cell, seq);
@@ -216,11 +222,38 @@ function projectProcessCell(cell: AgentLoopProcessCell, seq: number): AgentTimel
       return systemStatusFromError(cell, seq);
     case "plan":
       return systemStatusFromPlan(cell, seq);
+    case "diff":
+      return fileChangesItemFromDiffCell(cell, seq);
     case "assistant_markdown":
       return processItem(cell.id, seq, cell.markdownSource, "model", "process_text");
     default:
       return null;
   }
+}
+
+function fileChangesItemFromDiffCell(cell: DiffCellState, seq: number): AgentTimelineItem {
+  return {
+    id: cell.id,
+    type: "file_changes",
+    seq,
+    cell,
+    added: cell.summary.added,
+    removed: cell.summary.deleted,
+    files: cell.files.map((file) => ({
+      path: file.path,
+      added: file.additions,
+      removed: file.deletions,
+      status: file.changeType === "created"
+        ? "created"
+        : file.changeType === "deleted"
+          ? "deleted"
+          : "modified",
+    })),
+    actions: {
+      canReview: cell.files.some((file) => Boolean(file.patch)),
+      canUndo: cell.files.some((file) => Boolean(file.path)),
+    },
+  };
 }
 
 function processItemFromThinking(cell: ThinkingCellState, seq: number): ProcessItem | null {
@@ -244,7 +277,10 @@ function projectActivityCell(cell: ActivityCellState, seq: number): AgentTimelin
   if (isBrowserPreviewActivity(cell)) {
     return browserPreviewItemFromActivities(cell.id, [cell], seq);
   }
-  return activityGroupItemFromActivities(cell.id, [cell], seq);
+  const actionItems = actionTimelineItemsFromActivityCell(cell, seq);
+  if (actionItems.length > 0) return actionItems[0] ?? null;
+  const item = activityGroupItemFromActivities(cell.id, [cell], seq);
+  return Array.isArray(item) ? item[0] ?? null : item;
 }
 
 function processItem(
@@ -275,9 +311,11 @@ function activityGroupItemFromExecs(
   const count = cells.length;
   const isTestGroup = cells.every((cell) => isTestCommand(cell.command));
   const title =
-    status === "running"
-      ? `正在运行 ${count} 条命令`
-      : `已运行 ${count} 条命令`;
+    count === 1
+      ? status === "running" ? "正在运行命令" : "已运行命令"
+      : status === "running"
+        ? `正在运行 ${count} 条命令`
+        : `已运行 ${count} 条命令`;
   const summary =
     status === "failed"
       ? "有命令未通过"
@@ -294,7 +332,8 @@ function activityGroupItemFromExecs(
     summary,
     status,
     details: cells.map(shellDetailFromExec),
-    defaultCollapsed: true,
+    defaultCollapsed: status !== "running",
+    emphasis: "group",
   };
 }
 
@@ -315,11 +354,13 @@ function activityGroupItemFromActivities(
   id: string,
   cells: ActivityCellState[],
   seq: number,
-): ActivityGroupItem | BrowserPreviewItem | null {
+): ActivityGroupItem | ActivityGroupItem[] | BrowserPreviewItem | null {
   if (cells.length === 0) return null;
   if (cells.some(isBrowserPreviewActivity)) {
     return browserPreviewItemFromActivities(id, cells, seq);
   }
+  const actionItems = actionTimelineItemsFromActivityCells(id, cells, seq);
+  if (actionItems.length > 0) return actionItems.length === 1 ? actionItems[0] : actionItems;
   const status = activityStatus(cells);
   const activityKind = agentActivityKind(cells);
   const count = activityRecordTotal(cells);
@@ -335,8 +376,82 @@ function activityGroupItemFromActivities(
     summary: activitySummary(activityKind, count),
     status,
     details: details.length > 0 ? details : fallbackActivityDetails(cells),
-    defaultCollapsed: true,
+    defaultCollapsed: status !== "running",
+    emphasis: "group",
   };
+}
+
+function actionTimelineItemsFromActivityCell(cell: ActivityCellState, seq: number): ActivityGroupItem[] {
+  return actionTimelineItemsFromActivityCells(cell.id, [cell], seq);
+}
+
+function actionTimelineItemsFromActivityCells(
+  id: string,
+  cells: ActivityCellState[],
+  seq: number,
+): ActivityGroupItem[] {
+  if (!cells.every((cell) => ACTION_CHAIN_ACTIVITY_KINDS.has(cell.activityKind))) return [];
+  return cells.flatMap((cell, index) => {
+    const records = cell.toolCallRecords ?? [];
+    if (records.length === 0) return [];
+    const details = records.map((record) => detailFromToolRecord(cell, record));
+    const status = activityStatus([cell]);
+    const activityKind = agentActivityKind([cell]);
+    const title = actionChainTitle([cell], records, activityKind, status);
+    return [{
+      id: cells.length === 1 ? id : `${id}:${cell.id}`,
+      type: "activity_group" as const,
+      activityKind,
+      seq: seq + index,
+      title,
+      summary: actionChainSummary(records, activityKind),
+      status,
+      details,
+      defaultCollapsed: status !== "running",
+      emphasis: "inline" as const,
+    }];
+  });
+}
+
+function actionChainTitle(
+  cells: ActivityCellState[],
+  records: ToolCallRecord[],
+  activityKind: ActivityGroupItem["activityKind"],
+  status: ActivityGroupItem["status"],
+): string {
+  if (activityKind === "command" || activityKind === "test") {
+    if (records.length === 1) return status === "running" ? "正在运行命令" : "已运行命令";
+    return status === "running" ? `正在运行 ${records.length} 条命令` : `已运行 ${records.length} 条命令`;
+  }
+  if (activityKind === "web_search") {
+    const query = firstRecordQuery(records);
+    if (records.length === 1 && query) return status === "running" ? `正在搜索 ${query}` : `已搜索 ${query}`;
+    return status === "running" ? `正在搜索 ${records.length} 次` : `已搜索 ${records.length} 次`;
+  }
+  if (activityKind === "web_read") {
+    const target = firstRecordUrl(records);
+    if (records.length === 1 && target) return status === "running" ? `正在打开 ${shortUrlLabel(target)}` : `已打开 ${shortUrlLabel(target)}`;
+    return status === "running" ? `正在打开 ${records.length} 个网页` : `已打开 ${records.length} 个网页`;
+  }
+  if (activityKind === "file_read") {
+    const target = firstRecordPathOrQuery(records);
+    if (records.length === 1 && target) return status === "running" ? `正在查看 ${target}` : `已查看 ${target}`;
+    return status === "running" ? `正在查看 ${records.length} 个来源` : `已查看 ${records.length} 个来源`;
+  }
+  if (activityKind === "mcp") {
+    return status === "running" ? `正在调用 ${records.length} 个工具` : `已调用 ${records.length} 个工具`;
+  }
+  const title = cells[0]?.title?.trim();
+  return title || (status === "running" ? `正在处理 ${records.length} 项` : `已处理 ${records.length} 项`);
+}
+
+function actionChainSummary(records: ToolCallRecord[], activityKind: ActivityGroupItem["activityKind"]): string {
+  const first = records[0];
+  if (activityKind === "web_search") return firstRecordQuery(records) || `${records.length} 次搜索`;
+  if (activityKind === "web_read") return firstRecordUrl(records) ? shortUrlLabel(firstRecordUrl(records)) : `${records.length} 个页面`;
+  if (activityKind === "file_read") return firstRecordPathOrQuery(records) || `${records.length} 个来源`;
+  if (activityKind === "command" || activityKind === "test") return `${records.length} 条命令`;
+  return first?.displaySummary || first?.inputSummary || first?.summary || `${records.length} 项`;
 }
 
 function browserPreviewItemFromActivities(
@@ -380,11 +495,17 @@ function detailFromToolRecord(cell: ActivityCellState, record: ToolCallRecord): 
 
   const url = stringArg(args.url ?? args.source_url ?? record.sourceUrl) || firstHttpUrl(record.displaySummary || record.summary);
   if (url) {
+    const excerpt = cleanWebExcerpt(
+      record.contentPreview ||
+      record.displaySummary ||
+      record.summary ||
+      "",
+    );
     return {
       kind: "source",
       title: webDetailTitle(record),
       url,
-      excerpt: record.contentPreview || record.displaySummary || record.summary,
+      excerpt,
     };
   }
 
@@ -394,7 +515,7 @@ function detailFromToolRecord(cell: ActivityCellState, record: ToolCallRecord): 
       kind: "source",
       title: searchDetailTitle(record),
       query,
-      excerpt: query,
+      excerpt: record.displaySummary || record.summary || query,
     };
   }
 
@@ -404,7 +525,7 @@ function detailFromToolRecord(cell: ActivityCellState, record: ToolCallRecord): 
       kind: "source",
       title: fileDetailTitle(record),
       path,
-      excerpt: path,
+      excerpt: writeFileExcerpt(record) || path,
     };
   }
 
@@ -413,6 +534,29 @@ function detailFromToolRecord(cell: ActivityCellState, record: ToolCallRecord): 
     title: readableToolName(record.name),
     content: record.displaySummary || record.inputSummary || record.summary || record.contentPreview || record.name,
   };
+}
+
+function cleanWebExcerpt(value: string): string | undefined {
+  const text = value
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text) return undefined;
+  if (looksLikeCssOrHtmlDump(text)) return undefined;
+  if (/^https?:\/\//i.test(text)) return undefined;
+  return truncateMiddle(text, 220);
+}
+
+function looksLikeCssOrHtmlDump(text: string): boolean {
+  const sample = text.slice(0, 800);
+  const cssSignals = (sample.match(/[{};]/g) ?? []).length;
+  if (cssSignals > 18 && /\.(?:[a-z0-9_-]+)\s*\{/i.test(sample)) return true;
+  if (/<\/?(?:html|head|body|div|span|style|script|meta|link)\b/i.test(sample)) return true;
+  if (/(?:width|height|background|font-size|line-height|margin|padding|position|z-index)\s*:/i.test(sample) && cssSignals > 8) return true;
+  if (/function\s*\(|document\.|window\.|var\s+\w+\s*=|const\s+\w+\s*=|let\s+\w+\s*=/i.test(sample) && cssSignals > 8) return true;
+  return false;
 }
 
 function fallbackActivityDetails(cells: ActivityCellState[]): ActivityDetail[] {
@@ -510,6 +654,7 @@ function activityTitle(
     return title || (status === "running" ? "正在打开浏览器预览" : "已打开浏览器预览");
   }
   if (kind === "command") {
+    if (count === 1) return status === "running" ? "正在运行命令" : "已运行命令";
     return status === "running" ? `正在运行 ${count} 条命令` : `已运行 ${count} 条命令`;
   }
   if (kind === "mcp") {
@@ -559,15 +704,74 @@ function activityRecordTotal(cells: ActivityCellState[]): number {
 }
 
 function activityRecordCount(cell: ActivityCellState): number {
-  return Math.max(1, cell.toolCallRecords?.length ?? Number(cell.subtitle?.match(/\d+/)?.[0] || cell.title.match(/\d+/)?.[0] || 1));
+  // Count comes from the tool-call records, never from digits scraped out of
+  // localized display strings (which produced wrong counts like "文件 ×7").
+  return Math.max(1, cell.toolCallRecords?.length ?? 1);
 }
 
 function recordHasUrl(record: ToolCallRecord): boolean {
+  if (/search/i.test(record.name)) return false;
   const args = record.args ?? {};
   return Boolean(
     stringArg(args.url ?? args.source_url ?? record.sourceUrl) ||
     firstHttpUrl(record.displaySummary || record.summary),
   );
+}
+
+function firstRecordQuery(records: ToolCallRecord[]): string {
+  for (const record of records) {
+    const args = record.args ?? {};
+    const query = stringArg(args.query ?? args.q ?? args.pattern ?? args.glob);
+    if (query) return truncateMiddle(query, 80);
+  }
+  return "";
+}
+
+function firstRecordUrl(records: ToolCallRecord[]): string {
+  for (const record of records) {
+    const args = record.args ?? {};
+    const url = stringArg(args.url ?? args.source_url ?? record.sourceUrl) ||
+      firstHttpUrl(record.displaySummary || record.summary);
+    if (url) return url;
+  }
+  return "";
+}
+
+function firstRecordPathOrQuery(records: ToolCallRecord[]): string {
+  for (const record of records) {
+    const args = record.args ?? {};
+    const path = stringArg(args.file_path ?? args.path ?? args.target ?? args.filename);
+    if (path) return truncatePath(path);
+    const query = stringArg(args.query ?? args.q ?? args.pattern ?? args.glob);
+    if (query) return truncateMiddle(query, 80);
+  }
+  return "";
+}
+
+function truncateMiddle(value: string, max = 96): string {
+  const text = value.replace(/\s+/g, " ").trim();
+  if (text.length <= max) return text;
+  const head = Math.max(12, Math.floor(max * 0.58));
+  const tail = Math.max(8, max - head - 3);
+  return `${text.slice(0, head)}...${text.slice(-tail)}`;
+}
+
+function truncatePath(value: string): string {
+  const normalized = value.replace(/\\/g, "/");
+  const parts = normalized.split("/").filter(Boolean);
+  if (parts.length <= 3) return truncateMiddle(value, 84);
+  return truncateMiddle(`${parts[0]}/.../${parts.slice(-2).join("/")}`, 84);
+}
+
+function shortUrlLabel(value: string): string {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.replace(/^www\./i, "");
+    const path = url.pathname && url.pathname !== "/" ? url.pathname.replace(/\/$/, "") : "";
+    return truncateMiddle(`${host}${path}`, 72);
+  } catch {
+    return truncateMiddle(value, 72);
+  }
 }
 
 function stringArg(value: unknown): string {
@@ -597,11 +801,12 @@ function readableToolName(name: string): string {
 }
 
 function webDetailTitle(record: ToolCallRecord): string {
-  return /fetch|read/i.test(record.name) ? "读取网页" : "来源";
+  if (/search/i.test(record.name)) return "搜索结果";
+  return /fetch|read|open/i.test(record.name) ? "打开网页" : "来源";
 }
 
 function searchDetailTitle(record: ToolCallRecord): string {
-  return /grep|glob|list|workspace/i.test(record.name) ? "搜索工作区" : "搜索";
+  return /grep|glob|list|workspace|file/i.test(record.name) ? "搜索工作区" : "搜索网页";
 }
 
 function fileDetailTitle(record: ToolCallRecord): string {
@@ -610,20 +815,43 @@ function fileDetailTitle(record: ToolCallRecord): string {
   return "读取文件";
 }
 
+function writeFileExcerpt(record: ToolCallRecord): string | undefined {
+  const isWriteEdit = /write|edit|patch|apply/i.test(record.name);
+  const diff = record.diff;
+  const lines: string[] = [];
+  if (diff) {
+    lines.push(`+${diff.plus} -${diff.minus}`);
+    if (diff.patch) lines.push(diff.patch);
+  } else if (isWriteEdit) {
+    const preview = record.contentPreview || record.summary || "";
+    if (preview) lines.push(preview);
+  }
+  const text = lines.join("\n").trim();
+  return text || undefined;
+}
+
 function sourceContribution(cell: Extract<HistoryCellState, { kind: "activity" }>): number {
-  if (!["fileRead", "workspaceSearch", "webSearch", "mcpToolCall"].includes(cell.activityKind)) {
+  if (cell.activityKind === "webSearch") {
+    return (cell.toolCallRecords ?? []).filter(recordHasUrl).length;
+  }
+  if (!["fileRead", "workspaceSearch", "mcpToolCall"].includes(cell.activityKind)) {
     return 0;
   }
   return Math.max(1, cell.toolCallRecords?.length ?? 1);
 }
 
 function isBrowserPreviewActivity(cell: Extract<HistoryCellState, { kind: "activity" }>): boolean {
+  if (cell.activityKind === "webSearch" || cell.activityKind === "fileRead" || cell.activityKind === "workspaceSearch") {
+    return false;
+  }
+  const toolNames = (cell.toolCallRecords ?? []).map((record) => record.name).join(" ");
+  if (/browser|playwright|preview/i.test(toolNames)) return true;
+
   const text = [
     cell.activityKind,
     cell.title,
     cell.subtitle,
     ...(cell.toolCallRecords ?? []).flatMap((record) => [
-      record.name,
       record.displaySummary,
       record.summary,
       typeof record.args.url === "string" ? record.args.url : "",

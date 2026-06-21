@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { CheckCircle2, ChevronDown, ChevronRight, CircleAlert } from "lucide-react";
 import type { AgentLoopSummaryItem } from "../projection/project-turn";
 import type { AgentTurnStatus } from "../types";
 
@@ -17,6 +17,8 @@ export function AgentProcessSummary({
   summaryItems: AgentLoopSummaryItem[];
   onToggle: () => void;
 }) {
+  const completedSummaryItems = summaryItems.filter((item) => item.kind !== "command");
+
   if (!shouldCollapseProcess) {
     if (status !== "running") return null;
     return (
@@ -41,6 +43,13 @@ export function AgentProcessSummary({
         aria-expanded={processExpanded}
         onClick={onToggle}
       >
+        <span className="agent-loop-process-summary-icon" aria-hidden="true">
+          {status === "failed" ? (
+            <CircleAlert size={13} className="agent-loop-failed-icon" />
+          ) : (
+            <CheckCircle2 size={13} className="agent-loop-done-icon" />
+          )}
+        </span>
         <span className="chat-turn-process-summary-text">
           已处理
           {durationLabel && (
@@ -49,6 +58,11 @@ export function AgentProcessSummary({
             </span>
           )}
         </span>
+        {completedSummaryItems.length > 0 && (
+          <span className="agent-loop-process-summary-meta">
+            {completedSummaryItems.map((item) => item.label).join(" · ")}
+          </span>
+        )}
         {processExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
       </button>
     </div>

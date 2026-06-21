@@ -1,5 +1,11 @@
 import type { StateCreator } from "zustand";
-import type { AppStore, UISlice } from "./types";
+import type {
+  AppStore,
+  ArtifactContentState,
+  ConversationWorkbenchState,
+  DiffReviewState,
+  UISlice,
+} from "./types";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { buildApprovalResponseCommand } from "../protocol/prompt-responses";
 import {
@@ -16,6 +22,63 @@ import {
   editorStateForWorkspace,
 } from "./shared-helpers";
 import { clampTextScale } from "../lib/text-scale";
+
+function cloneDiffReviewState(state: DiffReviewState | null): DiffReviewState | null {
+  if (!state) return null;
+  return {
+    ...state,
+    files: state.files.map((file) => ({ ...file })),
+    fileDecisions: { ...state.fileDecisions },
+    lineComments: state.lineComments?.map((comment) => ({ ...comment })) ?? [],
+  };
+}
+
+function cloneArtifactState(state: ArtifactContentState | null): ArtifactContentState | null {
+  return state ? { ...state } : null;
+}
+
+function emptyConversationWorkbenchState(): ConversationWorkbenchState {
+  return {
+    diffReview: null,
+    previewArtifact: null,
+    livePreviewUrl: null,
+    activeTerminalSessionId: null,
+    rightStackTab: "tasks",
+    rightPanelOpen: false,
+    rightStackTabLocked: false,
+  };
+}
+
+function cloneConversationWorkbenchState(state: ConversationWorkbenchState): ConversationWorkbenchState {
+  return {
+    ...state,
+    diffReview: cloneDiffReviewState(state.diffReview),
+    previewArtifact: cloneArtifactState(state.previewArtifact),
+  };
+}
+
+function liveConversationWorkbenchState(s: AppStore): ConversationWorkbenchState {
+  return {
+    diffReview: cloneDiffReviewState(s.diffReview),
+    previewArtifact: cloneArtifactState(s.previewArtifact),
+    livePreviewUrl: s.livePreviewUrl,
+    activeTerminalSessionId: s.activeTerminalSessionId,
+    rightStackTab: s.rightStackTab,
+    rightPanelOpen: s.rightPanelOpen,
+    rightStackTabLocked: s.rightStackTabLocked,
+  };
+}
+
+function storeConversationWorkbenchState(
+  s: AppStore,
+  conversationId: string,
+  state: ConversationWorkbenchState,
+): Record<string, ConversationWorkbenchState> {
+  return {
+    ...(s.conversationWorkbenchStates ?? {}),
+    [conversationId]: cloneConversationWorkbenchState(state),
+  };
+}
 
 export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get) => ({
   themeMode: initialTheme(),
@@ -40,6 +103,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   workingDirectory: "",
   workspaceGit: null,
   diffReview: null,
+  conversationWorkbenchStates: {},
   previewArtifact: null,
   livePreviewUrl: null,
   previewServers: [],
@@ -207,6 +271,58 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   },
   setWorkspaceGit: (state) => set({ workspaceGit: state }),
   setDiffReviewState: (state) => set({ diffReview: state }),
+  snapshotWorkbenchState: (conversationId) =>
+    set((s) => {
+      const targetId = conversationId || s.conversationId || undefined;
+      if (!targetId) return s;
+      return {
+        conversationWorkbenchStates: storeConversationWorkbenchState(
+          s,
+          targetId,
+          liveConversationWorkbenchState(s),
+        ),
+      };
+    }),
+  restoreWorkbenchState: (conversationId) =>
+    set((s) => {
+      const targetId = conversationId || s.conversationId || undefined;
+      const stored = targetId
+        ? s.conversationWorkbenchStates?.[targetId]
+        : undefined;
+      const next = cloneConversationWorkbenchState(stored ?? emptyConversationWorkbenchState());
+      const activeTerminalSessionId = next.activeTerminalSessionId &&
+        s.terminalSessions.some((session) => session.id === next.activeTerminalSessionId)
+          ? next.activeTerminalSessionId
+          : null;
+      return {
+        diffReview: next.diffReview,
+        previewArtifact: next.previewArtifact,
+        livePreviewUrl: next.livePreviewUrl,
+        activeTerminalSessionId,
+        rightStackTab: next.rightStackTab,
+        rightPanelOpen: next.rightPanelOpen,
+        rightStackTabLocked: next.rightStackTabLocked,
+        ...(targetId
+          ? {
+              conversationWorkbenchStates: storeConversationWorkbenchState(
+                s,
+                targetId,
+                { ...next, activeTerminalSessionId },
+              ),
+            }
+          : {}),
+      };
+    }),
+  clearConversationWorkbenchState: (conversationId) =>
+    set((s) => {
+      const next = { ...(s.conversationWorkbenchStates ?? {}) };
+      delete next[conversationId];
+      if (s.conversationId !== conversationId) return { conversationWorkbenchStates: next };
+      return {
+        ...emptyConversationWorkbenchState(),
+        conversationWorkbenchStates: next,
+      };
+    }),
   updateDiffReviewFile: (path, patch) =>
     set((s) => ({
       diffReview: s.diffReview

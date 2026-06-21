@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
-import { CalendarClock, Code2, FolderOpen, Loader, Plus, Search, SlidersHorizontal, Sparkles } from "lucide-react";
+import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from "react";
+import { Boxes, CalendarClock, Code2, FolderOpen, Plus, Search, SlidersHorizontal, Sparkles } from "lucide-react";
 import { useAppStore } from "../stores";
+import { LEFT_SIDEBAR_MAX_WIDTH, LEFT_SIDEBAR_MIN_WIDTH } from "../stores/shared-helpers";
 import { FileTree } from "./FileTree";
 import { ConfirmDialog, type ConfirmDialogState } from "./sidebarComponents";
 import { ConversationsTab } from "./ConversationsTab";
@@ -14,14 +16,18 @@ export const SidebarLeft = () => {
   const appMode = useAppStore((s) => s.appMode);
   const conversationId = useAppStore((s) => s.conversationId);
   const leftSidebarWidth = useAppStore((s) => s.leftSidebarWidth);
+  const workingDirectory = useAppStore((s) => s.workingDirectory);
   const setAppMode = useAppStore((s) => s.setAppMode);
+  const setLeftSidebarWidth = useAppStore((s) => s.setLeftSidebarWidth);
   const createConversation = useAppStore((s) => s.createConversation);
   const toggleCommandPalette = useAppStore((s) => s.toggleCommandPalette);
+  const toggleLiveArtifacts = useAppStore((s) => s.toggleLiveArtifacts);
   const toggleSkillsMarketplace = useAppStore((s) => s.toggleSkillsMarketplace);
   const toggleSettings = useAppStore((s) => s.toggleSettings);
   const [tab, setTab] = useState<SidebarTab>(appMode === "cowork" ? "conversations" : "files");
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState>(null);
   const codeMode = tab === "files";
+  const isOpen = leftSidebarWidth > 0;
 
   const runningCount = useAppStore((s) => {
     let count = 0;
@@ -46,23 +52,67 @@ export const SidebarLeft = () => {
     setTab(nextTab);
     setAppMode(nextTab === "conversations" ? "cowork" : "code");
   };
+  const startSession = (mode: "cowork" | "code") => {
+    createConversation({ appMode: mode, bindWorkspace: Boolean(workingDirectory) });
+  };
+
+  const startResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const handle = event.currentTarget;
+    const pointerId = event.pointerId;
+    const startX = event.clientX;
+    const startWidth = leftSidebarWidth || LEFT_SIDEBAR_MIN_WIDTH;
+    const onMove = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
+      const nextWidth = startWidth + moveEvent.clientX - startX;
+      setLeftSidebarWidth(nextWidth < 42 ? 0 : nextWidth);
+    };
+    const cleanup = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      handle.removeEventListener("lostpointercapture", cleanup);
+      if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      document.body.classList.remove("layout-dragging");
+    };
+    const onUp = (upEvent: PointerEvent) => {
+      if (upEvent.pointerId !== pointerId) return;
+      cleanup();
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    document.body.classList.add("layout-dragging");
+    handle.setPointerCapture(pointerId);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    handle.addEventListener("lostpointercapture", cleanup);
+  };
+
+  const resetSidebarWidth = () => setLeftSidebarWidth(320);
+
+  const sidebarWidth = isOpen ? `${leftSidebarWidth}px` : 0;
 
   return (
     <aside
-      className="anim-slide-left sidebar-animate flex flex-col overflow-hidden box-border"
+      className="mc-sidebar-left anim-slide-left sidebar-animate flex flex-col overflow-hidden box-border"
+      data-open={isOpen ? "true" : "false"}
       style={{
+        position: "relative",
         display: "flex",
         flexDirection: "column",
         overflow: "hidden",
         padding: "14px 10px 10px",
         boxSizing: "border-box",
         borderRight: "1px solid color-mix(in oklch, var(--border-subtle) 55%, transparent)",
-        width: leftSidebarWidth > 0 ? "var(--sidebar-max-width)" : 0,
-        minWidth: leftSidebarWidth > 0 ? "var(--sidebar-min-width)" : 0,
-        maxWidth: leftSidebarWidth > 0 ? "var(--sidebar-max-width)" : 0,
+        width: sidebarWidth,
+        minWidth: sidebarWidth,
+        maxWidth: sidebarWidth,
         background: "color-mix(in oklch, var(--surface-page) 82%, var(--surface-base))",
-        opacity: leftSidebarWidth > 0 ? 1 : 0,
-        pointerEvents: leftSidebarWidth > 0 ? "auto" : "none",
+        opacity: isOpen ? 1 : 0,
+        pointerEvents: isOpen ? "auto" : "none",
       }}
     >
       {/* Tab bar */}
@@ -105,18 +155,26 @@ export const SidebarLeft = () => {
 
       {!codeMode && (
         <nav aria-label="Workspace navigation" style={{ display: "grid", gap: 3, padding: "10px 4px 12px" }}>
-          <SidebarAction icon={<Plus size={15} />} label="New task" onClick={() => createConversation()} />
-          <SidebarAction icon={<Search size={15} />} label="Search" onClick={() => toggleCommandPalette()} />
-          <SidebarAction icon={<FolderOpen size={15} />} label="Open folder" onClick={() => void openWorkspaceFolder()} />
+          <SidebarAction icon={<Plus size={15} />} label="New task" onClick={() => startSession("cowork")} />
+          <SidebarAction icon={<FolderOpen size={15} />} label="Projects" onClick={() => void openWorkspaceFolder()} />
           <SidebarAction
             icon={<CalendarClock size={15} />}
-            label="Automations"
+            label="Scheduled"
             onClick={() => {
               window.dispatchEvent(new CustomEvent("minicode:settings-tab", { detail: "scheduler" }));
               toggleSettings();
             }}
           />
+          <SidebarAction icon={<Boxes size={15} />} label="Live artifacts" onClick={() => toggleLiveArtifacts()} />
           <SidebarAction icon={<Sparkles size={15} />} label="Customize" onClick={() => toggleSkillsMarketplace()} />
+        </nav>
+      )}
+
+      {codeMode && (
+        <nav aria-label="Code navigation" style={{ display: "grid", gap: 3, padding: "10px 4px 12px" }}>
+          <SidebarAction icon={<Plus size={15} />} label="New session" onClick={() => startSession("code")} />
+          <SidebarAction icon={<Search size={15} />} label="Search" onClick={() => toggleCommandPalette()} />
+          <SidebarAction icon={<FolderOpen size={15} />} label={workingDirectory ? "Switch folder" : "Open folder"} onClick={() => void openWorkspaceFolder()} />
         </nav>
       )}
 
@@ -128,6 +186,22 @@ export const SidebarLeft = () => {
       )}
 
       {tab === "files" && <FileTree />}
+
+      {isOpen && (
+        <div
+          className="mc-sidebar-left-resize-handle"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize left sidebar"
+          aria-valuemin={LEFT_SIDEBAR_MIN_WIDTH}
+          aria-valuemax={LEFT_SIDEBAR_MAX_WIDTH}
+          aria-valuenow={Math.round(leftSidebarWidth)}
+          title="Drag to resize left sidebar; double-click to reset"
+          onPointerDown={startResize}
+          onDoubleClick={resetSidebarWidth}
+          style={leftResizeHandleStyle}
+        />
+      )}
 
       {confirmDialog && (
         <ConfirmDialog
@@ -149,7 +223,7 @@ const SidebarAction = ({
   label,
   onClick,
 }: {
-  icon: React.ReactNode;
+  icon: ReactNode;
   label: string;
   onClick: () => void;
 }) => (
@@ -177,3 +251,13 @@ const SidebarAction = ({
     <span>{label}</span>
   </button>
 );
+
+const leftResizeHandleStyle: CSSProperties = {
+  position: "absolute",
+  top: 0,
+  right: -3,
+  bottom: 0,
+  width: 7,
+  cursor: "col-resize",
+  zIndex: 2,
+};

@@ -15,6 +15,7 @@
 // ──────────────────────────────────────────────────────────────────
 
 import type { RuntimeSessionSnapshot } from "./streaming-types";
+import type { AgentCapabilitiesPayload } from "./capabilities";
 import type {
   ConversationRecordPayload,
   ConversationTranscriptMessage,
@@ -35,6 +36,7 @@ export type CommonServerEventType =
   // Session / control plane
   | "session.restored"
   | "session.synced"
+  | "runtime.capabilities"
   | "client.command.ack"
   | "pong"
   | "control_request"
@@ -78,6 +80,7 @@ export type CommonClientCommandType =
   | "session.status.inspect"
   | "session.usage.inspect"
   | "session.permissions.inspect"
+  | "runtime.capabilities.inspect"
   // Session restore / sync
   | "session.restore"
   | "session.sync"
@@ -206,6 +209,13 @@ export interface ClientCommandAckEvent {
   command_type: string;
 }
 
+export interface RuntimeCapabilitiesEvent {
+  type: "runtime.capabilities";
+  session_id?: string;
+  source?: string;
+  capabilities: AgentCapabilitiesPayload;
+}
+
 // ──────────────────────────────────────────────────────────────────
 // Client command payloads (common / infrastructure domain)
 // ──────────────────────────────────────────────────────────────────
@@ -302,4 +312,9 @@ export interface ConnectorsMarketplaceListCommand {
 export interface ConnectorsMarketplaceInstallCommand {
   type: "connectors.marketplace.install";
   name: string;
+}
+
+export interface RuntimeCapabilitiesInspectCommand {
+  type: "runtime.capabilities.inspect";
+  source?: string;
 }

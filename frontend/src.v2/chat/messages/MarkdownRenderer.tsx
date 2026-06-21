@@ -25,6 +25,7 @@ type MarkdownNode = {
 
 type ResolvedTheme = "light" | "dark";
 type MarkdownComponents = NonNullable<React.ComponentProps<typeof ReactMarkdown>["components"]>;
+type MarkdownRemarkPlugins = NonNullable<React.ComponentProps<typeof ReactMarkdown>["remarkPlugins"]>;
 type MarkdownCodeProps = React.HTMLAttributes<HTMLElement> & {
   node?: { position?: { start: { line: number }; end: { line: number } } };
 };
@@ -232,6 +233,14 @@ const editorLinkUrl = (path: string, line: string, column?: string): string => {
   return `minicode-file-ref:${params.toString()}`;
 };
 
+const isWorkspaceRelativeEditorPath = (path: string): boolean => {
+  const trimmed = path.trim();
+  if (!trimmed || trimmed.includes("\0")) return false;
+  if (trimmed.startsWith("/") || trimmed.startsWith("\\") || trimmed.startsWith("~")) return false;
+  if (/^[A-Za-z]:[/\\]/.test(trimmed) || /^file:/i.test(trimmed)) return false;
+  return !trimmed.split(/[\\/]+/).some((part) => part === "..");
+};
+
 const splitBareFileRefs = (value: string): MarkdownNode[] | null => {
   bareFileRefPattern.lastIndex = 0;
   const parts: MarkdownNode[] = [];
@@ -406,19 +415,12 @@ const parsePositiveInt = (value: string | null | undefined): number | undefined 
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 };
 
-const parseLineAnchor = (href: string): { line?: number; column?: number } => {
-  const hash = href.match(/[#?&](?:L|line=)?(\d+)(?::|&column=)?(\d+)?/i);
-  return {
-    line: parsePositiveInt(hash?.[1]),
-    column: parsePositiveInt(hash?.[2]),
-  };
-};
-
 const editorTargetFromHref = (href: string): { path: string; line?: number; column?: number } | null => {
   if (href.startsWith("minicode-file-ref:")) {
     const params = new URLSearchParams(href.slice("minicode-file-ref:".length));
     const path = params.get("path")?.trim();
     if (!path) return null;
+    if (!isWorkspaceRelativeEditorPath(path)) return null;
     return {
       path,
       line: parsePositiveInt(params.get("line")),
@@ -426,15 +428,10 @@ const editorTargetFromHref = (href: string): { path: string; line?: number; colu
     };
   }
   if (href.startsWith("file://")) {
-    const withoutScheme = decodeURIComponent(href.slice(7));
-    const hashIndex = withoutScheme.search(/[#?]/);
-    const path = hashIndex >= 0 ? withoutScheme.slice(0, hashIndex) : withoutScheme;
-    return { path, ...parseLineAnchor(withoutScheme) };
+    return null;
   }
   if (/^[A-Za-z]:[/\\]|^\/[^/]/.test(href)) {
-    const hashIndex = href.search(/[#?]/);
-    const path = hashIndex >= 0 ? href.slice(0, hashIndex) : href;
-    return { path, ...parseLineAnchor(href) };
+    return null;
   }
   return null;
 };
@@ -481,6 +478,9 @@ const mdComponents = (resolvedTheme: ResolvedTheme, citations: Props["citations"
     const childrenText = Children.toArray(props.children).join("");
     const compactChildren = label >= 0 && childrenText === href ? `[${label + 1}]` : props.children;
     const editorTarget = editorTargetFromHref(href);
+    if (href.startsWith("minicode-file-ref:") && !editorTarget) {
+      return <span className="font-[var(--font-mono)] text-[0.9em]">{compactChildren}</span>;
+    }
     if (editorTarget) {
       return (
         <button type="button" onClick={() => useAppStore.getState().openEditorFile(
@@ -535,7 +535,11 @@ const mdComponents = (resolvedTheme: ResolvedTheme, citations: Props["citations"
   ),
 });
 
-const remarkPlugins = [remarkGfm, normalizeFallbackStrongMarkers, linkifyBareFileReferences];
+const remarkPlugins: MarkdownRemarkPlugins = [
+  [remarkGfm, { singleTilde: false }],
+  normalizeFallbackStrongMarkers,
+  linkifyBareFileReferences,
+];
 
 const markdownUrlTransform = (url: string) => (
   url.startsWith("minicode-file-ref:") ? url : defaultUrlTransform(url)
@@ -575,16 +579,20 @@ const citationHref = (citation: NonNullable<Props["citations"]>[number] | undefi
 
 const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-const sourceLabelPattern = "(?:\u6765\u6e90|\u53c2\u8003\u6765\u6e90|\u8d44\u6599\u6765\u6e90|\u53c2\u8003|sources?|references?)";
-const sourceHeadingLabelPattern = "(?:\u6765\u6e90|\u53c2\u8003\u6765\u6e90|\u8d44\u6599\u6765\u6e90|\u53c2\u8003\u6765\u6e90\u5217\u8868|\u53c2\u8003\u8d44\u6599|\u53c2\u8003\u6587\u732e|\u53c2\u8003|sources?|references?)";
+const sourceLabelPattern = "(?:\u6765\u6e90|\u6570\u636e\u6765\u6e90|\u4fe1\u606f\u6765\u6e90|\u53c2\u8003\u6765\u6e90|\u8d44\u6599\u6765\u6e90|\u53c2\u8003|sources?|references?)";
+const sourceHeadingLabelPattern = "(?:\u6765\u6e90|\u6570\u636e\u6765\u6e90|\u4fe1\u606f\u6765\u6e90|\u53c2\u8003\u6765\u6e90|\u8d44\u6599\u6765\u6e90|\u53c2\u8003\u6765\u6e90\u5217\u8868|\u53c2\u8003\u8d44\u6599|\u53c2\u8003\u6587\u732e|\u53c2\u8003|sources?|references?)";
 const urlOrHostPattern = "(?:<?https?:\\/\\/\\S+>?|[\\w.-]+\\.[a-z]{2,}(?:\\/\\S*)?)";
 
 const sourceLinePattern = new RegExp(
-  `^\\s*${sourceLabelPattern}\\s*[:\\uFF1A]\\s*(?:\\[\\d+\\]\\s*)?${urlOrHostPattern}.*$`,
+  `^\\s*${sourceLabelPattern}\\s*[:\\uFF1A]\\s*(?:\\[\\d+\\]\\s*)?.*${urlOrHostPattern}.*$`,
   "i",
 );
 const sourceListOnlyPattern = new RegExp(
   `^\\s*${sourceLabelPattern}\\s*[:\\uFF1A]\\s*(?:\\[\\d+\\](?:\\s*${urlOrHostPattern})?(?:\\s*[,;\\uFF0C\\u3001]\\s*)?)+\\s*$`,
+  "i",
+);
+const sourceCitationSummaryPattern = new RegExp(
+  `^\\s*${sourceLabelPattern}\\s*[:\\uFF1A]\\s*(?:\\[\\d+\\]\\s*[^\\[]+)+\\s*$`,
   "i",
 );
 const sourceHeadingPattern = new RegExp(
@@ -592,19 +600,51 @@ const sourceHeadingPattern = new RegExp(
   "i",
 );
 const sourceItemPattern = new RegExp(
-  `^\\s*(?:[-*]\\s*)?(?:\\[\\d+\\]|\\d+[.)])\\s*(?:[^\\n:\\uFF1A]{0,120}[:\\uFF1A]\\s*)?${urlOrHostPattern}.*$`,
+  `^\\s*(?:[-*]\\s*)?(?:\\[\\d+\\]|\\d+[.)])\\s*(?:[^\\n:\\uFF1A]{0,160}(?:[:\\uFF1A]|\\s+)\\s*)?${urlOrHostPattern}.*$`,
   "i",
 );
 const sourceTitlePattern = new RegExp("^\\s*(?:[-*]\\s*)?(?:\\[\\d+\\]|\\d+[.)])\\s+.+[:\\uFF1A]\\s*$");
 const bareUrlPattern = /^\s*<?https?:\/\/\S+>?\s*$/i;
+const indexedCitationMarkerPattern = /(?:\[\d+\]|\[\[\\?\d+\\?\]\]\([^)]+\)|\[\\\[\d+\\\]\]\(<[^)]+>\))/g;
+const urlOrHostGlobalPattern = new RegExp(urlOrHostPattern, "gi");
+const inlineSourceLinkPattern = /\s*\[\s*(?:https?:\/\/[^\]\s]+|(?:www\.)?[\w.-]+\.[a-z]{2,}(?:\/[^\]\s]*)?)\s*\]\(\s*<?https?:\/\/[^)\s>]+>?\s*\)/gi;
 
-const stripModelAuthoredSources = (content: string): string => {
+const isInlineIndexedSourceList = (line: string): boolean => {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("[")) return false;
+  const markers = [...trimmed.matchAll(indexedCitationMarkerPattern)];
+  if (markers.length < 2 || markers[0].index !== 0) return false;
+  return [...trimmed.matchAll(urlOrHostGlobalPattern)].length >= 2;
+};
+
+const stripInlineSourceLinks = (line: string): string => (
+  line
+    .replace(inlineSourceLinkPattern, "")
+    .replace(/\s+([。！？!?；;，,])/g, "$1")
+);
+
+export const stripModelAuthoredSources = (content: string): string => {
   const lines = content.split(/\r?\n/);
   const kept: string[] = [];
   let inSourceSection = false;
+  let inFence = false;
 
   for (const line of lines) {
-    if (sourceLinePattern.test(line) || sourceListOnlyPattern.test(line)) {
+    if (/^\s*(```|~~~)/.test(line)) {
+      inFence = !inFence;
+      kept.push(line);
+      continue;
+    }
+    if (inFence) {
+      kept.push(line);
+      continue;
+    }
+    if (
+      sourceLinePattern.test(line) ||
+      sourceListOnlyPattern.test(line) ||
+      sourceCitationSummaryPattern.test(line) ||
+      isInlineIndexedSourceList(line)
+    ) {
       continue;
     }
     if (sourceHeadingPattern.test(line)) {
@@ -622,32 +662,47 @@ const stripModelAuthoredSources = (content: string): string => {
       }
       inSourceSection = false;
     }
-    kept.push(line);
+    kept.push(stripInlineSourceLinks(line));
   }
 
   return kept.join("\n").trim();
 };
-const normalizeCitationText = (content: string, citations: Props["citations"] = []): string => {
-  let next = stripModelAuthoredSources(content);
-  if (!citations.length) return next;
+
+const removeInlineCitationMarkers = (content: string, citations: Props["citations"] = []): string => {
+  let next = content;
   citations.forEach((citation, index) => {
     const href = citationHref(citation);
     if (!href) return;
     const n = index + 1;
-    const linkedMarker = `[\\[${n}\\]](<${href.replace(/>/g, "%3E")}>)`;
     const escapedHref = escapeRegex(href);
-
-    next = next.replace(new RegExp(`\\[${n}\\]\\s*<?${escapedHref}>?`, "g"), linkedMarker);
+    next = next
+      .replace(new RegExp(`\\[${n}\\]\\(\\s*<?${escapedHref}>?\\s*\\)`, "g"), "")
+      .replace(new RegExp(`\\[\\\\?\\[${n}\\\\?\\]\\]\\(\\s*<?${escapedHref}>?\\s*\\)`, "g"), "");
     try {
       const parsed = new URL(href);
       const prefix = escapeRegex(`${parsed.origin}${parsed.pathname}`);
-      next = next.replace(new RegExp(`\\[${n}\\]\\s*<?${prefix}[^\\s)\\]}>,;]*>?`, "g"), linkedMarker);
+      next = next
+        .replace(new RegExp(`\\[${n}\\]\\(\\s*<?${prefix}[^)\\s>]*>?\\s*\\)`, "g"), "")
+        .replace(new RegExp(`\\[\\\\?\\[${n}\\\\?\\]\\]\\(\\s*<?${prefix}[^)\\s>]*>?\\s*\\)`, "g"), "");
     } catch {
       // Exact URL replacement above is enough for non-standard URLs.
     }
-    next = next.replace(new RegExp(`\\[${n}\\](?!\\()`, "g"), linkedMarker);
+    next = next.replace(new RegExp(`\\[${n}\\](?!\\()`, "g"), "");
   });
-  return next;
+  return next
+    .replace(/[ \t]+([，。！？；：、,.!?;:])/g, "$1")
+    .replace(/([（(【「『])\s+/g, "$1")
+    .replace(/\s+([）)】」』])/g, "$1")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
+    .trim();
+};
+
+export const normalizeCitationText = (content: string, citations: Props["citations"] = []): string => {
+  let next = stripModelAuthoredSources(content);
+  if (!citations.length) return next;
+  return removeInlineCitationMarkers(next, citations);
 };
 
 export const MarkdownRenderer = memo(({ content, isStreaming, citations }: Props) => {

@@ -1,5 +1,6 @@
 import type { ContentBlock } from "../stores/types";
 import type { ToolCallRecord } from "./tool-call-reducer";
+import { shouldShowInMainChat } from "./display-intent";
 
 export type TurnActivityKind =
   | "reasoning"
@@ -52,6 +53,12 @@ export interface TurnHeadline {
 export interface TurnProjection {
   activityItems: TurnActivityItem[];
   finalAnswer: string;
+  /** Origin of the final answer text. "send_message" = explicit BriefTool reply;
+   * "stream" (or undefined) = final-answer text streamed after tool work. */
+  finalAnswerSource?: string;
+  /** True when the turn contains a `send_message` (BriefTool) call. Used to
+   * collapse preamble text since the BriefTool reply is the visible answer. */
+  hasSendMessage: boolean;
   status: "streaming" | "completed" | "failed" | "empty";
   durationMs: number;
   hasFailure: boolean;
@@ -163,13 +170,13 @@ const isTurnActivityKind = (value: string): value is TurnActivityKind =>
 
 const kindForTool = (record: ToolCallRecord): TurnActivityKind | null => {
   if (record.name === "ask_user") return null;
-  if (record.name === "todo_write") return "genericTool";
+  if (record.name === "todo_write" || record.name === "todo_read") return null;
   if (record.activityKind && isTurnActivityKind(record.activityKind)) return record.activityKind;
   const resultKind = resultKindForRecord(record);
   if (isWebTool(record)) return "webSearch";
   if (resultKind === "command" || isCommandTool(record.name)) return "commandExecution";
-  if (resultKind === "edit" || isFileChangeTool(record.name)) {
-    return hasFileChangeTarget(record) ? "fileChange" : "genericTool";
+  if (resultKind === "edit" || isFileChangeTool(record.name) || record.diff) {
+    return hasFileChangeTarget(record) || record.diff ? "fileChange" : "genericTool";
   }
   if (record.name.startsWith("mcp__") || resultKind === "mcp") return "mcpToolCall";
   if (isWorkspaceSearchTool(record.name)) return "workspaceSearch";
@@ -314,6 +321,7 @@ const pushToolBlock = (
   items: TurnActivityItem[],
   block: Extract<ContentBlock, { type: "tool_call" }>,
 ): boolean => {
+  if (!shouldShowInMainChat(block.record)) return false;
   const kind = kindForTool(block.record);
   if (!kind) return false;
   const last = items.at(-1);
@@ -353,6 +361,7 @@ const pushProgressBlock = (
   items: TurnActivityItem[],
   block: Extract<ContentBlock, { type: "progress" }>,
 ) => {
+  if (!shouldShowInMainChat(block)) return;
   const kind: TurnActivityKind = block.stage === "planning" ? "planning" : "progress";
   const last = items.at(-1);
   if (last?.kind === kind) {
@@ -382,7 +391,7 @@ const kindForThinking = (
   block: Extract<ContentBlock, { type: "thinking" }>,
 ): Extract<TurnActivityKind, "reasoning" | "processNote" | "providerReasoning"> => {
   if (block.source === "provider") return "providerReasoning";
-  if (block.source === "model_preamble" || block.source === "runtime") return "processNote";
+  if (block.source === "model_preamble" || block.source === "post_tool" || block.source === "runtime") return "processNote";
   return "reasoning";
 };
 
@@ -394,7 +403,7 @@ const pushThinkingBlock = (
 ) => {
   const kind = kindForThinking(block);
   const last = items.at(-1);
-  if (last?.kind === kind) {
+  if (last?.kind === kind && last.source === block.source) {
     last.blocks.push(block);
     last.content = `${last.content ?? ""}${block.content}`;
     last.status = isThinkingStreaming ? "running" : "completed";
@@ -405,6 +414,7 @@ const pushThinkingBlock = (
     kind,
     blocks: [block],
     content: block.content,
+    source: block.source,
     status: isThinkingStreaming ? "running" : "completed",
     hasFailure: false,
     hasPendingUserAction: false,
@@ -416,6 +426,7 @@ const pushProcessBlock = (
   block: Extract<ContentBlock, { type: "process" }>,
   index: number,
 ) => {
+  if (!shouldShowInMainChat(block)) return;
   if (!block.content.trim() || block.visibility === "debug") return;
   const kind: TurnActivityKind = "processNote";
   const status: TurnActivityStatus =
@@ -428,6 +439,13 @@ const pushProcessBlock = (
           : "completed";
   const last = items.at(-1);
   if (last?.kind === kind && last.source === block.source && last.itemKind === block.itemKind) {
+    if (last.content && isRedundantAdjacentModelPreamble(block.content, last)) {
+      last.blocks = [block];
+      last.content = block.content;
+      last.status = status;
+      last.hasFailure = status === "failed";
+      return;
+    }
     last.blocks.push(block);
     last.content = `${last.content ?? ""}${block.content}`;
     last.status = status;
@@ -452,25 +470,171 @@ const pushProcessBlock = (
 const nonEmptyTextIndexes = (blocks: ContentBlock[]): number[] =>
   blocks.flatMap((block, index) => block.type === "text" && block.content.trim() ? [index] : []);
 
+const explicitFinalTextIndexes = (blocks: ContentBlock[]): number[] =>
+  blocks.flatMap((block, index) => {
+    if (block.type !== "text" || !block.content.trim()) return [];
+    if (
+      block.visibility === "final" ||
+      block.phase === "final" ||
+      block.source === "send_message" ||
+      block.source === "model_final" ||
+      block.source === "fallback" ||
+      block.source === "partial"
+    ) {
+      return [index];
+    }
+    return [];
+  });
+
+const hasModernTextRouting = (blocks: ContentBlock[]): boolean =>
+  blocks.some((block) => {
+    if (block.type === "process" || block.type === "progress") return true;
+    if (block.type !== "text") return false;
+    if (block.visibility || block.phase || block.role) return true;
+    return Boolean(block.source && block.source !== "stream");
+  });
+
+const isTimelineTextBlock = (block: ContentBlock): boolean =>
+  block.type === "text" &&
+  (
+    block.visibility === "timeline" ||
+    block.visibility === "debug" ||
+    block.role === "runtime" ||
+    block.source === "model_preamble" ||
+    block.source === "post_tool" ||
+    block.source === "runtime"
+  );
+
+const implicitFinalTextIndexes = (blocks: ContentBlock[], requireStreamSource = false): number[] =>
+  blocks.flatMap((block, index) => {
+    if (block.type !== "text" || !block.content.trim()) return [];
+    if (isTimelineTextBlock(block)) return [];
+    if (requireStreamSource && block.source !== "stream") return [];
+    return [index];
+  });
+
 const isActivityBlock = (block: ContentBlock): boolean =>
   block.type === "tool_call" || block.type === "progress" || block.type === "thinking" || block.type === "process";
 
 const hasWorkActivity = (blocks: ContentBlock[]): boolean =>
   blocks.some(isActivityBlock);
 
+const hasRunningToolBefore = (blocks: ContentBlock[], index: number): boolean =>
+  blocks.slice(0, index).some((block) =>
+    block.type === "tool_call" &&
+    (block.record.status === "running" || block.record.status === "pending"),
+  );
+
+const hasToolActivityBefore = (blocks: ContentBlock[], index: number): boolean =>
+  blocks.slice(0, index).some((block) => block.type === "tool_call");
+
+const isTimelineText = (block: ContentBlock): block is Extract<ContentBlock, { type: "text" }> =>
+  block.type === "text" && block.visibility === "timeline";
+
 const isRawProviderErrorText = (content: string): boolean =>
   /Claude API 调用失败|LLM API 调用失败|LLM API request failed|Concurrency limit exceeded|rate limit|too many requests|429/i.test(content);
 
-const isInterimAssistantText = (content: string): boolean => {
-  const text = content.replace(/\s+/g, " ").trim();
-  if (!text) return false;
-  if (/(?:收到，我继续|我继续|我现在|现在我|接下来|下一步|重新跑|跑测试|回归.*过了|测试.*过了|修掉了|我会|我来|我先)/.test(text)) {
-    return true;
+const normalizePreambleText = (content: string): string =>
+  content.replace(/\s+/g, " ").trim();
+
+const normalizeProcessNarrativeText = (content: string): string =>
+  content
+    .toLowerCase()
+    .replace(/[`*_~#[\](){}<>|"'“”‘’]/g, "")
+    .replace(/[，。！？、；：,.!?;:\s-]+/g, "")
+    .trim();
+
+const characterBigrams = (value: string): Set<string> => {
+  const chars = Array.from(value);
+  if (chars.length < 2) return new Set(chars);
+  const grams = new Set<string>();
+  for (let index = 0; index < chars.length - 1; index += 1) {
+    grams.add(`${chars[index]}${chars[index + 1]}`);
   }
-  return (
-    /^(?:let me|i['’]?ll|i will|i(?:'| a)?m going to|first[,，]?|next[,，]?)/i.test(text) ||
-    /(?:我先|先看|先了解|先检查|先详细|接下来|继续看|再看|再检查|我看看|看一下|了解一下|先修|先改)/.test(text) ||
-    /(?:look at|look into|inspect|check|read).{0,80}(?:first|next|then)/i.test(text)
+  return grams;
+};
+
+const processNarrativeSimilarity = (left: string, right: string): number => {
+  const a = characterBigrams(left);
+  const b = characterBigrams(right);
+  if (!a.size || !b.size) return 0;
+  let overlap = 0;
+  a.forEach((gram) => {
+    if (b.has(gram)) overlap += 1;
+  });
+  return (2 * overlap) / (a.size + b.size);
+};
+
+const REDUNDANT_PROCESS_NARRATIVE_THRESHOLD = 0.86;
+
+const isRedundantProcessNarrative = (content: string, previous: string): boolean => {
+  const current = normalizeProcessNarrativeText(content);
+  const earlier = normalizeProcessNarrativeText(previous);
+  if (!current || !earlier) return false;
+  if (current === earlier) return true;
+  const shorter = current.length < earlier.length ? current : earlier;
+  const longer = current.length < earlier.length ? earlier : current;
+  if (shorter.length >= 36 && longer.includes(shorter)) return true;
+  return current.length >= 28 && earlier.length >= 28 && processNarrativeSimilarity(current, earlier) >= REDUNDANT_PROCESS_NARRATIVE_THRESHOLD;
+};
+
+const isModelPreambleNarrativeItem = (item: TurnActivityItem): boolean =>
+  (item.kind === "processNote" || item.kind === "agentMessage") &&
+  (item.source === "model_preamble" || item.source === undefined || item.source === "") &&
+  Boolean(item.content?.trim()) &&
+  !item.hasFailure &&
+  !item.hasPendingUserAction;
+
+const isRedundantAdjacentModelPreamble = (content: string, previous: TurnActivityItem): boolean =>
+  isModelPreambleNarrativeItem(previous) &&
+  isRedundantProcessNarrative(content, previous.content ?? "");
+
+const dedupeProcessNarrativeItems = (items: TurnActivityItem[]): TurnActivityItem[] => {
+  const kept: TurnActivityItem[] = [];
+  for (const item of items) {
+    const previous = kept.at(-1);
+    if (
+      previous &&
+      isModelPreambleNarrativeItem(item) &&
+      previous.kind === item.kind &&
+      isRedundantAdjacentModelPreamble(item.content ?? "", previous)
+    ) {
+      kept[kept.length - 1] = item;
+      continue;
+    }
+    kept.push(item);
+  }
+  return kept;
+};
+
+const isVisibleProcessThinking = (
+  block: ContentBlock,
+): block is Extract<ContentBlock, { type: "thinking" }> =>
+  block.type === "thinking" &&
+  (block.source === "model_preamble" || block.source === "post_tool") &&
+  block.visibility !== "debug" &&
+  !block.is_raw_provider_reasoning &&
+  Boolean(normalizePreambleText(block.content));
+
+const isVisibleProcessBlock = (
+  block: ContentBlock,
+): block is Extract<ContentBlock, { type: "process" }> =>
+  block.type === "process" &&
+  (block.itemKind === "process_text" || block.itemKind === "action_summary") &&
+  block.visibility !== "debug" &&
+  Boolean(normalizePreambleText(block.content));
+
+const duplicatesVisibleProcessText = (
+  blocks: ContentBlock[],
+  textIndex: number,
+  content: string,
+): boolean => {
+  const normalized = normalizePreambleText(content);
+  if (!normalized) return false;
+  return blocks.some((block, index) =>
+    index !== textIndex &&
+    (isVisibleProcessThinking(block) || isVisibleProcessBlock(block)) &&
+    normalizePreambleText(block.content) === normalized,
   );
 };
 
@@ -478,16 +642,30 @@ const selectFinalTextIndex = (
   blocks: ContentBlock[],
   options: ProjectTurnOptions,
 ): number | undefined => {
-  const indexes = nonEmptyTextIndexes(blocks);
+  const explicitIndexes = explicitFinalTextIndexes(blocks);
+  const explicitCandidate = explicitIndexes.at(-1);
+  if (explicitCandidate != null) {
+    const block = blocks[explicitCandidate];
+    if (block?.type !== "text") return undefined;
+    return isRawProviderErrorText(block.content) ? undefined : explicitCandidate;
+  }
+
+  const modernTextRouting = hasModernTextRouting(blocks);
+  const indexes = modernTextRouting
+    ? implicitFinalTextIndexes(blocks, true)
+    : nonEmptyTextIndexes(blocks);
   const candidate = indexes.at(-1);
   if (candidate == null) return undefined;
+  const candidateBlock = blocks[candidate];
+  if (candidateBlock?.type !== "text") return undefined;
+  if (isTimelineTextBlock(candidateBlock)) return undefined;
 
   const hasActivityAfter = blocks.slice(candidate + 1).some(isActivityBlock);
   if (hasActivityAfter) return undefined;
+  if (options.isStreaming && hasRunningToolBefore(blocks, candidate)) return undefined;
 
-  const content = (blocks[candidate] as Extract<ContentBlock, { type: "text" }>).content;
-  if (isRawProviderErrorText(content)) return undefined;
-  if (isInterimAssistantText(content) && (options.isStreaming || hasWorkActivity(blocks))) return undefined;
+  if (isRawProviderErrorText(candidateBlock.content)) return undefined;
+  if (duplicatesVisibleProcessText(blocks, candidate, candidateBlock.content) && hasWorkActivity(blocks)) return undefined;
 
   return candidate;
 };
@@ -635,9 +813,18 @@ export function projectTurn(
   options: ProjectTurnOptions = {},
 ): TurnProjection {
   const finalTextIndex = selectFinalTextIndex(blocks, options);
-  const finalAnswer = finalTextIndex == null || blocks[finalTextIndex]?.type !== "text"
-    ? ""
-    : (blocks[finalTextIndex] as Extract<ContentBlock, { type: "text" }>).content;
+  const finalAnswerBlock = finalTextIndex == null
+    ? undefined
+    : (blocks[finalTextIndex] as Extract<ContentBlock, { type: "text" }> | undefined);
+  const finalAnswer = finalAnswerBlock?.type === "text" ? finalAnswerBlock.content : "";
+  const finalAnswerSource = finalAnswerBlock?.type === "text"
+    ? (finalAnswerBlock as { source?: string }).source
+    : undefined;
+  // A BriefTool (send_message) reply makes itself the visible answer of the
+  // turn; the preamble text that precedes it is then collapsed by the caller.
+  const hasSendMessage = blocks.some(
+    (block) => block.type === "tool_call" && block.record.name === "send_message",
+  );
 
   const activityItems: TurnActivityItem[] = [];
   const legacyThinkingBlocks = blocks.filter(
@@ -671,11 +858,16 @@ export function projectTurn(
       if (index === finalTextIndex) return;
       if (!block.content.trim()) return;
       if (isRawProviderErrorText(block.content)) return;
+      if (duplicatesVisibleProcessText(blocks, index, block.content)) return;
+      const source = block.visibility === "timeline"
+        ? (block.source || (hasToolActivityBefore(blocks, index) ? "post_tool" : "model_preamble"))
+        : hasToolActivityBefore(blocks, index) ? "post_tool" : "model_preamble";
       activityItems.push({
         id: `agent-message-${index}`,
         kind: "agentMessage",
         blocks: [block],
         content: block.content,
+        source,
         status: "completed",
         hasFailure: false,
         hasPendingUserAction: false,
@@ -693,13 +885,15 @@ export function projectTurn(
     }
   });
 
-  const hasActivityFailure = activityItems.some((item) =>
+  const displayActivityItems = dedupeProcessNarrativeItems(activityItems);
+
+  const hasActivityFailure = displayActivityItems.some((item) =>
     item.status === "failed" ||
     item.status === "blocked" ||
     (item.hasFailure && !hasSuccessfulToolRecord(item)) ||
     itemHasHardFailure(item)
   );
-  const hasOnlyLocalSuccessfulWorkspaceActivity = activityItems.length > 0 && activityItems.every((item) => (
+  const hasOnlyLocalSuccessfulWorkspaceActivity = displayActivityItems.length > 0 && displayActivityItems.every((item) => (
     !item.hasFailure
     && item.status === "completed"
     && (item.kind === "workspaceSearch" || item.kind === "fileRead")
@@ -710,20 +904,22 @@ export function projectTurn(
     && hasOnlyLocalSuccessfulWorkspaceActivity
   );
   const hasFailure = hasActivityFailure || (options.terminalStatus === "failed" && !terminalFailedWithoutFailedActivity);
-  const hasPendingUserAction = skippedAskUser || activityItems.some((item) => item.hasPendingUserAction);
-  const durationMs = activityItems.reduce((max, item) => Math.max(max, item.durationMs ?? 0), 0);
+  const hasPendingUserAction = skippedAskUser || displayActivityItems.some((item) => item.hasPendingUserAction);
+  const durationMs = displayActivityItems.reduce((max, item) => Math.max(max, item.durationMs ?? 0), 0);
   const status = options.isStreaming
     ? "streaming"
     : hasFailure
       ? "failed"
-      : finalAnswer.trim() || activityItems.length
+      : finalAnswer.trim() || displayActivityItems.length
         ? "completed"
         : "empty";
-  const headline = buildHeadline(activityItems, status, durationMs, options);
+  const headline = buildHeadline(displayActivityItems, status, durationMs, options);
 
   return {
-    activityItems,
+    activityItems: displayActivityItems,
     finalAnswer,
+    finalAnswerSource,
+    hasSendMessage,
     status,
     durationMs,
     hasFailure,

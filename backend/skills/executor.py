@@ -19,6 +19,10 @@ from backend.skills.manager import SkillManager
 
 logger = logging.getLogger(__name__)
 
+# Codex-style progressive disclosure: the always-on skill index must stay small
+# so selecting one skill can still load its full SKILL.md later.
+LAYER1_SUMMARY_MAX_CHARS = 8000
+
 # Skill 注入模板
 SKILL_SECTION_HEADER = """
 ## 激活的 Skills
@@ -62,12 +66,16 @@ class SkillExecutor:
 
         return SKILL_SECTION_HEADER + content
 
-    def build_layer1_summary(self) -> str:
+    def build_layer1_summary(self, max_chars: int = LAYER1_SUMMARY_MAX_CHARS) -> str:
         """
         构建 Layer 1 摘要（始终注入）。
 
         让 LLM 知道有哪些 Skill 可用（即使未激活），
         便于推荐用户激活或 auto_detect 使用。
+
+        Args:
+            max_chars: Layer 1 metadata budget. Defaults to the Codex-like
+                cap of 8000 chars (roughly 2k tokens).
 
         Returns:
             Skill 摘要列表文本
@@ -76,6 +84,7 @@ class SkillExecutor:
         if not summary:
             return ""
 
+        summary = _cap_layer1_summary(summary, max_chars=max_chars)
         return (
             "\n\n## Available Skills\n"
             "When the user's request matches a skill description below, "
@@ -93,3 +102,36 @@ class SkillExecutor:
             "active_names": active,
             "estimated_tokens": len(content) // 4 if content else 0,
         }
+
+
+def _cap_layer1_summary(summary: str, *, max_chars: int) -> str:
+    """Cap the always-injected skill index without splitting mid-entry."""
+    if max_chars <= 0:
+        return ""
+    if len(summary) <= max_chars:
+        return summary
+
+    notice_template = "\n- ... {omitted} more skill entries omitted by context budget; use list_skills/load_skill if needed."
+    lines = [line for line in summary.splitlines() if line.strip()]
+    kept: list[str] = []
+    used = 0
+    omitted = 0
+
+    for index, line in enumerate(lines):
+        remaining_after_this = len(lines) - index - 1
+        notice = notice_template.format(omitted=max(1, remaining_after_this))
+        line_len = len(line) + (1 if kept else 0)
+        if used + line_len + len(notice) > max_chars:
+            omitted = len(lines) - index
+            break
+        kept.append(line)
+        used += line_len
+
+    if kept:
+        notice = notice_template.format(omitted=omitted or max(1, len(lines) - len(kept)))
+        capped = "\n".join(kept) + notice
+        return capped[:max_chars]
+
+    fallback_notice = notice_template.format(omitted=max(1, len(lines))).lstrip()
+    head_budget = max(0, max_chars - len(fallback_notice) - 1)
+    return f"{summary[:head_budget].rstrip()}\n{fallback_notice}"[:max_chars]

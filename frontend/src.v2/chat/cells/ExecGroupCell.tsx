@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CheckCircle2, ChevronDown, ChevronRight, Loader2, TriangleAlert } from "lucide-react";
 import type { ExecCellState } from "./cellTypes";
 import { ExecCell } from "./ExecCell";
@@ -8,18 +8,30 @@ export function ExecGroupCell({
   cells,
   isActive = false,
   onStop,
+  defaultCollapsed = false,
 }: {
   cells: ExecCellState[];
   isActive?: boolean;
   onStop?: () => void;
+  defaultCollapsed?: boolean;
 }) {
   const status = execGroupStatus(cells, isActive);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(() => !defaultCollapsed);
+  const groupIdentity = useMemo(() => cells.map((cell) => cell.id).join("|"), [cells]);
+  const previousGroupIdentity = useRef(groupIdentity);
+  const userToggledRef = useRef(false);
   const title = useMemo(() => execGroupTitle(cells, status), [cells, status]);
 
   useEffect(() => {
-    setExpanded(false);
-  }, [cells, status]);
+    if (previousGroupIdentity.current !== groupIdentity) {
+      previousGroupIdentity.current = groupIdentity;
+      userToggledRef.current = false;
+      setExpanded(!defaultCollapsed);
+      return;
+    }
+    if (userToggledRef.current) return;
+    setExpanded(!defaultCollapsed);
+  }, [defaultCollapsed, groupIdentity]);
 
   if (cells.length === 0) return null;
 
@@ -30,7 +42,10 @@ export function ExecGroupCell({
         aria-label={expanded ? "Collapse command details" : "Expand command details"}
         aria-expanded={expanded}
         className="exec-group-header"
-        onClick={() => setExpanded((value) => !value)}
+        onClick={() => {
+          userToggledRef.current = true;
+          setExpanded((value) => !value);
+        }}
       >
         {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         <ExecGroupStatusIcon status={status} />
@@ -41,7 +56,7 @@ export function ExecGroupCell({
           {cells.map((cell) => (
             <ExecCell
               key={cell.id}
-              cell={{ ...cell, collapsed: true }}
+              cell={{ ...cell, collapsed: defaultCollapsed }}
               isActive={isActive && cell.status === "running"}
               onStop={onStop}
             />

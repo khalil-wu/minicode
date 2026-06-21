@@ -17,6 +17,7 @@ from backend.agent.prompting import (
     build_dynamic_context,
     build_static_environment_info,
     build_stable_prompt,
+    clear_system_prompt_sections,
     detect_project_type,
 )
 from backend.tools.base import ToolResult
@@ -604,9 +605,13 @@ class ContextBuilder:
         project_guidelines = self._get_project_guidelines(workspace_root)
         if project_guidelines:
             system_tokens += _estimate_content_tokens(project_guidelines)
-        harness_guidance = str(getattr(state, "harness_guidance", "") or "")
-        if harness_guidance:
-            system_tokens += _estimate_content_tokens(harness_guidance)
+        tool_runtime_guidance = str(
+            getattr(state, "tool_runtime_guidance", "")
+            or getattr(state, "harness_guidance", "")
+            or ""
+        )
+        if tool_runtime_guidance:
+            system_tokens += _estimate_content_tokens(tool_runtime_guidance)
 
         notes_tokens = sum(
             _estimate_content_tokens(str(note.get("content", ""))) for note in self._persistent_notes
@@ -785,6 +790,7 @@ class ContextBuilder:
         Creates new compacted messages instead of mutating originals in-place
         (Hermes pattern: never irreversibly destroy information).
         """
+        clear_system_prompt_sections()
         self._compaction_count += 1
         keep_recent = self._agent_settings.history_keep_recent
 
@@ -869,6 +875,7 @@ class ContextBuilder:
         """
         import asyncio as _asyncio
 
+        clear_system_prompt_sections()
         self._compaction_count += 1
         keep_recent = max(2, min(self._agent_settings.history_keep_recent, 6))
         original_len = len(self._history)
@@ -1032,6 +1039,7 @@ class ContextBuilder:
         return len(self._history)
 
     def clear(self) -> None:
+        clear_system_prompt_sections()
         self._history.clear()
         self._history_token_estimates.clear()
         self._history_tokens_total = 0

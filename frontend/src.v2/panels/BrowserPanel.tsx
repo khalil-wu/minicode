@@ -210,7 +210,7 @@ export const BrowserPanel = () => {
     return (
       <div className="flex-1 grid place-items-center gap-2 text-[var(--text-muted)] text-sm">
         <Globe size={20} style={{ opacity: 0.7 }} />
-        <div>Browser panel is desktop-only.</div>
+        <div>Chrome/CDP panel is desktop-only.</div>
       </div>
     );
   }
@@ -220,8 +220,8 @@ export const BrowserPanel = () => {
       <div className="flex items-center gap-1.5 px-2.5 py-2 border-b border-[var(--border-subtle)]">
         <button
           type="button"
-          title="Refresh browser targets"
-          aria-label="Refresh browser targets"
+          title="Refresh Chrome targets"
+          aria-label="Refresh Chrome targets"
           onClick={() => void refresh()}
           className="w-6 h-6 inline-flex items-center justify-center rounded border border-[var(--border-subtle)] bg-[var(--surface-page)] text-[var(--text-secondary)] cursor-pointer p-0"
         >
@@ -247,7 +247,7 @@ export const BrowserPanel = () => {
         <div className="grid gap-2 p-2.5 bg-[var(--surface-soft)] border border-[var(--border-subtle)] rounded-[var(--radius-sm,6px)]">
           <div className="flex items-center justify-between gap-2.5">
             <div className="min-w-0">
-              <div className="text-xs uppercase font-bold text-[var(--text-muted)]">Browser</div>
+              <div className="text-xs uppercase font-bold text-[var(--text-muted)]">Chrome/CDP</div>
               <div className="mt-0.5 text-[var(--text-primary)] text-sm font-semibold overflow-hidden text-ellipsis whitespace-nowrap">{result?.browser || "External Chrome"}</div>
             </div>
             <span
@@ -334,7 +334,7 @@ export const BrowserPanel = () => {
         ) : (
           <InfoCard>
             <div className="text-xs uppercase font-bold text-[var(--text-muted)]">Current Page</div>
-            <div className="text-[var(--text-secondary)] text-xs leading-relaxed">No browser page selected.</div>
+            <div className="text-[var(--text-secondary)] text-xs leading-relaxed">No Chrome page selected.</div>
           </InfoCard>
         )}
 
@@ -380,7 +380,7 @@ export const BrowserPanel = () => {
             <div className="mt-1.5 rounded-[var(--radius-sm,6px)] overflow-hidden border border-[var(--border-subtle)] bg-[var(--surface-page)]">
               <img
                 src={`data:${selectedScreenshot.mimeType};base64,${selectedScreenshot.data}`}
-                alt={selectedScreenshot.title || selectedScreenshot.url || "Browser screenshot"}
+                alt={selectedScreenshot.title || selectedScreenshot.url || "Chrome/CDP screenshot"}
                 className="block w-full h-auto max-h-[420px] object-contain"
               />
             </div>

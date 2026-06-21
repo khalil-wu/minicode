@@ -16,6 +16,7 @@ from typing import Any
 from backend.agent.context import ContextBuilder
 from backend.agent.message import AgentEvent
 from backend.agent.query_engine import QuerySubmission
+from backend.agent.runtime import default_runtime
 from backend.agent.turn_state import AgentTurnState
 from backend.config import get_available_models, get_llm_provider, load_config
 from backend.llm.errors import classify_llm_error, sanitize_llm_error_message
@@ -33,6 +34,13 @@ from backend.ws.stream_state import (
 )
 
 _FAILED_TOOL_STATUSES = {"error", "failed", "blocked"}
+UI_AGENT_STATE_SNAPSHOT_KEY = "ui_agent_state"
+_PLAN_STATUSES = {"draft", "accepted", "executing", "completed", "cancelled"}
+_PLAN_STEP_STATUSES = {"pending", "running", "done", "skipped", "failed"}
+_TODO_STATUSES = {"pending", "in_progress", "completed", "blocked"}
+_SUBAGENT_STATUSES = {"running", "done", "error"}
+_PROGRESS_STAGES = {"status", "planning", "verification", "final"}
+_PROGRESS_STATUSES = {"running", "completed", "failed", "info"}
 
 
 def _contains_cjk(text: str) -> bool:
@@ -45,6 +53,242 @@ def _failed_tool_call_records(records: list[dict[str, Any]]) -> list[dict[str, A
         for record in records
         if str(record.get("status") or "").strip().lower() in _FAILED_TOOL_STATUSES
     ]
+
+
+def _text_chunk_metadata(data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: data[key]
+        for key in ("source", "visibility", "role", "phase")
+        if data.get(key)
+    }
+
+
+def _empty_ui_agent_state() -> dict[str, Any]:
+    return {"plan": None, "todos": [], "subagents": [], "agentProgress": []}
+
+
+def _coerce_ui_agent_state(value: Any) -> dict[str, Any]:
+    state = _empty_ui_agent_state()
+    if not isinstance(value, dict):
+        return state
+    if isinstance(value.get("plan"), dict) or value.get("plan") is None:
+        state["plan"] = value.get("plan")
+    if isinstance(value.get("todos"), list):
+        state["todos"] = list(value["todos"])
+    if isinstance(value.get("subagents"), list):
+        state["subagents"] = list(value["subagents"])
+    if isinstance(value.get("agentProgress"), list):
+        state["agentProgress"] = list(value["agentProgress"])
+    return state
+
+
+def _normalized_plan_status(value: Any) -> str:
+    status = str(value or "").strip()
+    return status if status in _PLAN_STATUSES else "executing"
+
+
+def _normalized_plan_step(step: Any, index: int) -> dict[str, Any] | None:
+    if not isinstance(step, dict):
+        return None
+    title = str(step.get("title") or "").strip()
+    if not title:
+        return None
+    status = str(step.get("status") or "pending").strip()
+    return {
+        "id": str(step.get("id") or f"step-{index}"),
+        "title": title,
+        **({"detail": str(step.get("detail"))} if step.get("detail") is not None else {}),
+        "status": status if status in _PLAN_STEP_STATUSES else "pending",
+    }
+
+
+def _normalized_todo(todo: Any) -> dict[str, Any] | None:
+    if not isinstance(todo, dict):
+        return None
+    todo_id = str(todo.get("id") or todo.get("todo_id") or "").strip()
+    content = str(todo.get("content") or "").strip()
+    status = str(todo.get("status") or "").strip()
+    if not todo_id or not content or status not in _TODO_STATUSES:
+        return None
+    return {
+        "id": todo_id,
+        "content": content,
+        "activeForm": str(todo.get("activeForm") or todo.get("active_form") or content),
+        "status": status,
+    }
+
+
+def _upsert_by_id(items: list[Any], item: dict[str, Any]) -> list[dict[str, Any]]:
+    item_id = str(item.get("id") or "").strip()
+    normalized_items = [existing for existing in items if isinstance(existing, dict)]
+    for index, existing in enumerate(normalized_items):
+        if str(existing.get("id") or "").strip() == item_id:
+            normalized_items[index] = {**existing, **item}
+            return normalized_items
+    return [*normalized_items, item]
+
+
+def _subagent_summary(data: dict[str, Any]) -> str:
+    detail = str(data.get("detail") or "").strip()
+    if detail:
+        return detail
+    tool_name = str(data.get("tool_name") or "").strip()
+    if tool_name:
+        return f"Running {tool_name}"
+    return str(data.get("summary") or data.get("prompt") or "Working")
+
+
+def _ui_agent_state_for_event(current: Any, event_type: str, data: dict[str, Any]) -> dict[str, Any] | None:
+    state = _coerce_ui_agent_state(current)
+
+    if event_type == "plan_updated":
+        raw_steps = data.get("steps")
+        if not isinstance(raw_steps, list):
+            return None
+        steps = [
+            normalized
+            for index, step in enumerate(raw_steps)
+            if (normalized := _normalized_plan_step(step, index)) is not None
+        ]
+        state["plan"] = {
+            "planId": str(data.get("plan_id") or "plan"),
+            "status": _normalized_plan_status(data.get("status")),
+            "currentStep": int(data.get("current_step") or 0),
+            "steps": steps,
+        }
+        return state
+
+    if event_type == "plan_step_updated":
+        plan = state.get("plan")
+        if not isinstance(plan, dict):
+            return None
+        if data.get("plan_id") and str(plan.get("planId") or "") != str(data.get("plan_id")):
+            return None
+        steps = list(plan.get("steps") or [])
+        index = data.get("step_index")
+        if not isinstance(index, int):
+            step_id = str(data.get("step_id") or "")
+            index = next((i for i, step in enumerate(steps) if isinstance(step, dict) and str(step.get("id") or "") == step_id), -1)
+        if index < 0 or index >= len(steps) or str(data.get("status") or "") not in _PLAN_STEP_STATUSES:
+            return None
+        existing = steps[index] if isinstance(steps[index], dict) else {}
+        steps[index] = {
+            **existing,
+            **({"title": str(data.get("title"))} if data.get("title") is not None else {}),
+            **({"detail": str(data.get("detail"))} if data.get("detail") is not None else {}),
+            "status": str(data.get("status")),
+        }
+        state["plan"] = {
+            **plan,
+            "steps": steps,
+            "currentStep": int(data.get("current_step") if isinstance(data.get("current_step"), int) else index),
+            "status": "executing" if plan.get("status") not in {"completed", "cancelled"} else plan.get("status"),
+        }
+        return state
+
+    if event_type == "task.update":
+        if isinstance(data.get("session"), dict):
+            return None
+        if isinstance(data.get("todos"), list):
+            state["todos"] = [
+                todo
+                for raw in data["todos"]
+                if (todo := _normalized_todo(raw)) is not None
+            ]
+            return state
+        todo = _normalized_todo(data)
+        if todo is None:
+            return None
+        state["todos"] = _upsert_by_id(list(state.get("todos") or []), todo)
+        return state
+
+    if event_type == "subagent.start":
+        subagent_id = str(data.get("subagent_id") or "").strip()
+        if not subagent_id:
+            return None
+        state["subagents"] = _upsert_by_id(list(state.get("subagents") or []), {
+            "id": subagent_id,
+            "role": str(data.get("role") or "subagent"),
+            "status": "running",
+            "summary": str(data.get("prompt") or ""),
+            **({"parentRunId": str(data.get("parent_run_id"))} if data.get("parent_run_id") is not None else {}),
+        })[-20:]
+        return state
+
+    if event_type == "subagent.progress":
+        subagent_id = str(data.get("subagent_id") or "").strip()
+        if not subagent_id:
+            return None
+        state["subagents"] = _upsert_by_id(list(state.get("subagents") or []), {
+            "id": subagent_id,
+            "role": "subagent",
+            "status": "running",
+            "summary": _subagent_summary(data),
+            **({"iteration": data.get("iteration")} if isinstance(data.get("iteration"), int) else {}),
+            **({"maxIterations": data.get("max_iterations")} if isinstance(data.get("max_iterations"), int) else {}),
+            **({"currentTool": str(data.get("tool_name"))} if data.get("tool_name") is not None else {}),
+            **({"detail": str(data.get("detail"))} if data.get("detail") is not None else {}),
+        })[-20:]
+        return state
+
+    if event_type == "subagent.done":
+        subagent_id = str(data.get("subagent_id") or "").strip()
+        if not subagent_id:
+            return None
+        status = "error" if data.get("error") else "done"
+        state["subagents"] = _upsert_by_id(list(state.get("subagents") or []), {
+            "id": subagent_id,
+            "role": "subagent",
+            "status": status if status in _SUBAGENT_STATUSES else "done",
+            "summary": str(data.get("error") or data.get("summary") or ""),
+        })[-20:]
+        return state
+
+    if event_type == "agent.progress":
+        stage = str(data.get("stage") or "").strip()
+        status = str(data.get("status") or "").strip()
+        progress_id = str(data.get("id") or "").strip()
+        message = str(data.get("message") or "").strip()
+        if (
+            not progress_id
+            or not message
+            or stage not in _PROGRESS_STAGES
+            or status not in _PROGRESS_STATUSES
+            or data.get("visibility") == "debug"
+        ):
+            return None
+        entry = {
+            "type": "progress",
+            "id": progress_id,
+            "stage": stage,
+            **({"phase": str(data.get("phase"))} if data.get("phase") is not None else {}),
+            "status": status,
+            "message": message,
+            **({"label": str(data.get("label"))} if data.get("label") is not None else {}),
+            **({"summary": str(data.get("summary"))} if data.get("summary") is not None else {}),
+            **({"visibility": str(data.get("visibility"))} if data.get("visibility") is not None else {}),
+            **({"detail": str(data.get("detail"))} if data.get("detail") is not None else {}),
+            **({"toolCallId": str(data.get("tool_call_id"))} if data.get("tool_call_id") is not None else {}),
+            **({"toolName": str(data.get("tool_name"))} if data.get("tool_name") is not None else {}),
+            **({"groupId": str(data.get("group_id"))} if data.get("group_id") is not None else {}),
+            **({"stepId": str(data.get("step_id"))} if data.get("step_id") is not None else {}),
+            **({"count": data.get("count")} if isinstance(data.get("count"), int) else {}),
+            **({"iterationId": str(data.get("iteration_id"))} if data.get("iteration_id") is not None else {}),
+            **({"displayScope": str(data.get("display_scope"))} if data.get("display_scope") is not None else {}),
+            **({"panelHint": str(data.get("panel_hint"))} if data.get("panel_hint") is not None else {}),
+            **({"requiresAttention": bool(data.get("requires_attention"))} if data.get("requires_attention") is not None else {}),
+            "timestamp": int(time.time() * 1000),
+        }
+        state["agentProgress"] = _upsert_by_id(list(state.get("agentProgress") or []), entry)[-80:]
+        return state
+
+    return None
+
+
+def _merge_ui_agent_state_into_snapshot(snapshot: dict[str, Any], source_snapshot: Any) -> dict[str, Any]:
+    if isinstance(source_snapshot, dict) and UI_AGENT_STATE_SNAPSHOT_KEY in source_snapshot:
+        snapshot[UI_AGENT_STATE_SNAPSHOT_KEY] = source_snapshot[UI_AGENT_STATE_SNAPSHOT_KEY]
+    return snapshot
 
 
 def _tool_record_detail(record: dict[str, Any], *, fallback: str) -> str:
@@ -148,6 +392,26 @@ class SessionAgentRunnerMixin:
     llm, artifact_store, tool_registry, skill_manager, vector_memory,
     _approval_handler, _active_task_id, _interrupted, etc.
     """
+
+    def _persist_ui_agent_state_event(
+        self,
+        conversation_id: str,
+        event_type: str,
+        data: dict[str, Any],
+    ) -> None:
+        if not conversation_id:
+            return
+        record = self.conversation_repo.get_conversation(conversation_id)
+        snapshot = dict(getattr(record, "context_snapshot", {}) or {}) if record is not None else {}
+        next_state = _ui_agent_state_for_event(
+            snapshot.get(UI_AGENT_STATE_SNAPSHOT_KEY),
+            event_type,
+            data,
+        )
+        if next_state is None:
+            return
+        snapshot[UI_AGENT_STATE_SNAPSHOT_KEY] = next_state
+        self.conversation_repo.save_context_snapshot(conversation_id, snapshot)
 
     async def _run_agent(
         self,
@@ -272,9 +536,11 @@ class SessionAgentRunnerMixin:
         normalized_attachments = list(attachments or [])
         effective_user_message = build_effective_user_message(user_message, normalized_attachments)
         run_metadata = dict(metadata or {})
+        run_metadata.setdefault("agent_runtime", default_runtime())
         run_workspace_root = self._workspace_root_for_conversation(conversation)
         run_workspace_context = self._workspace_context_for_conversation(conversation)
         run_metadata.setdefault("workspace_context", run_workspace_context)
+        run_metadata.setdefault("conversation_id", conversation.id)
         run_metadata.setdefault("requires_explicit_workspace", True)
         run_permission_context = self._permission_context_for_conversation(
             conversation,
@@ -352,6 +618,9 @@ class SessionAgentRunnerMixin:
         async def _emit_runtime_event(event_type: str, data: dict[str, Any]) -> None:
             payload = dict(data)
             payload.setdefault("conversation_id", conversation.id)
+            self._persist_ui_agent_state_event(conversation.id, event_type, payload)
+            if event_type == "text_chunk" and payload.get("visibility") not in {"timeline", "debug"}:
+                turn_state.append_text(str(payload.get("content", "")), _text_chunk_metadata(payload))
             await self._send_event(AgentEvent(type=event_type, data=payload))
 
         assistant_artifacts: list[dict[str, Any]] = []
@@ -390,13 +659,11 @@ class SessionAgentRunnerMixin:
             if not fallback_reply:
                 return
             synthesized_no_final_reply = True
-            turn_state.append_text(fallback_reply)
-            for fallback_event in (
-                AgentEvent.final_answer_delta(fallback_reply),
-                AgentEvent.final_answer_committed(fallback_reply),
-            ):
-                fallback_event.data["conversation_id"] = conversation.id
-                await self._send_event(fallback_event)
+            fallback_metadata = {"source": "fallback", "visibility": "final", "phase": "final"}
+            turn_state.append_text(fallback_reply, fallback_metadata)
+            fallback_event = AgentEvent.text_chunk(fallback_reply, source="fallback", visibility="final", phase="final")
+            fallback_event.data["conversation_id"] = conversation.id
+            await self._send_event(fallback_event)
             if not run_failed_message:
                 run_failed_message = "Tool calls completed but the model did not produce a final reply."
                 turn_state.record_error({"message": run_failed_message})
@@ -489,7 +756,10 @@ class SessionAgentRunnerMixin:
                                 },
                                 log_context="artifact.preview",
                             )
-                    turn_state.append_text(str(event.data.get("content", "")))
+                    if event.data.get("visibility") not in {"timeline", "debug"}:
+                        turn_state.append_text(str(event.data.get("content", "")), _text_chunk_metadata(event.data))
+                elif event.type == "text_replace":
+                    turn_state.replace_text(str(event.data.get("content", "")))
                 elif event.type == "image_chunk":
                     image_data = str(event.data.get("image_data") or "").strip()
                     media_type = str(event.data.get("media_type") or "image/png").strip() or "image/png"
@@ -524,15 +794,6 @@ class SessionAgentRunnerMixin:
                             },
                             log_context="artifact.preview",
                         )
-                elif event.type == "final_answer_started":
-                    pass  # no-op: streaming state is managed by final_answer_delta
-                elif event.type == "final_answer_delta":
-                    turn_state.append_text(str(event.data.get("content", "")))
-                elif event.type == "final_answer_retracted":
-                    turn_state.clear_text()
-                elif event.type == "final_answer_committed":
-                    # Fallback: if streaming was interrupted, use committed content
-                    turn_state.commit_text(str(event.data.get("content", "")))
                 elif event.type in {"thinking_delta", "thinking"}:
                     thinking_chunk = str(event.data.get("content", ""))
                     thinking_metadata = {
@@ -561,6 +822,8 @@ class SessionAgentRunnerMixin:
                     await _maybe_emit_source_citation(event.data)
                 elif event.type == "agent.progress":
                     turn_state.record_progress(event.data)
+                elif event.type == "agent.item":
+                    turn_state.record_process_item(event.data)
                 elif event.type == "done":
                     usage_payload = turn_state.record_done(event.data)
                     tracker.record_usage(
@@ -680,11 +943,13 @@ class SessionAgentRunnerMixin:
                         {"type": "text", "content": assistant_content},
                     ]
             if assistant_content or assistant_blocks or assistant_tool_calls or assistant_artifacts:
+                completed_at = _now_ms()
                 assistant_message: dict[str, Any] = {
                     "id": assistant_message_id,
                     "role": "assistant",
                     "content": assistant_content,
-                    "timestamp": datetime.now(UTC).isoformat(),
+                    "timestamp": datetime.fromtimestamp(completed_at / 1000, UTC).isoformat(),
+                    "completed_at": completed_at,
                     "usage": usage_payload or {},
                 }
                 if assistant_tool_calls:
@@ -731,6 +996,11 @@ class SessionAgentRunnerMixin:
                     )
 
             saved_snapshot = run_context_builder.export_snapshot()
+            latest_conversation = self.conversation_repo.get_conversation(conversation.id)
+            _merge_ui_agent_state_into_snapshot(
+                saved_snapshot,
+                getattr(latest_conversation, "context_snapshot", None),
+            )
             self.conversation_repo.save_context_snapshot(conversation.id, saved_snapshot)
             if conversation.id == self.active_conversation_id:
                 self._load_active_conversation_snapshot(conversation.id, saved_snapshot)

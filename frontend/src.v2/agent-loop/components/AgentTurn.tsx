@@ -34,6 +34,8 @@ export const AgentTurn = memo(function AgentTurn({
   const showProcessStack =
     turn.hasProcessContent &&
     (!turn.shouldCollapseProcess || processExpanded);
+  const showRunningSummaryAfterStack =
+    turn.status === "running" && !turn.shouldCollapseProcess;
   return (
     <div
       className="chat-turn agent-loop-turn"
@@ -47,19 +49,22 @@ export const AgentTurn = memo(function AgentTurn({
 
       {turn.hasProcessContent && (
         <section
-          className="chat-turn-process agent-loop-process"
+          className="chat-turn-process agent-loop-process agent-loop-work-area"
+          data-zone="work"
           data-active={turn.status === "running" ? "true" : "false"}
           data-collapsed={turn.shouldCollapseProcess && !processExpanded ? "true" : "false"}
           aria-label="Agent progress"
         >
-          <AgentProcessSummary
-            status={turn.status}
-            shouldCollapseProcess={turn.shouldCollapseProcess}
-            processExpanded={processExpanded}
-            durationLabel={turn.durationLabel}
-            summaryItems={turn.summaryItems}
-            onToggle={() => setProcessExpanded((value) => !value)}
-          />
+          {!showRunningSummaryAfterStack && (
+            <AgentProcessSummary
+              status={turn.status}
+              shouldCollapseProcess={turn.shouldCollapseProcess}
+              processExpanded={processExpanded}
+              durationLabel={turn.durationLabel}
+              summaryItems={turn.summaryItems}
+              onToggle={() => setProcessExpanded((value) => !value)}
+            />
+          )}
 
           {showProcessStack && (
             <AgentTimeline
@@ -69,16 +74,33 @@ export const AgentTurn = memo(function AgentTurn({
               streamingIndicator={null}
             />
           )}
+
+          {showRunningSummaryAfterStack && (
+            <AgentProcessSummary
+              status={turn.status}
+              shouldCollapseProcess={turn.shouldCollapseProcess}
+              processExpanded={processExpanded}
+              durationLabel={turn.durationLabel}
+              summaryItems={turn.summaryItems}
+              onToggle={() => setProcessExpanded((value) => !value)}
+            />
+          )}
         </section>
       )}
 
       {turn.answerCell && (
-        <FinalAnswer
-          cell={turn.answerCell}
-          isStreaming={turn.answerIsStreaming}
-          isActive={Boolean(turn.activeAnswerCell)}
-          renderCell={renderCell}
-        />
+        <section
+          className="chat-turn-answer-zone agent-loop-reply-area"
+          data-zone="reply"
+          aria-label="Agent reply"
+        >
+          <FinalAnswer
+            cell={turn.answerCell}
+            isStreaming={turn.answerIsStreaming}
+            isActive={Boolean(turn.activeAnswerCell)}
+            renderCell={renderCell}
+          />
+        </section>
       )}
 
       <ArtifactCards cells={turn.artifactCells} />

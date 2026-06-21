@@ -107,7 +107,7 @@ class MCPToolProxy(BaseTool):
         )
 
     def get_spec(self):
-        from backend.agent.harness.mcp_adapter import MCPToolSpecAdapter
+        from backend.mcp.tool_spec_adapter import MCPToolSpecAdapter
 
         return MCPToolSpecAdapter.from_tool_def(self._server_name, self._tool_def).build_spec(self.name)
 

@@ -62,6 +62,7 @@ export type ConversationClientCommandType =
   | "conversation.permission.rules.list"
   | "conversation.permission.rules.add"
   | "conversation.permission.rules.remove"
+  | "permissions.content_rule.add"
   // LLM
   | "llm.model.set"
   | "llm.config.set";

@@ -34,6 +34,9 @@ export const useKeyboardShortcuts = () => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
       const s = useAppStore.getState();
+      const createConversationInCurrentMode = () => {
+        s.createConversation({ appMode: s.appMode, bindWorkspace: Boolean(s.workingDirectory) });
+      };
 
       // Alt+1/2/3 for mode switching (no Ctrl required)
       if (e.altKey && !mod) {
@@ -70,7 +73,7 @@ export const useKeyboardShortcuts = () => {
         case "l":
           if (e.shiftKey) {
             e.preventDefault();
-            s.createConversation();
+            createConversationInCurrentMode();
           } else {
             e.preventDefault();
             s.setDraft("");
@@ -141,7 +144,7 @@ export const useKeyboardShortcuts = () => {
           break;
         case "n":
           e.preventDefault();
-          s.createConversation();
+          createConversationInCurrentMode();
           break;
         case ",":
           e.preventDefault();
@@ -185,19 +188,19 @@ export const useKeyboardShortcuts = () => {
             if (focused && s.panelSlots.length > 1) s.removePanel(focused.id);
           }
           break;
-case "b":
+        case "b":
           if (!e.shiftKey) {
             e.preventDefault();
-            useAppStore.setState((st) => {
-              if (st.leftSidebarWidth > 0) {
-                sidebarWidthRef.current = st.leftSidebarWidth;
-                return { leftSidebarWidth: 0 };
-              }
-              return { leftSidebarWidth: sidebarWidthRef.current };
-            });
+            if (s.leftSidebarWidth > 0) {
+              sidebarWidthRef.current = s.leftSidebarWidth;
+              s.setLeftSidebarWidth(0);
+            } else {
+              s.setLeftSidebarWidth(sidebarWidthRef.current);
+            }
           } else {
             e.preventDefault();
-            s.toggleRightPanel();
+            s.setAppMode("code");
+            s.setRightStackTab("preview");
           }
           break;
         case "v":

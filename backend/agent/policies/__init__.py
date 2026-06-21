@@ -1,7 +1,4 @@
-"""Agent-loop generation and retry policies.
-
-Domain/task/web harness behavior lives in :mod:`backend.agent.harness`.
-"""
+"""Agent-loop generation and retry policies."""
 
 from __future__ import annotations
 

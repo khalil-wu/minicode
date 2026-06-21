@@ -2,6 +2,12 @@ import { useCallback, useMemo, useState } from "react";
 import type React from "react";
 import { ChevronDown, ChevronRight, FileCode2, FileSearch, RotateCcw } from "lucide-react";
 import type { DiffCellState } from "./cellTypes";
+import {
+  diffCellTitle,
+  diffChangeBreakdownLabel,
+  diffFileChangeType,
+  diffFileChangeTypeLabel,
+} from "./diffCellLabels";
 import { useAppStore } from "../../stores";
 import { sendClientCommand } from "../../protocol/ws-outbox";
 import "./cells.css";
@@ -75,6 +81,8 @@ export function DiffCell({ cell }: { cell: DiffCellState }) {
     ? cell.files
     : cell.files.slice(0, COLLAPSED_FILE_LIMIT);
   const hiddenCount = cell.files.length - visibleFiles.length;
+  const title = diffCellTitle(cell);
+  const breakdownLabel = diffChangeBreakdownLabel(cell.files);
 
   return (
     <div className="diff-cell">
@@ -91,16 +99,19 @@ export function DiffCell({ cell }: { cell: DiffCellState }) {
             <FileCode2 size={15} />
           </span>
           <span className="diff-cell-title-block">
-            <span className="diff-cell-title">
-              已编辑 {cell.summary.modifiedFiles} 个文件
-            </span>
-            <span className="diff-cell-stats diff-cell-header-stats">
-              <span className="diff-cell-added">
-                +{cell.summary.added}
-              </span>{" "}
-              <span className="diff-cell-removed">
-                -{cell.summary.deleted}
+            <span className="diff-cell-title">{title}</span>
+            <span className="diff-cell-meta-row">
+              <span className="diff-cell-stats diff-cell-header-stats">
+                <span className="diff-cell-added">
+                  +{cell.summary.added}
+                </span>{" "}
+                <span className="diff-cell-removed">
+                  -{cell.summary.deleted}
+                </span>
               </span>
+              {breakdownLabel && (
+                <span className="diff-cell-breakdown">{breakdownLabel}</span>
+              )}
             </span>
           </span>
         </button>
@@ -155,6 +166,9 @@ function DiffFileRow({
   file: DiffCellState["files"][number];
   shortPath: (p: string) => string;
 }) {
+  const changeType = diffFileChangeType(file);
+  const changeLabel = diffFileChangeTypeLabel(file);
+
   const openFile = () => {
     const store = useAppStore.getState();
     const label = file.path.split(/[/\\]/).filter(Boolean).pop() ?? file.path;
@@ -196,6 +210,9 @@ function DiffFileRow({
         <FileCode2 size={12} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
         <span className="diff-cell-file-path">{shortPath(file.path)}</span>
       </button>
+      <span className={`diff-cell-file-kind diff-cell-file-kind-${changeType}`}>
+        {changeLabel}
+      </span>
       <span className="diff-cell-stats">
         <span className="diff-cell-added">
           +{file.additions}

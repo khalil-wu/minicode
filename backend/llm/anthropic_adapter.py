@@ -291,7 +291,13 @@ class AnthropicAdapter(LLMAdapter):
                         except (json.JSONDecodeError, TypeError):
                             from backend.llm.json_repair import repair_tool_json
                             arguments = repair_tool_json(current_tool_args) or {"_raw": current_tool_args}
-                        pending_tool_calls.append(ToolCallEvent(id=current_tool_id, name=current_tool_name, arguments=arguments))
+                        completed_tool_call = ToolCallEvent(id=current_tool_id, name=current_tool_name, arguments=arguments)
+                        pending_tool_calls.append(completed_tool_call)
+                        yield StreamEvent(
+                            type=StreamEventType.TOOL_CALL,
+                            tool_calls=[completed_tool_call],
+                            tool_calls_final=False,
+                        )
                         current_tool_id = ""
                         current_tool_name = ""
                         current_tool_args = ""
@@ -448,6 +454,11 @@ class AnthropicAdapter(LLMAdapter):
                                     arguments = repair_tool_json(current_tool_args) or {"_raw": current_tool_args}
                                 pending_tool_calls.append(
                                     ToolCallEvent(id=current_tool_id, name=current_tool_name, arguments=arguments)
+                                )
+                                yield StreamEvent(
+                                    type=StreamEventType.TOOL_CALL,
+                                    tool_calls=[pending_tool_calls[-1]],
+                                    tool_calls_final=False,
                                 )
                                 current_tool_id = ""
                                 current_tool_name = ""

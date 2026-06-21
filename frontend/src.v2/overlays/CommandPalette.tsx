@@ -135,7 +135,10 @@ export const CommandPalette = () => {
       id: "conversation.new",
       label: "New conversation",
       hint: "Ctrl+N",
-      run: () => useAppStore.getState().createConversation(),
+      run: () => {
+        const state = useAppStore.getState();
+        state.createConversation({ appMode: state.appMode, bindWorkspace: Boolean(state.workingDirectory) });
+      },
     },
     {
       id: "conversation.new.isolated",
@@ -313,8 +316,8 @@ export const CommandPalette = () => {
       label: "Toggle left sidebar",
       hint: "Ctrl+B",
       run: () => {
-        const cur = useAppStore.getState().leftSidebarWidth;
-        useAppStore.setState({ leftSidebarWidth: cur > 0 ? 0 : 280 });
+        const store = useAppStore.getState();
+        store.setLeftSidebarWidth(store.leftSidebarWidth > 0 ? 0 : 320);
       },
     },
     {

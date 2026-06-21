@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN" class="dark">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -19,10 +19,10 @@
             theme = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
           }
           if (theme !== 'light' && theme !== 'dark') {
-            theme = 'dark';
+            theme = 'light';
           }
           document.documentElement.setAttribute('data-theme', theme);
-        } catch (e) { /* localStorage unavailable: leave default (CSS :root = dark) */ }
+        } catch (e) { /* localStorage unavailable: leave default (CSS :root = light) */ }
       })();
     </script>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />

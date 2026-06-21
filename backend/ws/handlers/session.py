@@ -158,6 +158,11 @@ async def handle_session_permissions_inspect(session: "WebSocketSession", data: 
     return True
 
 
+async def handle_runtime_capabilities_inspect(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    await session._send_runtime_capabilities(source=str(data.get("source") or "runtime.inspect"))
+    return True
+
+
 async def handle_session_restore(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     from backend.ws.session_restore import SessionRestoreManager
 
@@ -177,12 +182,15 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
     is_hydrating = False
     if restored_conversation_id:
         target = session.conversation_repo.get_conversation(str(restored_conversation_id))
-        if target is not None:
+        if target is not None and not getattr(target, "archived", False):
             session.active_conversation_id = target.id
             await session._switch_workspace_for_conversation(target, announce=False)
             is_hydrating = session._load_active_conversation_snapshot(target.id, target.context_snapshot)
             session._sync_permission_mode_with_active_conversation(source="session.restore")
             active_payload = target.to_dict()
+        else:
+            restored_conversation_id = None
+            active_payload = None
 
     runtime_snapshot = session.runtime_snapshot()
     if restored_conversation_id:
@@ -264,9 +272,13 @@ async def handle_session_sync(session: "WebSocketSession", data: dict[str, Any])
             "incremental": result["incremental"],
             "changes": result.get("changes", []),
             "session": result["session"],
-            "active_conversation_id": session.active_conversation_id,
+            "active_conversation_id": session.active_conversation_id
+            if session.active_conversation is not None
+            and not getattr(session.active_conversation, "archived", False)
+            else None,
             "active_conversation": session.active_conversation.to_dict()
             if session.active_conversation is not None
+            and not getattr(session.active_conversation, "archived", False)
             else None,
             "working_directory": str(workspace_root) if workspace_root is not None else "",
             "model": session.selected_model,
@@ -284,6 +296,7 @@ HANDLERS: dict[str, Any] = {
     "session.status.inspect": handle_session_status_inspect,
     "session.usage.inspect": handle_session_usage_inspect,
     "session.permissions.inspect": handle_session_permissions_inspect,
+    "runtime.capabilities.inspect": handle_runtime_capabilities_inspect,
     "session.restore": handle_session_restore,
     "session.sync": handle_session_sync,
 }

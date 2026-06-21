@@ -1,4 +1,5 @@
 import { extractInlineCitationIndexes } from "../chat/citationProjection";
+import { shouldShowInActivity } from "../lib/display-intent";
 import { getToolCallsFromMessage } from "../lib/content-blocks";
 import type {
   AgentProgressEntry,
@@ -128,13 +129,26 @@ function buildProgress(input: ActivitySidebarStateInput): ActivityProgressItem[]
   }
 
   const conversationKey = input.conversationId || "__active__";
-  const compactProgress = input.agentProgress
+  const scopedProgress = input.agentProgress
     .filter((entry) =>
       (entry.conversationId === conversationKey || entry.conversationId === "__active__" || !entry.conversationId) &&
       entry.visibility !== "debug" &&
+      shouldShowInActivity(entry) &&
       (entry.stage === "planning" || entry.stage === "verification" || entry.stage === "final"),
-    )
-    .slice(-4);
+    );
+  const phaseRunIds = new Set(
+    scopedProgress
+      .map((entry) => agentPhaseRunId(entry.id))
+      .filter((runId): runId is string => Boolean(runId)),
+  );
+  const compactProgress = serializeMainAgentProgress(
+    scopedProgress
+      .filter((entry) => {
+        const runId = agentRunId(entry.id);
+        return !runId || !phaseRunIds.has(runId);
+      })
+      .slice(-6),
+  ).slice(-4);
 
   for (const entry of compactProgress) {
     const label = entry.summary || entry.message || entry.label || "";
@@ -148,6 +162,27 @@ function buildProgress(input: ActivitySidebarStateInput): ActivityProgressItem[]
   }
 
   return dedupeBy(progress, (item) => item.id);
+}
+
+function agentRunId(id: string): string {
+  return id.match(/^agent-run:([^:]+)/)?.[1] ?? "";
+}
+
+function agentPhaseRunId(id: string): string {
+  return id.match(/^agent-phase:([^:]+)/)?.[1] ?? "";
+}
+
+function serializeMainAgentProgress(entries: AgentProgressEntry[]): AgentProgressEntry[] {
+  let lastRunningIndex = -1;
+  entries.forEach((entry, index) => {
+    if (entry.status === "running") lastRunningIndex = index;
+  });
+  if (lastRunningIndex < 0) return entries;
+  return entries.map((entry, index) =>
+    index < lastRunningIndex && entry.status === "running"
+      ? { ...entry, status: "completed" }
+      : entry,
+  );
 }
 
 function buildOutput(messages: ChatMessage[], previewArtifact: ArtifactContentState | null): ActivityOutputItem[] {
@@ -214,6 +249,7 @@ function buildSources(messages: ChatMessage[]): ActivitySourceItem[] {
 
   for (const message of assistantMessages) {
     for (const record of getToolCallsFromMessage(message)) {
+      if (!shouldShowInActivity(record)) continue;
       const webUrl = toolSourceUrl(record);
       if (webUrl && !seen.has(`web:${webUrl}`)) {
         seen.add(`web:${webUrl}`);

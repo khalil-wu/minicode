@@ -5,10 +5,10 @@ from pathlib import Path
 from typing import Any
 
 from backend.agent.state import AgentState
-from backend.agent.harness.search_plan import build_search_plan
+from backend.agent.search_plan import build_search_plan
 from backend.permissions.context import ToolExecutionContext
 from backend.security.sensitive_files import is_sensitive_file
-from backend.agent.harness._common import WEB_SEARCH_TOOL_NAMES, WEB_FETCH_TOOL_NAMES, _text_arg
+from backend.agent.tool_common import WEB_SEARCH_TOOL_NAMES, WEB_FETCH_TOOL_NAMES, _text_arg
 
 PRIMARY_FILE_METADATA_KEYS = (
     "primaryFile",

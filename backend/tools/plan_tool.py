@@ -1,8 +1,9 @@
 """update_plan tool — model-driven execution plan with live step progression.
 
-Unlike todo_write (a private checklist), the plan is a user-visible execution
-plan rendered in the Plan panel. Each call emits a full `plan_updated` snapshot
-so the frontend can create or replace the live plan in one event.
+Unlike todo_write (the compact task progress checklist), the plan is a larger
+user-visible execution plan rendered in the Plan panel. Each call emits a full
+`plan_updated` snapshot so the frontend can create or replace the live plan in
+one event.
 """
 
 from __future__ import annotations
@@ -33,12 +34,15 @@ class UpdatePlanTool(BaseTool):
     read_only = False  # mutates session plan state
     permission = PermissionLevel.AUTO
     description = (
-        "维护用户可见的执行计划（区别于 todo_write 的私有清单）。"
-        "当任务需要多步骤、跨文件或阶段验证时，先用 update_plan 给出完整步骤，"
-        "并在推进时再次调用以更新每个步骤的状态。"
-        "参数 plan 是步骤数组，每个步骤含 step（标题）和 status"
-        "（pending / in_progress / completed）；任意时刻最多一个 in_progress。"
-        "可选 explanation 说明计划或本次更新的原因。"
+        "Maintain the larger user-visible execution plan. This is distinct from todo_write: todo_write drives "
+        "the compact live checklist/status island, while update_plan is for a visible phase plan.\n\n"
+        "When to use: the user explicitly asks for a plan, the task is ambiguous enough that a visible approach "
+        "helps alignment, or the work has larger phases that should remain visible while you execute.\n\n"
+        "When not to use: routine task tracking, a simple checklist, a single-step fix, or merely because "
+        "todo_write is available. Do not mirror the same routine todo list into both tools.\n\n"
+        "State rules: every call sends the full ordered plan snapshot; at most one step may be in_progress; "
+        "advance status as phases actually progress; mark completed only after the phase is genuinely done. "
+        "Optional explanation should describe why the plan changed, not narrate every tool call."
     )
 
     def __init__(self, workspace_root: Path | None = None) -> None:
@@ -53,11 +57,14 @@ class UpdatePlanTool(BaseTool):
                 "properties": {
                     "plan": {
                         "type": "array",
-                        "description": "Ordered plan steps.",
+                        "description": (
+                            "Full ordered plan snapshot. Use for a larger visible phase plan, not routine todo "
+                            "tracking. At most one step may be in_progress."
+                        ),
                         "items": {
                             "type": "object",
                             "properties": {
-                                "step": {"type": "string", "description": "Step title."},
+                                "step": {"type": "string", "description": "Concise visible phase title."},
                                 "status": {
                                     "type": "string",
                                     "enum": ["pending", "in_progress", "completed"],
@@ -68,7 +75,12 @@ class UpdatePlanTool(BaseTool):
                     },
                     "explanation": {
                         "type": "string",
-                        "description": "Optional note about the plan or this update.",
+                        "description": "Optional note explaining the plan or why this update changed it.",
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["draft", "accepted", "executing", "completed", "cancelled"],
+                        "description": "Optional plan lifecycle state. Omit to infer from step statuses.",
                     },
                 },
                 "required": ["plan"],
@@ -116,7 +128,20 @@ class UpdatePlanTool(BaseTool):
         plan_id = f"plan-{session_id}"
         current_step = self._current_step(steps)
         all_done = all(step["status"] == "done" for step in steps)
-        plan_status = "completed" if all_done else "executing"
+        raw_plan_status = str(args.get("status", "") or "").strip().lower()
+        if raw_plan_status and raw_plan_status not in {"draft", "accepted", "executing", "completed", "cancelled"}:
+            return ToolResult(
+                content="无效计划状态，必须是 draft / accepted / executing / completed / cancelled。",
+                is_error=True,
+            )
+        if raw_plan_status:
+            plan_status = raw_plan_status
+        elif all_done:
+            plan_status = "completed"
+        elif in_progress_count:
+            plan_status = "executing"
+        else:
+            plan_status = "draft"
         explanation = str(args.get("explanation", "") or "").strip()
 
         self._save(session_id, plan_id, steps, plan_status, current_step)
@@ -136,7 +161,7 @@ class UpdatePlanTool(BaseTool):
 
         done = sum(1 for step in steps if step["status"] == "done")
         running = next((step["title"] for step in steps if step["status"] == "running"), "")
-        summary = f"计划已更新：{len(steps)} 步，已完成 {done}。"
+        summary = f"计划已更新：{len(steps)} 步，状态 {plan_status}，已完成 {done}。"
         if running:
             summary += f" 进行中：{running}。"
         elif all_done:

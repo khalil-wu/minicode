@@ -8,6 +8,7 @@ from backend.agent.context import ContextBuilder
 from backend.conversations.repository import ConversationRepository
 
 SNAPSHOT_PARTIAL_HISTORY_COUNT = 20
+UI_AGENT_STATE_SNAPSHOT_KEY = "ui_agent_state"
 
 
 class ConversationRuntime:
@@ -214,6 +215,8 @@ class ConversationRuntime:
             "persistent_notes": list(previous_snapshot.get("persistent_notes", [])),
             "compaction_count": int(previous_snapshot.get("compaction_count", 0) or 0),
         }
+        if UI_AGENT_STATE_SNAPSHOT_KEY in previous_snapshot:
+            snapshot[UI_AGENT_STATE_SNAPSHOT_KEY] = previous_snapshot[UI_AGENT_STATE_SNAPSHOT_KEY]
         self._context_builder.load_snapshot(snapshot)
         return snapshot
 

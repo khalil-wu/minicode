@@ -88,6 +88,7 @@ export const SessionRow = ({
         type="button"
         onClick={(e) => {
           if (selectionMode) { onToggleSelected(c.id); return; }
+          if (c.archived) return;
           if (e.ctrlKey || e.metaKey) {
             const id = `chat-${c.id}`;
             const state = useAppStore.getState();
@@ -165,6 +166,7 @@ export const SessionRow = ({
           canDelete
           canReveal={Boolean((c.worktreePath || c.workspaceRoot) && isDesktop())}
           canCopy={Boolean(c.worktreePath || c.workspaceRoot)}
+          canSwitch={!c.archived}
           onSwitch={() => onSwitch(c.id)}
           onReveal={() => onReveal(c.worktreePath || c.workspaceRoot)}
           onCopy={() => onCopy(c.worktreePath || c.workspaceRoot)}

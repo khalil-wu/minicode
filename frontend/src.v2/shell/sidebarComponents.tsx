@@ -103,6 +103,7 @@ export const ConversationMenu = ({
   canDelete,
   canReveal,
   canCopy,
+  canSwitch = true,
   onSwitch,
   onReveal,
   onCopy,
@@ -115,6 +116,7 @@ export const ConversationMenu = ({
   canDelete: boolean;
   canReveal: boolean;
   canCopy: boolean;
+  canSwitch?: boolean;
   onSwitch: () => void;
   onReveal: () => void;
   onCopy: () => void;
@@ -137,7 +139,7 @@ export const ConversationMenu = ({
       boxShadow: "var(--shadow-soft)",
     }}
   >
-    <MenuItem icon={<LogIn size={13} />} label="Switch session" onClick={onSwitch} />
+    {canSwitch && <MenuItem icon={<LogIn size={13} />} label="Switch session" onClick={onSwitch} />}
     {canReveal && <MenuItem icon={<FolderOpen size={13} />} label="Reveal workspace" onClick={onReveal} />}
     {canCopy && <MenuItem icon={<Copy size={13} />} label="Copy workspace path" onClick={onCopy} />}
     {isIsolated && (

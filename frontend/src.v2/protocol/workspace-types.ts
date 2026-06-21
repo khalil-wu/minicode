@@ -30,6 +30,8 @@ export type WorkspaceServerEventType =
   // Checkpoints
   | "checkpoint.list"
   | "checkpoint.rewound"
+  | "checkpoint.run.list"
+  | "checkpoint.run.resume"
   // Guidelines / permissions
   | "guidelines.updated"
   | "permission.mode.updated"
@@ -57,6 +59,7 @@ export type WorkspaceClientCommandType =
   | "git.pr_status"
   | "checkpoint.list"
   | "checkpoint.rewind"
+  | "checkpoint.run.list"
   // Git diff
   | "diff.git_working_tree"
   | "diff.git_staged"
@@ -97,6 +100,68 @@ export interface GitPrStatusEvent {
   error?: string;
 }
 
+export interface GitDiffFilePayload {
+  path: string;
+  patch: string;
+  additions: number;
+  deletions: number;
+  is_binary?: boolean;
+}
+
+export interface GitDiffWorkingTreeEvent {
+  type: "diff.git_working_tree";
+  files?: GitDiffFilePayload[];
+  untracked?: string[];
+}
+
+export interface GitDiffStagedEvent {
+  type: "diff.git_staged";
+  files?: GitDiffFilePayload[];
+}
+
+export interface GitDiffActionEvent {
+  type:
+    | "diff.git_stage_file"
+    | "diff.git_unstage_file"
+    | "diff.git_stage_all"
+    | "diff.git_unstage_all"
+    | "diff.git_revert_file";
+  ok?: boolean;
+  path?: string;
+  message?: string;
+}
+
+export interface RunCheckpointRecord {
+  run_id?: string;
+  session_id?: string;
+  conversation_id?: string;
+  iteration?: number;
+  iterations?: number;
+  stopped_reason?: string | null;
+  created_at?: number;
+  timestamp?: number;
+}
+
+export interface RunCheckpointListEvent {
+  type: "checkpoint.run.list";
+  session_id?: string;
+  conversation_id?: string;
+  checkpoints?: RunCheckpointRecord[];
+  runs?: Record<string, unknown>[];
+  subagents?: Record<string, unknown>[];
+}
+
+export interface RunCheckpointResumeEvent {
+  type: "checkpoint.run.resume";
+  resumed: boolean;
+  session_id?: string;
+  conversation_id?: string;
+  run_id?: string;
+  iteration?: number;
+  stopped_reason?: string | null;
+  message?: string;
+}
+
 // ──────────────────────────────────────────────────────────────────
 // Client command payloads
 // ──────────────────────────────────────────────────────────────────
@@ -115,4 +180,10 @@ export interface EnvSetCommand {
 export interface EnvDeleteCommand {
   type: "env.delete";
   name: string;
+}
+
+export interface RunCheckpointListCommand {
+  type: "checkpoint.run.list";
+  session_id?: string;
+  conversation_id?: string;
 }

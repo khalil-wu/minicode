@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ExternalLink, Code2 } from "lucide-react";
+import { ExternalLink, Code2, ShieldCheck } from "lucide-react";
 import { useAppStore } from "../stores";
 import { getWebSocket } from "../hooks/useWebSocket";
 import { buildApprovalResponseCommand } from "../protocol/prompt-responses";
 import { pendingPromptTargetsConversation } from "../lib/pending-prompts";
 import { MonacoDiffView } from "../components/MonacoDiffView";
 import { guessLanguageFromPath } from "../lib/monaco-colorize";
+import { sendClientCommand } from "../protocol/ws-outbox";
 
 export const DiffReviewModal = () => {
   const pendingDiffReview = useAppStore((s) => s.pendingDiffReview);
@@ -33,6 +34,25 @@ export const DiffReviewModal = () => {
     }
     useAppStore.getState().clearDiffReview();
   }, [visibleDiffReview]);
+
+  // "Always allow edits here": persist an Edit(<dir>/**) content rule so future
+  // edits under the same directory skip the review, then approve this one.
+  const alwaysAllowHere = useCallback(() => {
+    if (!visibleDiffReview?.filePath) {
+      respond(true);
+      return;
+    }
+    const normalized = visibleDiffReview.filePath.replace(/\\/g, "/");
+    const slash = normalized.lastIndexOf("/");
+    const glob = slash >= 0 ? `${normalized.slice(0, slash)}/**` : normalized;
+    sendClientCommand({
+      type: "permissions.content_rule.add",
+      rule: `Edit(${glob})`,
+      deny: false,
+      source: "diff_review.always_allow",
+    });
+    respond(true);
+  }, [visibleDiffReview, respond]);
 
   useEffect(() => {
     if (!visibleDiffReview) return;
@@ -211,6 +231,16 @@ export const DiffReviewModal = () => {
             <button onClick={() => respond(false)} className="border rounded py-2 px-5 cursor-pointer" style={rejectBtn}>
               Reject
             </button>
+            {visibleDiffReview.filePath && (
+              <button
+                onClick={alwaysAllowHere}
+                title="Approve and don't ask again for edits under this path"
+                className="border rounded py-2 px-3 cursor-pointer inline-flex items-center gap-1.5"
+                style={alwaysBtn}
+              >
+                <ShieldCheck size={14} /> Always here
+              </button>
+            )}
             <button onClick={() => respond(true)} className="border-0 rounded py-2 px-5 font-semibold cursor-pointer" style={acceptBtn}>
               Accept
             </button>
@@ -256,6 +286,14 @@ const openBtn: React.CSSProperties = {
   background: "var(--surface-soft)",
   color: "var(--text-primary)",
   borderColor: "var(--border-subtle)",
+  borderRadius: "var(--radius-sm, 6px)",
+  fontSize: "var(--text-sm)",
+};
+
+const alwaysBtn: React.CSSProperties = {
+  background: "color-mix(in oklch, var(--state-success) 12%, var(--surface-soft))",
+  color: "var(--state-success)",
+  borderColor: "color-mix(in oklch, var(--state-success) 35%, var(--border-subtle))",
   borderRadius: "var(--radius-sm, 6px)",
   fontSize: "var(--text-sm)",
 };

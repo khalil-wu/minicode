@@ -20,7 +20,7 @@ class RoutedToolResult:
 
 
 class ControlToolRouter:
-    """Route agent control tools that are implemented by the runtime harness."""
+    """Route agent control tools implemented by the agent runtime."""
 
     def __init__(
         self,

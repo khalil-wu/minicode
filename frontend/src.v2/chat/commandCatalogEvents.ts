@@ -7,7 +7,7 @@ export const handleCommandCatalogEvent = (e: ServerEvent): boolean => {
   switch (e.type) {
     case "skills.list": {
       if (e.skills) {
-        s.setAvailableSkills(e.skills.map((skill) => ({
+        s.setAvailableSkills(e.skills.map((skill: { name: string; description: string; version?: string; triggers?: string[]; tools_required?: string[]; source_level?: string; active?: boolean }) => ({
           ...skill,
           active: Boolean((skill as typeof skill & { active?: boolean }).active),
         })));
@@ -67,7 +67,7 @@ export const handleCommandCatalogEvent = (e: ServerEvent): boolean => {
     }
     case "skills.marketplace.list": {
       if (e.skills) {
-        s.setMarketplaceSkills(e.skills.map((sk) => ({
+        s.setMarketplaceSkills(e.skills.map((sk: { name: string; title?: string; description: string; triggers?: string[]; installed?: boolean }) => ({
           name: sk.name,
           title: sk.title ?? sk.name,
           description: sk.description,

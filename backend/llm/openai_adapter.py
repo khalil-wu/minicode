@@ -140,6 +140,16 @@ class _ToolCallAccumulator:
             ))
         return events
 
+
+def _prefetch_tool_call_event(tool_calls: list[ToolCallEvent]) -> StreamEvent | None:
+    if not tool_calls:
+        return None
+    return StreamEvent(
+        type=StreamEventType.TOOL_CALL,
+        tool_calls=list(tool_calls),
+        tool_calls_final=False,
+    )
+
 _TRANSIENT_ERROR_SUBSTRINGS = (
     "concurrency limit exceeded",
     "retry later",
@@ -657,13 +667,15 @@ class OpenAIAdapter(LLMAdapter):
                     except (json.JSONDecodeError, TypeError):
                         from backend.llm.json_repair import repair_tool_json
                         arguments = repair_tool_json(arguments_str) or {"_raw": arguments_str}
-                    pending_tool_calls.append(
-                        ToolCallEvent(
-                            id=call_id,
-                            name=name,
-                            arguments=arguments,
-                        )
+                    tool_call = ToolCallEvent(
+                        id=call_id,
+                        name=name,
+                        arguments=arguments,
                     )
+                    pending_tool_calls.append(tool_call)
+                    prefetch_event = _prefetch_tool_call_event([tool_call])
+                    if prefetch_event is not None:
+                        yield prefetch_event
 
                 # 完成
                 elif event_type in {
@@ -882,6 +894,7 @@ class OpenAIAdapter(LLMAdapter):
         accumulator = _ToolCallAccumulator()
         usage = UsageInfo()
         finish_reason = ""
+        tool_prefetch_emitted = False
 
         async with self._raw_http_client.stream(
             "POST",
@@ -957,6 +970,11 @@ class OpenAIAdapter(LLMAdapter):
                 # drop it and leave usage at zero. The loop ends on [DONE] / EOF.
                 if choice.get("finish_reason"):
                     finish_reason = str(choice.get("finish_reason") or "")
+                    if not tool_prefetch_emitted and finish_reason == "tool_calls":
+                        prefetch_event = _prefetch_tool_call_event(accumulator.finalize())
+                        if prefetch_event is not None:
+                            yield prefetch_event
+                            tool_prefetch_emitted = True
                     continue
 
         tool_call_events = accumulator.finalize()
@@ -1161,6 +1179,8 @@ class OpenAIAdapter(LLMAdapter):
         full_text = ""
         accumulator = _ToolCallAccumulator()
         usage = UsageInfo()
+        finish_reason = ""
+        tool_prefetch_emitted = False
 
         try:
             async for chunk in stream:
@@ -1216,6 +1236,11 @@ class OpenAIAdapter(LLMAdapter):
                 # would skip it and leave usage at zero. Loop ends at stream EOF.
                 if choice.finish_reason:
                     finish_reason = str(choice.finish_reason or "")
+                    if not tool_prefetch_emitted and finish_reason == "tool_calls":
+                        prefetch_event = _prefetch_tool_call_event(accumulator.finalize())
+                        if prefetch_event is not None:
+                            yield prefetch_event
+                            tool_prefetch_emitted = True
                     continue
         except Exception as exc:
             yield StreamEvent(

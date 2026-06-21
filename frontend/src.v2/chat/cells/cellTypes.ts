@@ -23,6 +23,7 @@ export interface DiffFileChange {
   patch?: string;
   additions: number;
   deletions: number;
+  changeType?: "created" | "updated" | "deleted";
   isLarge?: boolean;
   isTruncated?: boolean;
 }
@@ -167,7 +168,22 @@ export interface AssistantMarkdownCellState {
   phase: "final";
   copyable: boolean;
   isStreaming?: boolean; // ✅ 添加流式状态标志
+  /** Origin of the reply text. Used for data-source attribution, not for
+   * visual divergence in this phase. */
+  source?: "send_message" | "stream" | "fallback" | "partial";
+  /** Attachments carried by a BriefTool (send_message) reply. Rendered as a
+   * compact chip list below the answer; image attachments are previewable. */
+  attachments?: AssistantReplyAttachment[];
   createdAt: number;
+}
+
+export interface AssistantReplyAttachment {
+  /** Absolute or workspace-relative file path. */
+  path: string;
+  /** File size in bytes. */
+  size: number;
+  /** True for previewable image formats. */
+  isImage: boolean;
 }
 
 export interface StreamingAssistantTailCellState {
@@ -181,7 +197,7 @@ export interface ThinkingCellState {
   kind: "thinking";
   id: string;
   content: string;
-  source: "model_preamble" | "provider" | "reasoning" | "runtime";
+  source: "model_preamble" | "post_tool" | "provider" | "reasoning" | "runtime";
   phase?: string; // Optional phase indicator (e.g., "analyzing", "planning")
   createdAt: number;
 }

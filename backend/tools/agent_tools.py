@@ -10,7 +10,9 @@ from uuid import uuid4
 from backend.attachments.store import AttachmentStore
 from backend.agent.context import ContextBuilder
 from backend.agent.message import AgentEvent
+from backend.agent.runtime import AgentRuntime
 from backend.agent.state import AgentState
+from backend.agents.loader import discover_agents, get_custom_agent
 from backend.artifact.store import ArtifactStore
 from backend.config import AgentSettings, TokenBudget
 from backend.llm.base import LLMAdapter
@@ -18,6 +20,39 @@ from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext, ToolExecutionContext
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.registry import ToolRegistry
+
+
+# Built-in subagent types. Custom agents (from .mini-code/agents/*.md) are
+# accepted in addition to these via agents.loader.get_custom_agent.
+_BUILTIN_AGENT_TYPE_ORDER = [
+    "general-purpose",
+    "explore",
+    "plan",
+    "implement",
+    "verification",
+]
+_BUILTIN_AGENT_TYPES: set[str] = set(_BUILTIN_AGENT_TYPE_ORDER)
+
+
+def _available_agent_types() -> list[str]:
+    """Return built-in plus discovered custom subagent types for model schema."""
+    try:
+        custom = sorted(
+            name
+            for name in discover_agents().keys()
+            if name and name not in _BUILTIN_AGENT_TYPES
+        )
+    except Exception:
+        custom = []
+    return [*_BUILTIN_AGENT_TYPE_ORDER, *custom]
+
+
+def _artifact_content_preview(content: str, *, max_chars: int = 1600) -> str:
+    text = str(content or "").strip()
+    if len(text) <= max_chars:
+        return text
+    head = text[: max_chars - 80].rstrip()
+    return f"{head}\n... [{len(text) - len(head)} chars omitted; expand/open artifact for full content] ..."
 
 
 class AskUserTool(BaseTool):
@@ -53,6 +88,184 @@ class AskUserTool(BaseTool):
         return self._success_result(f"[waiting for user answer] {question}")
 
 
+class BriefTool(BaseTool):
+    """Send a concise user-facing reply into the main answer stream."""
+
+    name = "send_message"
+    description = (
+        "Send a concise user-facing message as the main assistant reply. "
+        "Use this for final results or proactive status that the user should definitely see. "
+        "Do not use it for filler acknowledgements like 'I'll keep looking' or 'now I will answer'."
+    )
+    permission = PermissionLevel.AUTO
+    read_only = True
+    mutates_workspace = False
+
+    # Image extensions rendered inline (previewable). Everything else is
+    # shown as a [file] chip with its size. Matches cc's IMAGE_EXTENSION_REGEX.
+    _IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
+
+    def get_spec(self):
+        from backend.tools.contracts import ToolSpec
+
+        return ToolSpec(
+            name=self.name,
+            capability="user.reply",
+            exposure="deferred",
+            required_args=("message",),
+            arg_roles={"message": "generated_content"},
+            empty_args_policy="repair_or_block",
+        )
+
+    def get_schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=self.name,
+            description=self.description,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "Markdown message to show in the main assistant reply area.",
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["normal", "proactive"],
+                        "default": "normal",
+                        "description": "Use 'proactive' for a brief status update before more work; otherwise use 'normal'.",
+                    },
+                    "attachments": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional file paths (absolute or relative to the workspace root) to attach "
+                            "alongside the message. Use for screenshots, diffs, logs, or any file the user "
+                            "should see with this reply."
+                        ),
+                    },
+                },
+                "required": ["message"],
+            },
+            strict=True,
+        )
+
+    async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
+        message = str(args.get("message") or "").strip()
+        if not message:
+            return self._error_result("Missing message argument")
+
+        attachments_meta = self._resolve_attachments(args.get("attachments"), context)
+
+        emit_event = context.emit_event if context else None
+        if emit_event is not None:
+            payload: dict[str, Any] = {"content": message, "source": self.name}
+            if attachments_meta is not None:
+                payload["attachments"] = attachments_meta
+            await emit_event("text_chunk", payload)
+
+        summary = "Sent user-facing message."
+        if str(args.get("status") or "normal") == "proactive":
+            summary = "Sent proactive user-facing status."
+        if attachments_meta:
+            summary += f" ({len(attachments_meta)} attachment{'s' if len(attachments_meta) != 1 else ''} included)"
+        return ToolResult(
+            content=summary,
+            result_kind="reply",
+            display_scope="silent",
+        )
+
+    def _resolve_attachments(
+        self,
+        raw: Any,
+        context: ToolExecutionContext | None,
+    ) -> list[dict[str, Any]] | None:
+        """Validate and stat attachment paths.
+
+        Returns ``None`` when no attachments were supplied (so the event payload
+        stays unchanged), or a list of ``{path, size, is_image}`` metadata dicts.
+        Missing or inaccessible paths are skipped — best-effort graceful
+        degradation, mirroring cc's resolveAttachments. The model can retry with
+        corrected paths.
+        """
+        if not raw or not isinstance(raw, list):
+            return None
+        import fnmatch
+        import os
+        from pathlib import Path
+
+        ws = getattr(context, "workspace_root", None) if context else None
+        workspace_root = (Path(str(ws)) if ws else Path(os.getcwd())).resolve()
+        checker = getattr(context, "permission_checker", None) if context else None
+        if checker is None:
+            from backend.config import PermissionSettings
+
+            checker = PermissionChecker(PermissionSettings(), workspace_root)
+        else:
+            checker = checker.with_workspace_root(workspace_root)
+        denylist = checker.policy_snapshot().get("path_denylist", [])
+        permission_context = getattr(context, "permission", None) if context else None
+        constraints = getattr(permission_context, "filesystem_constraints", {}) or {}
+        if "denylist" in constraints:
+            denylist = list(constraints["denylist"])
+
+        resolved: list[dict[str, Any]] = []
+        for item in raw:
+            path_str = str(item or "").strip()
+            if not path_str:
+                continue
+            requested_path = Path(path_str)
+            if any(part == ".." for part in requested_path.parts):
+                continue
+            full_path = requested_path
+            if not full_path.is_absolute():
+                full_path = workspace_root / full_path
+            try:
+                real_path = full_path.resolve()
+                rel_path = real_path.relative_to(workspace_root).as_posix()
+                if self._matches_attachment_denylist(path_str, rel_path, real_path.name, denylist, fnmatch):
+                    continue
+                allowed, _reason = checker.validate_file_operation(str(real_path), "read")
+                if not allowed or not real_path.is_file():
+                    continue
+                size = real_path.stat().st_size
+            except OSError:
+                continue
+            except ValueError:
+                continue
+            resolved.append({
+                "path": str(real_path),
+                "size": size,
+                "is_image": real_path.suffix.lower() in self._IMAGE_EXTENSIONS,
+            })
+        return resolved if resolved else None
+
+    @staticmethod
+    def _matches_attachment_denylist(
+        raw_path: str,
+        rel_path: str,
+        file_name: str,
+        denylist: list[str],
+        fnmatch_module: Any,
+    ) -> bool:
+        raw_normalized = raw_path.replace("\\", "/").strip()
+        rel_normalized = rel_path.replace("\\", "/").strip()
+        for pattern in denylist:
+            normalized = str(pattern).replace("\\", "/").strip()
+            while normalized.startswith("./"):
+                normalized = normalized[2:]
+            if not normalized:
+                continue
+            if normalized.endswith("/") and rel_normalized.startswith(normalized):
+                return True
+            if fnmatch_module.fnmatch(raw_normalized, normalized):
+                return True
+            if fnmatch_module.fnmatch(rel_normalized, normalized):
+                return True
+            if fnmatch_module.fnmatch(file_name, normalized):
+                return True
+        return False
+
+
 class ReadArtifactTool(BaseTool):
     """Read full content from an artifact created by a previous tool."""
 
@@ -74,7 +287,7 @@ class ReadArtifactTool(BaseTool):
         self._attachment_store = attachment_store
 
     def get_spec(self):
-        from backend.agent.harness.contracts import ToolSpec
+        from backend.tools.contracts import ToolSpec
 
         return ToolSpec(
             name=self.name,
@@ -128,7 +341,12 @@ class ReadArtifactTool(BaseTool):
                 f"Artifact '{artifact_id}' does not exist. {hint}"
             )
 
-        return self._success_result(content)
+        preview = _artifact_content_preview(content)
+        return ToolResult(
+            content=content,
+            content_preview=preview,
+            display_summary=f"Read artifact {artifact_id}",
+        )
 
     @staticmethod
     def _is_parse_error(content: str) -> bool:
@@ -209,7 +427,7 @@ class TaskTool(BaseTool):
     permission = PermissionLevel.AUTO
 
     def get_spec(self):
-        from backend.agent.harness.contracts import ToolSpec
+        from backend.tools.contracts import ToolSpec
 
         return ToolSpec(
             name=self.name,
@@ -248,6 +466,12 @@ class TaskTool(BaseTool):
         self._token_budget_provider = token_budget_provider
 
     def get_schema(self) -> ToolSchema:
+        agent_types = _available_agent_types()
+        agent_type_description = (
+            "Optional subagent type. Use explore or plan for read-heavy investigation, "
+            "implement for a focused code change, and verification for adversarial read-only checks. "
+            f"Available types: {', '.join(agent_types)}."
+        )
         return ToolSchema(
             name=self.name,
             description=self.description,
@@ -264,8 +488,8 @@ class TaskTool(BaseTool):
                     },
                     "agent_type": {
                         "type": "string",
-                        "enum": ["general-purpose", "explore", "plan", "implement"],
-                        "description": "Optional subagent type. Use explore or plan for read-heavy investigation; implement for a focused code change.",
+                        "enum": agent_types,
+                        "description": agent_type_description,
                     },
                     "parallel_tasks": {
                         "type": "array",
@@ -287,8 +511,8 @@ class TaskTool(BaseTool):
                                 },
                                 "agent_type": {
                                     "type": "string",
-                                    "enum": ["general-purpose", "explore", "plan", "implement"],
-                                    "description": "Subagent type for this subtask.",
+                                    "enum": agent_types,
+                                    "description": agent_type_description,
                                 },
                             },
                             "required": ["description", "prompt"],
@@ -350,7 +574,7 @@ class TaskTool(BaseTool):
                     tasks.append({
                         "description": t_desc,
                         "prompt": t_prompt,
-                        "agent_type": t_type if t_type in {"general-purpose", "explore", "plan", "implement"} else "general-purpose",
+                        "agent_type": t_type if (t_type in _BUILTIN_AGENT_TYPES or get_custom_agent(t_type)) else "general-purpose",
                     })
             if len(tasks) >= 2:
                 return await self._run_parallel_subtasks(
@@ -362,7 +586,7 @@ class TaskTool(BaseTool):
         agent_type = str(args.get("agent_type") or "general-purpose").strip().lower()
         if agent_type == "general":
             agent_type = "general-purpose"
-        if agent_type not in {"general-purpose", "explore", "plan", "implement"}:
+        if agent_type not in _BUILTIN_AGENT_TYPES and not get_custom_agent(agent_type):
             agent_type = "general-purpose"
         if not description:
             return self._error_result("Missing description argument")
@@ -404,17 +628,27 @@ class TaskTool(BaseTool):
         subagent_id = f"subagent-{uuid4().hex[:8]}"
         parent_id = context.task_id if context and context.task_id else context.session_id if context else ""
         emit_event = context.emit_event if context else None
+        runtime = self._runtime_from_context(context)
+        parent_metadata = self._metadata_from_context(context)
+        parent_run_id = str(parent_metadata.get("run_id", ""))
+        subagent_record = runtime.start_subagent(
+            subagent_id=subagent_id,
+            parent_run_id=parent_run_id,
+            agent_type=agent_type,
+            prompt_summary=description,
+        ) if runtime is not None else None
 
         if emit_event is not None:
-            await emit_event(
-                "subagent.start",
-                AgentEvent.subagent_start(
-                    subagent_id=subagent_id,
-                    parent_id=parent_id,
-                    role=agent_type,
-                    prompt=description,
-                ).data,
+            start_event = AgentEvent.subagent_start(
+                subagent_id=subagent_id,
+                parent_id=parent_id,
+                role=agent_type,
+                prompt=description,
             )
+            if subagent_record is not None:
+                start_event.data["record"] = subagent_record.to_dict()
+                start_event.data["parent_run_id"] = parent_run_id
+            await emit_event("subagent.start", start_event.data)
 
         sub_settings = self._resolve_agent_settings()
         if sub_settings.max_iterations > 8:
@@ -437,7 +671,7 @@ class TaskTool(BaseTool):
         sub_context = self._build_permission_context(agent_type, context)
         delegated_prompt = self._build_subagent_prompt(agent_type, prompt)
         sub_state = AgentState(user_message=delegated_prompt, max_iterations=sub_settings.max_iterations)
-        sub_state.workspace_context = getattr(context, "metadata", {}).get("workspace_context") if context else None
+        sub_state.workspace_context = parent_metadata.get("workspace_context")
         if context is not None:
             sub_state.conversation_id = context.conversation_id
             sub_state.checkpoint_manager = context.checkpoint_manager
@@ -480,7 +714,13 @@ class TaskTool(BaseTool):
                         task_id=subagent_id,
                         task_manager=context.task_manager if context else None,
                         emit_event=emit_event,
-                        metadata=dict(context.metadata) if context else {},
+                        metadata={
+                            **parent_metadata,
+                            "agent_runtime": runtime,
+                            "parent_run_id": parent_run_id,
+                            "agent_role": f"subagent:{agent_type}",
+                            "run_id": subagent_id,
+                        },
                         stream_callback=context.stream_callback if context else None,
                         session_context=None,
                     ):
@@ -511,17 +751,24 @@ class TaskTool(BaseTool):
             tool_call_count = len(sub_state.tool_calls)
 
             if emit_event is not None:
-                await emit_event(
-                    "subagent.done",
-                    AgentEvent.subagent_done(
-                        subagent_id=subagent_id,
-                        summary=summary[:500] if summary else "",
-                        duration_ms=elapsed_ms,
-                        iterations=sub_state.iterations,
-                        tool_call_count=tool_call_count,
-                        timed_out=timed_out,
-                    ).data,
+                done_event = AgentEvent.subagent_done(
+                    subagent_id=subagent_id,
+                    summary=summary[:500] if summary else "",
+                    duration_ms=elapsed_ms,
+                    iterations=sub_state.iterations,
+                    tool_call_count=tool_call_count,
+                    timed_out=timed_out,
                 )
+                if runtime is not None:
+                    record = runtime.complete_subagent(
+                        subagent_id,
+                        "failed" if timed_out else "completed",
+                        summary=summary[:500] if summary else "",
+                        tool_count=tool_call_count,
+                    )
+                    if record is not None:
+                        done_event.data["record"] = record.to_dict()
+                await emit_event("subagent.done", done_event.data)
 
             if timed_out and not summary:
                 return ToolResult(
@@ -556,28 +803,32 @@ class TaskTool(BaseTool):
         except asyncio.CancelledError:
             elapsed_ms = int((time.perf_counter() - start_time) * 1000)
             if emit_event is not None:
-                await emit_event(
-                    "subagent.done",
-                    AgentEvent.subagent_done(
-                        subagent_id=subagent_id,
-                        error="cancelled",
-                        duration_ms=elapsed_ms,
-                        iterations=sub_state.iterations,
-                    ).data,
+                done_event = AgentEvent.subagent_done(
+                    subagent_id=subagent_id,
+                    error="cancelled",
+                    duration_ms=elapsed_ms,
+                    iterations=sub_state.iterations,
                 )
+                if runtime is not None:
+                    record = runtime.complete_subagent(subagent_id, "cancelled", summary="cancelled", tool_count=len(sub_state.tool_calls))
+                    if record is not None:
+                        done_event.data["record"] = record.to_dict()
+                await emit_event("subagent.done", done_event.data)
             raise
         except Exception as exc:
             elapsed_ms = int((time.perf_counter() - start_time) * 1000)
             if emit_event is not None:
-                await emit_event(
-                    "subagent.done",
-                    AgentEvent.subagent_done(
-                        subagent_id=subagent_id,
-                        error=str(exc),
-                        duration_ms=elapsed_ms,
-                        iterations=sub_state.iterations,
-                    ).data,
+                done_event = AgentEvent.subagent_done(
+                    subagent_id=subagent_id,
+                    error=str(exc),
+                    duration_ms=elapsed_ms,
+                    iterations=sub_state.iterations,
                 )
+                if runtime is not None:
+                    record = runtime.complete_subagent(subagent_id, "failed", summary=str(exc), tool_count=len(sub_state.tool_calls))
+                    if record is not None:
+                        done_event.data["record"] = record.to_dict()
+                await emit_event("subagent.done", done_event.data)
             return ToolResult(
                 content=(
                     f"Subagent {subagent_id} ({agent_type}) failed after "
@@ -765,7 +1016,7 @@ class TaskTool(BaseTool):
         parent_context: ToolExecutionContext | None,
     ) -> PermissionContext:
         parent_permission = parent_context.permission if parent_context else PermissionContext()
-        if parent_permission.mode == "plan" or agent_type in {"explore", "plan"}:
+        if parent_permission.mode == "plan" or agent_type in {"explore", "plan", "verification"}:
             mode = "plan"
         else:
             mode = parent_permission.mode
@@ -793,6 +1044,11 @@ class TaskTool(BaseTool):
 
     @staticmethod
     def _build_subagent_prompt(agent_type: str, prompt: str) -> str:
+        # Custom agent (from .mini-code/agents/*.md): its body is the role prompt.
+        if agent_type not in _BUILTIN_AGENT_TYPES:
+            custom = get_custom_agent(agent_type)
+            if custom and custom.prompt:
+                return f"{custom.prompt}\n\nTask:\n{prompt}"
         if agent_type == "explore":
             role_note = (
                 "You are a read-only exploration subagent. Inspect the codebase and return concise findings "
@@ -808,9 +1064,28 @@ class TaskTool(BaseTool):
                 "You are an implementation subagent. Complete only the bounded work in this prompt, "
                 "then summarize changed files and verification. Do not spawn more subagents."
             )
+        elif agent_type == "verification":
+            role_note = (
+                "You are a verification specialist. Try to break the result with real read-only checks. "
+                "Do not modify project files, install packages, or spawn more subagents. "
+                "Return VERDICT: PASS, VERDICT: FAIL, or VERDICT: PARTIAL with concise evidence."
+            )
         else:
             role_note = (
                 "You are a general-purpose subagent. Complete the bounded task and return a concise summary. "
                 "Do not spawn more subagents."
             )
         return f"{role_note}\n\nTask:\n{prompt}"
+
+    @staticmethod
+    def _runtime_from_context(context: ToolExecutionContext | None) -> AgentRuntime | None:
+        if context is None:
+            return None
+        runtime = context.metadata.get("agent_runtime") if isinstance(context.metadata, dict) else None
+        return runtime if isinstance(runtime, AgentRuntime) else None
+
+    @staticmethod
+    def _metadata_from_context(context: ToolExecutionContext | None) -> dict[str, Any]:
+        if context is None or not isinstance(context.metadata, dict):
+            return {}
+        return dict(context.metadata)

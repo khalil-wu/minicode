@@ -86,12 +86,13 @@ function groupActivityCells(cells: ChatTurnState["committedCells"]): ChatTurnSta
     if (!shouldGroupActivityBuffer(buffer)) {
       buffer.forEach(cell => grouped.push(cell));
     } else {
+      const status = groupStatus(buffer);
       grouped.push({
         kind: "activity_group",
         id: `activity-group-${activityGroupKey(buffer)}-${buffer[0]?.id ?? grouped.length}`,
         cells: buffer,
-        status: groupStatus(buffer),
-        collapsed: true,
+        status,
+        collapsed: status === "done",
         startedAt: Math.min(...buffer.map((cell) => cell.startedAt)),
         completedAt: latestCompletedAt(buffer),
       });
@@ -102,12 +103,13 @@ function groupActivityCells(cells: ChatTurnState["committedCells"]): ChatTurnSta
   const flushExec = () => {
     if (execBuffer.length === 0) return;
 
+    const status = execGroupStatus(execBuffer);
     grouped.push({
       kind: "exec_group",
       id: `exec-group-${execBuffer[0]?.id ?? grouped.length}`,
       cells: execBuffer,
-      status: execGroupStatus(execBuffer),
-      collapsed: true,
+      status,
+      collapsed: status === "done",
       startedAt: Math.min(...execBuffer.map((cell) => cell.createdAt)),
       completedAt: latestExecCompletedAt(execBuffer),
     });
@@ -326,7 +328,7 @@ export function HistoryCellRenderer({
       return <ActivityCell cell={cell} isActive={isActive} />;
 
     case "activity_group":
-      return <ActivityGroupCell cells={cell.cells} isActive={isActive} />;
+      return <ActivityGroupCell cells={cell.cells} isActive={isActive} defaultCollapsed={cell.collapsed} />;
 
     case "plan":
       return <PlanCell cell={cell} />;
@@ -335,7 +337,7 @@ export function HistoryCellRenderer({
       return <ExecCell cell={cell} isActive={isActive} onStop={onStopExecution} />;
 
     case "exec_group":
-      return <ExecGroupCell cells={cell.cells} isActive={isActive} onStop={onStopExecution} />;
+      return <ExecGroupCell cells={cell.cells} isActive={isActive} onStop={onStopExecution} defaultCollapsed={cell.collapsed} />;
 
     case "diff":
       return <DiffCell cell={cell} />;

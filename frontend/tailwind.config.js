@@ -1,49 +1,49 @@
 /** @type {import('tailwindcss').Config} */
 export default {
   content: ["./index.html", "./src.v2/**/*.{js,ts,jsx,tsx}"],
-  darkMode: "class",
+  darkMode: ["selector", "[data-theme='dark']"],
   theme: {
     extend: {
       colors: {
-        // Accent — Claude Code warm brown/caramel (OKLCH for perceptual uniformity)
+        // Accent — Codex Blue (light theme)
         accent: {
-          DEFAULT: "oklch(0.68 0.045 50)",
-          primary: "oklch(0.68 0.045 50)",
-          strong: "oklch(0.75 0.048 50)",
-          hover: "oklch(0.80 0.050 50)",
-          active: "oklch(0.60 0.042 50)",
-          soft: "oklch(0.68 0.045 50 / 0.10)",
-          border: "oklch(0.68 0.045 50 / 0.25)",
+          DEFAULT: "#2563EB",
+          primary: "#2563EB",
+          strong: "#1D4ED8",
+          hover: "#3B82F6",
+          active: "#1E40AF",
+          soft: "#2563EB1A",
+          border: "#2563EB40",
           glow: "none",
-          dim: "oklch(0.68 0.045 50 / 0.06)",
+          dim: "#2563EB0F",
         },
-        // Surface layers — layered warm dark grays (OKLCH)
+        // Surface layers — light warm grays (OKLCH)
         surface: {
-          base: "oklch(0.145 0.004 80)",
-          page: "oklch(0.185 0.005 80)",
-          panel: "oklch(0.230 0.006 80)",
-          sidebar: "oklch(0.165 0.004 80)",
-          raised: "oklch(0.260 0.006 80)",
-          soft: "oklch(0.210 0.005 80)",
-          input: "oklch(0.165 0.004 80)",
-          hover: "oklch(0.295 0.007 80)",
-          active: "oklch(0.330 0.007 80)",
-          overlay: "oklch(0.260 0.006 80)",
+          base: "oklch(0.98 0.002 80)",
+          page: "oklch(0.965 0.002 80)",
+          panel: "oklch(1.0 0 0)",
+          sidebar: "oklch(0.965 0.002 80)",
+          raised: "oklch(1.0 0 0)",
+          soft: "oklch(0.965 0.002 80)",
+          input: "oklch(1.0 0 0)",
+          hover: "oklch(0.965 0.002 80)",
+          active: "oklch(0.92 0.004 80)",
+          overlay: "oklch(0.98 0.002 80)",
         },
-        // Borders (OKLCH with alpha)
+        // Borders — light (OKLCH with alpha)
         border: {
-          DEFAULT: "oklch(0.870 0.006 80 / 0.22)",
-          subtle: "oklch(0.870 0.006 80 / 0.15)",
-          soft: "oklch(0.870 0.006 80 / 0.22)",
-          strong: "oklch(0.870 0.006 80 / 0.40)",
-          accent: "oklch(0.68 0.045 50 / 0.25)",
+          DEFAULT: "oklch(0.92 0.004 80 / 0.35)",
+          subtle: "oklch(0.92 0.004 80 / 0.20)",
+          soft: "oklch(0.92 0.004 80 / 0.35)",
+          strong: "oklch(0.92 0.004 80 / 0.50)",
+          accent: "#2563EB40",
         },
-        // Text — warm off-white tones (OKLCH)
+        // Text — dark stone tones (light theme)
         text: {
-          primary: "oklch(0.965 0.005 80)",
-          secondary: "oklch(0.840 0.006 80)",
-          muted: "oklch(0.680 0.006 80)",
-          disabled: "oklch(0.965 0.005 80 / 0.50)",
+          primary: "oklch(0.15 0.005 80)",
+          secondary: "oklch(0.47 0.010 70)",
+          muted: "oklch(0.63 0.010 70)",
+          disabled: "oklch(0.15 0.005 80 / 0.50)",
         },
         // Semantic states (OKLCH)
         state: {
@@ -101,10 +101,10 @@ export default {
         full: "9999px",
       },
       boxShadow: {
-        sm: "0 1px 2px rgba(0, 0, 0, 0.25)",
-        md: "0 2px 6px rgba(0, 0, 0, 0.30)",
-        lg: "0 2px 8px rgba(0, 0, 0, 0.25)",
-        xl: "0 4px 16px rgba(0, 0, 0, 0.40)",
+        sm: "0 1px 2px rgba(0, 0, 0, 0.06)",
+        md: "0 2px 6px rgba(0, 0, 0, 0.08)",
+        lg: "0 2px 8px rgba(0, 0, 0, 0.10)",
+        xl: "0 4px 16px rgba(0, 0, 0, 0.12)",
         glow: "none",
       },
       transitionDuration: {

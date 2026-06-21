@@ -20,30 +20,34 @@ class AgentEvent:
         return {"type": self.type, **self.data}
 
     @classmethod
-    def text_chunk(cls, content: str) -> AgentEvent:
-        return cls(type="text_chunk", data={"content": content})
+    def text_chunk(
+        cls,
+        content: str,
+        *,
+        source: str = "",
+        visibility: str = "",
+        role: str = "",
+        phase: str = "",
+        finalize: bool = False,
+    ) -> AgentEvent:
+        data: dict[str, Any] = {"content": content}
+        if source:
+            data["source"] = source
+        if visibility:
+            data["visibility"] = visibility
+        if role:
+            data["role"] = role
+        if phase:
+            data["phase"] = phase
+        if finalize:
+            # Contentless seal: re-tag the last streamed text block as the
+            # final answer without re-emitting content (already streamed live).
+            data["finalize"] = True
+        return cls(type="text_chunk", data=data)
 
     @classmethod
-    def final_answer_started(cls, *, is_streaming: bool = True) -> AgentEvent:
-        return cls(type="final_answer_started", data={"is_streaming": is_streaming})
-
-    @classmethod
-    def final_answer_delta(cls, content: str) -> AgentEvent:
-        return cls(type="final_answer_delta", data={"content": content})
-
-    @classmethod
-    def final_answer_retracted(cls, reason: str = "") -> AgentEvent:
-        data: dict[str, Any] = {}
-        if reason:
-            data["reason"] = reason
-        return cls(type="final_answer_retracted", data=data)
-
-    @classmethod
-    def final_answer_committed(cls, content: str = "", *, is_streaming: bool = False) -> AgentEvent:
-        data: dict[str, Any] = {"is_streaming": is_streaming}
-        if content:
-            data["content"] = content
-        return cls(type="final_answer_committed", data=data)
+    def text_replace(cls, content: str = "") -> AgentEvent:
+        return cls(type="text_replace", data={"content": content})
 
     @classmethod
     def thinking_chunk(
@@ -87,12 +91,18 @@ class AgentEvent:
         step_id: str = "",
         iteration_id: str = "",
         phase: str = "",
+        display_scope: str = "activity",
+        panel_hint: str = "inspector",
+        requires_attention: bool = False,
     ) -> AgentEvent:
         data: dict[str, Any] = {
             "id": id,
             "name": name,
             "args": args,
             "status": status,
+            "display_scope": display_scope,
+            "panel_hint": panel_hint,
+            "requires_attention": requires_attention,
         }
         if started_at is not None:
             data["started_at"] = started_at
@@ -158,12 +168,18 @@ class AgentEvent:
         projection: str = "",
         iteration_id: str = "",
         phase: str = "",
+        display_scope: str = "activity",
+        panel_hint: str = "inspector",
+        requires_attention: bool = False,
     ) -> AgentEvent:
         result: dict[str, Any] = {
             "id": id,
             "summary": summary,
             "is_error": is_error,
             "status": status or ("failed" if is_error else "success"),
+            "display_scope": display_scope,
+            "panel_hint": panel_hint,
+            "requires_attention": requires_attention,
         }
         if artifact_id:
             result["artifact_id"] = artifact_id
@@ -295,6 +311,9 @@ class AgentEvent:
         group_id: str = "",
         step_id: str = "",
         tool_call_ids: list[str] | None = None,
+        display_scope: str = "",
+        panel_hint: str = "",
+        requires_attention: bool = False,
     ) -> AgentEvent:
         payload: dict[str, Any] = {
             "id": id,
@@ -303,7 +322,12 @@ class AgentEvent:
             "role": role,
             "status": status,
             "visibility": visibility,
+            "requires_attention": requires_attention,
         }
+        if display_scope:
+            payload["display_scope"] = display_scope
+        if panel_hint:
+            payload["panel_hint"] = panel_hint
         if source:
             payload["source"] = source
         if content:
@@ -353,6 +377,9 @@ class AgentEvent:
         group_id: str = "",
         step_id: str = "",
         iteration_id: str = "",
+        display_scope: str = "",
+        panel_hint: str = "",
+        requires_attention: bool = False,
     ) -> AgentEvent:
         payload: dict[str, Any] = {
             "id": id or f"{stage}:{message}",
@@ -363,7 +390,12 @@ class AgentEvent:
             "label": label,
             "summary": summary or message,
             "visibility": visibility,
+            "requires_attention": requires_attention,
         }
+        if display_scope:
+            payload["display_scope"] = display_scope
+        if panel_hint:
+            payload["panel_hint"] = panel_hint
         if detail:
             payload["detail"] = detail
         if tool_call_id:
@@ -379,6 +411,85 @@ class AgentEvent:
         if iteration_id:
             payload["iteration_id"] = iteration_id
         return cls(type="agent.progress", data=payload)
+
+    @classmethod
+    def agent_run_started(cls, record: Any) -> AgentEvent:
+        payload = record.to_dict() if hasattr(record, "to_dict") else dict(record or {})
+        return cls(type="agent.run.started", data=payload)
+
+    @classmethod
+    def agent_run_updated(cls, record: Any) -> AgentEvent:
+        payload = record.to_dict() if hasattr(record, "to_dict") else dict(record or {})
+        return cls(type="agent.run.updated", data=payload)
+
+    @classmethod
+    def agent_run_completed(cls, record: Any) -> AgentEvent:
+        payload = record.to_dict() if hasattr(record, "to_dict") else dict(record or {})
+        return cls(type="agent.run.completed", data=payload)
+
+    @classmethod
+    def agent_phase_updated(
+        cls,
+        run_id: str,
+        phase: str,
+        *,
+        status: str = "running",
+        summary: str = "",
+        role: str = "",
+        conversation_id: str = "",
+    ) -> AgentEvent:
+        payload: dict[str, Any] = {
+            "run_id": run_id,
+            "phase": phase,
+            "status": status,
+        }
+        if summary:
+            payload["summary"] = summary
+        if role:
+            payload["role"] = role
+        if conversation_id:
+            payload["conversation_id"] = conversation_id
+        return cls(type="agent.phase.updated", data=payload)
+
+    @classmethod
+    def verification_started(
+        cls,
+        run_id: str,
+        *,
+        command: str = "",
+        conversation_id: str = "",
+    ) -> AgentEvent:
+        payload: dict[str, Any] = {"run_id": run_id}
+        payload["display_scope"] = "activity"
+        payload["panel_hint"] = "plan"
+        payload["requires_attention"] = False
+        if command:
+            payload["command"] = command
+        if conversation_id:
+            payload["conversation_id"] = conversation_id
+        return cls(type="verification.started", data=payload)
+
+    @classmethod
+    def verification_result(
+        cls,
+        run_id: str,
+        *,
+        passed: bool,
+        output: str = "",
+        command: str = "",
+        conversation_id: str = "",
+    ) -> AgentEvent:
+        payload: dict[str, Any] = {"run_id": run_id, "passed": passed}
+        payload["display_scope"] = "activity" if passed else "notice"
+        payload["panel_hint"] = "plan"
+        payload["requires_attention"] = not passed
+        if output:
+            payload["output"] = output
+        if command:
+            payload["command"] = command
+        if conversation_id:
+            payload["conversation_id"] = conversation_id
+        return cls(type="verification.result", data=payload)
 
     @classmethod
     def plan_step_updated(
@@ -568,6 +679,9 @@ class AgentEvent:
                 "parent_id": parent_id,
                 "role": role,
                 "prompt": prompt,
+                "display_scope": "agents",
+                "panel_hint": "subagents",
+                "requires_attention": False,
             },
         )
 
@@ -585,6 +699,9 @@ class AgentEvent:
         data: dict[str, Any] = {
             "subagent_id": subagent_id,
             "iteration": iteration,
+            "display_scope": "agents",
+            "panel_hint": "subagents",
+            "requires_attention": False,
         }
         if max_iterations:
             data["max_iterations"] = max_iterations
@@ -606,7 +723,13 @@ class AgentEvent:
         tool_call_count: int = 0,
         timed_out: bool = False,
     ) -> AgentEvent:
-        data: dict[str, Any] = {"subagent_id": subagent_id, "summary": summary}
+        data: dict[str, Any] = {
+            "subagent_id": subagent_id,
+            "summary": summary,
+            "display_scope": "agents",
+            "panel_hint": "subagents",
+            "requires_attention": bool(error or timed_out),
+        }
         if error:
             data["error"] = error
         if duration_ms is not None:

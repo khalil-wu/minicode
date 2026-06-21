@@ -10,6 +10,7 @@ import { createAgentSlice } from "./agent-slice";
 import { createApprovalSlice } from "./approval-slice";
 import { createInspectorSlice } from "./inspector-slice";
 import { createEditorSlice } from "./editor-slice";
+import { hasVisiblePlanSteps } from "../lib/planVisibility";
 import { applyTheme, applyTextScale, automaticRightPanelState } from "./shared-helpers";
 
 export const useAppStore = create<AppStore>()(
@@ -33,7 +34,7 @@ if (typeof window !== "undefined") {
   useAppStore.subscribe(
     (state) => state.plan,
     (plan) => {
-      if (!plan || plan.status === "completed" || plan.status === "cancelled") return;
+      if (!hasVisiblePlanSteps(plan) || plan.status === "completed" || plan.status === "cancelled") return;
       const key = `${plan.planId}:${plan.status}`;
       if (key === lastAutoFocusedPlanId) return;
       lastAutoFocusedPlanId = key;

@@ -42,7 +42,7 @@ ToolProjectionKind = Literal["silent", "status", "warning", "error", "approval"]
 
 @dataclass(frozen=True)
 class ToolSpec:
-    """Runtime metadata used by the harness.
+    """Runtime metadata used by tool registration and execution.
 
     The JSON schema tells the model the shape of a tool. ToolSpec tells the
     runtime how to expose, repair, route, and project that tool without
@@ -136,10 +136,3 @@ class ToolIssue:
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
-
-
-@dataclass(frozen=True)
-class AnswerGateResult:
-    ok: bool
-    feedback: str = ""
-    reason: str = ""

@@ -1,4 +1,4 @@
-export type CapabilitySource = "doctor" | "status" | "unknown";
+export type CapabilitySource = "doctor" | "status" | "runtime" | "unknown";
 
 export interface DoctorPayload {
   backend?: Record<string, unknown>;
@@ -17,9 +17,24 @@ export interface AgentCapabilitiesPayload {
   summary?: AgentCapabilitySummary;
   tools?: AgentCapabilityTool[];
   tool_views?: AgentCapabilityToolView[];
+  tool_runtime_metadata?: Record<string, unknown>;
   commands?: AgentCapabilityNamedItem[];
   skills?: AgentCapabilityNamedItem[];
   composer_commands?: AgentCapabilityNamedItem[];
+  permission?: AgentCapabilityPermission;
+  mcp_registry_version?: number;
+  version?: number;
+}
+
+export interface AgentCapabilityPermission {
+  mode?: string;
+  profile?: string;
+  source?: string;
+  workspace_scope?: string;
+  sandbox_status?: {
+    os?: string;
+    network?: string;
+  };
 }
 
 export interface AgentCapabilitySummary {
@@ -118,7 +133,7 @@ export const withDerivedCapabilitySummary = (
   if (!capabilities) return undefined;
   const summary = capabilities.summary;
   const exposure = summarizeToolViews(capabilities.tool_views);
-  const toolsTotal = finiteNumber(summary?.tools_total) ?? arrayLength(capabilities.tools) ?? exposure.total;
+  const toolsTotal = finiteNumber(summary?.tools_total) ?? (exposure.hasViews ? exposure.total : arrayLength(capabilities.tools));
   const directTools = finiteNumber(summary?.direct_tools) ?? (exposure.hasViews ? exposure.direct.length : undefined);
   const coreTools = finiteNumber(summary?.core_tools) ?? exposure.core;
   const deferredTools = finiteNumber(summary?.deferred_tools) ?? (exposure.hasViews ? exposure.deferred.length : undefined);
@@ -155,6 +170,7 @@ export const withDerivedCapabilitySummary = (
 export const formatCapabilitySource = (source: CapabilitySource | undefined): string => {
   if (source === "doctor") return "Doctor";
   if (source === "status") return "Status fallback";
+  if (source === "runtime") return "Runtime";
   return "Unknown";
 };
 

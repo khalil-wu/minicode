@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # 引用语法正则
 REFERENCE_PATTERN = re.compile(
-    r'@(?P<type>file|folder|diff|staged|git|url):?(?P<value>[^\s,;!?.\n]+)?',
+    r'@(?P<type>file|folder|diff|staged|git|url):?(?P<value>[^\s,;!?\n]+)?',
     re.IGNORECASE
 )
 

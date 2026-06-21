@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Iterable
 
-from backend.agent.harness.contracts import ToolSpec
+from backend.tools.contracts import ToolSpec
 
 
 CORE_TOOLSET = "core"

@@ -5,6 +5,7 @@ import { sendClientCommand } from "../protocol/ws-outbox";
 import {
   Section,
   inputStyle,
+  selectInputStyle,
   primaryActionStyle,
   secondaryActionStyle,
   subTabBarStyle,
@@ -94,7 +95,7 @@ export const ConnectorsTab = () => {
             <div className="grid gap-2">
               <div className="flex gap-2">
                 <input type="text" value={newServerName} onChange={(e) => setNewServerName(e.target.value)} placeholder="Server name" style={{ ...inputStyle, flex: 1 }} />
-                <select value={newServerTransport} onChange={(e) => setNewServerTransport(e.target.value as "stdio" | "http")} style={{ ...inputStyle, width: 90 }}>
+                <select value={newServerTransport} onChange={(e) => setNewServerTransport(e.target.value as "stdio" | "http")} style={{ ...selectInputStyle, width: 90 }}>
                   <option value="stdio">stdio</option>
                   <option value="http">http</option>
                 </select>

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from backend.agent.harness.contracts import ToolIssue
+from backend.tools.contracts import ToolIssue
 from backend.llm.base import ToolCallEvent
 from backend.tools.base import ToolResult
 

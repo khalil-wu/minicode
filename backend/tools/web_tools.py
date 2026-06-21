@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 from typing import Any
 
 from backend.artifact.store import ArtifactStore
-from backend.agent.harness.search_plan import build_search_plan
+from backend.agent.search_plan import build_search_plan
 from backend.permissions.context import ToolExecutionContext
 from backend.permissions.network import assess_network_url
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
@@ -131,6 +131,7 @@ class WebFetchTool(BaseTool):
 
     name = "web_fetch"
     read_only = True
+    open_world = True
     # Self-bounds via WEB_FETCH_TOKEN_LIMIT and artifacts large pages.
     max_result_chars = None
     description = (
@@ -138,13 +139,23 @@ class WebFetchTool(BaseTool):
         "Do NOT use web_fetch for workspace files — use read_file instead.\n"
         "Do NOT use web_fetch without a prior web_search — search first to find candidate URLs.\n"
         "Do NOT fetch a URL whose title/snippet does not match the user's question.\n"
-        "Prefer web_search snippets when they already contain the answer — cite with [1] and skip fetching.\n\n"
+        "For GitHub URLs, prefer gh via run_command when available (e.g. gh pr view, gh issue view, gh api).\n"
+        "When the fetched content informs your answer, cite it with a compact [1] marker in the final response; do not append raw URLs or a Sources section.\n"
+        "Search snippets are candidate evidence. Fetch a relevant source before making confident specific claims; "
+        "use snippets alone only for low-risk simple facts or when fetch is unavailable, and state that limitation.\n\n"
+        "Do not write routine process prose between web_fetch calls. If another URL, page section, group, or detail is needed, "
+        "call web_fetch directly; if you have enough evidence, answer directly without a bridge line like "
+        "'now I will write the answer', 'let me fetch more details', or 'continue fetching the remaining groups'.\n\n"
         "FAILURE RECOVERY: If this fetch fails or times out, you MUST try a DIFFERENT URL from your "
         "web_search results. Pick the next most relevant candidate. Do NOT give up after one failed fetch. "
         "Try at least 2 different URLs before falling back to search snippets alone.\n\n"
         "FOR RESEARCH: When investigating complex topics, fetch multiple URLs to gather diverse perspectives. "
         "Read fetched content carefully — when it references other studies, papers, or key terms you haven't explored, "
         "search for those to deepen your understanding (citation chaining).\n"
+        "For papers, releases, and versioned artifacts, verify dates, identifiers, authors, and project links from the fetched source. "
+        "Prefer primary sources (paper page/PDF, official repository, official docs) over blogs or reposts. "
+        "Do not cite commentary/blog summaries as the source for paper metadata or technical claims unless clearly labeled as commentary. "
+        "If a GitHub/project link is not present, omit it rather than leaving an empty label.\n"
         "For location-specific queries, only fetch URLs that match the queried location.\n\n"
         "PROMPT PARAMETER: Pass prompt='what to extract' to get a focused summary instead of full page text. "
         "Useful for large pages where you only need specific information (e.g. prompt='get the pricing table', "
@@ -195,7 +206,7 @@ class WebFetchTool(BaseTool):
         return self._client
 
     def get_spec(self):
-        from backend.agent.harness.contracts import ToolSpec
+        from backend.tools.contracts import ToolSpec
 
         return ToolSpec(
             name=self.name,
@@ -277,8 +288,9 @@ class WebFetchTool(BaseTool):
                     content=(
                         f"Fetch limited for {url}: the site blocked direct extraction "
                         f"({status_code or 'anti-bot'}). "
-                        "do not retry this URL. Pick a DIFFERENT URL from your web_search results "
-                        "or use the search snippets directly with [1] citation markers."
+                        "Do not retry this URL. Pick a DIFFERENT URL from your web_search results. "
+                        "Only if no relevant page can be fetched, answer from candidate search snippets with clear uncertainty "
+                        "and [1] citation markers."
                     ),
                     is_error=False,
                     source_url=url,
@@ -293,8 +305,8 @@ class WebFetchTool(BaseTool):
                     f"Fetch failed for {url}: {exc}\n\n"
                     "IMPORTANT: This URL may be temporarily unreachable. "
                     "Try a DIFFERENT URL from your web_search results — pick the next most relevant candidate. "
-                    "If all URLs fail, use the search snippets directly (cite with [1] markers) "
-                    "and tell the user you could not load full pages."
+                    "If all URLs fail, answer from candidate search snippets only with clear uncertainty, "
+                    "cite with [1] markers, and tell the user you could not load full pages."
                 ),
                 is_error=True,
                 source_url=url,
@@ -385,23 +397,29 @@ class WebSearchTool(BaseTool):
 
     name = "web_search"
     read_only = True
+    open_world = True
     description = (
         "Search the web for real-time information: current events, latest versions, live data, breaking news, weather. "
         "Returns a list of candidate results with titles, URLs, and snippets.\n\n"
         "Do NOT use web_search for stable knowledge (math, history, programming concepts) — answer directly from training data.\n"
         "Do NOT use web_search for workspace files — use grep_files or glob_files instead.\n"
         "Do NOT use web_search to fetch full web pages — use web_fetch instead.\n\n"
-        "SNIPPETS ARE OFTEN ENOUGH: For simple factual queries (weather, stock prices, event dates, news headlines), "
-        "the search snippets usually already contain the answer. Read them carefully, cite with [1] markers, "
-        "and skip web_fetch unless the snippet is clearly incomplete.\n\n"
+        "When web_search informs the final answer, include compact [1], [2] citation markers in the answer. "
+        "Do not append a Sources/References section or raw URLs; the UI renders source links from tool metadata.\n\n"
+        "CANDIDATE SNIPPETS: Search snippets are candidate evidence, not verified page evidence. "
+        "Use them to choose URLs to fetch. For low-risk simple facts, you may answer from snippets only when "
+        "you cite [1] markers and make the evidence level clear. For specific, research, latest/current, "
+        "or high-impact claims, fetch a relevant source before answering confidently.\n\n"
         "RESEARCH STRATEGY: For complex questions requiring multiple perspectives (comparisons, analyses, "
         "surveys, 'find papers about X'), use MULTIPLE searches with DIFFERENT queries:\n"
         "- For simple factual queries, one search is enough. Do not keep searching after the snippet answers it.\n"
         "- Issue multiple web_search calls in the same turn when you need multiple angles; the runtime can run them in parallel.\n"
         "- Start with 2-4 distinct queries covering different angles of the topic\n"
         "- Do not repeat the same query. Each search should use different keywords, language, scope, or time range.\n"
+        "- Do not narrate between search batches. After the first process note, routine search/fetch continuation should be tool-only; do not write lines like 'let me fetch more details' or 'continue fetching the remaining groups'.\n"
         "- Use synonyms, related terms, English/Chinese variants — not just the user's exact words\n"
         "- When a fetched page mentions key terms, authors, or studies you haven't searched, search for those too\n"
+        "- For papers, releases, and versioned artifacts, choose primary sources for final citations; blogs/reposts are discovery leads or commentary, not metadata authorities.\n"
         "- If first searches return thin results, reformulate: try jargon, narrower terms, or different phrasing\n"
         "- Stop when new searches return mostly information you already have (saturation)\n\n"
         "When the user asks about a specific location or topic, only select results that match — "
@@ -443,7 +461,7 @@ class WebSearchTool(BaseTool):
         return self._client
 
     def get_spec(self):
-        from backend.agent.harness.contracts import ToolSpec
+        from backend.tools.contracts import ToolSpec
 
         return ToolSpec(
             name=self.name,

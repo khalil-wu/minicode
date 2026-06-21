@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { getWebSocket } from "../../hooks/useWebSocket";
+import { useSharedSecondTick } from "../../lib/shared-tick";
 import type { ToolCallRecord, ToolCallStatus } from "../../lib/tool-call-reducer";
 import { useAppStore } from "../../stores";
 import type { ViewMode } from "../../stores/types";
@@ -390,8 +391,10 @@ export const ToolCallCard = memo(({ record, viewMode = "normal", compact = false
   // Default collapsed for cleaner viewport (Codex-style). Only auto-expand in verbose mode.
   const [open, setOpen] = useState(viewMode === "verbose");
   const [outputExpanded, setOutputExpanded] = useState(false);
-  const [now, setNow] = useState(() => Date.now());
   const userToggled = useRef(false);
+  const isActive = record.status === "running" || record.status === "pending";
+  // Shared 1s tick — one interval for all running tool cards, not N.
+  const now = useSharedSecondTick(isActive);
   useEffect(() => {
     if (viewMode === "verbose") {
       setOpen(true);
@@ -402,11 +405,6 @@ export const ToolCallCard = memo(({ record, viewMode = "normal", compact = false
       setOpen(false);
     }
   }, [compact, record.status, viewMode]);
-  useEffect(() => {
-    if (record.status !== "running" && record.status !== "pending") return undefined;
-    const id = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(id);
-  }, [record.status]);
   const duration =
     record.finishedAt && record.startedAt
       ? `${((record.finishedAt - record.startedAt) / 1000).toFixed(1)}s`

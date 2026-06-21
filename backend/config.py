@@ -161,6 +161,11 @@ class PermissionSettings:
     path_denylist: list[str] = field(
         default_factory=lambda: [".env", ".mcp.json", "settings.json", ".git/**", "*.key", "*.pem", "secrets/"]
     )
+    # Content-level rules in Tool(content) syntax, e.g. Bash(npm run:*), Edit(src/**).
+    # allow rules force AUTO (in non-plan modes); deny rules ALWAYS_DENY in every
+    # mode (safety). Parsed by permissions.content_rules.
+    content_allow_rules: list[str] = field(default_factory=list)
+    content_deny_rules: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -177,6 +182,14 @@ class AgentSettings:
     reflection_multi_perspective: bool = True  # 高风险回合（有 mutation/web 断言）用对抗式双维度复核；低风险回合零开销跳过
     answer_gate_enabled: bool = False  # 默认关闭（仅弱模型需要；强模型兜底用）
     agent_mode: str = "react"
+
+    # Stream assistant text live (token-by-token) instead of buffering and
+    # emitting once at turn end. When on, text_chunk deltas are yielded during
+    # streaming, the process_text agent.item emission is skipped (live text
+    # replaces it), and a contentless text_chunk(finalize=True) seals the last
+    # streamed block as the final answer. DEFAULT OFF — verify live typing +
+    # multi-segment routing in the app before enabling broadly.
+    live_text_streaming: bool = False
 
     # Action-level verification: run this command after workspace mutations and
     # feed failures back to the model before accepting the final answer.
@@ -772,6 +785,29 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
     return get_llm_settings_payload(settings_data)
 
 
+def add_permission_content_rule(rule: str, *, deny: bool = False) -> list[str]:
+    """Append a Tool(content) permission rule to settings.json and persist it.
+
+    Used by the approval dialog's "always allow/deny this" action. Because the
+    runtime PermissionChecker is rebuilt from ``load_config().permissions`` on
+    each use, the saved rule takes effect on the next tool call. Returns the
+    updated rule list.
+    """
+    rule = str(rule or "").strip()
+    if not rule:
+        return []
+    settings_data = _load_settings_json()
+    perms = settings_data.setdefault("permissions", {})
+    key = "content_deny_rules" if deny else "content_allow_rules"
+    rules = [str(r) for r in perms.get(key, []) if str(r).strip()]
+    if rule in rules:
+        return rules  # already present — no write needed
+    rules.append(rule)
+    perms[key] = rules
+    _write_settings_json(settings_data)
+    return rules
+
+
 def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSettings:
     """从环境变量与 settings.json 加载 LLM 配置。"""
     active_provider = get_llm_provider(settings_data)
@@ -846,6 +882,14 @@ def load_config() -> AppConfig:
             list(perm_data.get("path_denylist", default_permissions.path_denylist)),
             default_permissions.path_denylist,
         ),
+        content_allow_rules=_merge_unique(
+            list(perm_data.get("content_allow_rules", [])),
+            [],
+        ),
+        content_deny_rules=_merge_unique(
+            list(perm_data.get("content_deny_rules", [])),
+            [],
+        ),
     )
 
     # Agent 参数来自 settings.json
@@ -867,10 +911,11 @@ def load_config() -> AppConfig:
         fallback_providers=tuple(fallback_providers),
         reflection_pass=bool(agent_data.get("reflection_pass", False)),
         reflection_multi_perspective=bool(agent_data.get("reflection_multi_perspective", True)),
-        answer_gate_enabled=bool(agent_data.get("answer_gate_enabled", True)),
+        answer_gate_enabled=bool(agent_data.get("answer_gate_enabled", False)),
         agent_mode=_normalize_agent_mode(agent_data.get("agent_mode", "react")),
         verify_command=str(agent_data.get("verify_command", "") or "").strip(),
         verify_timeout_seconds=float(agent_data.get("verify_timeout_seconds", 120.0)),
+        live_text_streaming=bool(agent_data.get("live_text_streaming", False)),
     )
 
     # Token 预算

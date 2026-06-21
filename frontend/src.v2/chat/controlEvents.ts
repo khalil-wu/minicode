@@ -1,5 +1,5 @@
 import { useAppStore } from "../stores";
-import type { ServerEvent } from "../protocol/events";
+import type { ApprovalFileDiffEvent, ServerEvent } from "../protocol/events";
 
 const isEventForActiveConversation = (e: ServerEvent): boolean => {
   const conversationId = (e as unknown as { conversation_id?: unknown }).conversation_id;
@@ -169,13 +169,7 @@ export const handleControlEvent = (e: ServerEvent): boolean => {
       return true;
     }
     case "approval.file_diff": {
-      const ev = e as unknown as {
-        tool_call_id?: string;
-        path?: string;
-        patch?: string;
-        is_large?: boolean;
-        is_truncated?: boolean;
-      };
+      const ev = e as ApprovalFileDiffEvent;
       if (ev.path && ev.patch) {
         s.updateDiffReviewFile(ev.path, {
           patch: ev.patch,

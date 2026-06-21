@@ -17,7 +17,6 @@ export const SharedBackdrop = () => {
     shortcutsHelpOpen,
     skillsMarketplaceOpen,
     liveArtifactsOpen,
-    pendingApproval,
     toggleCommandPalette,
     toggleSettings,
     toggleQuickOpen,
@@ -33,17 +32,13 @@ export const SharedBackdrop = () => {
     quickOpenVisible ||
     shortcutsHelpOpen ||
     skillsMarketplaceOpen ||
-    liveArtifactsOpen ||
-    !!pendingApproval;
+    liveArtifactsOpen;
 
   if (!hasModalOpen) return null;
 
   // Determine which modal to close on backdrop click
   // Approval modals cannot be closed by clicking backdrop
   const handleBackdropClick = () => {
-    // Don't close approval modals on backdrop click
-    if (pendingApproval) return;
-
     // Close the currently open modal
     if (commandPaletteOpen) toggleCommandPalette();
     else if (settingsOpen) toggleSettings();

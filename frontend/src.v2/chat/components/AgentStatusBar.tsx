@@ -1,6 +1,7 @@
-import { memo, useMemo } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, CheckCircle, Loader2, Pencil, XCircle, Pause, Play } from "lucide-react";
 import { useAppStore } from "../../stores";
+import { useAnimatedNumber } from "../../lib/use-animated-number";
 
 /**
  * AgentStatusBar — a slim inline indicator above the message list
@@ -13,8 +14,70 @@ import { useAppStore } from "../../stores";
  *   ✓ Done                  — turn completed
  *   ✗ Failed                — turn failed
  *
- * Derived from: isStreaming, agentProgress, last message state.
+ * Polish vs. a bare spinner (mirrors cc's SpinnerAnimationRow):
+ *   - shows an elapsed timer while streaming
+ *   - surfaces the in-progress todo's activeForm ("Running tests", not "Thinking...")
+ *   - shifts the indicator color after a few seconds of silence so the user
+ *     can tell "thinking" from "stuck" (cc useStalledAnimation)
  */
+const STALL_AFTER_MS = 3000;
+
+function formatElapsed(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function formatTokens(n: number): string {
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(Math.round(n));
+}
+
+/**
+ * Tracks elapsed time since streaming started and whether the stream has gone
+ * quiet (no progress events or streaming text for STALL_AFTER_MS). The stall
+ * flag drives a color shift so silence is visible.
+ */
+function useStreamingProgress(
+  isStreaming: boolean,
+  progressSignature: unknown,
+  contentSignature: number,
+): { elapsed: string; stalled: boolean } {
+  const [elapsed, setElapsed] = useState("");
+  const [stalled, setStalled] = useState(false);
+  const startRef = useRef<number | null>(null);
+  const lastActivityRef = useRef<number>(Date.now());
+
+  // (Re)start the clock when streaming begins; record activity whenever the
+  // progress list grows or the streaming message content changes.
+  useEffect(() => {
+    if (!isStreaming) {
+      startRef.current = null;
+      setElapsed("");
+      setStalled(false);
+      return;
+    }
+    if (startRef.current == null) startRef.current = Date.now();
+    lastActivityRef.current = Date.now();
+    setStalled(false);
+  }, [isStreaming, progressSignature, contentSignature]);
+
+  useEffect(() => {
+    if (!isStreaming) return;
+    const tick = () => {
+      const start = startRef.current ?? Date.now();
+      setElapsed(formatElapsed(Date.now() - start));
+      setStalled(Date.now() - lastActivityRef.current > STALL_AFTER_MS);
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [isStreaming]);
+
+  return { elapsed, stalled };
+}
+
 export const AgentStatusBar = memo(function AgentStatusBar() {
   const isStreaming = useAppStore((s) => s.isStreaming);
   const isPaused = useAppStore((s) => s.isPaused);
@@ -23,6 +86,8 @@ export const AgentStatusBar = memo(function AgentStatusBar() {
   const conversationId = useAppStore((s) => s.conversationId);
   const agentProgress = useAppStore((s) => s.agentProgress);
   const messages = useAppStore((s) => s.messages);
+  const todos = useAppStore((s) => s.todos);
+  const lastUsage = useAppStore((s) => s.lastUsage);
 
   const state = useMemo(() => {
     if (!isStreaming) {
@@ -69,15 +134,43 @@ export const AgentStatusBar = memo(function AgentStatusBar() {
     return { kind: "thinking" as const };
   }, [isStreaming, conversationId, agentProgress, messages]);
 
+  // The in-progress todo's activeForm (e.g. "Running tests") — when present,
+  // replaces the generic "Thinking..." so the bar states what's happening.
+  const activeTodo = todos.find((t) => t.status === "in_progress");
+  const activeLabel = activeTodo?.activeForm || activeTodo?.content;
+
+  // Signatures that change on real activity (progress events or streaming
+  // text). Used to detect stalls.
+  const progressSignature = agentProgress.length;
+  const lastMsgForSig = messages[messages.length - 1];
+  const contentSignature = lastMsgForSig ? String(lastMsgForSig.content ?? "").length : 0;
+  const { elapsed, stalled } = useStreamingProgress(
+    isStreaming,
+    progressSignature,
+    contentSignature,
+  );
+
+  // Smooth token counter (cc SpinnerAnimationRow style): the displayed count
+  // eases toward the real usage instead of jumping on each update.
+  const targetTokens = lastUsage ? lastUsage.input + lastUsage.output : 0;
+  const animatedTokens = useAnimatedNumber(targetTokens, isStreaming);
+  const showTokens = isStreaming && targetTokens > 0;
+
   if (!state) return null;
 
   const showPauseButton = isStreaming && (state.kind === "thinking" || state.kind === "writing" || state.kind === "executing");
+  const showElapsed = isStreaming && elapsed && (state.kind === "thinking" || state.kind === "executing" || state.kind === "writing");
+  const stalledActive = stalled && !isPaused;
 
   return (
     <div style={barStyle} data-testid="agent-status-bar">
-      <StatusIcon kind={state.kind} />
+      <StatusIcon kind={state.kind} stalled={stalledActive} />
       <span style={labelStyle}>
-        <StatusLabel state={state} />
+        <StatusLabel state={state} activeLabel={activeLabel} />
+        {showElapsed && <span style={{ marginLeft: 8, opacity: 0.7 }}>· {elapsed}</span>}
+        {showTokens && (
+          <span style={{ marginLeft: 8, opacity: 0.7 }}>· {formatTokens(animatedTokens)} tok</span>
+        )}
         {isPaused && <span style={{ marginLeft: 8, color: "var(--state-warning)" }}>(Paused)</span>}
       </span>
       {showPauseButton && (
@@ -94,16 +187,19 @@ export const AgentStatusBar = memo(function AgentStatusBar() {
   );
 });
 
-function StatusIcon({ kind }: { kind: string }) {
+function StatusIcon({ kind, stalled = false }: { kind: string; stalled?: boolean }) {
   const size = 13;
+  const liveKinds = kind === "thinking" || kind === "recovering" || kind === "writing" || kind === "executing";
+  const color = stalled && liveKinds ? "var(--state-warning)" : "var(--state-info)";
+  const transitionStyle = { transition: "color 600ms ease-in-out" };
   switch (kind) {
     case "thinking":
     case "recovering":
-      return <Loader2 size={size} style={{ animation: "spin 1s linear infinite" }} color="var(--state-info)" />;
+      return <Loader2 size={size} style={{ animation: "spin 1s linear infinite", color, ...transitionStyle }} />;
     case "executing":
-      return <Activity size={size} color="var(--state-info)" />;
+      return <Activity size={size} style={{ color, ...transitionStyle }} />;
     case "writing":
-      return <Pencil size={size} color="var(--state-info)" />;
+      return <Pencil size={size} style={{ color, ...transitionStyle }} />;
     case "done":
       return <CheckCircle size={size} color="var(--state-success)" />;
     case "failed":
@@ -113,10 +209,10 @@ function StatusIcon({ kind }: { kind: string }) {
   }
 }
 
-function StatusLabel({ state }: { state: { kind: string; toolName?: string; label?: string } }) {
+function StatusLabel({ state, activeLabel }: { state: { kind: string; toolName?: string; label?: string }; activeLabel?: string }) {
   switch (state.kind) {
     case "thinking":
-      return <>{state.label || "Thinking..."}</>;
+      return <>{activeLabel || state.label || "Thinking..."}</>;
     case "executing":
       return (
         <>
@@ -124,7 +220,7 @@ function StatusLabel({ state }: { state: { kind: string; toolName?: string; labe
         </>
       );
     case "writing":
-      return <>Writing answer...</>;
+      return <>{activeLabel ? `${activeLabel}` : "Writing answer..."}</>;
     case "recovering":
       return <>{state.label || "Recovering..."}</>;
     case "done":

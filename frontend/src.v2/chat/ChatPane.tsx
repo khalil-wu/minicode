@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MessageList } from "./MessageList";
 import { Composer } from "../composer/Composer";
-import { InlineAgentPrompt } from "./InlineAgentPrompt";
 import { ChatSearch } from "./ChatSearch";
 import { SafeBoundary } from "../shell/ChunkErrorBoundary";
 import { ComposerErrorFallback } from "../components/ComposerErrorFallback";
@@ -59,7 +58,6 @@ export const ChatPane = () => {
       <SafeBoundary fallback={<ChatErrorFallback />}>
         <MessageList />
       </SafeBoundary>
-      <InlineAgentPrompt />
       <SafeBoundary fallback={<ComposerErrorFallback />}>
         <Composer />
       </SafeBoundary>

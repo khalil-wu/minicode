@@ -76,6 +76,8 @@ export const handleNoticeEvent = (e: ServerEvent, conversationId?: string): bool
     case "permission.rules.updated":
     case "checkpoint.list":
     case "checkpoint.rewound":
+    case "checkpoint.run.list":
+    case "checkpoint.run.resume":
     case "workspace.recent.list":
     case "command_output_chunk":
     case "pong":

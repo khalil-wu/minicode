@@ -47,11 +47,12 @@ class SessionRestoreManager:
         if last_conversation_id:
             try:
                 conversation = self.conversation_repo.get_conversation(last_conversation_id)
-                if conversation:
+                if conversation and not getattr(conversation, "archived", False):
                     bound_workspace_root = str(conversation.worktree_path or conversation.workspace_root or "").strip()
                     result["conversation"] = {
                         "id": conversation.id,
                         "title": conversation.title,
+                        "archived": conversation.archived,
                         "memory_mode": conversation.memory_mode,
                         "permission_mode": conversation.permission_mode,
                         "message_count": conversation.message_count,

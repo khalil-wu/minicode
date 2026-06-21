@@ -3,6 +3,8 @@ import type { AppStore, PanelKind, PanelSlot, UISlice, WorkspaceSlice } from "./
 import { clamp } from "../lib/clamp";
 import {
   LS,
+  LEFT_SIDEBAR_MAX_WIDTH,
+  LEFT_SIDEBAR_MIN_WIDTH,
   RIGHT_SIDEBAR_MAX,
   writeLS,
   normalizePanelSlots,
@@ -24,7 +26,7 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
     editorOpenRequests: [],
     activeEditorPath: null,
     setLeftSidebarWidth: (w) => {
-      const v = clamp(280, 360, w);
+      const v = w <= 0 ? 0 : clamp(LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_MAX_WIDTH, w);
       writeLS(LS.layout.leftWidth, String(v));
       set({ leftSidebarWidth: v });
     },
@@ -180,14 +182,14 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
       persistPanelSlots(next);
       set({
         panelSlots: next,
-        leftSidebarWidth: 352,
+        leftSidebarWidth: 320,
         rightSidebarWidth: 440,
         rightPanelOpen: false,
         dockHeight: 240,
         dockCollapsed: true,
         activeBottomTab: "terminal",
       });
-      writeLS(LS.layout.leftWidth, "352");
+      writeLS(LS.layout.leftWidth, "320");
       writeLS(LS.layout.rightWidth, "440");
       writeLS(LS.layout.rightOpen, "0");
       writeLS(LS.layout.dockHeight, "240");

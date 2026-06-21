@@ -7,18 +7,28 @@ import "../chat/components/context-budget.css";
 
 export const HeaderBar = () => {
   const isConnected = useAppStore((s) => s.isConnected);
+  const appMode = useAppStore((s) => s.appMode);
   const rightPanelOpen = useAppStore((s) => s.rightPanelOpen);
   const themeMode = useAppStore((s) => s.themeMode);
+  const workingDirectory = useAppStore((s) => s.workingDirectory);
   const toggleCommandPalette = useAppStore((s) => s.toggleCommandPalette);
   const toggleSettings = useAppStore((s) => s.toggleSettings);
   const toggleRightPanel = useAppStore((s) => s.toggleRightPanel);
   const setThemeMode = useAppStore((s) => s.setThemeMode);
+  const setLeftSidebarWidth = useAppStore((s) => s.setLeftSidebarWidth);
   const startNewConversation = useAppStore((s) => s.createConversation);
 
   const toggleLeftPanel = () => {
     const current = useAppStore.getState().leftSidebarWidth;
-    useAppStore.setState({ leftSidebarWidth: current > 0 ? 0 : 352 });
+    setLeftSidebarWidth(current > 0 ? 0 : 320);
   };
+  const createConversationInCurrentMode = () => {
+    startNewConversation({ appMode, bindWorkspace: Boolean(workingDirectory) });
+  };
+  const darkThemeActive =
+    themeMode === "dark" ||
+    (themeMode === "system" && typeof window !== "undefined" && window.matchMedia?.("(prefers-color-scheme: dark)").matches);
+  const nextTheme = darkThemeActive ? "light" : "dark";
 
   return (
     <header className="header-bar" style={headerStyle}>
@@ -29,7 +39,7 @@ export const HeaderBar = () => {
         <IconButton label="Toggle left sidebar" onClick={toggleLeftPanel}>
           <PanelLeft size={17} />
         </IconButton>
-        <IconButton label="New conversation" onClick={startNewConversation}>
+        <IconButton label="New conversation" onClick={createConversationInCurrentMode}>
           <Plus size={17} />
         </IconButton>
       </div>
@@ -38,10 +48,10 @@ export const HeaderBar = () => {
         <Search size={16} />
       </IconButton>
       <IconButton
-        label={themeMode === "light" ? "Switch to dark theme" : "Switch to light theme"}
-        onClick={() => setThemeMode(themeMode === "light" ? "dark" : "light")}
+        label={darkThemeActive ? "Switch to light theme" : "Switch to dark theme"}
+        onClick={() => setThemeMode(nextTheme)}
       >
-        {themeMode === "light" ? <Moon size={16} /> : <Sun size={16} />}
+        {darkThemeActive ? <Sun size={16} /> : <Moon size={16} />}
       </IconButton>
       <ContextBudgetIndicator />
       <IconButton label={rightPanelOpen ? "Close right panel" : "Open right panel"} onClick={toggleRightPanel} active={rightPanelOpen}>

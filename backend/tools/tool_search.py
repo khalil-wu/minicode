@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from backend.agent.harness.catalog import BRIDGE_TOOL_NAMES, tool_spec_for
+from backend.tools.catalog import BRIDGE_TOOL_NAMES, tool_spec_for
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 
 
@@ -163,9 +163,15 @@ class ToolSearchTool(BaseTool):
     read_only = True
     permission = PermissionLevel.AUTO
     description = (
-        "Search deferred tools that are not directly listed. Returns matching tool "
-        "names and short descriptions. Use tool_describe before tool_call when the "
-        "parameter schema is not known."
+        "Search deferred tools that are not directly listed in the current tool set.\n\n"
+        "When to use: the user asks for a capability that the directly listed tools do not cover, such as "
+        "browser/desktop control, document or spreadsheet work, connector-specific actions, optional MCP tools, "
+        "or another specialized workflow. Search by capability keywords or exact tool names.\n\n"
+        "When not to use: a direct tool already covers the request, or you only need workspace read/edit/search/"
+        "command tools.\n\n"
+        "Returned matches are discovery only. Until a tool's full schema is loaded with tool_describe, you do "
+        "not know its parameters and must not claim it was used. Use tool_describe before tool_call unless the "
+        "schema was already loaded in this turn."
     )
 
     def __init__(self, registry: Any | None = None) -> None:
@@ -184,7 +190,10 @@ class ToolSearchTool(BaseTool):
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Capability keywords, for example 'git branch' or 'browser click'.",
+                        "description": (
+                            "Capability keywords or exact tool names, for example 'browser click', "
+                            "'spreadsheet chart', 'PDF render', or 'select:tool_name'."
+                        ),
                     },
                     "limit": {
                         "type": "integer",
@@ -230,7 +239,11 @@ class ToolDescribeTool(BaseTool):
     name = "tool_describe"
     read_only = True
     permission = PermissionLevel.AUTO
-    description = "Load the full JSON schema for one deferred tool returned by tool_search."
+    description = (
+        "Load the full JSON schema for one deferred tool returned by tool_search. "
+        "This is required before tool_call unless the schema is already known from the current turn. "
+        "Do not infer arguments from the short search result."
+    )
 
     def __init__(self, registry: Any) -> None:
         self._registry = registry
@@ -266,7 +279,11 @@ class ToolCallTool(BaseTool):
     name = "tool_call"
     read_only = False
     permission = PermissionLevel.AUTO
-    description = "Invoke a deferred tool by name with arguments matching the schema returned by tool_describe."
+    description = (
+        "Invoke a deferred tool by exact name with arguments matching the schema returned by tool_describe. "
+        "Use only after selecting a relevant deferred tool and loading its schema. "
+        "Do not use this for directly listed tools; call those tools directly."
+    )
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -283,4 +300,4 @@ class ToolCallTool(BaseTool):
         )
 
     async def execute(self, args: dict[str, Any], context: Any = None) -> ToolResult:
-        return self._error_result("tool_call must be unwrapped by the agent harness before execution")
+        return self._error_result("tool_call must be unwrapped by the agent runtime before execution")

@@ -12,6 +12,7 @@ import { useAppStore } from "../stores";
 import { SafeBoundary } from "./ChunkErrorBoundary";
 import { ChatErrorFallback } from "../components/ChatErrorFallback";
 import { isDesktop, runtime } from "../desktop/runtime";
+import { hasVisibleActiveConversation } from "../chat/activeConversation";
 
 const connectionBannerMessage = (): string => {
   const runtimeInfo = runtime();
@@ -61,7 +62,7 @@ const ChatModeShell = () => (
 const CoworkModeShell = () => {
   const rightPanelOpen = useAppStore((s) => s.rightPanelOpen);
   const isEmptyConversation = useAppStore(
-    (s) => !s.conversationId || s.messages.length === 0,
+    (s) => !hasVisibleActiveConversation(s.conversationId, s.conversations) || s.messages.length === 0,
   );
   return (
     <div

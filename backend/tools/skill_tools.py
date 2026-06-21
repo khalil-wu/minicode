@@ -30,10 +30,14 @@ class LoadSkillTool(BaseTool):
 
     name = "load_skill"
     description = (
-        "激活一个 Skill，将其专业指令注入到当前上下文中。"
-        "激活后 Agent 将按照 Skill 的指令行事，直到 Skill 被卸载。"
-        "示例: load_skill(skill_name='code_review')。"
-        "注意: 可同时激活多个 Skill，但会占用 context 预算。"
+        "Activate a Skill and inject its SKILL.md workflow instructions into the current context.\n\n"
+        "When to use: the user explicitly names a skill, slash command, or $skill; or an available skill name/"
+        "description clearly matches the task. Matching skills are a blocking requirement: call load_skill "
+        "before substantive guidance, implementation, or claiming you are using that skill.\n\n"
+        "When not to use: no listed/known skill matches, the task is better handled by directly available tools, "
+        "or the skill is already active in context.\n\n"
+        "Never mention a skill as used or available for the task unless it has been activated or is already active. "
+        "Use list_skills only when discovery is needed."
     )
     permission = PermissionLevel.AUTO
 
@@ -61,7 +65,10 @@ class LoadSkillTool(BaseTool):
                 "properties": {
                     "skill_name": {
                         "type": "string",
-                        "description": "要激活的 Skill 名称，如 'code_review'、'debugging'、'refactor'",
+                        "description": (
+                            "Exact skill name to activate, for example 'code_review', 'debugging', or 'refactor'. "
+                            "Use when that skill was explicitly requested or clearly matches the task."
+                        ),
                     },
                 },
             },
@@ -96,8 +103,8 @@ class UnloadSkillTool(BaseTool):
 
     name = "unload_skill"
     description = (
-        "停用一个已激活的 Skill，从当前上下文中移除其指令。"
-        "示例: unload_skill(skill_name='code_review')。"
+        "Deactivate an already active Skill and remove its workflow instructions from the current context. "
+        "Use only when the user asks to stop using a skill or when the active skill is no longer relevant."
     )
     permission = PermissionLevel.AUTO
 
@@ -157,8 +164,9 @@ class ListSkillsTool(BaseTool):
 
     name = "list_skills"
     description = (
-        "列出所有可用的 Skill 及其当前状态（激活/未激活）。"
-        "返回每个 Skill 的名称、描述和激活状态。"
+        "List available Skills, their descriptions, and active state for discovery. "
+        "Use this when you need to decide whether a matching skill exists or avoid duplicate activation. "
+        "If a skill clearly matches after discovery, call load_skill before doing substantive task work."
     )
     permission = PermissionLevel.AUTO
 

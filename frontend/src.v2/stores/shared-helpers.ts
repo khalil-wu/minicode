@@ -33,6 +33,8 @@ export const LS = {
 };
 
 export const DEFAULT_WORKSPACE_KEY = "__default__";
+export const LEFT_SIDEBAR_MIN_WIDTH = 252;
+export const LEFT_SIDEBAR_MAX_WIDTH = 380;
 export const RIGHT_SIDEBAR_MAX = 1040;
 
 // ── LocalStorage read/write ────────────────────────────────────────
@@ -71,7 +73,7 @@ export const applyTextScale = (s: number) => {
 export const initialTheme = (): UISlice["themeMode"] => {
   const v = readLS(LS.theme);
   if (v === "dark" || v === "light" || v === "system") return v;
-  return "dark";
+  return "light";
 };
 
 export const initialTextScale = (): number => {
@@ -139,8 +141,13 @@ export const loadInitialLayout = () => {
   } catch {
     /* keep default */
   }
+  const leftSidebarWidth = Number.isFinite(left)
+    ? left <= 0
+      ? 0
+      : clamp(LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_MAX_WIDTH, left)
+    : 320;
   return {
-    leftSidebarWidth: clamp(280, 360, Number.isFinite(left) ? left : 352),
+    leftSidebarWidth,
     rightSidebarWidth: clamp(320, RIGHT_SIDEBAR_MAX, Number.isFinite(right) ? right : 440),
     rightPanelOpen: rightOpen,
     dockHeight: clamp(180, 520, Number.isFinite(dock) ? dock : 240),
@@ -429,6 +436,12 @@ export function conversationResetPayload(): Record<string, unknown> {
     approvalQueue: [],
     pendingDiffReview: null,
     diffReview: null,
+    previewArtifact: null,
+    livePreviewUrl: null,
+    activeTerminalSessionId: null,
+    rightStackTab: "tasks",
+    rightPanelOpen: false,
+    rightStackTabLocked: false,
     pendingAskUser: null,
     plan: null,
     todos: [],

@@ -514,6 +514,34 @@ async def _handle_usage(
     return True, ""
 
 
+async def _handle_context(
+    ws: "WebSocketSession", arg: str, attachments: Any
+) -> tuple[bool, str]:
+    _ = arg
+    _ = attachments
+    # Focused view of the context/token budget (opens the usage inspector with
+    # a focus hint the frontend can use to land on the context section).
+    await _dispatch_command(
+        ws,
+        "session.usage.inspect",
+        {"source": "slash:/context", "focus": "context"},
+    )
+    return True, ""
+
+
+async def _handle_cost(
+    ws: "WebSocketSession", arg: str, attachments: Any
+) -> tuple[bool, str]:
+    _ = arg
+    _ = attachments
+    await _dispatch_command(
+        ws,
+        "session.usage.inspect",
+        {"source": "slash:/cost", "focus": "cost"},
+    )
+    return True, ""
+
+
 async def _handle_help(
     ws: "WebSocketSession", arg: str, attachments: Any
 ) -> tuple[bool, str]:
@@ -790,6 +818,8 @@ _LOCAL_COMMAND_HANDLERS: dict[str, SlashHandler] = {
     "tasks": _handle_tasks,
     "status": _handle_status,
     "usage": _handle_usage,
+    "context": _handle_context,
+    "cost": _handle_cost,
     "help": _handle_help,
     "skills": _handle_skills,
     "compact": _handle_compact,

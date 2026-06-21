@@ -45,6 +45,7 @@ export const isQueueableWhenOffline = (cmd: ClientCommand): boolean => {
     || cmd.type === "conversation.list"
     || cmd.type === "session.restore"
     || cmd.type === "commands.list"
+    || cmd.type === "skills.list"
     || cmd.type === "interrupt"
   );
 };
@@ -141,6 +142,9 @@ const shouldWarnOnMissingCommandAck = (cmd: ClientCommand): boolean =>
   || cmd.type === "user_message"
   || cmd.type === "interrupt";
 
+export const shouldTrackClientCommandAck = (cmd: ClientCommand): boolean =>
+  cmd.type !== "ping";
+
 const clearPendingClientCommandAck = (clientCommandId: string) => {
   const timeoutId = pendingClientCommandAcks.get(clientCommandId);
   if (timeoutId) clearTimeout(timeoutId);
@@ -148,6 +152,7 @@ const clearPendingClientCommandAck = (clientCommandId: string) => {
 };
 
 export const trackPendingClientCommandAck = (cmd: ClientCommand) => {
+  if (!shouldTrackClientCommandAck(cmd)) return;
   if (typeof cmd.client_command_id !== "string" || !cmd.client_command_id) return;
   clearPendingClientCommandAck(cmd.client_command_id);
   const timeoutId = shouldWarnOnMissingCommandAck(cmd)
@@ -361,8 +366,8 @@ export const useWebSocketConnection = () => {
   }, []);
 };
 
-const textStreamBuffer = createStreamBuffer((buffered, conversationId) => {
-  useAppStore.getState().appendTextChunk(buffered, conversationId);
+const textStreamBuffer = createStreamBuffer((buffered, conversationId, source, metadata) => {
+  useAppStore.getState().appendTextChunk(buffered, conversationId, source, metadata);
 });
 
 const thinkingStreamBuffer = createStreamBuffer((buffered, conversationId) => {

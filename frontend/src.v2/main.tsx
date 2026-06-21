@@ -12,9 +12,9 @@ import "./styles/utilities.css";
 import "./styles/z-index.css";
 import "./styles/breakpoints.css";  // 🆕 Responsive breakpoints
 import "./styles/scroll.css";       // 🆕 Scroll optimizations
-import "./styles/workbench-polish.css";
 import "./agent-loop/styles/agent-loop.css";
 import "./composer/composer.css";   // 🎨 Composer styles
+import "./styles/workbench-polish.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

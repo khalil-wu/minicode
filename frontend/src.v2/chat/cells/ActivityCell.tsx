@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { memo, useEffect, useMemo, useState, useCallback } from "react";
 import { ChevronDown, ChevronRight, Copy, RefreshCw, Eye, EyeOff } from "lucide-react";
 import type { ActivityCellState } from "./cellTypes";
 import { useAppStore } from "../../stores";
@@ -14,27 +14,19 @@ import {
   fileLabel,
   formatDuration,
 } from "./activityCellHelpers";
+import { subscribeSecondTick } from "../../lib/shared-tick";
 import "./cells.css";
 
-/** Real-time elapsed timer — ticks every second while tool is running */
+/** Real-time elapsed timer — ticks every second while tool is running.
+ * Subscribes to the shared 1s tick so N running cells share one interval. */
 function useElapsedTime(startedAt: number | undefined, isRunning: boolean): string {
   const [elapsed, setElapsed] = useState("");
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
-    if (!startedAt || !isRunning) {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      return;
-    }
-    const tick = () => {
-      const ms = Date.now() - startedAt;
-      setElapsed(formatDuration(ms));
-    };
-    tick();
-    intervalRef.current = setInterval(tick, 1000);
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
+    if (!startedAt || !isRunning) return;
+    const update = (now: number) => setElapsed(formatDuration(now - startedAt));
+    update(Date.now());
+    return subscribeSecondTick(update);
   }, [startedAt, isRunning]);
 
   return elapsed;
@@ -49,15 +41,17 @@ function useElapsedTime(startedAt: number | undefined, isRunning: boolean): stri
  *
  * Expandable on click to show detailed records.
  */
-export function ActivityCell({
+export const ActivityCell = memo(function ActivityCell({
   cell,
   isActive = false,
+  forceExpanded = false,
 }: {
   cell: ActivityCellState;
   isActive?: boolean;
+  forceExpanded?: boolean;
 }) {
   const developerMode = useAppStore((s) => s.viewMode === "verbose");
-  const shouldAutoExpand = !cell.collapsed;
+  const shouldAutoExpand = forceExpanded || !cell.collapsed;
   const [isExpanded, setIsExpanded] = useState(shouldAutoExpand);
   const [showErrorDetail, setShowErrorDetail] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -70,7 +64,7 @@ export function ActivityCell({
     const records = cell.toolCallRecords ?? [];
     const outputs = records
       .map((r) => {
-        const output = r.outputPreview || r.errorInfo?.user_summary || "";
+        const output = r.outputPreview || r.contentPreview || (/^read_artifact$/i.test(r.name) ? r.summary : "") || r.errorInfo?.user_summary || "";
         return output ? `${r.name}:\n${output}` : "";
       })
       .filter(Boolean)
@@ -189,6 +183,12 @@ export function ActivityCell({
         </div>
       )}
 
+      {!isActive && isExpanded && hasOutputPreview(cell.toolCallRecords) && (
+        <div className="activity-cell-output-preview">
+          <pre className="activity-cell-output-pre">{getOutputPreview(cell.toolCallRecords)}</pre>
+        </div>
+      )}
+
       {/* Inline output preview for running commands */}
       {isActive && cell.activityKind === "commandExecution" && hasOutputPreview(cell.toolCallRecords) && (
         <div className="activity-cell-output-preview">
@@ -235,7 +235,7 @@ export function ActivityCell({
       )}
     </div>
   );
-}
+});
 
 // ── DetailTarget sub-component ─────────────────────────────
 

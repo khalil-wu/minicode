@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from backend.agent.harness.contracts import ToolSpec
+from backend.tools.contracts import ToolSpec
 
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -20,7 +20,7 @@ _DOCUMENT_SOURCE_ARG_NAMES = {"source", "document", "document_id", "doc_id", "in
 class MCPToolSpecAdapter:
     """Classify MCP tools into the generic harness contract.
 
-    MCP servers are dynamic and untrusted from the harness point of view. This
+    MCP servers are dynamic and untrusted from the agent runtime point of view. This
     adapter is intentionally conservative: tools only become deferred when their
     resource contract is clear from name, description, and schema metadata.
     Unknown tools stay hidden.

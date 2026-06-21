@@ -23,10 +23,7 @@ from typing import Any, Literal, TypedDict
 ServerEventType = Literal[
     # Streaming text + tool execution
     "text_chunk",
-    "final_answer_started",
-    "final_answer_delta",
-    "final_answer_retracted",
-    "final_answer_committed",
+    "text_replace",
     "image_chunk",
     "thinking_delta",
     "thinking",
@@ -35,6 +32,10 @@ ServerEventType = Literal[
     "tool_result",
     "agent.loop.started",
     "agent.loop.completed",
+    "agent.run.started",
+    "agent.run.updated",
+    "agent.run.completed",
+    "agent.phase.updated",
     "agent.item",
     "agent.progress",
     "task.update",
@@ -73,6 +74,8 @@ ServerEventType = Literal[
     # Checkpoints
     "checkpoint.list",
     "checkpoint.rewound",
+    "checkpoint.run.list",
+    "checkpoint.run.resume",
     # File watcher
     "file.changed",
     # Terminal
@@ -104,6 +107,7 @@ ServerEventType = Literal[
     # Session / control plane
     "session.restored",
     "session.synced",
+    "runtime.capabilities",
     "client.command.ack",
     "pong",
     "control_request",
@@ -114,6 +118,8 @@ ServerEventType = Literal[
     "subagent.event",
     "subagent.progress",
     "subagent.done",
+    "verification.started",
+    "verification.result",
     "citation.add",
     "inspector.update",
     # UI catalogs / notices
@@ -184,15 +190,20 @@ ClientCommandType = Literal[
     "session.status.inspect",
     "session.usage.inspect",
     "session.permissions.inspect",
+    "runtime.capabilities.inspect",
     # LLM
     "llm.model.set",
     # Permission rules
     "conversation.permission.rules.list",
     "conversation.permission.rules.add",
     "conversation.permission.rules.remove",
+    "permissions.content_rule.add",
     # Checkpoints
     "checkpoint.list",
     "checkpoint.rewind",
+    "checkpoint.run.list",
+    "agent.resume",
+    "verification.run",
     # Terminal
     "terminal.create",
     "terminal.input",
@@ -212,6 +223,7 @@ ClientCommandType = Literal[
     "session.sync",
     # Wave 1+ new
     "task.edit",                 # legacy todo-state edit command
+    "plan.edit",                 # user accepts/rejects a proposed plan
     "task.stop",
     "subagent.cancel",           # user kills a subagent
     "inspector.focus",           # UI tells backend which target the user is viewing
@@ -287,6 +299,9 @@ class AgentProgressData(TypedDict, total=False):
     group_id: str
     step_id: str
     count: int
+    display_scope: Literal["chat", "activity", "notice", "agents", "inspector", "silent"]
+    panel_hint: Literal["plan", "subagents", "diff", "inspector", "tasks", "terminal", "preview"]
+    requires_attention: bool
 
 
 class AgentLoopData(TypedDict, total=False):
@@ -301,6 +316,25 @@ class AgentLoopData(TypedDict, total=False):
     item_count: int
     tool_call_count: int
     default_collapsed: bool
+
+
+class AgentRunData(TypedDict, total=False):
+    run_id: str
+    conversation_id: str
+    parent_run_id: str
+    role: str
+    phase: Literal["plan", "execute", "verify", "recover", "final"]
+    status: Literal["running", "completed", "failed", "cancelled"]
+    budget: dict[str, Any]
+    started_at: int
+    completed_at: int | None
+    task_id: str
+    session_id: str
+    summary: str
+    error: str
+    display_scope: Literal["chat", "activity", "notice", "agents", "inspector", "silent"]
+    panel_hint: Literal["plan", "subagents", "diff", "inspector", "tasks", "terminal", "preview"]
+    requires_attention: bool
 
 
 class AgentItemData(TypedDict, total=False):
@@ -323,11 +357,14 @@ class AgentItemData(TypedDict, total=False):
     group_id: str
     step_id: str
     tool_call_ids: list[str]
+    display_scope: Literal["chat", "activity", "notice", "agents", "inspector", "silent"]
+    panel_hint: Literal["plan", "subagents", "diff", "inspector", "tasks", "terminal", "preview"]
+    requires_attention: bool
 
 
 class ThinkingDeltaData(TypedDict, total=False):
     content: str
-    source: Literal["provider", "model_preamble", "runtime"]
+    source: Literal["provider", "model_preamble", "post_tool", "runtime"]
     visibility: Literal["debug", "timeline", "compact"]
     is_raw_provider_reasoning: bool
 
@@ -346,6 +383,9 @@ class ToolCallData(TypedDict, total=False):
     step_id: str
     iteration_id: str
     phase: str
+    display_scope: Literal["chat", "activity", "notice", "agents", "inspector", "silent"]
+    panel_hint: Literal["plan", "subagents", "diff", "inspector", "tasks", "terminal", "preview"]
+    requires_attention: bool
 
 
 class ToolOutputDeltaData(TypedDict, total=False):
@@ -381,6 +421,9 @@ class ToolResultData(TypedDict, total=False):
     projection: Literal["silent", "status", "warning", "error", "approval"]
     iteration_id: str
     phase: str
+    display_scope: Literal["chat", "activity", "notice", "agents", "inspector", "silent"]
+    panel_hint: Literal["plan", "subagents", "diff", "inspector", "tasks", "terminal", "preview"]
+    requires_attention: bool
 
 
 class SubagentStartData(TypedDict, total=False):
@@ -388,6 +431,9 @@ class SubagentStartData(TypedDict, total=False):
     parent_id: str
     role: str
     prompt: str
+    display_scope: Literal["agents", "activity", "inspector"]
+    panel_hint: Literal["subagents", "inspector"]
+    requires_attention: bool
 
 
 class SubagentEventData(TypedDict, total=False):
@@ -399,6 +445,9 @@ class SubagentDoneData(TypedDict, total=False):
     subagent_id: str
     summary: str
     error: str
+    display_scope: Literal["agents", "activity", "inspector"]
+    panel_hint: Literal["subagents", "inspector"]
+    requires_attention: bool
 
 
 class CitationData(TypedDict, total=False):
@@ -418,9 +467,12 @@ class ArtifactPreviewData(TypedDict, total=False):
 
 
 class InspectorUpdateData(TypedDict, total=False):
-    target_kind: Literal["message", "tool_call", "artifact", "subagent", "budget"]
+    target_kind: Literal["message", "tool_call", "artifact", "file", "diff", "subagent", "budget"]
     target_id: str
     payload: dict[str, Any]
+    display_scope: Literal["inspector", "silent"]
+    panel_hint: Literal["inspector"]
+    requires_attention: bool
 
 
 class BudgetWarningData(TypedDict, total=False):
@@ -517,6 +569,12 @@ class McpProgressData(TypedDict, total=False):
     status: Literal["running", "completed", "failed"]
 
 
+class RuntimeCapabilitiesData(TypedDict, total=False):
+    session_id: str
+    source: str
+    capabilities: dict[str, Any]
+
+
 
 # ──────────────────────────────────────────────────────────────────
 # Convenience: full sets for runtime validation
@@ -544,6 +602,7 @@ __all__ = [
     "TaskUpdateData",
     "AgentProgressData",
     "AgentLoopData",
+    "AgentRunData",
     "AgentItemData",
     "ThinkingDeltaData",
     "ToolCallData",
@@ -568,4 +627,5 @@ __all__ = [
     "PreviewVerifiedData",
     "McpLifecycleData",
     "McpProgressData",
+    "RuntimeCapabilitiesData",
 ]

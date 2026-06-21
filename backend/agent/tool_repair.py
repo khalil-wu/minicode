@@ -4,8 +4,8 @@ from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 from backend.agent.state import AgentState
-from backend.agent.harness.catalog import tool_spec_for
-from backend.agent.harness.contracts import ToolSpec
+from backend.tools.catalog import tool_spec_for
+from backend.tools.contracts import ToolSpec
 from backend.llm.base import ToolCallEvent
 from backend.tools.registry import ToolRegistry
 

@@ -39,6 +39,10 @@ class AgentCheckpoint:
     stopped_reason: str | None = None
     last_mutation_index: int = 0
     last_verified_mutation_index: int = 0
+    run_id: str = ""
+    conversation_id: str = ""
+    checkpoint_type: str = "run_checkpoint"
+    resume_payload: dict[str, Any] | None = None
 
 
 def get_checkpoint_dir(session_id: str, base_dir: Path | None = None) -> Path:
@@ -63,6 +67,9 @@ def save_checkpoint(
     last_mutation_index: int,
     last_verified_mutation_index: int,
     base_dir: Path | None = None,
+    run_id: str = "",
+    conversation_id: str = "",
+    resume_payload: dict[str, Any] | None = None,
 ) -> Path:
     """Save checkpoint after each iteration."""
     import time
@@ -79,6 +86,10 @@ def save_checkpoint(
         stopped_reason=stopped_reason,
         last_mutation_index=last_mutation_index,
         last_verified_mutation_index=last_verified_mutation_index,
+        run_id=run_id,
+        conversation_id=conversation_id,
+        checkpoint_type="run_checkpoint",
+        resume_payload=resume_payload or {},
     )
     checkpoint_dir = get_checkpoint_dir(session_id, base_dir)
     checkpoint_path = checkpoint_dir / f"{int(checkpoint.timestamp)}.json"
@@ -86,6 +97,15 @@ def save_checkpoint(
         json.dump(asdict(checkpoint), f, indent=2, ensure_ascii=False)
     logger.info(f"Checkpoint saved: {checkpoint_path}")
     return checkpoint_path
+
+
+def save_run_checkpoint(**kwargs: Any) -> Path:
+    """Explicit alias for run-resume checkpoints.
+
+    Kept separate from backend.checkpoint.CheckpointManager, which snapshots
+    files before writes and powers checkpoint.rewind.
+    """
+    return save_checkpoint(**kwargs)
 
 
 def load_latest_checkpoint(session_id: str, base_dir: Path | None = None) -> AgentCheckpoint | None:
@@ -99,11 +119,19 @@ def load_latest_checkpoint(session_id: str, base_dir: Path | None = None) -> Age
     with open(latest, encoding="utf-8") as f:
         data = json.load(f)
 
+    data.setdefault("run_id", "")
+    data.setdefault("conversation_id", "")
+    data.setdefault("checkpoint_type", "run_checkpoint")
+    data.setdefault("resume_payload", {})
     checkpoint = AgentCheckpoint(**data)
     # Only resume if the task didn't complete naturally
     if checkpoint.stopped_reason in ("completed", None):
         return None
     return checkpoint
+
+
+def load_latest_run_checkpoint(session_id: str, base_dir: Path | None = None) -> AgentCheckpoint | None:
+    return load_latest_checkpoint(session_id, base_dir)
 
 
 def clear_checkpoints(session_id: str, base_dir: Path | None = None) -> None:

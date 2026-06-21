@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from backend.agent.harness.contracts import SearchPlan
+from backend.tools.contracts import SearchPlan
 
 
 RELATIVE_TIME_RE = re.compile(
@@ -31,7 +31,6 @@ def build_search_plan(raw_query: str, *, timezone: str = "Asia/Shanghai") -> Sea
     normalized = query
     required_date = None
     if freshness == "realtime" and not ABSOLUTE_DATE_RE.search(normalized):
-        # Prepend date only — do NOT append timezone (it pollutes search results)
         normalized = f"{date} {normalized}".strip()
         required_date = date
 

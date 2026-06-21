@@ -100,6 +100,21 @@ export function firstHttpUrl(value?: string): string {
   return match?.[0] ?? "";
 }
 
+function canonicalActivityTarget(target: string, targetKind: ActivityDetail["targetKind"]): string {
+  const value = target.trim();
+  if (targetKind !== "url" || !isHttpUrl(value)) return value;
+  try {
+    const url = new URL(value);
+    url.hash = "";
+    url.search = "";
+    url.hostname = url.hostname.replace(/^www\./i, "").toLowerCase();
+    url.pathname = url.pathname.replace(/\/+$/g, "");
+    return url.toString();
+  } catch {
+    return value;
+  }
+}
+
 // ── Arg helpers ────────────────────────────────────────────
 
 export function stringArg(value: unknown): string {
@@ -156,7 +171,11 @@ function describeRecordDetail(
   if (name === "todo_write") {
     return { label: "任务", target: describeTodos(args.todos), targetKind: "text" };
   }
-  if (/read_file|read_artifact/i.test(name)) {
+  if (/read_artifact/i.test(name)) {
+    const target = stringArg(args.artifact_id ?? args.artifact_ref ?? "");
+    return { label: "读取", target, targetKind: "text" };
+  }
+  if (/read_file/i.test(name)) {
     const target = stringArg(args.file_path ?? args.path ?? args.target ?? "");
     return { label: "读取", target, targetKind: detailTargetKind(target, "file") };
   }
@@ -194,7 +213,7 @@ export function describeRecordDetails(
   const details = new Map<string, ActivityDetail>();
   for (const record of records) {
     const { label, target, targetKind } = describeRecordDetail(record, developerMode);
-    const key = `${label}\n${targetKind}\n${target}`;
+    const key = `${label}\n${targetKind}\n${canonicalActivityTarget(target, targetKind)}`;
     const existing = details.get(key);
     if (existing) {
       existing.count += 1;
@@ -210,16 +229,23 @@ export function describeRecordDetails(
 
 export function hasOutputPreview(records?: NonNullable<ActivityCellState["toolCallRecords"]>): boolean {
   if (!records || records.length === 0) return false;
-  return records.some((r) => Boolean(r.outputPreview?.trim()));
+  return records.some((r) => Boolean(recordOutputText(r)));
 }
 
 export function getOutputPreview(records?: NonNullable<ActivityCellState["toolCallRecords"]>): string {
   if (!records || records.length === 0) return "";
   const last = records[records.length - 1];
-  const output = last?.outputPreview || "";
+  const output = last ? recordOutputText(last) : "";
   const lines = output.split("\n");
-  const tail = lines.slice(-5).join("\n");
-  return tail.length > 400 ? `...${tail.slice(-400)}` : tail;
+  const tail = lines.slice(-24).join("\n");
+  return tail.length > 1600 ? `...${tail.slice(-1600)}` : tail;
+}
+
+function recordOutputText(record: NonNullable<ActivityCellState["toolCallRecords"]>[number]): string {
+  const direct = record.outputPreview?.trim() || record.contentPreview?.trim();
+  if (direct) return direct;
+  if (/^read_artifact$/i.test(record.name)) return record.summary?.trim() || "";
+  return "";
 }
 
 // ── Long running ───────────────────────────────────────────

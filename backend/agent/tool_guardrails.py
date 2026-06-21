@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from backend.agent.harness._common import WEB_SEARCH_TOOL_NAMES, WEB_TOOL_NAMES, _text_arg
+from backend.agent.tool_common import WEB_SEARCH_TOOL_NAMES, WEB_TOOL_NAMES, _text_arg
 
 
 

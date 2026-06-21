@@ -51,12 +51,20 @@ class TodoWriteTool(BaseTool):
     mutates_workspace = False
     read_only = False  # 会修改会话状态
     description = (
-        "创建或更新会话任务清单，用于模型自驱动地跟踪复杂工作进度。"
-        "每个 todo 包含 id、content、status（pending/in_progress/completed）、priority（high/medium/low）。"
-        "当任务包含多个子任务、多个文件、用户给出清单、需要阶段性验证，或可能委托 task 子 agent 时，"
-        "先创建清单并在执行过程中持续更新。"
-        "这不是系统编排计划；它只是当前 agent loop 的可见 checklist。"
-        "简单单步问答或无需跟踪的操作不要使用。"
+        "Create or update the current session todo checklist. Use this proactively and often for "
+        "complex coding work so progress is visible and requirements are not lost.\n\n"
+        "When to use: complex multi-step work (3+ meaningful steps), multi-file changes, a user-provided "
+        "list of tasks, non-trivial investigation, tasks that need tests/build verification, or newly discovered "
+        "follow-up work. Call todo_write before the first substantive work/tool call, with exactly one item "
+        "already in_progress.\n\n"
+        "When not to use: a single straightforward edit, a trivial command, pure conversation, or an informational "
+        "answer with no work to track.\n\n"
+        "State rules: pass the complete updated list every time; keep at most one item in_progress; mark a task "
+        "completed immediately after it is fully done; do not batch several completions into one late update. "
+        "Never mark completed while tests fail, verification is unfinished, implementation is partial, or a blocker "
+        "remains. Remove obsolete tasks entirely instead of keeping stale pending items.\n\n"
+        "Each item needs both content (imperative, e.g. 'Run tests') and activeForm (present continuous, e.g. "
+        "'Running tests'). This is a live checklist, not the larger visible update_plan."
     )
     permission = PermissionLevel.AUTO
 
@@ -99,11 +107,14 @@ class TodoWriteTool(BaseTool):
                     "todos": {
                         "type": "array",
                         "description": (
-                            "完整的更新后任务清单。每次调用必须传入完整列表（不是增量更新）。"
-                            "每个 item: id, content（祈使形式，如'运行测试'）, "
-                            "activeForm（进行时形式，如'正在运行测试'）, "
-                            "status（pending/in_progress/completed）, priority（high/medium/low）。"
-                            "同一时刻只有一个 item 为 in_progress。"
+                            "Complete updated todo list, not a patch or incremental delta. "
+                            "For active work, include exactly one in_progress item and mark completed items "
+                            "immediately when they are fully done. "
+                            "Each item: id, content (imperative, e.g. 'Run tests'), "
+                            "activeForm (present continuous, e.g. 'Running tests'), "
+                            "status (pending/in_progress/completed), priority (high/medium/low). "
+                            "Never mark completed if tests fail, verification is unfinished, work is partial, "
+                            "or a blocker remains."
                         ),
                         "items": {
                             "type": "object",
@@ -130,8 +141,8 @@ class TodoWriteTool(BaseTool):
                                     "enum": ["high", "medium", "low"],
                                     "description": "任务优先级",
                                 },
-                            },
-                            "required": ["id", "content", "status", "priority"],
+                        },
+                            "required": ["id", "content", "activeForm", "status", "priority"],
                         },
                         "maxItems": MAX_TODO_ITEMS,
                     },
@@ -152,7 +163,6 @@ class TodoWriteTool(BaseTool):
         if len(todos) > MAX_TODO_ITEMS:
             return self._error_result(f"任务数量不能超过 {MAX_TODO_ITEMS}")
 
-        # 🆕 调试日志：工具被调用
         logger.info(f"[TODO] todo_write called with {len(todos)} items")
 
         # 验证每个 todo item
@@ -171,6 +181,11 @@ class TodoWriteTool(BaseTool):
                 return self._error_result("每个 todo item 必须有 id")
             if not content:
                 return self._error_result(f"todo item '{item_id}' 缺少 content")
+            if not active_form:
+                return self._error_result(
+                    f"todo item '{item_id}' 缺少 activeForm；"
+                    "请提供进行中显示文案，例如 '正在运行测试'"
+                )
             if status not in VALID_STATUSES:
                 return self._error_result(
                     f"无效状态 '{status}'，必须是: {', '.join(sorted(VALID_STATUSES))}"
@@ -189,6 +204,11 @@ class TodoWriteTool(BaseTool):
             })
 
         # 获取会话 ID
+        in_progress_count = sum(1 for item in validated if item["status"] == "in_progress")
+        if in_progress_count > 1:
+            return self._error_result("同一时刻最多只能有一个 in_progress todo item")
+
+        # 获取会话 ID
         session_id = "default"
         if context and hasattr(context, "session_id") and context.session_id:
             session_id = context.session_id
@@ -196,35 +216,40 @@ class TodoWriteTool(BaseTool):
         # 保存旧状态（用于 diff）
         old_todos = self._todos.get(session_id, [])
 
-        # 🆕 修改：不再自动清空所有已完成的任务，保留它们让前端处理
-        # 这样用户可以看到完成的任务（前端会在 30 秒后自动淡出）
-        new_todos = validated
+        # Claude Code semantics: when every item is completed, the visible app
+        # checklist is cleared. The model still receives the completed list in
+        # the summary below, but session state/disk should not keep stale done
+        # items around.
+        all_done = all(t["status"] == "completed" for t in validated) if validated else False
+        new_todos = [] if all_done else validated
 
         self._todos[session_id] = new_todos
         self._save_to_disk(session_id, new_todos)
 
-        # 🆕 调试日志：任务已创建/更新
         logger.info(f"[TODO] Session {session_id}: {len(new_todos)} tasks saved")
         for t in new_todos:
             logger.info(f"[TODO]   #{t['id']}: {t['content']} [{t['status']}]")
 
-        # 🆕 发送 WebSocket 事件到前端
-        # 使用 context.emit_event 发送每个任务的更新事件
         if context and context.emit_event:
             try:
-                for todo in new_todos:
+                for todo in validated:
                     await context.emit_event("task.update", {
                         "todo_id": todo["id"],
                         "status": todo["status"],
                         "content": todo["content"],
                         "activeForm": todo.get("activeForm", ""),
                     })
-                logger.info(f"[TODO] Emitted {len(new_todos)} task.update events via WebSocket")
+                if all_done:
+                    await context.emit_event("task.update", {"todos": []})
+                logger.info(
+                    "[TODO] Emitted %d task.update events via WebSocket%s",
+                    len(validated),
+                    " + clear snapshot" if all_done else "",
+                )
             except Exception as e:
                 logger.warning(f"[TODO] Failed to emit task events: {e}")
 
         # 构建摘要
-        all_done = all(t["status"] == "completed" for t in validated) if validated else False
         summary = self._build_summary(old_todos, validated, all_done)
         return self._success_result(summary)
 

@@ -3,6 +3,7 @@ import { Section, EFFORT_LEVELS, choiceStyle } from "./settingsShared";
 
 const PERMISSION_CHOICES: { id: PermissionMode; label: string; title: string }[] = [
   { id: "ask_permissions", label: "Ask", title: "Ask before file and network actions" },
+  { id: "plan", label: "Plan", title: "Read and research only until the plan is approved" },
   { id: "auto", label: "Auto", title: "Automatically read, search, and edit workspace files" },
   { id: "bypass", label: "Full access", title: "No sandbox or approval prompts" },
 ];

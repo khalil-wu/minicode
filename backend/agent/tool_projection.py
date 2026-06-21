@@ -16,6 +16,9 @@ class ToolProjection:
     display_hint: str
     input_summary: str = ""
     activity_kind: str = ""
+    display_scope: str = "activity"
+    panel_hint: str = "inspector"
+    requires_attention: bool = False
 
 
 def _short_text(value: str, max_len: int = 96) -> str:
@@ -66,6 +69,8 @@ class ProjectionRegistry:
 
     def result_kind_for_tool(self, tool_name: str) -> str:
         name = tool_name.lower()
+        if name == "send_message":
+            return "reply"
         if name in {"load_skill", "unload_skill", "list_skills"}:
             return "skill"
         if name in {"todo_write", "todo_read"}:
@@ -88,7 +93,7 @@ class ProjectionRegistry:
     def activity_kind_for_tool(self, tool_name: str) -> str:
         kind = self.result_kind_for_tool(tool_name)
         name = tool_name.lower()
-        if name == "ask_user":
+        if name in {"ask_user", "send_message"}:
             return ""
         if name in {"todo_write", "todo_read"}:
             return "genericTool"
@@ -108,6 +113,8 @@ class ProjectionRegistry:
 
     def input_summary_for_tool(self, tool_name: str, args: dict[str, Any]) -> str:
         name = tool_name.lower()
+        if name == "send_message":
+            return _short_text(str(args.get("message") or ""))
         if name in {"web_search", "search_web"}:
             return _short_text(str(args.get("query") or args.get("q") or ""))
         if name in {"web_fetch"} or "fetch" in name:
@@ -115,6 +122,10 @@ class ProjectionRegistry:
             return _hostname(url) or _short_text(url)
         if "command" in name or "terminal" in name or name in {"bash", "powershell"}:
             return _short_text(str(args.get("command") or args.get("cmd") or ""))
+        if name == "read_artifact":
+            artifact_id = str(args.get("artifact_id") or args.get("artifact_ref") or "").strip()
+            if artifact_id:
+                return _short_text(artifact_id)
         path_value = str(args.get("file_path") or args.get("path") or args.get("target") or args.get("directory") or "")
         if path_value:
             return _short_path(path_value)
@@ -126,6 +137,8 @@ class ProjectionRegistry:
     def display_hint_for_tool(self, tool_name: str, args: dict[str, Any] | None = None) -> str:
         name = tool_name.lower()
         target = self.input_summary_for_tool(tool_name, args or {})
+        if name == "send_message":
+            return _with_target("Reply", target)
         if name == "todo_write":
             return "Update tasks"
         if name == "todo_read":
@@ -160,11 +173,32 @@ class ProjectionRegistry:
         }.get(self.result_kind_for_tool(tool_name), "Running tool")
 
     def project_tool_call(self, tool_name: str, args: dict[str, Any]) -> ToolProjection:
+        result_kind = self.result_kind_for_tool(tool_name)
+        if tool_name.lower() == "send_message":
+            return ToolProjection(
+                result_kind=result_kind,
+                display_hint=self.display_hint_for_tool(tool_name, args),
+                input_summary=self.input_summary_for_tool(tool_name, args),
+                activity_kind="",
+                display_scope="silent",
+                panel_hint="",
+            )
+        if tool_name.lower() in {"todo_write", "todo_read"}:
+            return ToolProjection(
+                result_kind=result_kind,
+                display_hint=self.display_hint_for_tool(tool_name, args),
+                input_summary=self.input_summary_for_tool(tool_name, args),
+                activity_kind=self.activity_kind_for_tool(tool_name),
+                display_scope="silent",
+                panel_hint="",
+            )
         return ToolProjection(
-            result_kind=self.result_kind_for_tool(tool_name),
+            result_kind=result_kind,
             display_hint=self.display_hint_for_tool(tool_name, args),
             input_summary=self.input_summary_for_tool(tool_name, args),
             activity_kind=self.activity_kind_for_tool(tool_name),
+            display_scope="activity",
+            panel_hint="diff" if result_kind == "edit" else "inspector",
         )
 
     def display_summary_for_result(
@@ -181,6 +215,8 @@ class ProjectionRegistry:
         name = tc.name.lower()
         args = tc.arguments or {}
         target = self.input_summary_for_tool(tc.name, args)
+        if name == "send_message":
+            return "Sent reply"
         if name == "todo_write":
             return "Task update failed" if status == "failed" else "Updated tasks"
         if name == "todo_read":

@@ -100,12 +100,30 @@ def _serialize_tool_results(tool_results: list[Any], limit: int = _TOOL_RESULTS_
         return "[]"
 
 
+def _parse_json_stdout(stdout: str) -> dict[str, Any] | None:
+    """Parse hook stdout as JSON if it looks like a JSON object.
+
+    Returns the parsed dict, or None if stdout isn't JSON. Tolerates leading/
+    trailing whitespace. A non-object (e.g. a bare number) is treated as None.
+    """
+    stripped = stdout.strip()
+    if not stripped or stripped[0] not in "{[":
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except (ValueError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 class HookEvent(str, Enum):
     SESSION_START = "session_start"
     USER_PROMPT_SUBMIT = "user_prompt_submit"
     PRE_TOOL_USE = "pre_tool_use"
     POST_TOOL_USE = "post_tool_use"
+    POST_TOOL_USE_FAILURE = "post_tool_use_failure"
     PRE_COMPACT = "pre_compact"
+    POST_COMPACT = "post_compact"
     STOP = "stop"
 
 
@@ -115,10 +133,16 @@ class HookResult:
     message: str = ""
     feedback: str = ""
     stdout: str = ""
+    # Extra context injected into the conversation (cc's additionalContext).
+    additional_context: str = ""
 
     @property
     def has_feedback(self) -> bool:
         return bool(self.feedback.strip())
+
+    @property
+    def has_additional_context(self) -> bool:
+        return bool(self.additional_context.strip())
 
 
 @dataclass
@@ -132,6 +156,10 @@ class _HookEntry:
 class HookManager:
     hooks: dict[HookEvent, list[_HookEntry]] = field(default_factory=dict)
     workspace_root: Path | None = None
+    # Session IDs for which session_start has already fired. Lets the hook
+    # fire once per session (on the first agent turn) without per-session state
+    # in the per-turn AgentState.
+    _session_start_fired: set[str] = field(default_factory=set)
 
     # Legacy compatibility properties
     @property
@@ -198,8 +226,28 @@ class HookManager:
             HookEvent.POST_TOOL_USE, match_target=tool_name, env_extras=extras,
         )
 
+    async def run_post_tool_failure(self, tool_name: str, args: dict[str, Any], error_content: str) -> HookResult:
+        """Fires when a tool call errors — useful for logging/alerting/telemetry."""
+        extras = self._tool_env(tool_name, args)
+        extras["TOOL_ERROR"] = error_content[:_RESULT_TRUNCATE]
+        return await self._run_event(
+            HookEvent.POST_TOOL_USE_FAILURE, match_target=tool_name, env_extras=extras,
+        )
+
+    async def run_post_compact(self) -> HookResult:
+        """Fires after context compaction completes (symmetric with pre_compact)."""
+        return await self._run_event(HookEvent.POST_COMPACT, match_target="compact")
+
     async def run_session_start(self) -> HookResult:
         return await self._run_event(HookEvent.SESSION_START, match_target="session")
+
+    async def run_session_start_once(self, session_id: str) -> HookResult:
+        """Fire session_start once per session (first agent turn). No-op on
+        subsequent turns of the same session."""
+        if not session_id or session_id in self._session_start_fired:
+            return HookResult()
+        self._session_start_fired.add(session_id)
+        return await self.run_session_start()
 
     async def run_user_prompt_submit(self, user_message: str) -> HookResult:
         return await self._run_event(
@@ -244,6 +292,31 @@ class HookManager:
             stdout, exit_code = await self._exec(entry.command, event, env_extras)
             if stdout:
                 outputs.append(stdout)
+
+            # JSON stdout contract (cc-aligned): a hook may emit a JSON object
+            # with {"decision": "block"|"allow", "feedback": "...",
+            # "additional_context": "..."} for richer control than exit codes.
+            json_result = _parse_json_stdout(stdout)
+            if json_result is not None:
+                if json_result.get("decision") == "block" or exit_code == 2:
+                    feedback = json_result.get("feedback") or (stdout.strip() if exit_code == 2 else "")
+                    if feedback:
+                        return HookResult(
+                            feedback=feedback,
+                            additional_context=json_result.get("additional_context", ""),
+                            stdout="\n".join(outputs),
+                        )
+                if json_result.get("feedback"):
+                    return HookResult(
+                        feedback=json_result["feedback"],
+                        additional_context=json_result.get("additional_context", ""),
+                        stdout="\n".join(outputs),
+                    )
+                if json_result.get("additional_context"):
+                    return HookResult(
+                        additional_context=json_result["additional_context"],
+                        stdout="\n".join(outputs),
+                    )
 
             # Exit code 2: feedback injection (Claude Code semantics)
             if exit_code == 2 and stdout.strip():

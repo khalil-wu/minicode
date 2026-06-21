@@ -97,7 +97,10 @@ export const FALLBACK_RUNTIME_SLASH_COMMANDS: RuntimeSlashMenuItem[] = [
   { name: "/unarchive", description: "Unarchive conversation" },
   { name: "/tasks", description: "Show running tasks" },
   { name: "/status", description: "Show runtime status" },
-  { name: "/usage", description: "Show token usage" },
+  { name: "/usage", description: "Show token, context, and cost usage" },
+  { name: "/context", description: "Show context token budget" },
+  { name: "/cost", description: "Show session cost breakdown" },
+  { name: "/init", description: "Generate a CLAUDE.md for this project" },
   { name: "/help", description: "Show slash command help" },
 ];
 
