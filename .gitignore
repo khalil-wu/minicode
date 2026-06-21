@@ -74,6 +74,7 @@ data/checkpoints/
 data/chroma/
 data/conversations/
 data/memory/
+data/metrics/
 data/active_workspace.json
 data/recent_projects.json
 data/backend-startup.*.log
