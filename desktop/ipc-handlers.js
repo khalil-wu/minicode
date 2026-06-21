@@ -189,7 +189,6 @@ function registerIpcHandlers() {
     showDesktopNotification,
     dispatchDeepLink,
     attemptAppStartup,
-    startupFailureState,
     getDesktopLogPath,
     appendDesktopLog,
     exportDesktopDiagnostics,
@@ -318,7 +317,7 @@ function registerIpcHandlers() {
   // Startup / diagnostics
   // -----------------------------------------------------------------------
 
-  ipcMain.handle("minicode:startup:getState", () => startupFailureState);
+  ipcMain.handle("minicode:startup:getState", () => ctx.startupFailureState || {});
   ipcMain.handle("minicode:startup:retry", async () => {
     return typeof attemptAppStartup === "function" ? attemptAppStartup("startup-retry") : false;
   });

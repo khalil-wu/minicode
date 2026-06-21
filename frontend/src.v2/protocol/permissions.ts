@@ -16,6 +16,9 @@ export const normalizeUiPermissionMode = (mode: unknown): PermissionMode => {
   ) {
     return "ask_permissions";
   }
+  if (normalized === "plan" || canonical === "plan_mode" || compact === "planmode") {
+    return "plan";
+  }
   if (
     normalized === "bypass" ||
     canonical === "full_access" ||
@@ -34,9 +37,6 @@ export const normalizeUiPermissionMode = (mode: unknown): PermissionMode => {
   ) {
     return "auto";
   }
-  if (normalized === "plan") {
-    return "ask_permissions";
-  }
   return "auto";
 };
 
@@ -53,6 +53,7 @@ export const initialUiPermissionMode = (stored: unknown): PermissionMode => {
 export const toBackendPermissionMode = (mode: PermissionMode): BackendPermissionMode => {
   if (mode === "bypass") return "bypass";
   if (mode === "auto") return "auto";
+  if (mode === "plan") return "plan";
   if (mode === "ask_permissions") return "confirm";
   return "auto";
 };
@@ -61,9 +62,16 @@ export const fromBackendPermissionMode = (mode: string): PermissionMode => {
   return normalizeUiPermissionMode(mode);
 };
 
-export const syncPermissionMode = (mode: PermissionMode, source = "frontend.ui"): boolean =>
-  sendClientCommand({
+export const syncPermissionMode = (
+  mode: PermissionMode,
+  source = "frontend.ui",
+  conversationId?: string | null,
+): boolean => {
+  const targetConversationId = String(conversationId ?? "").trim();
+  return sendClientCommand({
     type: "conversation.permission_mode.set",
     mode: toBackendPermissionMode(mode),
     source,
+    ...(targetConversationId ? { conversation_id: targetConversationId } : {}),
   });
+};

@@ -3,6 +3,7 @@ import { memo, useEffect, useId, useRef, useState } from "react";
 import type { SendButtonState } from "../lib/send-state";
 import { useAppStore } from "../stores";
 import { getWebSocket } from "../hooks/useWebSocket";
+import { sendClientCommand } from "../protocol/ws-outbox";
 import { uploadComposerFiles } from "./uploads";
 import type { EffortLevel, PermissionMode } from "../stores/types";
 import { formatModelLabel } from "../lib/model-label";
@@ -21,6 +22,9 @@ interface Props {
   minimal?: boolean;
 }
 
+// Codex-style picker: three choices only. Plan mode is still supported by the
+// backend and surfaced via the current-mode label when the agent enters it
+// (EnterPlanMode tool), but it is not a user-selectable picker option.
 const PERMISSION_MODES: { id: PermissionMode; label: string; desc: string }[] = [
   { id: "ask_permissions", label: "Ask", desc: "Ask before file and network actions" },
   { id: "auto", label: "Auto", desc: "Auto read, search, and edit workspace files" },
@@ -97,7 +101,7 @@ export const FooterRow = memo(({ sendState, onSend, compact = false, minimal = f
   };
 
   const switchModel = (model: string) => {
-    getWebSocket()?.send({ type: "llm.model.set", model });
+    sendClientCommand({ type: "llm.model.set", model });
     setModelOpen(false);
   };
 
@@ -422,10 +426,11 @@ const toneColor = (tone: "normal" | "danger" | "info" | "warning") => {
 };
 
 const permissionTone = (mode: PermissionMode): "normal" | "danger" | "info" | "warning" =>
-  mode === "auto" ? "info" : "normal";
+  mode === "auto" ? "info" : mode === "plan" ? "warning" : "normal";
 
 const permissionLabel = (mode: PermissionMode): string => {
   if (mode === "ask_permissions") return "Ask";
+  if (mode === "plan") return "Plan";
   if (mode === "auto") return "Auto";
   if (mode === "bypass") return "Full access";
   return "Auto";

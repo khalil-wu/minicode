@@ -40,7 +40,7 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
     const before = get();
     writeLS(LS.permissionMode, m);
     set({ permissionMode: m });
-    syncPermissionMode(m);
+    syncPermissionMode(m, "frontend.ui", before.conversationId);
     if (m === "bypass" || m === "auto") {
       const responded = new Set<string>();
       for (const approval of [before.pendingApproval, ...before.approvalQueue]) {

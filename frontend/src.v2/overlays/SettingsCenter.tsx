@@ -150,6 +150,8 @@ export const SettingsCenter = () => {
           )}
           {activeTab === "provider" && (
             <ProviderTab
+              selectedProvider={provider}
+              settingsPayload={settingsPayload}
               settingsPayloadRef={settingsPayloadRef}
               onProviderChange={handleProviderChange}
               onSettingsPayloadChange={handleSettingsPayloadChange}

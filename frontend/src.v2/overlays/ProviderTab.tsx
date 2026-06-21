@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAppStore } from "../stores";
 import { pushToast } from "./ToastContainer";
 import { apiBase, authHeaders } from "../protocol/api";
@@ -24,6 +24,7 @@ import {
   providerGridStyle,
   providerButtonStyle,
   inputStyle,
+  selectInputStyle,
   choiceStyle,
   hintLineStyle,
   savedKeyStateStyle,
@@ -38,10 +39,14 @@ import {
 } from "./settingsShared";
 
 export const ProviderTab = ({
+  selectedProvider,
+  settingsPayload,
   settingsPayloadRef,
   onProviderChange,
   onSettingsPayloadChange,
 }: {
+  selectedProvider: ProviderId;
+  settingsPayload: LLMSettingsPayload | null;
   settingsPayloadRef: React.MutableRefObject<LLMSettingsPayload | null>;
   onProviderChange: (id: ProviderId) => void;
   onSettingsPayloadChange?: (payload: LLMSettingsPayload) => void;
@@ -49,7 +54,7 @@ export const ProviderTab = ({
   const currentModel = useAppStore((s) => s.currentModel);
   const availableModels = useAppStore((s) => s.availableModels);
 
-  const [provider, setProvider] = useState<ProviderId>("deepseek");
+  const [provider, setProvider] = useState<ProviderId>(selectedProvider);
   const [apiKey, setApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState("https://api.deepseek.com/v1");
   const [modelName, setModelName] = useState("deepseek-chat");
@@ -85,6 +90,18 @@ export const ProviderTab = ({
     }
     setThinkingBudget(Number(section?.thinking_budget ?? fallback.thinking_budget ?? 0) || 0);
   };
+
+  useEffect(() => {
+    setProvider(selectedProvider);
+    applyProviderSection(selectedProvider, sectionForUiProvider(settingsPayload, selectedProvider));
+    setSavedKeyByProvider({
+      openai: Boolean(settingsPayload?.openai?.has_api_key),
+      anthropic: Boolean(settingsPayload?.anthropic?.has_api_key),
+      custom: Boolean(settingsPayload?.custom?.has_api_key),
+    });
+    setApiKey("");
+    setShowKey(false);
+  }, [selectedProvider, settingsPayload]);
 
   const handleProviderChange = (id: ProviderId) => {
     setProvider(id);
@@ -244,7 +261,7 @@ export const ProviderTab = ({
           <select
             value={customWireApi}
             onChange={(e) => setCustomWireApi(e.target.value as CustomWireApi)}
-            style={inputStyle}
+            style={selectInputStyle}
           >
             <option value="chat">OpenAI Chat Completions</option>
             <option value="responses">OpenAI Responses</option>
