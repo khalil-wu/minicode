@@ -1,4 +1,15 @@
-"""Agent event and WebSocket command conversion helpers."""
+"""Agent event and WebSocket command conversion helpers.
+
+Output-protocol note (vs. Codex): Codex's wire shape carries `phase` as a field
+on a structured `message` output item (`{type:"message", phase:"commentary"|"final_answer"}`).
+MiniCode instead attaches `phase`/`visibility` as metadata on `text_chunk` events
+(see `text_chunk` below) and projects them into process/answer channels on the
+frontend (`frontend/src.v2/lib/turn-projection.ts`). The two are functionally
+equivalent — both separate in-progress narration from the final answer — and a
+full migration to Codex-style structured message items is intentionally deferred
+(wire-protocol + projection + test rewrite for no functional gain). Do not
+"fix" this difference without revisiting that decision.
+"""
 
 from __future__ import annotations
 
@@ -29,6 +40,7 @@ class AgentEvent:
         role: str = "",
         phase: str = "",
         finalize: bool = False,
+        metadata: dict[str, Any] | None = None,
     ) -> AgentEvent:
         data: dict[str, Any] = {"content": content}
         if source:
@@ -43,6 +55,8 @@ class AgentEvent:
             # Contentless seal: re-tag the last streamed text block as the
             # final answer without re-emitting content (already streamed live).
             data["finalize"] = True
+        if metadata:
+            data["metadata"] = metadata
         return cls(type="text_chunk", data=data)
 
     @classmethod
@@ -57,6 +71,7 @@ class AgentEvent:
         source: str = "",
         visibility: str = "",
         is_raw_provider_reasoning: bool = False,
+        provider_reasoning_type: str = "",
         phase: str = "",
     ) -> AgentEvent:
         data: dict[str, Any] = {"content": content}
@@ -66,6 +81,8 @@ class AgentEvent:
             data["visibility"] = visibility
         if is_raw_provider_reasoning:
             data["is_raw_provider_reasoning"] = True
+        if provider_reasoning_type:
+            data["provider_reasoning_type"] = provider_reasoning_type
         if phase:
             data["phase"] = phase
         return cls(type="thinking_delta", data=data)
@@ -89,6 +106,7 @@ class AgentEvent:
         activity_kind: str = "",
         group_id: str = "",
         step_id: str = "",
+        turn_id: str = "",
         iteration_id: str = "",
         phase: str = "",
         display_scope: str = "activity",
@@ -118,6 +136,8 @@ class AgentEvent:
             data["group_id"] = group_id
         if step_id:
             data["step_id"] = step_id
+        if turn_id:
+            data["turn_id"] = turn_id
         if iteration_id:
             data["iteration_id"] = iteration_id
         if phase:
@@ -131,11 +151,21 @@ class AgentEvent:
         output: str,
         *,
         stream: str = "stdout",
+        turn_id: str = "",
+        iteration_id: str = "",
+        step_id: str = "",
     ) -> AgentEvent:
         """工具执行期间的增量输出（如命令的 stdout/stderr）。"""
+        data = {"id": id, "output": output, "stream": stream}
+        if turn_id:
+            data["turn_id"] = turn_id
+        if iteration_id:
+            data["iteration_id"] = iteration_id
+        if step_id:
+            data["step_id"] = step_id
         return cls(
             type="tool_output_delta",
-            data={"id": id, "output": output, "stream": stream},
+            data=data,
         )
 
     @classmethod
@@ -166,6 +196,7 @@ class AgentEvent:
         developer_detail: str = "",
         recoverable: bool | None = None,
         projection: str = "",
+        turn_id: str = "",
         iteration_id: str = "",
         phase: str = "",
         display_scope: str = "activity",
@@ -221,6 +252,8 @@ class AgentEvent:
             result["recoverable"] = recoverable
         if projection:
             result["projection"] = projection
+        if turn_id:
+            result["turn_id"] = turn_id
         if iteration_id:
             result["iteration_id"] = iteration_id
         if phase:
@@ -314,6 +347,11 @@ class AgentEvent:
         display_scope: str = "",
         panel_hint: str = "",
         requires_attention: bool = False,
+        skill_name: str = "",
+        trigger_mode: str = "",
+        source_level: str = "",
+        reason: str = "",
+        token_estimate: int | None = None,
     ) -> AgentEvent:
         payload: dict[str, Any] = {
             "id": id,
@@ -356,6 +394,16 @@ class AgentEvent:
             payload["step_id"] = step_id
         if tool_call_ids:
             payload["tool_call_ids"] = tool_call_ids
+        if skill_name:
+            payload["skill_name"] = skill_name
+        if trigger_mode:
+            payload["trigger_mode"] = trigger_mode
+        if source_level:
+            payload["source_level"] = source_level
+        if reason:
+            payload["reason"] = reason
+        if token_estimate is not None:
+            payload["token_estimate"] = token_estimate
         return cls(type="agent.item", data=payload)
 
     @classmethod
@@ -560,23 +608,52 @@ class AgentEvent:
         return cls(type="approval_request", data=data)
 
     @classmethod
+    def permission_decision(
+        cls,
+        *,
+        tool_call_id: str,
+        tool_name: str,
+        decision: str,
+        source: str = "hook",
+        permission_level: str = "",
+        message: str = "",
+    ) -> AgentEvent:
+        data: dict[str, Any] = {
+            "tool_call_id": tool_call_id,
+            "tool_name": tool_name,
+            "decision": decision,
+            "source": source,
+        }
+        if permission_level:
+            data["permission_level"] = permission_level
+        if message:
+            data["message"] = message
+        return cls(type="permission.decision", data=data)
+
+    @classmethod
     def done(
         cls,
         input_tokens: int = 0,
         output_tokens: int = 0,
         cache_creation_input_tokens: int = 0,
         cache_read_input_tokens: int = 0,
+        reasoning_output_tokens: int = 0,
+        provider_raw: dict[str, Any] | None = None,
     ) -> AgentEvent:
+        usage = {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_creation_input_tokens": cache_creation_input_tokens,
+            "cache_read_input_tokens": cache_read_input_tokens,
+        }
+        if reasoning_output_tokens:
+            usage["reasoning_output_tokens"] = reasoning_output_tokens
+        data: dict[str, Any] = {"usage": usage}
+        if provider_raw:
+            data["providerRaw"] = provider_raw
         return cls(
             type="done",
-            data={
-                "usage": {
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "cache_creation_input_tokens": cache_creation_input_tokens,
-                    "cache_read_input_tokens": cache_read_input_tokens,
-                }
-            },
+            data=data,
         )
 
     @classmethod
@@ -757,15 +834,29 @@ class AgentEvent:
 
     @classmethod
     def inspector_update(
-        cls, target_kind: str, target_id: str, payload: dict[str, Any]
+        cls,
+        target_kind: str,
+        target_id: str,
+        payload: dict[str, Any],
+        *,
+        display_scope: str = "",
+        panel_hint: str = "",
+        requires_attention: bool = False,
     ) -> AgentEvent:
+        data: dict[str, Any] = {
+            "target_kind": target_kind,
+            "target_id": target_id,
+            "payload": payload,
+        }
+        if display_scope:
+            data["display_scope"] = display_scope
+        if panel_hint:
+            data["panel_hint"] = panel_hint
+        if requires_attention:
+            data["requires_attention"] = True
         return cls(
             type="inspector.update",
-            data={
-                "target_kind": target_kind,
-                "target_id": target_id,
-                "payload": payload,
-            },
+            data=data,
         )
 
 
