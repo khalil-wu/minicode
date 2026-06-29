@@ -1,4 +1,4 @@
-import type { PermissionMode } from "../stores/types";
+import type { PermissionMode, PromptPersona } from "../stores/types";
 import { Section, EFFORT_LEVELS, choiceStyle } from "./settingsShared";
 
 const PERMISSION_CHOICES: { id: PermissionMode; label: string; title: string }[] = [
@@ -8,19 +8,28 @@ const PERMISSION_CHOICES: { id: PermissionMode; label: string; title: string }[]
   { id: "bypass", label: "Full access", title: "No sandbox or approval prompts" },
 ];
 
+const PROMPT_PERSONAS: { id: PromptPersona; label: string; title: string }[] = [
+  { id: "minicode", label: "MiniCode", title: "Use MiniCode's native prompt contract" },
+  { id: "codex", label: "Codex style", title: "Adopt Codex's personality and output discipline" },
+];
+
 export const GeneralTab = ({
   permissionMode,
+  promptPersona,
   effortLevel,
   currentModel,
   showReasoningEffort,
   switchPermissionMode,
+  switchPromptPersona,
   setEffortLevel,
 }: {
   permissionMode: PermissionMode;
+  promptPersona: PromptPersona;
   effortLevel: string;
   currentModel: string;
   showReasoningEffort: boolean;
   switchPermissionMode: (mode: PermissionMode) => void;
+  switchPromptPersona: (persona: PromptPersona) => void;
   setEffortLevel: (level: "low" | "medium" | "high" | "max") => void;
 }) => (
   <>
@@ -29,6 +38,16 @@ export const GeneralTab = ({
         {PERMISSION_CHOICES.map((mode) => (
           <button key={mode.id} onClick={() => switchPermissionMode(mode.id)} style={choiceStyle(permissionMode === mode.id)} title={mode.title}>
             {mode.label}
+          </button>
+        ))}
+      </div>
+    </Section>
+
+    <Section title="Prompt Style" description="MiniCode stays the default identity; Codex style adopts Codex's personality and output discipline">
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {PROMPT_PERSONAS.map((persona) => (
+          <button key={persona.id} onClick={() => switchPromptPersona(persona.id)} style={choiceStyle(promptPersona === persona.id)} title={persona.title}>
+            {persona.label}
           </button>
         ))}
       </div>
