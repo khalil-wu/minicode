@@ -1,10 +1,15 @@
-import { coordinatorNoticeKindForSubagent, effectiveSubagentStatus, userFacingCoordinatorNoticeForSubagent } from "./collaborationDisplay";
+import {
+  coordinatorNoticeKindForSubagent,
+  effectiveSubagentStatus,
+  userFacingCoordinatorNoticeForSubagent,
+  type CoordinatorNoticeKind,
+} from "./collaborationDisplay";
 import type { SubagentState } from "../stores/types";
 import type { ActivityItem } from "../agent-loop/activity-item";
 import { projectSubagentActivityItems } from "../agent-loop/projection/project-subagent-activity-items";
 
 export type AgentDisplayStatus = "attention" | "running" | "waiting" | "completed";
-export type CoordinatorNoticeKind = "collect_results" | "duplicate_delegation" | "capacity" | null;
+export type { CoordinatorNoticeKind } from "./collaborationDisplay";
 
 export interface AgentView {
   id: string;
@@ -15,7 +20,7 @@ export interface AgentView {
   elapsedLabel: string;
   roleLabel: string;
   effectiveStatus: SubagentState["status"];
-  coordinatorNoticeKind: CoordinatorNoticeKind;
+  coordinatorNoticeKind: CoordinatorNoticeKind | null;
   isWorkflow: boolean;
   activity: string;
   detail: string;
@@ -132,8 +137,8 @@ const cleanTitle = (value: string): string => value
 
 const titleFor = (agent: SubagentState): string => {
   const coordinatorNotice = userFacingCoordinatorNoticeForSubagent(agent);
-  if (coordinatorNotice) return agent.objective || coordinatorNotice;
-  const title = cleanTitle(agent.objective || userVisibleLine(agent.summary) || agent.nodeId || agent.role || agent.id);
+  if (coordinatorNotice) return userVisibleLine(agent.objective) || coordinatorNotice;
+  const title = cleanTitle(userVisibleLine(agent.objective) || userVisibleLine(agent.summary) || agent.nodeId || agent.role || agent.id);
   const workflowName = String(agent.workflowName || "").trim();
   if (workflowName && title.toLowerCase().startsWith(`${workflowName.toLowerCase()}:`)) {
     return title.slice(workflowName.length + 1).trim();

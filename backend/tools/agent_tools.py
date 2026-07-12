@@ -81,18 +81,49 @@ def _user_visible_progress_text(value: Any) -> str:
     return text
 
 
-def _scope_parallel_task_prompt(task: dict[str, Any]) -> str:
+def _scope_parallel_task_prompt(task: dict[str, Any], *, scope: str | None = None) -> str:
     prompt = str(task.get("prompt") or "").strip()
-    scope = str(task.get("description") or task.get("objective") or "").strip()
-    if not scope:
+    assigned_scope = str(scope or task.get("description") or task.get("objective") or "").strip()
+    if not assigned_scope:
         return prompt
     return (
         "[Parallel task scope]\n"
-        f"Your assigned objective is exactly: {scope}\n"
+        f"Your assigned objective is exactly: {assigned_scope}\n"
         "Work only on this objective. Do not investigate, execute, or summarize targets "
         "assigned to sibling subagents, even if the original prompt mentions them.\n\n"
         f"{prompt}"
     )
+
+
+def _exclusive_parallel_task_scopes(tasks: list[dict[str, Any]]) -> list[str]:
+    """Select a unique user-facing scope for every parallel worker."""
+
+    descriptions = [str(task.get("description") or "").strip() for task in tasks]
+    objectives = [str(task.get("objective") or "").strip() for task in tasks]
+    description_counts: dict[str, int] = {}
+    objective_counts: dict[str, int] = {}
+    for description in descriptions:
+        if description:
+            key = description.casefold()
+            description_counts[key] = description_counts.get(key, 0) + 1
+    for objective in objectives:
+        if objective:
+            key = objective.casefold()
+            objective_counts[key] = objective_counts.get(key, 0) + 1
+
+    scopes: list[str] = []
+    for description, objective in zip(descriptions, objectives, strict=True):
+        if description and description_counts.get(description.casefold()) == 1:
+            scopes.append(description)
+            continue
+        if objective and objective_counts.get(objective.casefold()) == 1:
+            scopes.append(objective)
+            continue
+        return []
+    normalized_scopes = [scope.casefold() for scope in scopes]
+    if len(set(normalized_scopes)) != len(normalized_scopes):
+        return []
+    return scopes
 
 
 def _available_agent_types() -> list[str]:
@@ -646,8 +677,14 @@ class TaskTool(BaseTool):
                         **_nonempty_subagent_metadata(item),
                     })
             if len(tasks) >= 2:
-                for task in tasks:
-                    task["prompt"] = _scope_parallel_task_prompt(task)
+                scopes = _exclusive_parallel_task_scopes(tasks)
+                if len(scopes) != len(tasks):
+                    return self._error_result(
+                        "Parallel tasks require one exclusive description or objective per worker. "
+                        "Split the shared request into non-overlapping scopes before delegating."
+                    )
+                for task, scope in zip(tasks, scopes, strict=True):
+                    task["prompt"] = _scope_parallel_task_prompt(task, scope=scope)
                 if bool(args.get("run_in_background")):
                     return await self._start_background_subtasks(
                         tasks=tasks,

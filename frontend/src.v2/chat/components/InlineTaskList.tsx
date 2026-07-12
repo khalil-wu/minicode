@@ -1,8 +1,9 @@
 import { ArrowRight, Copy, ListChecks, LoaderCircle, OctagonAlert } from "lucide-react";
-import { useMemo, type CSSProperties } from "react";
+import { useId, useMemo, useState, type CSSProperties } from "react";
 import { useAppStore } from "../../stores";
 import { planStepTodoStatus, shouldSurfacePlanProgress } from "../../lib/planVisibility";
 import { coordinatorNoticeKindForSubagent, effectiveSubagentStatus, type CoordinatorNoticeKind } from "../../lib/collaborationDisplay";
+import { projectAgentViews, type AgentDisplayStatus } from "../../lib/agent-view-model";
 import type { ConversationAgentState, ConversationMeta, GitChangesState, PlanState, SubagentState, TodoItem } from "../../stores/types";
 import { RollingNumber } from "../../components/RollingNumber";
 import { initialDiffReviewPatch } from "../diffReviewState";
@@ -23,6 +24,8 @@ export function InlineTaskList({ wide = false }: InlineTaskListProps = {}) {
   const conversationStreaming = useAppStore((s) => s.conversationStreaming);
   const conversationAgentStates = useAppStore((s) => s.conversationAgentStates);
   const requestConversationSwitch = useAppStore((s) => s.requestConversationSwitch);
+  const [collaborationPreviewVisible, setCollaborationPreviewVisible] = useState(false);
+  const collaborationPreviewId = useId();
 
   const currentSummary = useMemo(() => summarizeWork(todos, plan), [todos, plan]);
   const collaborationSummary = useMemo(() => summarizeCollaboration(subagents), [subagents]);
@@ -56,6 +59,10 @@ export function InlineTaskList({ wide = false }: InlineTaskListProps = {}) {
   } = summary;
   const isBackground = kind === "background";
   const isCollaboration = kind === "collaboration";
+  const collaborationPreviewItems = isCollaboration ? (summary.previewItems ?? []) : [];
+  const visibleCollaborationPreviewItems = collaborationPreviewItems.slice(0, 3);
+  const hiddenCollaborationPreviewCount = Math.max(0, collaborationPreviewItems.length - visibleCollaborationPreviewItems.length);
+  const canPreviewCollaboration = isCollaboration && visibleCollaborationPreviewItems.length > 0;
   if (!isBackground && !isCollaboration && !isStreaming && !hasBlocked) return null;
   if (allCompleted && !hasBlocked) return null;
 
@@ -100,7 +107,7 @@ export function InlineTaskList({ wide = false }: InlineTaskListProps = {}) {
   const countLabel = allCompleted ? `${completed}/${total}` : `${activeIndex}/${total}`;
   const visibleCountLabel = isBackground
       ? backgroundCount && backgroundCount > 1 ? `${backgroundCount} 个任务` : "查看"
-      : isCollaboration ? "查看"
+      : isCollaboration ? stateLabel
       : kind === "plan" ? `第 ${countLabel} 步` : `任务 ${countLabel}`;
   const ariaLabel = `${visibleCountLabel}：${activeLabel}${gitAriaLabel}`;
   const openBackgroundConversation = () => {
@@ -156,16 +163,19 @@ export function InlineTaskList({ wide = false }: InlineTaskListProps = {}) {
       data-state={stateTone}
       data-kind={kind}
       data-editing-files={isFileActive ? "true" : "false"}
-      role="status"
-      aria-label={ariaLabel}
-      aria-live="polite"
       style={{ maxWidth: wide ? "min(560px, calc(100% - 32px))" : "min(480px, calc(100% - 32px))" }}
     >
+      <span className="sr-only" role="status" aria-label={ariaLabel} aria-live="polite" />
       <button
         type="button"
         className="inline-task-pill inline-task-pill-button"
         onClick={handlePillClick}
         aria-label={pillAriaLabel}
+        aria-describedby={collaborationPreviewVisible && canPreviewCollaboration ? collaborationPreviewId : undefined}
+        onMouseEnter={() => canPreviewCollaboration && setCollaborationPreviewVisible(true)}
+        onMouseLeave={() => canPreviewCollaboration && setCollaborationPreviewVisible(false)}
+        onFocus={() => canPreviewCollaboration && setCollaborationPreviewVisible(true)}
+        onBlur={() => canPreviewCollaboration && setCollaborationPreviewVisible(false)}
       >
         <span className="inline-task-pill-icon" aria-hidden="true">
           {stateTone === "blocked"
@@ -176,19 +186,19 @@ export function InlineTaskList({ wide = false }: InlineTaskListProps = {}) {
         </span>
         <span className="inline-task-pill-state">{stateLabel}</span>
         <span className="inline-task-pill-title">{activeLabel}</span>
-        {backgroundConversationId || isCollaboration ? (
+        {backgroundConversationId ? (
           <span
             className="inline-task-pill-action"
-            title={isCollaboration ? "查看处理详情" : "查看运行中的对话"}
+            title="查看运行中的对话"
           >
             <span>{visibleCountLabel}</span>
             <ArrowRight size={12} />
           </span>
-        ) : (
+        ) : !isCollaboration ? (
           <span key={visibleCountLabel} className="inline-task-pill-count">
             {visibleCountLabel}
           </span>
-        )}
+        ) : null}
         {visibleGitStats && (
           <span className="inline-task-pill-change">
             {!visibleGitStats.primaryLabel && <span>{visibleGitStats.label}</span>}
@@ -205,6 +215,33 @@ export function InlineTaskList({ wide = false }: InlineTaskListProps = {}) {
           </span>
         )}
       </button>
+      {collaborationPreviewVisible && canPreviewCollaboration && (
+        <div
+          id={collaborationPreviewId}
+          className="inline-task-collaboration-preview"
+          role="tooltip"
+          aria-label="子智能体任务预览"
+        >
+          <div className="inline-task-collaboration-preview-header">
+            <span>子 Agent</span>
+            <span>{activeIndex}/{total}</span>
+          </div>
+          <div className="inline-task-collaboration-preview-list">
+            {visibleCollaborationPreviewItems.map((item) => (
+              <div key={item.id} className="inline-task-collaboration-preview-row">
+                <span className="inline-task-collaboration-preview-dot" data-tone={item.tone} aria-hidden="true" />
+                <span className="inline-task-collaboration-preview-title">{item.title}</span>
+                <span className="inline-task-collaboration-preview-state">{item.statusLabel}</span>
+              </div>
+            ))}
+          </div>
+          {hiddenCollaborationPreviewCount > 0 && (
+            <div className="inline-task-collaboration-preview-more">
+              +{hiddenCollaborationPreviewCount} 个任务
+            </div>
+          )}
+        </div>
+      )}
       {isEditingFiles && visibleGitStats && (
         <button
           type="button"
@@ -238,12 +275,26 @@ interface InlineSummary {
   backgroundConversationId?: string;
   backgroundCount?: number;
   conversationTitle?: string;
+  previewItems?: InlinePreviewItem[];
+}
+
+interface InlinePreviewItem {
+  id: string;
+  title: string;
+  statusLabel: string;
+  tone: AgentDisplayStatus;
 }
 
 function summarizeCollaboration(subagents: SubagentState[]): InlineSummary | null {
   const userVisibleSubagents = subagents.filter((subagent) => subagent.role !== "message");
   const visible = userVisibleSubagents.filter((subagent) => subagent.role !== "workflow" && !subagent.id.startsWith("workflow-"));
   const candidates = visible.length > 0 ? visible : userVisibleSubagents;
+  const previewItems = projectAgentViews(candidates).map((view) => ({
+    id: view.id,
+    title: view.title,
+    statusLabel: view.statusLabel,
+    tone: view.status,
+  }));
   const active = candidates.filter((subagent) => ["running", "pending", "blocked"].includes(effectiveSubagentStatus(subagent)));
   const errors = candidates.filter((subagent) => effectiveSubagentStatus(subagent) === "error");
   if (active.length === 0) {
@@ -254,6 +305,7 @@ function summarizeCollaboration(subagents: SubagentState[]): InlineSummary | nul
         total: errors.length,
         completed: 0,
         items: [],
+        previewItems,
         activeTask: {
           id: "collaboration-error",
           content: label,
@@ -303,6 +355,7 @@ function summarizeCollaboration(subagents: SubagentState[]): InlineSummary | nul
     total: candidates.length,
     completed,
     items: [],
+    previewItems,
     activeTask: {
       id: "collaboration-active",
       content: label,

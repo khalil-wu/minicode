@@ -180,7 +180,7 @@ const summarizeCollaborationResults = () => {
 }
 
 const workflowNodeLabel = (view: AgentView): string =>
-  stripWorkflowPrefix(view.objective || summaryTitle(view.summary) || view.nodeId || view.taskId || view.id, view.workflowName)
+  stripWorkflowPrefix(view.title || view.nodeId || view.taskId || view.id, view.workflowName)
 
 const stableViewOrder = (left: AgentView, right: AgentView): number => {
   const leftOrder = typeof left.order === 'number' ? left.order : Number.POSITIVE_INFINITY
@@ -280,6 +280,8 @@ function cleanedResultContent(content: string): string {
 function isLowValueResultLine(line: string): boolean {
   if (!line) return false
   return (
+    /\bcall_[a-z0-9_-]{8,}\b/i.test(line) ||
+    /^\d+(?:\.\d+)?s elapsed$/i.test(line) ||
     /^Subagent\s+subagent-[\w-]+.*completed/i.test(line) ||
     /^已达到最大迭代次数限制/i.test(line) ||
     /^Recovery summary based on completed tool results:?$/i.test(line) ||
@@ -421,6 +423,7 @@ const AgentRow = ({
   const resultText = sub.resultError || sub.resultContent || ''
   const hasResult = view.hasResult && !view.coordinatorNoticeKind
   const cleanedResult = hasResult && sub.resultContent ? cleanedResultContent(sub.resultContent) : ''
+  const cleanedError = sub.resultError ? cleanedResultContent(sub.resultError) : ''
   const chips = view.metadataChips
   const title = view.title
   const secondary = view.summary
@@ -491,9 +494,9 @@ const AgentRow = ({
             <div className="subagents-row-details-inner">
               {detail && <div className="subagents-detail-line">{detail}</div>}
               {progressTrace && <div className="subagents-detail-muted">{progressTrace}</div>}
-              {sub.resultError && (
+              {cleanedError && (
                 <pre className="subagents-result subagents-result-raw" data-error="true">
-                  {sub.resultError}
+                  {cleanedError}
                 </pre>
               )}
               {cleanedResult && (
@@ -526,6 +529,7 @@ const AgentDetail = ({
   const sub = view.source
   const status = view.effectiveStatus
   const result = sub.resultContent ? cleanedResultContent(sub.resultContent) : ''
+  const resultError = sub.resultError ? cleanedResultContent(sub.resultError) : ''
   const activity = view.activity
   const trace = view.progressTrace
   const needsResult = view.needsResult
@@ -544,7 +548,7 @@ const AgentDetail = ({
         </div>
       </header>
       <div className="subagents-detail-scroll">
-        <p className="subagents-detail-brief">{sub.objective || summaryTitle(sub.summary) || activity || '正在处理当前任务。'}</p>
+        <p className="subagents-detail-brief">{view.title || view.summary || activity || '正在处理当前任务。'}</p>
 
         {view.metadataChips.length > 0 && (
           <div className="subagents-chip-row">
@@ -572,10 +576,10 @@ const AgentDetail = ({
           </details>
         )}
 
-        {(result || sub.resultError || needsResult) && (
+        {(result || resultError || needsResult) && (
           <section className="subagents-detail-result" aria-label="Agent 结果">
             <h3>结果</h3>
-            {sub.resultError && <div className="subagents-detail-error">{sub.resultError}</div>}
+            {resultError && <div className="subagents-detail-error">{resultError}</div>}
             {result && <MarkdownRenderer content={result} />}
             {needsResult && <div className="subagents-detail-muted">结果已就绪，获取后会显示在这里。</div>}
           </section>
@@ -721,10 +725,10 @@ export const SubagentsTab = () => {
           const canResume = children.some((child) => child.effectiveStatus === 'pending')
           const status = workflow.effectiveStatus
           return (
-            <section key={workflow.id} className="subagents-workflow-card" aria-label={workflow.workflowName || workflow.id} data-status={status}>
+            <section key={workflow.id} className="subagents-workflow-card" aria-label={workflow.workflowName || workflow.title} data-status={status}>
               <div className="subagents-workflow-header">
                 <GitBranch size={14} />
-                <span className="subagents-workflow-title">{workflow.workflowName || workflow.objective || workflow.id}</span>
+                <span className="subagents-workflow-title">{workflow.workflowName || workflow.title}</span>
                 <span className="subagents-workflow-meta">{workflowStatusMeta(children)}</span>
                 {canResume && (
                   <SmallButton

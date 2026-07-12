@@ -1121,11 +1121,13 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         const visibleSubagents = visibleSubagentsForConversation(conversationId);
         const existing = visibleSubagents.find((subagent) => subagent.id === workflowId);
         const patch = {
-          status: "error" as const,
+          status: "cancelled" as const,
           summary,
           detail,
           resultContent,
           resultAvailable: Boolean(resultContent),
+          terminationReason: "workflow_cancelled",
+          terminationInitiator: maybeString(eventPayload.initiator) ?? "parent",
           workflowId,
           workflowName: name,
           workflowMode: mode,
