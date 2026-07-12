@@ -9,8 +9,11 @@ const userVisibleLine = (value?: string): string => {
   if (
     !line
     || /\bcall_[a-z0-9_-]{8,}\b/i.test(line)
+    || /\bart_[a-z0-9_-]{6,}\b/i.test(line)
     || /^(?:tool started|running)\s*:?\s*[a-z0-9_.-]+$/i.test(line)
     || /^\d+(?:\.\d+)?s elapsed$/i.test(line)
+    || /^(?:ready\s*\/\s*launched|waiting on dependencies)[.!…]*$/i.test(line)
+    || /^(?:workflow mode|task output)\s*:/i.test(line)
   ) {
     return "";
   }
@@ -98,7 +101,11 @@ export function projectSubagentActivityItems(agent: SubagentState): ActivityItem
       kind: "agent",
       status: "completed",
       title: "任务已创建",
-      visibility: "activity",
+      // Creation is useful for replay/Inspector, but is not a user-facing
+      // milestone. Showing it in the sidebar makes every task look noisier
+      // without telling the user what the agent actually did.
+      // `developer` is the canonical Inspector-only visibility tier.
+      visibility: "developer",
       groupKey,
       hasFailure: false,
       hasPendingUserAction: false,
@@ -114,7 +121,6 @@ export function projectSubagentActivityItems(agent: SubagentState): ActivityItem
       title: executionTitle(agent),
       summary: userVisibleLine(agent.objective) || undefined,
       finishedAt: isTerminalStatus(agent.status) ? agent.lastEventAt : undefined,
-      durationMs: agent.durationMs,
       visibility: "activity",
       groupKey,
       hasFailure: agent.status === "error",

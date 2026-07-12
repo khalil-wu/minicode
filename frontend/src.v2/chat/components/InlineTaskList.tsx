@@ -296,7 +296,8 @@ interface InlinePreviewItem {
 function summarizeCollaboration(subagents: SubagentState[]): InlineSummary | null {
   const userVisibleSubagents = subagents.filter((subagent) => subagent.role !== "message");
   const visible = userVisibleSubagents.filter((subagent) => subagent.role !== "workflow" && !subagent.id.startsWith("workflow-"));
-  const candidates = visible.length > 0 ? visible : userVisibleSubagents;
+  const visibleCandidates = visible.length > 0 ? visible : userVisibleSubagents;
+  const candidates = selectCurrentCollaborationBatch(visibleCandidates);
   const previewItems = projectAgentViews(candidates).map((view) => ({
     id: view.id,
     title: view.title,
@@ -374,6 +375,55 @@ function summarizeCollaboration(subagents: SubagentState[]): InlineSummary | nul
     allCompleted: false,
     hasBlocked: blocked > 0 && !collectOnly,
   };
+}
+
+/**
+ * A conversation can contain many historical agents. The composer represents
+ * the current delegation burst only, so prefer the newest active parent run
+ * and never let an old completed task inflate the denominator.
+ */
+function selectCurrentCollaborationBatch(subagents: SubagentState[]): SubagentState[] {
+  const active = subagents.filter((subagent) =>
+    ["running", "pending", "blocked"].includes(effectiveSubagentStatus(subagent)),
+  );
+  if (active.length === 0) {
+    return subagents.filter((subagent) => effectiveSubagentStatus(subagent) === "error");
+  }
+
+  const grouped = new Map<string, SubagentState[]>();
+  for (const subagent of subagents) {
+    if (!subagent.parentRunId) continue;
+    const group = grouped.get(subagent.parentRunId) ?? [];
+    group.push(subagent);
+    grouped.set(subagent.parentRunId, group);
+  }
+  const activeGroups = [...grouped.entries()]
+    .map(([parentRunId, group]) => ({
+      parentRunId,
+      group,
+      active: group.filter((subagent) => active.includes(subagent)).length,
+      latest: Math.max(...group.map((subagent) => subagent.lastEventAt ?? subagent.lastProgressAt ?? 0)),
+    }))
+    .filter((entry) => entry.active > 0)
+    .sort((left, right) => right.latest - left.latest || right.active - left.active);
+  if (activeGroups.length > 0) {
+    return activeGroups[0].group;
+  }
+
+  // Older event producers do not attach parentRunId. In that case, keep
+  // recently finished siblings in the current burst so the compact progress
+  // advances 1/3 -> 2/3 instead of shrinking its denominator to 1/2. A
+  // timestamp window prevents unrelated historical work from being counted.
+  const newestActiveAt = Math.max(
+    ...active.map((subagent) => subagent.lastEventAt ?? subagent.lastProgressAt ?? 0),
+  );
+  if (newestActiveAt <= 0) return subagents;
+  const burstWindowMs = 2 * 60 * 1000;
+  return subagents.filter((subagent) => {
+    if (active.includes(subagent)) return true;
+    const eventAt = subagent.lastEventAt ?? subagent.lastProgressAt ?? 0;
+    return eventAt > 0 && Math.abs(newestActiveAt - eventAt) <= burstWindowMs;
+  });
 }
 
 function summarizeBackgroundRun({

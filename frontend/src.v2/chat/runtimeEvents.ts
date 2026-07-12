@@ -53,8 +53,6 @@ const subagentProgressSummary = (ev: {
 }): string => {
   const detail = userVisibleSubagentProgress(ev.detail);
   if (detail) return detail;
-  const toolName = userVisibleSubagentProgress(ev.tool_name);
-  if (toolName) return `Running ${toolName}`;
   return "正在执行子任务";
 };
 
@@ -1227,15 +1225,16 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       const terminationReason = maybeString((e as unknown as Record<string, unknown>).termination_reason);
       const terminationInitiator = maybeString((e as unknown as Record<string, unknown>).initiator);
       const checkpointId = maybeString((e as unknown as Record<string, unknown>).checkpoint_id);
+      const timedOut = Boolean(e.timed_out);
       const failed = Boolean(e.error || resultError || eventStatus === "failed");
-      const uiStatus = eventStatus === "partial"
+      const uiStatus = eventStatus === "partial" || timedOut
         ? "partial"
         : eventStatus === "cancelled"
           ? "cancelled"
           : failed
             ? "error"
             : "done";
-      const summary = e.error || e.summary || (e.timed_out ? "Timed out" : undefined);
+      const summary = e.error || e.summary;
       const record = maybeObject((e as unknown as { record?: unknown }).record);
       const metadata = subagentMetadataPatch(e as unknown as Record<string, unknown>, record);
       const currentState = useAppStore.getState();
@@ -1252,7 +1251,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
           durationMs,
           toolCallCount,
           resultAvailable: Boolean(resultContent || resultError),
-          terminationReason,
+          terminationReason: timedOut ? "deadline_exceeded" : terminationReason,
           terminationInitiator,
           checkpointId,
           ...metadata,
@@ -1268,7 +1267,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
           durationMs,
           toolCallCount,
           resultAvailable: Boolean(resultContent || resultError),
-          terminationReason,
+          terminationReason: timedOut ? "deadline_exceeded" : terminationReason,
           terminationInitiator,
           checkpointId,
           ...metadata,

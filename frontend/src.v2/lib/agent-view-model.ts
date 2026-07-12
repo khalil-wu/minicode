@@ -5,62 +5,31 @@ import {
   type CoordinatorNoticeKind,
 } from "./collaborationDisplay";
 import type { SubagentState } from "../stores/types";
-import type { ActivityItem } from "../agent-loop/activity-item";
-import { projectSubagentActivityItems } from "../agent-loop/projection/project-subagent-activity-items";
 
 export type AgentDisplayStatus = "attention" | "running" | "waiting" | "completed";
 export type { CoordinatorNoticeKind } from "./collaborationDisplay";
 
+/**
+ * Ordinary UI projection for delegated work.
+ *
+ * Runtime diagnostics (call ids, elapsed time, tool/iteration counts, progress
+ * traces and protocol milestones) deliberately stay on SubagentState and in
+ * Inspector. Components consuming AgentView should only be able to render
+ * information a person needs to understand or act on the delegated task.
+ */
 export interface AgentView {
   id: string;
   title: string;
   summary: string;
   status: AgentDisplayStatus;
   statusLabel: string;
-  elapsedLabel: string;
-  roleLabel: string;
   effectiveStatus: SubagentState["status"];
-  coordinatorNoticeKind: CoordinatorNoticeKind | null;
   isWorkflow: boolean;
-  activity: string;
-  detail: string;
-  progressTrace: string;
-  stats: string;
-  metadataChips: string[];
-  runtimeRows: AgentRuntimeRow[];
-  activityItems: ActivityItem[];
-  milestones: AgentMilestone[];
   hasResult: boolean;
   needsResult: boolean;
-  hasKnownProgress: boolean;
-  progressPercent: number;
   canStop: boolean;
-  workflowId?: string;
-  workflowName?: string;
-  workflowMode?: string;
-  nodeId?: string;
-  taskId?: string;
-  objective?: string;
-  blockedBy?: string[];
-  dependsOn?: string[];
-  order?: number;
-  lastProgressAt?: number;
-  lastEventAt?: number;
-  resultAvailable?: boolean;
   resultContent?: string;
   resultError?: string;
-  source: SubagentState;
-}
-
-export interface AgentRuntimeRow {
-  label: string;
-  value: string;
-  tone?: "warning" | "muted";
-}
-
-export interface AgentMilestone {
-  label: string;
-  done: boolean;
 }
 
 const isWorkflow = (agent: SubagentState): boolean =>
@@ -68,26 +37,28 @@ const isWorkflow = (agent: SubagentState): boolean =>
 
 const firstLine = (value?: string): string => String(value || "").trim().split(/\r?\n/).find(Boolean)?.trim() || "";
 
-const compactList = (items?: string[], limit = 2): string => {
-  if (!items?.length) return "";
-  const visible = items.slice(0, limit).join(", ");
-  return items.length > limit ? `${visible} +${items.length - limit}` : visible;
-};
-
-const blocksFinalReply = (agent: SubagentState): boolean => {
-  if (typeof agent.blocksFinalReply === "boolean") return agent.blocksFinalReply;
-  if (typeof agent.requiredForFinal === "boolean") return agent.requiredForFinal;
-  return Boolean(agent.workflowId && agent.role !== "workflow");
-};
-
 const isLowValueDetail = (value: string): boolean => {
   const normalized = value.trim().toLowerCase();
   return !normalized
     || /^(?:running task|task running|working|processing|in progress)[.!…]*$/.test(normalized)
     || /^iteration \d+(?:\/\d+)?/.test(normalized)
     || /\bcall_[a-z0-9_-]{8,}\b/i.test(normalized)
-    || /^(?:tool started|running)\s*:?\s*[a-z0-9_.-]+$/i.test(normalized)
-    || /^\d+(?:\.\d+)?s elapsed$/i.test(normalized);
+    || /\bart_[a-z0-9_-]{6,}\b/i.test(normalized)
+    || /\bmcp__[a-z0-9_.-]+/i.test(normalized)
+    || /^(?:tool started|running|using tool)\s*:?\s*[a-z0-9_.:/-]+$/i.test(normalized)
+    || /^(?:read|grep|glob|search|write|edit|patch|run|execute)_[a-z0-9_.-]+$/i.test(normalized)
+    || /\b(?:workflow|checkpoint|tool[_ -]?call|node)[_ -]?id\s*[:=]/i.test(normalized)
+    || /^\d+(?:\.\d+)?s elapsed$/i.test(normalized)
+    || /^timed out[.!…]*$/i.test(normalized)
+    || /^(?:ready\s*\/\s*launched|waiting on dependencies)[.!…]*$/i.test(normalized)
+    || /^workflow mode\s*:/i.test(normalized)
+    || /^task output\s*:/i.test(normalized)
+    || /^subagent\s+subagent-[\w-]+.*completed/i.test(normalized)
+    || /^stats:\s*\d+\s+iteration/i.test(normalized)
+    || /^tools used \(\d+ total\):/i.test(normalized)
+    || /^(?:read artifact|read file|grep files|glob files)\b/i.test(normalized)
+    || /^agent\s*\d+$/i.test(normalized)
+    || /^(?:subagent|task|node)[-_ ][a-z0-9_-]+$/i.test(normalized);
 };
 
 const userVisibleLine = (value?: string): string => {
@@ -95,82 +66,40 @@ const userVisibleLine = (value?: string): string => {
   return line && !isLowValueDetail(line) ? line : "";
 };
 
-const roleLabel = (role?: string): string => {
-  switch ((role || "").toLowerCase()) {
-    case "workflow": return "任务组";
-    case "explore":
-    case "explorer": return "探索";
-    case "review":
-    case "reviewer": return "审查";
-    case "verification":
-    case "verify":
-    case "verifier": return "验证";
-    case "implement":
-    case "worker": return "执行";
-    case "general-purpose": return "通用";
-    case "subagent": return "执行";
-    default: return role || "任务";
-  }
-};
-
-const progressTrace = (agent: SubagentState): string => {
-  switch ((agent.progressSource || "").toLowerCase()) {
-    case "tool_call": return "工具调用";
-    case "agent.progress": return "进度事件";
-    default: return agent.progressSource || "";
-  }
-};
-
-const metadataChips = (agent: SubagentState): string[] => [
-  agent.nodeId ? `任务 ${agent.nodeId}` : "",
-  blocksFinalReply(agent) ? "阻塞最终答复" : agent.requiredForFinal === false ? "不阻塞最终答复" : "",
-  agent.readOnly ? "只读" : "",
-  agent.blockedBy?.length ? `等待 ${compactList(agent.blockedBy)}` : "",
-  agent.dependsOn?.length && !agent.blockedBy?.length ? `依赖 ${compactList(agent.dependsOn)}` : "",
-  agent.writeScope?.length ? `写入 ${compactList(agent.writeScope)}` : "",
-].filter(Boolean);
-
 const cleanTitle = (value: string): string => value
   .replace(/^(?:ready|blocked|pending|task updated|task output|task created):\s*/i, "")
   .replace(/^\[[^\]]+\]\s*/, "")
   .trim();
 
+const fallbackTitleForRole = (role?: string): string => {
+  switch ((role || "").toLowerCase()) {
+    case "explore":
+    case "explorer":
+      return "调研任务";
+    case "review":
+    case "reviewer":
+      return "审查任务";
+    case "verification":
+    case "verify":
+    case "verifier":
+      return "验证任务";
+    case "implement":
+    case "worker":
+      return "执行任务";
+    default:
+      return "子任务";
+  }
+};
+
 const titleFor = (agent: SubagentState): string => {
   const coordinatorNotice = userFacingCoordinatorNoticeForSubagent(agent);
   if (coordinatorNotice) return userVisibleLine(agent.objective) || coordinatorNotice;
-  const title = cleanTitle(userVisibleLine(agent.objective) || userVisibleLine(agent.summary) || agent.nodeId || agent.role || agent.id);
+  const title = cleanTitle(userVisibleLine(agent.objective) || userVisibleLine(agent.summary));
   const workflowName = String(agent.workflowName || "").trim();
   if (workflowName && title.toLowerCase().startsWith(`${workflowName.toLowerCase()}:`)) {
-    return title.slice(workflowName.length + 1).trim();
+    return title.slice(workflowName.length + 1).trim() || fallbackTitleForRole(agent.role);
   }
-  return title;
-};
-
-const elapsedLabel = (agent: SubagentState, now: number): string => {
-  if (typeof agent.durationMs === "number") {
-    const seconds = Math.max(0, Math.round(agent.durationMs / 1000));
-    return seconds < 60 ? `${seconds}s` : `${Math.round(seconds / 60)}m`;
-  }
-  const timestamp = agent.lastProgressAt || agent.lastEventAt;
-  if (!timestamp) return effectiveSubagentStatus(agent) === "pending" ? "等待" : "";
-  const seconds = Math.max(0, Math.round((now - timestamp) / 1000));
-  return seconds < 60 ? `${seconds}s` : `${Math.round(seconds / 60)}m`;
-};
-
-const statsLabel = (agent: SubagentState, now: number): string => {
-  const duration = typeof agent.durationMs === "number"
-    ? `${Math.max(0, agent.durationMs / 1000).toFixed(1)}s`
-    : "";
-  const timestamp = agent.lastEventAt;
-  const age = timestamp
-    ? (() => {
-        const seconds = Math.max(0, Math.round((now - timestamp) / 1000));
-        if (seconds < 60) return `${seconds}s 前`;
-        const minutes = Math.round(seconds / 60);
-        return minutes < 60 ? `${minutes}m 前` : `${Math.round(minutes / 60)}h 前`;
-      })()
-    : "";
-  return [duration, age].filter(Boolean).join(" · ");
+  return title || fallbackTitleForRole(agent.role);
 };
 
 const displayStatus = (agent: SubagentState): AgentDisplayStatus => {
@@ -205,16 +134,16 @@ const statusLabelFor = (agent: SubagentState, status: AgentDisplayStatus): strin
   if (effective === "blocked") {
     switch (coordinatorNoticeKindForSubagent(agent)) {
       case "collect_results": return "整理中";
-      case "duplicate_delegation": return "已收敛";
-      case "capacity": return "待收敛";
-      default: return "等待依赖";
+      case "duplicate_delegation": return "已跳过";
+      case "capacity": return "排队中";
+      default: return "等待中";
     }
   }
   if (effective === "running") return "运行中";
   if (effective === "pending") return "等待中";
   if (effective === "done") return "已完成";
   if (effective === "partial") {
-    return agent.terminationReason === "deadline_exceeded" ? "达到时限" : "部分完成";
+    return agent.terminationReason === "deadline_exceeded" ? "已保留结果" : "部分完成";
   }
   if (effective === "cancelled") {
     return agent.terminationInitiator === "user" ? "已停止" : "已取消";
@@ -230,55 +159,63 @@ const summaryFor = (agent: SubagentState): string => {
   const activity = userVisibleLine(agent.currentActivity);
   const detail = userVisibleLine(agent.detail);
   if (status === "error") return userVisibleLine(agent.resultError) || "执行失败";
-  if (status === "partial") return userVisibleLine(agent.summary) || "已保留部分结果";
+  if (status === "partial") {
+    if (agent.terminationReason === "deadline_exceeded") {
+      return userVisibleLine(agent.summary) || "已保留可用结果";
+    }
+    return userVisibleLine(agent.summary) || "已完成部分工作";
+  }
   if (status === "cancelled") return agent.terminationInitiator === "user" ? "已由你停止" : "任务已取消";
-  if (status === "blocked" && agent.blockedBy?.length) return `等待前置任务：${compactList(agent.blockedBy, 3)}`;
+  if (status === "blocked" && agent.blockedBy?.length) return "等待前置任务完成";
   if (status === "pending") return "等待启动";
   if (status === "done") return userVisibleLine(agent.summary) || activity || "任务已完成";
   return activity || detail || userVisibleLine(agent.summary) || "正在执行";
 };
 
-const activityFor = (agent: SubagentState): string => {
-  if (userVisibleLine(agent.currentActivity)) return userVisibleLine(agent.currentActivity);
-  if (userVisibleLine(agent.detail)) return userVisibleLine(agent.detail);
-  return summaryFor(agent);
+const isLowValueResultLine = (line: string): boolean => {
+  if (!line) return false;
+  return (
+    /\bcall_[a-z0-9_-]{8,}\b/i.test(line)
+    || /\bart_[a-z0-9_-]{6,}\b/i.test(line)
+    || /\bmcp__[a-z0-9_.-]+/i.test(line)
+    || /^\d+(?:\.\d+)?s elapsed$/i.test(line)
+    || /^timed out[.!…]*$/i.test(line)
+    || /^subagent\s+subagent-[\w-]+.*completed/i.test(line)
+    || /\bsubagent-[a-z0-9_-]{4,}\b/i.test(line)
+    || /^stats:\s*\d+\s+iteration/i.test(line)
+    || /^tools used \(\d+ total\):/i.test(line)
+    || /^recovery summary based on completed tool results:?$/i.test(line)
+    || /^internal artifact was read/i.test(line)
+    || /^(?:ready\s*\/\s*launched|waiting on dependencies)[.!…]*$/i.test(line)
+    || /^workflow mode\s*:/i.test(line)
+    || /^task output\s*:/i.test(line)
+    || /^(?:read artifact|read file|grep files|glob files)\b/i.test(line)
+    || /^\d+\.\s*(?:read file|grep files|glob files|read artifact)\b/i.test(line)
+    || /^[-*]\s*(?:read_file|grep_files|glob_files|read_artifact)\(/i.test(line)
+    || /\b\d+\s+iteration\(s\)|\b\d+\s+tool call\(s\)/i.test(line)
+    || /\b(?:workflow|checkpoint|tool[_ -]?call|node)[_ -]?id\s*[:=]/i.test(line)
+    || /<task-notification>|<\/task-notification>|<task-id>|<\/task-id>/i.test(line)
+  );
 };
 
-const detailFor = (agent: SubagentState): string =>
-  agent.detail && agent.detail !== agent.currentActivity && userVisibleLine(agent.detail)
-    ? userVisibleLine(agent.detail)
-    : "";
-
-const runtimeRows = (agent: SubagentState, status: SubagentState["status"], now: number): AgentRuntimeRow[] => {
-  const waitingOn = userVisibleLine(agent.waitingOn);
-  const currentTool = userVisibleLine(agent.currentTool);
-  const waiting = waitingOn
-    || (agent.blockedBy?.length ? compactList(agent.blockedBy, 3) : "")
-    || (status === "pending" ? "启动" : status === "running" ? currentTool || "执行" : "");
-  const activity = userVisibleLine(agent.currentActivity);
-  const updated = agent.lastProgressAt || agent.lastEventAt;
-  const age = updated ? elapsedLabel({ ...agent, durationMs: undefined, lastProgressAt: updated }, now) : "";
-  return [
-    activity ? { label: "活动", value: activity } : null,
-    waiting ? {
-      label: "等待",
-      value: waiting,
-      tone: status === "blocked" || status === "pending" ? "warning" as const : "muted" as const,
-    } : null,
-    age ? { label: "最近更新", value: `${age} 前`, tone: "muted" as const } : null,
-    agent.workflowId && agent.role !== "workflow"
-      ? {
-          label: "最终答复",
-          value: blocksFinalReply(agent) ? "阻塞" : "不阻塞",
-          tone: blocksFinalReply(agent) ? "warning" as const : "muted" as const,
-        }
-      : null,
-  ].filter((row): row is AgentRuntimeRow => Boolean(row));
+/**
+ * Remove protocol/runtime noise before result text reaches ordinary UI.
+ * Inspector and replay still receive the original SubagentState payload.
+ */
+export const sanitizeAgentResultContent = (content?: string): string => {
+  const text = String(content || "").trim();
+  if (!text) return "";
+  const lines = text.split(/\r?\n/);
+  const kept = lines.filter((line) => !isLowValueResultLine(line.trim()));
+  const cleaned = kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  return cleaned || "";
 };
 
-const progressPercent = (agent: SubagentState): number => {
-  if (typeof agent.iteration !== "number" || !agent.maxIterations || agent.maxIterations <= 0) return 0;
-  return Math.max(0, Math.min(100, Math.round((agent.iteration / agent.maxIterations) * 100)));
+const projectedResult = (agent: SubagentState, field: "resultContent" | "resultError"): string | undefined => {
+  const coordinatorNotice = userFacingCoordinatorNoticeForSubagent(agent);
+  if (coordinatorNotice && agent[field]) return coordinatorNotice;
+  const value = sanitizeAgentResultContent(agent[field]);
+  return value || undefined;
 };
 
 const rank: Record<AgentDisplayStatus, number> = {
@@ -288,129 +225,49 @@ const rank: Record<AgentDisplayStatus, number> = {
   completed: 3,
 };
 
-export function projectAgentViews(agents: SubagentState[], now = Date.now()): AgentView[] {
+export function projectAgentViews(
+  agents: SubagentState[],
+  _now = Date.now(),
+  options: { includeWorkflows?: boolean } = {},
+): AgentView[] {
   return agents
-    .filter((agent) => agent.role !== "message" && !isWorkflow(agent))
+    .filter((agent) => agent.role !== "message" && (options.includeWorkflows || !isWorkflow(agent)))
+    .sort((left, right) =>
+      rank[displayStatus(left)] - rank[displayStatus(right)]
+      || (right.lastProgressAt || right.lastEventAt || 0) - (left.lastProgressAt || left.lastEventAt || 0),
+    )
     .map((source) => {
       const status = displayStatus(source);
       const effectiveStatus = effectiveSubagentStatus(source);
-      const activity = activityFor(source);
+      const resultContent = projectedResult(source, "resultContent");
+      const resultError = projectedResult(source, "resultError");
       const terminalWithoutResult = ["done", "partial", "cancelled", "error"].includes(effectiveStatus);
       const needsResult = Boolean(
-        !source.resultContent
+        !resultContent
+        && !resultError
+        && !source.resultContent
         && !source.resultError
         && (source.resultAvailable || terminalWithoutResult),
       );
-      const activityItems = projectSubagentActivityItems(source);
-      const coordinatorNoticeKind = coordinatorNoticeKindForSubagent(source) as CoordinatorNoticeKind;
       return {
         id: source.id,
         title: titleFor(source),
         summary: summaryFor(source),
         status,
         statusLabel: statusLabelFor(source, status),
-        elapsedLabel: elapsedLabel(source, now),
-        roleLabel: roleLabel(source.role),
         effectiveStatus,
-        coordinatorNoticeKind,
         isWorkflow: isWorkflow(source),
-        activity,
-        detail: detailFor(source),
-        progressTrace: progressTrace(source),
-        stats: statsLabel(source, now),
-        metadataChips: metadataChips(source),
-        runtimeRows: runtimeRows(source, effectiveStatus, now),
-        activityItems,
-        milestones: activityItems.map((item) => ({
-          label: item.title,
-          done: item.status === "completed" || item.status === "failed" || item.status === "cancelled",
-        })),
-        hasResult: Boolean(source.resultError || source.resultContent || source.resultAvailable || effectiveStatus === "done" || effectiveStatus === "error"),
+        hasResult: Boolean(resultError || resultContent || source.resultAvailable),
         needsResult,
-        hasKnownProgress: typeof source.iteration === "number" && Boolean(source.maxIterations && source.maxIterations > 0),
-        progressPercent: progressPercent(source),
         canStop: effectiveStatus === "running" && source.id.startsWith("subagent-"),
-        workflowId: source.workflowId,
-        workflowName: source.workflowName,
-        workflowMode: source.workflowMode,
-        nodeId: source.nodeId,
-        taskId: source.taskId,
-        objective: source.objective,
-        blockedBy: source.blockedBy,
-        dependsOn: source.dependsOn,
-        order: source.order,
-        lastProgressAt: source.lastProgressAt,
-        lastEventAt: source.lastEventAt,
-        resultAvailable: source.resultAvailable,
-        resultContent: source.resultContent,
-        resultError: source.resultError,
-        source,
+        resultContent,
+        resultError,
       };
-    })
-    .sort((left, right) =>
-      rank[left.status] - rank[right.status]
-      || (right.source.lastProgressAt || right.source.lastEventAt || 0) - (left.source.lastProgressAt || left.source.lastEventAt || 0),
-    );
+    });
 }
 
 export function projectAllAgentViews(agents: SubagentState[], now = Date.now()): AgentView[] {
-  return agents
-    .filter((agent) => agent.role !== "message")
-    .map((source) => {
-      const status = displayStatus(source);
-      const effectiveStatus = effectiveSubagentStatus(source);
-      const activity = activityFor(source);
-      const needsResult = Boolean(source.resultAvailable && !source.resultContent && !source.resultError);
-      const activityItems = projectSubagentActivityItems(source);
-      const coordinatorNoticeKind = coordinatorNoticeKindForSubagent(source) as CoordinatorNoticeKind;
-      return {
-        id: source.id,
-        title: titleFor(source),
-        summary: summaryFor(source),
-        status,
-        statusLabel: statusLabelFor(source, status),
-        elapsedLabel: elapsedLabel(source, now),
-        roleLabel: roleLabel(source.role),
-        effectiveStatus,
-        coordinatorNoticeKind,
-        isWorkflow: isWorkflow(source),
-        activity,
-        detail: detailFor(source),
-        progressTrace: progressTrace(source),
-        stats: statsLabel(source, now),
-        metadataChips: metadataChips(source),
-        runtimeRows: runtimeRows(source, effectiveStatus, now),
-        activityItems,
-        milestones: activityItems.map((item) => ({
-          label: item.title,
-          done: item.status === "completed" || item.status === "failed" || item.status === "cancelled",
-        })),
-        hasResult: Boolean(source.resultError || source.resultContent || source.resultAvailable || effectiveStatus === "done" || effectiveStatus === "error"),
-        needsResult,
-        hasKnownProgress: typeof source.iteration === "number" && Boolean(source.maxIterations && source.maxIterations > 0),
-        progressPercent: progressPercent(source),
-        canStop: effectiveStatus === "running" && source.id.startsWith("subagent-"),
-        workflowId: source.workflowId,
-        workflowName: source.workflowName,
-        workflowMode: source.workflowMode,
-        nodeId: source.nodeId,
-        taskId: source.taskId,
-        objective: source.objective,
-        blockedBy: source.blockedBy,
-        dependsOn: source.dependsOn,
-        order: source.order,
-        lastProgressAt: source.lastProgressAt,
-        lastEventAt: source.lastEventAt,
-        resultAvailable: source.resultAvailable,
-        resultContent: source.resultContent,
-        resultError: source.resultError,
-        source,
-      };
-    })
-    .sort((left, right) =>
-      rank[left.status] - rank[right.status]
-      || (right.source.lastProgressAt || right.source.lastEventAt || 0) - (left.source.lastProgressAt || left.source.lastEventAt || 0),
-    );
+  return projectAgentViews(agents, now, { includeWorkflows: true });
 }
 
 export function visibleAgentChips(agents: SubagentState[], limit = 3): { agents: AgentView[]; hiddenCount: number } {
