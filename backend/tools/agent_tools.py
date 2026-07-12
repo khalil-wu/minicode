@@ -81,9 +81,9 @@ def _user_visible_progress_text(value: Any) -> str:
     return text
 
 
-def _scope_parallel_task_prompt(task: dict[str, Any], *, scope: str | None = None) -> str:
+def _scope_parallel_task_prompt(task: dict[str, Any], *, scope: str) -> str:
     prompt = str(task.get("prompt") or "").strip()
-    assigned_scope = str(scope or task.get("description") or task.get("objective") or "").strip()
+    assigned_scope = str(scope).strip()
     if not assigned_scope:
         return prompt
     return (

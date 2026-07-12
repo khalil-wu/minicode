@@ -738,7 +738,9 @@ export const SubagentsTab = () => {
                   />
                 )}
               </div>
-              {workflow.resultError && <div className="subagents-detail-error">{workflow.resultError}</div>}
+              {workflow.resultError && (
+                <div className="subagents-detail-error">{cleanedResultContent(workflow.resultError)}</div>
+              )}
               {workflow.resultContent && (
                 <div className="subagents-result"><MarkdownRenderer content={cleanedResultContent(workflow.resultContent)} /></div>
               )}
