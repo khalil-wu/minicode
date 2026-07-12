@@ -123,6 +123,13 @@ def _exclusive_parallel_task_scopes(tasks: list[dict[str, Any]]) -> list[str]:
     normalized_scopes = [scope.casefold() for scope in scopes]
     if len(set(normalized_scopes)) != len(normalized_scopes):
         return []
+    generic_scope = re.compile(
+        r"^(?:agent|subagent|worker|task|subtask|researcher|智能体|子智能体|子\s*agent|任务|调研员)"
+        r"\s*[-_#：:]?\s*[一二三四五六七八九十\d]+$",
+        re.IGNORECASE,
+    )
+    if any(generic_scope.fullmatch(scope) for scope in scopes):
+        return []
     return scopes
 
 
@@ -493,7 +500,9 @@ class TaskTool(BaseTool):
                         "type": "array",
                         "description": (
                             "Run multiple subtasks concurrently. Each item is an object with "
-                            "'description', 'prompt', and optional 'agent_type'. "
+                            "'description', 'prompt', and optional 'agent_type'. Each description "
+                            "or objective must name one concrete, non-overlapping scope; generic "
+                            "labels such as 'Agent 1' are rejected. "
                             "When provided, the single-task 'prompt'/'description' fields are ignored."
                         ),
                         "items": {

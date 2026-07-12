@@ -165,7 +165,15 @@ export function InlineTaskList({ wide = false }: InlineTaskListProps = {}) {
       data-editing-files={isFileActive ? "true" : "false"}
       style={{ maxWidth: wide ? "min(560px, calc(100% - 32px))" : "min(480px, calc(100% - 32px))" }}
     >
-      <span className="sr-only" role="status" aria-label={ariaLabel} aria-live="polite" />
+      <span
+        className="sr-only"
+        role="status"
+        aria-label={ariaLabel}
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        {ariaLabel}
+      </span>
       <button
         type="button"
         className="inline-task-pill inline-task-pill-button"
