@@ -17,6 +17,9 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 
+_TRANSITION_HISTORY_LIMIT = 40
+
+
 @dataclass
 class ToolCallRecord:
     """单次工具调用记录。"""
@@ -35,7 +38,41 @@ class ToolCallRecord:
     user_summary: str | None = None
     developer_detail: str | None = None
     projection: str | None = None
+    turn_id: str | None = None  # Codex-style: correlates tool calls with conversation turns
+    iteration_id: str = ""  # Agent loop iteration that produced this call
     status: Literal["success", "error", "failed", "blocked", "partial"] = "success"
+
+
+# Terminal-reason vocabulary for run termination.
+TerminalReason = Literal[
+    "completed",
+    "interrupted",
+    "budget_exceeded",
+    "max_iterations",
+    "max_tool_calls",
+    "stagnation",
+    "partial_stream_error",
+    "recovered_stream_error",
+    "stream_error",
+    "partial_timeout",
+    "recovered_timeout",
+    "timeout",
+    "partial_api_error",
+    "recovered_api_error",
+    "api_error",
+    "api",
+    "auth",
+    "blocked",
+    "provider_capability",
+    "incomplete_tool_stream",
+    "tool_error",
+    "empty_reply",
+    "max_retries",
+    "invalid_model_action",
+    "billing",
+    "model",
+    "unknown",
+]
 
 
 @dataclass
@@ -52,18 +89,7 @@ class AgentState:
     # ── 执行状态 ──
     iterations: int = 0
     reply: str = ""
-    stopped_reason: Literal[
-        "completed",
-        "tool_error",
-        "invalid_model_action",
-        "max_iterations",
-        "stagnation",
-        "budget_exceeded",
-        "interrupted",
-        "api_error",
-        "timeout",
-        "billing",
-    ] | None = None
+    stopped_reason: TerminalReason | None = None
 
     # ── 工具记录 ──
     tool_calls: list[ToolCallRecord] = field(default_factory=list)
@@ -76,6 +102,7 @@ class AgentState:
     workspace_context: Any = None  # WorkspaceContext 实例（项目上下文）
     attachments: list[dict[str, Any]] = field(default_factory=list)
     evidence_records: list[Any] = field(default_factory=list)
+    prompt_context: dict[str, Any] = field(default_factory=dict)
 
     # ── 停滞检测数据 ──
     _tool_call_hashes: dict[str, int] = field(default_factory=dict)
@@ -90,8 +117,14 @@ class AgentState:
     _last_blocked_category: str | None = None
     heal_attempts: int = 0
     max_heal_attempts: int = 2
-    answer_gate_retries: int = 0
-    # 统一重试计数——跨所有重试类型（heal/verify/answer_gate/stream）
+    # Shared retry counter for the heal / future-action / coordinator paths
+    # (incremented at the _looks_like_future_action_only_answer, heal/confidence
+    # gate, and coordinator_finalization_feedback branches). Stream, max-output
+    # and empty-reply recovery each have their OWN bounded ladder instead
+    # (stream_retry.stream_max_attempts, _MAX_OUTPUT_TOKENS_RECOVERY_LIMIT,
+    # empty_reply_retries), so a single turn can perform more recovery steps
+    # than max_total_retries. Consolidating them here is a future option; today
+    # this counter gates only the three paths above.
     total_retries: int = 0
     max_total_retries: int = 5
     # Action-level verification (verify-after-edit) tracking.
@@ -102,11 +135,71 @@ class AgentState:
     # is greppable and resettable in one place).
     empty_reply_retries: int = 0
     stop_hook_feedback_used: bool = False
-    # Last recovery transition reason, for observability/debugging. Not load-bearing.
+    web_grounding_retry_used: bool = False
+    consecutive_compaction_failures: int = 0  # circuit breaker for ineffective compactions
+    reactive_compaction_attempted: bool = False
+    max_output_recovery_count: int = 0
+    max_output_recovered_text: str = ""
+    # Last loop transition reason, for observability/debugging. Not load-bearing.
     transition: str = ""
+    transition_details: dict[str, Any] = field(default_factory=dict)
+    transition_history: list[dict[str, Any]] = field(default_factory=list)
     disabled_tools: set[str] = field(default_factory=set)
     tool_runtime_guidance: str = ""
     loop_guidance: list[str] = field(default_factory=list)
+
+    def clear_transition(self) -> None:
+        self.transition = ""
+        self.transition_details.clear()
+        self.transition_history.clear()
+
+    def mark_transition(self, reason: str, **details: Any) -> None:
+        """Record why the loop will continue or retry."""
+        clean_reason = str(reason or "").strip()
+        if not clean_reason:
+            return
+        clean_details = {
+            str(key): self._transition_value(value)
+            for key, value in details.items()
+            if value is not None and value != ""
+        }
+        self.transition = clean_reason
+        self.transition_details = clean_details
+        record: dict[str, Any] = {
+            "reason": clean_reason,
+            "iteration": self.iterations,
+        }
+        if clean_details:
+            record["details"] = clean_details
+        self.transition_history.append(record)
+        if len(self.transition_history) > _TRANSITION_HISTORY_LIMIT:
+            del self.transition_history[:-_TRANSITION_HISTORY_LIMIT]
+
+    def transition_payload(self, *, default_reason: str = "") -> dict[str, Any]:
+        reason = self.transition or str(default_reason or "").strip()
+        payload: dict[str, Any] = {}
+        if reason:
+            payload["reason"] = reason
+        if self.transition_details:
+            payload["details"] = dict(self.transition_details)
+        if self.transition_history:
+            payload["history_length"] = len(self.transition_history)
+        return payload
+
+    @classmethod
+    def _transition_value(cls, value: Any) -> Any:
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, str):
+            return value if len(value) <= 240 else f"{value[:237]}..."
+        if isinstance(value, dict):
+            return {
+                str(key): cls._transition_value(inner)
+                for key, inner in list(value.items())[:20]
+            }
+        if isinstance(value, (list, tuple, set)):
+            return [cls._transition_value(item) for item in list(value)[:20]]
+        return str(value)[:240]
 
     def disable_tools(self, names: set[str], guidance: str = "") -> None:
         self.disabled_tools.update(names)
@@ -145,6 +238,8 @@ class AgentState:
         user_summary: str | None = None,
         developer_detail: str | None = None,
         projection: str | None = None,
+        turn_id: str | None = None,
+        iteration_id: str = "",
     ) -> None:
         """记录一次工具调用。"""
         resolved_status: Literal["success", "error", "failed", "blocked", "partial"]
@@ -169,6 +264,8 @@ class AgentState:
                 user_summary=user_summary,
                 developer_detail=developer_detail,
                 projection=projection,
+                turn_id=turn_id,
+                iteration_id=iteration_id,
                 status=resolved_status,
             )
         )
@@ -285,8 +382,9 @@ class AgentState:
         last = self.find_last_tool_call(name, args)
         if last is None or last.status == "success":
             return ""
-        # Web search tools are managed by the guardrail controller (web_guard_reason).
-        # Don't double-block them here — that causes infinite retry loops.
+        # Web tools are handled by the unified guardrail controller for exact
+        # repeats/no-progress. Avoid an extra state-level block here so the
+        # model can change query/source instead of being trapped in retry loops.
         if name in {"web_search", "search_web"}:
             return ""
 
@@ -315,6 +413,36 @@ class AgentState:
             "Use that observation, change the arguments, choose a different tool, "
             "or answer from the information already gathered."
         )
+
+    def rebuild_stagnation_accounting(self) -> None:
+        """Rebuild stagnation/repeat bookkeeping from ``self.tool_calls``.
+
+        Checkpoint resume restores ``tool_calls`` and the persisted
+        ``_last_mutation_index`` / ``last_verified_mutation_index`` but not the
+        derived hash/sequence maps, which would otherwise stay empty and disable
+        the repeat-call guard and stagnation detection for the rest of the run.
+        Only the derived maps and ``_tool_sequence`` are recomputed; the mutation
+        indices are preserved as restored from the checkpoint.
+        """
+        self._tool_sequence = 0
+        self._tool_call_hashes = {}
+        self._tool_call_labels = {}
+        self._tool_call_last_index = {}
+        self._last_tool_call_hash = None
+        self._consecutive_tool_call_count = 0
+        for record in self.tool_calls:
+            name = record.tool_name
+            args = record.tool_input or {}
+            call_hash = self._hash_call(name, self._normalize_args(name, args))
+            self._tool_sequence += 1
+            self._tool_call_hashes[call_hash] = self._tool_call_hashes.get(call_hash, 0) + 1
+            self._tool_call_labels.setdefault(call_hash, self._label_call(name, args))
+            self._tool_call_last_index[call_hash] = self._tool_sequence
+            if self._last_tool_call_hash == call_hash:
+                self._consecutive_tool_call_count += 1
+            else:
+                self._last_tool_call_hash = call_hash
+                self._consecutive_tool_call_count = 1
 
     def is_stagnant(self, limit: int = 3) -> bool:
         """

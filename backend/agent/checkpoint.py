@@ -3,7 +3,7 @@ Agent Loop Checkpoint System
 
 Minimal checkpoint/resume for long-running tasks that fail mid-way
 (timeout, network, interrupt). Saves state after each iteration to
-`.claude/checkpoints/<session_id>/<timestamp>.json`.
+`.claude/checkpoints/<session_id>/<timestamp_ms>-<seq>.json`.
 
 Only stores serializable state: messages, tool_calls, iterations,
 disabled_tools, active_skills. Complex runtime objects (workspace_context,
@@ -15,13 +15,21 @@ Usage:
   - Resume: /resume command or auto-detect incomplete checkpoint at loop start
 """
 
+from __future__ import annotations
+
+import hashlib
 import json
 import logging
-from dataclasses import asdict, dataclass
+import os
+import time
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+CHECKPOINT_SCHEMA_VERSION = 2
+MAX_RETAINED_CHECKPOINTS = 12
 
 
 @dataclass
@@ -43,6 +51,9 @@ class AgentCheckpoint:
     conversation_id: str = ""
     checkpoint_type: str = "run_checkpoint"
     resume_payload: dict[str, Any] | None = None
+    schema_version: int = CHECKPOINT_SCHEMA_VERSION
+    sequence: int = 0
+    checksum: str = ""
 
 
 def get_checkpoint_dir(session_id: str, base_dir: Path | None = None) -> Path:
@@ -52,6 +63,50 @@ def get_checkpoint_dir(session_id: str, base_dir: Path | None = None) -> Path:
     checkpoint_dir = base_dir / "checkpoints" / session_id
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     return checkpoint_dir
+
+
+def _payload_for_checksum(data: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(data)
+    payload.pop("checksum", None)
+    return payload
+
+
+def _compute_checksum(data: dict[str, Any]) -> str:
+    raw = json.dumps(
+        _payload_for_checksum(data),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _next_sequence(checkpoint_dir: Path) -> int:
+    highest = 0
+    for path in checkpoint_dir.glob("*.json"):
+        stem = path.stem
+        # Prefer trailing -<seq> when present.
+        if "-" in stem:
+            tail = stem.rsplit("-", 1)[-1]
+            if tail.isdigit():
+                highest = max(highest, int(tail))
+                continue
+        if stem.isdigit():
+            highest = max(highest, int(stem))
+    return highest + 1
+
+
+def _prune_checkpoints(checkpoint_dir: Path, *, keep: int = MAX_RETAINED_CHECKPOINTS) -> None:
+    paths = sorted(
+        [path for path in checkpoint_dir.glob("*.json") if path.is_file()],
+        key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    )
+    for stale in paths[max(0, keep):]:
+        try:
+            stale.unlink()
+        except OSError as exc:
+            logger.debug("Failed pruning checkpoint %s: %s", stale, exc)
 
 
 def save_checkpoint(
@@ -72,10 +127,12 @@ def save_checkpoint(
     resume_payload: dict[str, Any] | None = None,
 ) -> Path:
     """Save checkpoint after each iteration."""
-    import time
+    checkpoint_dir = get_checkpoint_dir(session_id, base_dir)
+    sequence = _next_sequence(checkpoint_dir)
+    now = time.time()
     checkpoint = AgentCheckpoint(
         session_id=session_id,
-        timestamp=time.time(),
+        timestamp=now,
         user_message=user_message,
         iterations=iterations,
         reply=reply,
@@ -90,11 +147,22 @@ def save_checkpoint(
         conversation_id=conversation_id,
         checkpoint_type="run_checkpoint",
         resume_payload=resume_payload or {},
+        schema_version=CHECKPOINT_SCHEMA_VERSION,
+        sequence=sequence,
     )
-    checkpoint_dir = get_checkpoint_dir(session_id, base_dir)
-    checkpoint_path = checkpoint_dir / f"{int(checkpoint.timestamp)}.json"
-    with open(checkpoint_path, "w", encoding="utf-8") as f:
-        json.dump(asdict(checkpoint), f, indent=2, ensure_ascii=False)
+    payload = asdict(checkpoint)
+    payload["checksum"] = _compute_checksum(payload)
+    checkpoint.checksum = payload["checksum"]
+
+    ts_ms = int(now * 1000)
+    checkpoint_path = checkpoint_dir / f"{ts_ms}-{sequence:06d}.json"
+    temp_path = checkpoint_path.with_suffix(".json.tmp")
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    temp_path.replace(checkpoint_path)
+    _prune_checkpoints(checkpoint_dir)
     logger.info(f"Checkpoint saved: {checkpoint_path}")
     return checkpoint_path
 
@@ -108,6 +176,33 @@ def save_run_checkpoint(**kwargs: Any) -> Path:
     return save_checkpoint(**kwargs)
 
 
+def _checkpoint_from_dict(data: dict[str, Any]) -> AgentCheckpoint:
+    data = dict(data)
+    data.setdefault("run_id", "")
+    data.setdefault("conversation_id", "")
+    data.setdefault("checkpoint_type", "run_checkpoint")
+    data.setdefault("resume_payload", {})
+    data.setdefault("schema_version", 1)
+    data.setdefault("sequence", 0)
+    data.setdefault("checksum", "")
+    # Drop unknown fields so older/newer files still load.
+    known = {field.name for field in AgentCheckpoint.__dataclass_fields__.values()}  # type: ignore[attr-defined]
+    filtered = {key: value for key, value in data.items() if key in known}
+    return AgentCheckpoint(**filtered)
+
+
+def _verify_checkpoint_payload(data: dict[str, Any], path: Path) -> bool:
+    checksum = str(data.get("checksum") or "").strip()
+    if not checksum:
+        # Legacy second-granularity checkpoints without checksum remain loadable.
+        return True
+    expected = _compute_checksum(data)
+    if checksum != expected:
+        logger.warning("Skipping checkpoint with bad checksum %s", path)
+        return False
+    return True
+
+
 def load_latest_checkpoint(session_id: str, base_dir: Path | None = None) -> AgentCheckpoint | None:
     """Load the latest incomplete checkpoint for this session."""
     checkpoint_dir = get_checkpoint_dir(session_id, base_dir)
@@ -115,19 +210,21 @@ def load_latest_checkpoint(session_id: str, base_dir: Path | None = None) -> Age
     if not checkpoints:
         return None
 
-    latest = checkpoints[0]
-    with open(latest, encoding="utf-8") as f:
-        data = json.load(f)
-
-    data.setdefault("run_id", "")
-    data.setdefault("conversation_id", "")
-    data.setdefault("checkpoint_type", "run_checkpoint")
-    data.setdefault("resume_payload", {})
-    checkpoint = AgentCheckpoint(**data)
-    # Only resume if the task didn't complete naturally
-    if checkpoint.stopped_reason in ("completed", None):
-        return None
-    return checkpoint
+    for path in checkpoints:
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                logger.warning("Skipping non-object checkpoint %s", path)
+                continue
+            if not _verify_checkpoint_payload(data, path):
+                continue
+            checkpoint = _checkpoint_from_dict(data)
+            if checkpoint.stopped_reason not in ("completed", None):
+                return checkpoint
+        except Exception as exc:
+            logger.warning("Skipping unreadable checkpoint %s: %s", path, exc)
+    return None
 
 
 def load_latest_run_checkpoint(session_id: str, base_dir: Path | None = None) -> AgentCheckpoint | None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import logging
 import os
@@ -91,6 +92,77 @@ def _get_user_config_dir() -> Path:
     return base.expanduser() / ".minicode"
 
 
+# Codex AGENTS.md behavior: discover AGENTS.md from the project (git) root down
+# to the working directory, concatenated root-first so the most specific file
+# (closest to cwd) wins by appearing last. Capped at AGENTS_MD_MAX_BYTES total to
+# bound prompt size (Codex default is 32 KiB).
+AGENTS_MD_MAX_BYTES = 32 * 1024
+
+
+def _find_project_root(start: Path) -> Path | None:
+    """Return the git/project root at or above ``start``, or None if none found.
+
+    Walks up looking for a ``.git`` marker (dir or file — worktrees use a file).
+    Mirrors Codex's discovery, which stops at the Git root and does not climb
+    past it.
+    """
+    try:
+        current = start.resolve()
+    except OSError:
+        return None
+    for directory in (current, *current.parents):
+        if (directory / ".git").exists():
+            return directory
+    return None
+
+
+def _agents_md_chain(scope_dir: Path) -> list[Path]:
+    """Directories from project root down to ``scope_dir`` (inclusive), root first.
+
+    When ``scope_dir`` is not inside a git project, only ``scope_dir`` itself is
+    returned (Codex's cwd-only fallback).
+    """
+    root = _find_project_root(scope_dir)
+    if root is None:
+        return [scope_dir]
+    try:
+        scope_resolved = scope_dir.resolve()
+        root_resolved = root.resolve()
+    except OSError:
+        return [scope_dir]
+    # Build root -> scope_dir inclusive. parents are cwd-first, so reverse.
+    chain: list[Path] = [scope_resolved]
+    for parent in scope_resolved.parents:
+        chain.append(parent)
+        if parent == root_resolved:
+            break
+    else:
+        # scope_dir was not under root (shouldn't happen) — fall back to cwd only.
+        return [scope_dir]
+    chain.reverse()  # root first, scope_dir last
+    return chain
+
+
+def _agents_md_candidates(scope_dir: Path) -> list[tuple[Path, str, str, int]]:
+    """Resolve the AGENTS.md hierarchy for a scope into guideline specs.
+
+    Each directory in the root->cwd chain contributes its AGENTS.override.md if
+    present, else its AGENTS.md. Priority decreases toward cwd (lower number =
+    rendered earlier) so root guidance appears first and cwd guidance last.
+    """
+    chain = _agents_md_chain(scope_dir)
+    candidates: list[tuple[Path, str, str, int]] = []
+    # Spread priorities just below the workspace CLAUDE.md band (100) so AGENTS.md
+    # still precedes project memory; root gets the smallest number.
+    for depth, directory in enumerate(chain):
+        override = directory / "AGENTS.override.md"
+        default = directory / "AGENTS.md"
+        chosen = override if override.exists() else default
+        candidates.append((chosen, "agent_instruction", "Agent Instructions", 40 + depth))
+    return candidates
+
+
+
 def _iter_guideline_specs(
     workspace_dir: Path,
     additional_directories: tuple[Path, ...],
@@ -99,11 +171,19 @@ def _iter_guideline_specs(
     seen_paths: set[str] = set()
 
     def register_scope(scope_dir: Path) -> None:
-        agents_override = scope_dir / "AGENTS.override.md"
-        agents_default = scope_dir / "AGENTS.md"
-        agents_candidate = agents_override if agents_override.exists() else agents_default
-        candidates = [
-            (agents_candidate, "agent_instruction", "Agent Instructions", 50),
+        # Render order is INSERTION order of this list (the `priority` field is
+        # informational only — sorting by it would interleave scopes and break
+        # per-scope grouping when additional_directories are present). So the
+        # order here IS the contract: global -> project-root->cwd -> memory.
+        candidates: list[tuple[Path, str, str, int]] = []
+        # Global user-level AGENTS.md (Codex hierarchy: ~/.codex/AGENTS.md is the
+        # baseline for all projects, then ~/.minicode/AGENTS.md). Rendered first.
+        candidates.append((Path.home() / ".codex" / "AGENTS.md", "user_memory", "User Agent Instructions (Codex)", 10))
+        candidates.append((_get_user_config_dir() / "AGENTS.md", "user_memory", "User Agent Instructions", 20))
+        # AGENTS.md hierarchy: project root -> cwd (Codex behavior). Each gets
+        # its own spec so the chain renders root-first, most-specific last.
+        candidates += list(_agents_md_candidates(scope_dir))
+        candidates += [
             (scope_dir / "CLAUDE.md", "project_memory", "Project Memory", 100),
         ]
 
@@ -146,6 +226,7 @@ def _build_signature(specs: list[tuple[Path, str, str, int, str]]) -> tuple[tupl
 
 def _read_blocks(specs: list[tuple[Path, str, str, int, str]]) -> tuple[GuidelineBlock, ...]:
     blocks: list[GuidelineBlock] = []
+    agents_bytes_used = 0  # cumulative AGENTS.md budget (Codex project_doc cap)
     for path, source_kind, label, priority, scope in specs:
         try:
             content = path.read_text(encoding="utf-8", errors="ignore").strip()
@@ -154,6 +235,17 @@ def _read_blocks(specs: list[tuple[Path, str, str, int, str]]) -> tuple[Guidelin
             continue
         if not content:
             continue
+        if source_kind == "agent_instruction":
+            remaining = AGENTS_MD_MAX_BYTES - agents_bytes_used
+            if remaining <= 0:
+                logger.debug("AGENTS.md budget exhausted; skipping %s", path)
+                continue
+            encoded = content.encode("utf-8")
+            if len(encoded) > remaining:
+                # Truncate on a UTF-8 char boundary, append a marker.
+                content = encoded[:remaining].decode("utf-8", errors="ignore").rstrip()
+                content += "\n\n[... AGENTS.md truncated to fit context budget ...]"
+            agents_bytes_used += len(content.encode("utf-8"))
         blocks.append(
             GuidelineBlock(
                 path=path,
@@ -164,7 +256,42 @@ def _read_blocks(specs: list[tuple[Path, str, str, int, str]]) -> tuple[Guidelin
                 content=content,
             )
         )
+        _schedule_instructions_loaded_hook(path, source_kind)
     return tuple(blocks)
+
+
+def _schedule_instructions_loaded_hook(path: Path, source_kind: str) -> None:
+    try:
+        from backend.hooks import get_hook_manager
+
+        hook_mgr = get_hook_manager()
+        if not hook_mgr:
+            return
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    except Exception:
+        return
+
+    memory_type = {
+        "agent_instruction": "Project",
+        "project_memory": "Project",
+        "project_rule": "Project",
+        "local_memory": "Local",
+        "user_memory": "User",
+    }.get(source_kind, source_kind)
+
+    async def _run() -> None:
+        try:
+            await hook_mgr.run_instructions_loaded(
+                file_path=str(path),
+                memory_type=memory_type,
+                load_reason="session_start",
+            )
+        except Exception:
+            logger.debug("instructions_loaded hook failed for %s", path)
+
+    loop.create_task(_run())
 
 
 def load_project_guideline_bundle(

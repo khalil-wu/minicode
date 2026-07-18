@@ -25,6 +25,7 @@ import {
   cacheMessagesForConversation,
   updateMessagesForConversation,
   findLastStreamingIndex,
+  findStreamingTargetIndex,
   computeToolCallCount,
   normalizeThinkingMetadata,
   thinkingMetadataMatches,
@@ -690,10 +691,10 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         return next;
       });
     }),
-  appendProcessItem: (item, conversationId) =>
+  appendProcessItem: (item, conversationId, messageId) =>
     set((s) => {
       return updateMessagesForConversation(s, conversationId, (messages) => {
-        const idx = findLastStreamingIndex(messages);
+        const idx = findStreamingTargetIndex(messages, messageId);
         if (idx < 0) return null;
         const next = messages.slice();
         const msg = next[idx];
@@ -725,10 +726,10 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         return next;
       });
     }),
-  appendProgress: (progress, conversationId) =>
+  appendProgress: (progress, conversationId, messageId) =>
     set((s) => {
       return updateMessagesForConversation(s, conversationId, (messages) => {
-        const idx = findLastStreamingIndex(messages);
+        const idx = findStreamingTargetIndex(messages, messageId);
         if (idx < 0) return null;
         const next = messages.slice();
         const msg = next[idx];
@@ -740,6 +741,34 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         };
         const existingIdx = blocks.findIndex((block) =>
           block.type === "progress" && block.id === progress.id,
+        );
+        if (existingIdx >= 0) {
+          blocks[existingIdx] = progressBlock;
+        } else {
+          blocks.push(progressBlock);
+        }
+        next[idx] = { ...msg, blocks };
+        return next;
+      });
+    }),
+  replaceEphemeralProgress: (progress, conversationId, messageId) =>
+    set((s) => {
+      return updateMessagesForConversation(s, conversationId, (messages) => {
+        const idx = findStreamingTargetIndex(messages, messageId);
+        if (idx < 0) return null;
+        const next = messages.slice();
+        const msg = next[idx];
+        const blocks = msg.blocks ? msg.blocks.slice() : [];
+        const progressBlock = {
+          ...progress,
+          type: "progress" as const,
+          timestamp: Date.now(),
+        };
+        // Ephemeral progress with the same groupId is a rolling status line —
+        // replace in place instead of accumulating history.
+        const existingIdx = blocks.findIndex((block) =>
+          block.type === "progress" &&
+          (block.id === progress.id || (Boolean(progress.groupId) && block.ephemeral === true && block.groupId === progress.groupId)),
         );
         if (existingIdx >= 0) {
           blocks[existingIdx] = progressBlock;

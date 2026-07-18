@@ -33,6 +33,10 @@ def agent_progress(
     group_id: str = "",
     step_id: str = "",
     iteration_id: str = "",
+    display_scope: str = "",
+    panel_hint: str = "",
+    requires_attention: bool = False,
+    ephemeral: bool = False,
 ) -> AgentEvent:
     return AgentEvent.progress(
         message,
@@ -48,4 +52,8 @@ def agent_progress(
         group_id=group_id,
         step_id=step_id,
         iteration_id=iteration_id,
+        display_scope=display_scope,
+        panel_hint=panel_hint,
+        requires_attention=requires_attention,
+        ephemeral=ephemeral,
     )

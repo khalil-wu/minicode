@@ -22,6 +22,8 @@ export interface AgentCapabilitiesPayload {
   skills?: AgentCapabilityNamedItem[];
   composer_commands?: AgentCapabilityNamedItem[];
   permission?: AgentCapabilityPermission;
+  /** backend/feature_flags.py payload: { name: { enabled, source } }. */
+  feature_flags?: Record<string, { enabled?: boolean; source?: string }>;
   mcp_registry_version?: number;
   version?: number;
 }

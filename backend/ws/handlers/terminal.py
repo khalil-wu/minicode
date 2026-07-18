@@ -7,9 +7,8 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from backend.agent.message import AgentEvent
-from backend.runtime_env import sanitized_subprocess_env
-from backend.terminal.shell_commands import normalize_windows_shell_command
 from backend.tools.base import PermissionLevel
+from backend.ws.command_results import emit_command_error
 
 if TYPE_CHECKING:
     from backend.ws.handler import WebSocketSession
@@ -18,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 
 async def handle_terminal_create(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    from backend.services.terminal_service import terminal_created_payload
+
     cwd = str(data.get("cwd", "")).strip() or None
     if not cwd:
         workspace_context = getattr(session, "_workspace_context", None)
@@ -32,16 +33,10 @@ async def handle_terminal_create(session: "WebSocketSession", data: dict[str, An
             on_exit=session._on_terminal_exit,
         )
         session.active_terminal_session_id = terminal_session.session_id
-        await session._send_ws_payload({
-            "type": "terminal.created",
-            "session_id": terminal_session.session_id,
-            "pid": terminal_session.pid,
-            "shell": terminal_session.shell,
-            "cwd": terminal_session._initial_cwd,
-        }, log_context="terminal.created")
+        await session._send_ws_payload(terminal_created_payload(terminal_session), log_context="terminal.created")
     except Exception as exc:
         logger.error("Terminal creation failed: %s", exc, exc_info=True)
-        await session._send_event(AgentEvent.error(f"Terminal creation failed: {exc}", recoverable=True))
+        await emit_command_error(session, "terminal.create", f"Terminal creation failed: {exc}")
     return True
 
 
@@ -50,28 +45,23 @@ async def handle_terminal_input(session: "WebSocketSession", data: dict[str, Any
     input_data = str(data.get("data", ""))
     terminal_session = session.terminal_manager.get_session(session_id)
     if terminal_session is None:
-        await session._send_event(
-            AgentEvent.error(f"Terminal session '{session_id}' not found", recoverable=True)
-        )
+        await emit_command_error(session, "terminal.input", f"Terminal session '{session_id}' not found")
         return True
     session.active_terminal_session_id = session_id
     try:
         await terminal_session.send_input(input_data)
     except RuntimeError as exc:
-        await session._send_event(AgentEvent.error(str(exc), recoverable=True))
+        await emit_command_error(session, "terminal.input", exc)
     return True
 
 
 async def handle_terminal_resize(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     """Resize a terminal session's PTY window."""
-    session_id = str(data.get("session_id") or data.get("sessionId") or "").strip()
+    from backend.services.terminal_service import apply_terminal_resize, resolve_terminal_session_id, terminal_resized_payload
+
+    session_id = resolve_terminal_session_id(data, active_session_id=str(getattr(session, "active_terminal_session_id", "") or ""))
     if not session_id:
-        active_id = getattr(session, "active_terminal_session_id", "")
-        session_id = str(active_id or "").strip()
-    if not session_id:
-        await session._send_event(
-            AgentEvent.error("No terminal session to resize", recoverable=True)
-        )
+        await emit_command_error(session, "terminal.resize", "No terminal session to resize")
         return True
 
     cols = int(data.get("cols") or data.get("columns") or 80)
@@ -79,137 +69,81 @@ async def handle_terminal_resize(session: "WebSocketSession", data: dict[str, An
 
     terminal_session = session.terminal_manager.get_session(session_id)
     if terminal_session is None:
-        await session._send_event(
-            AgentEvent.error(f"Terminal session '{session_id}' not found", recoverable=True)
-        )
+        await emit_command_error(session, "terminal.resize", f"Terminal session '{session_id}' not found")
         return True
 
-    # Try to resize the underlying process window
-    resized = False
-    proc = getattr(terminal_session, '_process', None)
-    if proc is not None and proc.returncode is None:
-        try:
-            import signal, fcntl, termios, struct, os
-            # Unix: send SIGWINCH after setting window size
-            if hasattr(proc, '_transport') and hasattr(proc._transport, 'get_extra_info'):
-                pty_fd = proc._transport.get_extra_info('pty_fd')
-                if pty_fd is not None:
-                    winsize = struct.pack('HHHH', rows, cols, 0, 0)
-                    fcntl.ioctl(pty_fd, termios.TIOCSWINSZ, winsize)
-                    os.kill(proc.pid, signal.SIGWINCH)
-                    resized = True
-            elif not getattr(terminal_session, '_is_windows', False):
-                # Non-PTY Unix process: at least send SIGWINCH
-                try:
-                    os.kill(proc.pid, signal.SIGWINCH)
-                    resized = True
-                except (OSError, ProcessLookupError):
-                    pass
-        except ImportError:
-            # Windows or missing modules — best-effort
-            pass
+    resized = apply_terminal_resize(terminal_session, cols=cols, rows=rows)
 
-    await session._send_ws_payload({
-        "type": "terminal.resized",
-        "session_id": session_id,
-        "cols": cols,
-        "rows": rows,
-        "applied": resized,
-    }, log_context="terminal.resize")
+    await session._send_ws_payload(
+        terminal_resized_payload(session_id=session_id, cols=cols, rows=rows, applied=resized),
+        log_context="terminal.resize",
+    )
     return True
 
 
 async def handle_terminal_kill(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    from backend.services.terminal_service import terminal_killed_payload
+
     session_id = str(data.get("session_id", ""))
     destroyed = await session.terminal_manager.destroy_session(session_id)
     if destroyed:
         if getattr(session, "active_terminal_session_id", None) == session_id:
             session.active_terminal_session_id = None
-        await session._send_ws_payload({
-            "type": "terminal.killed",
-            "session_id": session_id,
-        }, log_context="terminal.killed")
+        await session._send_ws_payload(terminal_killed_payload(session_id), log_context="terminal.killed")
     else:
-        await session._send_event(
-            AgentEvent.error(f"Terminal session '{session_id}' not found", recoverable=True)
-        )
+        await emit_command_error(session, "terminal.kill", f"Terminal session '{session_id}' not found")
     return True
 
 
 async def handle_terminal_list(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    from backend.services.terminal_service import terminal_list_payload
+
     sessions = session.terminal_manager.list_sessions()
-    await session._send_ws_payload({
-        "type": "terminal.list",
-        "sessions": [
-            {
-                "session_id": s.session_id,
-                "pid": s.pid,
-                "cwd": s.cwd,
-                "shell": s.shell,
-                "is_alive": s.is_alive,
-                "started_at": s.started_at,
-            }
-            for s in sessions
-        ],
-    }, log_context="terminal.list")
+    await session._send_ws_payload(terminal_list_payload(sessions), log_context="terminal.list")
     return True
 
 
 async def handle_terminal_snapshot_request(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    session_id = str(data.get("session_id") or data.get("sessionId") or "").strip()
-    if not session_id:
-        active_id = getattr(session, "active_terminal_session_id", "")
-        session_id = str(active_id or "").strip()
+    from backend.services.terminal_service import (
+        normalize_snapshot_max_chars,
+        resolve_terminal_session_id,
+        terminal_snapshot_payload,
+    )
+
+    session_id = resolve_terminal_session_id(data, active_session_id=str(getattr(session, "active_terminal_session_id", "") or ""))
     if not session_id:
         sessions = session.terminal_manager.list_sessions()
         session_id = sessions[-1].session_id if sessions else ""
     if not session_id:
-        await session._send_ws_payload({
-            "type": "terminal.snapshot",
-            "session_id": "",
-            "output": "",
-            "truncated": False,
-            "error": "No terminal session is available",
-        }, log_context="terminal.snapshot")
+        await session._send_ws_payload(terminal_snapshot_payload(None), log_context="terminal.snapshot")
         return True
 
-    try:
-        max_chars = int(data.get("max_chars") or data.get("maxChars") or 20_000)
-    except (TypeError, ValueError):
-        max_chars = 20_000
+    max_chars = normalize_snapshot_max_chars(data)
     snapshot = session.terminal_manager.snapshot(session_id, max_chars=max_chars)
     if snapshot is None:
-        await session._send_ws_payload({
-            "type": "terminal.snapshot",
-            "session_id": session_id,
-            "output": "",
-            "truncated": False,
-            "error": f"Terminal session '{session_id}' not found",
-        }, log_context="terminal.snapshot")
+        await session._send_ws_payload(terminal_snapshot_payload(None, session_id=session_id), log_context="terminal.snapshot")
         return True
     session.active_terminal_session_id = session_id
-    payload = {"type": "terminal.snapshot", **snapshot}
-    await session._send_ws_payload(payload, log_context="terminal.snapshot")
+    await session._send_ws_payload(terminal_snapshot_payload(snapshot), log_context="terminal.snapshot")
     return True
 
 
 def _mirror_session_id(data: dict[str, Any]) -> str:
-    return str(data.get("session_id") or data.get("sessionId") or "").strip()[:128]
+    from backend.services.terminal_service import mirror_session_id
+
+    return mirror_session_id(data)
 
 
 def _optional_int(value: Any) -> int | None:
-    try:
-        if value is None or value == "":
-            return None
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+    from backend.services.terminal_service import optional_int
+
+    return optional_int(value)
 
 
 async def handle_terminal_mirror_created(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     session_id = _mirror_session_id(data)
     if not session_id:
-        await session._send_event(AgentEvent.error("terminal.mirror.created requires session_id", recoverable=True))
+        await emit_command_error(session, "terminal.mirror.created", "terminal.mirror.created requires session_id")
         return True
     try:
         session.terminal_manager.upsert_external_session(
@@ -220,20 +154,20 @@ async def handle_terminal_mirror_created(session: "WebSocketSession", data: dict
             is_alive=True,
         )
     except RuntimeError as exc:
-        await session._send_event(AgentEvent.error(str(exc), recoverable=True))
+        await emit_command_error(session, "terminal.mirror.created", exc)
         return True
     session.active_terminal_session_id = session_id
     return True
 
 
 async def handle_terminal_mirror_output(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    from backend.services.terminal_service import mirror_output_chunk
+
     session_id = _mirror_session_id(data)
     if not session_id:
-        await session._send_event(AgentEvent.error("terminal.mirror.output requires session_id", recoverable=True))
+        await emit_command_error(session, "terminal.mirror.output", "terminal.mirror.output requires session_id")
         return True
-    chunk = str(data.get("data") or data.get("output") or "")
-    if len(chunk) > 20_000:
-        chunk = chunk[-20_000:]
+    chunk = mirror_output_chunk(data)
     try:
         session.terminal_manager.append_external_output(
             session_id,
@@ -243,7 +177,7 @@ async def handle_terminal_mirror_output(session: "WebSocketSession", data: dict[
             pid=_optional_int(data.get("pid")),
         )
     except RuntimeError as exc:
-        await session._send_event(AgentEvent.error(str(exc), recoverable=True))
+        await emit_command_error(session, "terminal.mirror.output", exc)
         return True
     session.active_terminal_session_id = session_id
     return True
@@ -252,7 +186,7 @@ async def handle_terminal_mirror_output(session: "WebSocketSession", data: dict[
 async def handle_terminal_mirror_exit(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     session_id = _mirror_session_id(data)
     if not session_id:
-        await session._send_event(AgentEvent.error("terminal.mirror.exit requires session_id", recoverable=True))
+        await emit_command_error(session, "terminal.mirror.exit", "terminal.mirror.exit requires session_id")
         return True
     session.terminal_manager.mark_external_exit(session_id)
     if getattr(session, "active_terminal_session_id", None) == session_id:
@@ -261,16 +195,19 @@ async def handle_terminal_mirror_exit(session: "WebSocketSession", data: dict[st
 
 
 async def handle_terminal_exec(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    command = str(data.get("command", "")).strip()
-    if not command:
-        await session._send_event(AgentEvent.error("Command is required", recoverable=True))
-        return True
-    if len(command) > 4096:
-        await session._send_event(AgentEvent.error("Command exceeds maximum length (4096 characters)", recoverable=True))
-        return True
+    from backend.services.terminal_service import (
+        parse_terminal_exec_command,
+        run_terminal_exec_command,
+        terminal_exec_approval_event,
+        terminal_exec_rejected_payload,
+        terminal_output_payload,
+    )
 
-    # Normalize Windows shell commands (e.g., curl -> curl.exe to avoid PowerShell alias)
-    command = normalize_windows_shell_command(command)
+    command_request = parse_terminal_exec_command(data)
+    if command_request.error_event is not None:
+        await emit_command_error(session, "terminal.exec", command_request.error_event)
+        return True
+    command = command_request.command
 
     cwd = str(session._resolve_workspace_cwd(str(data.get("cwd", "")).strip() or None))
     checker = session.permission_checker.with_workspace_root(Path(cwd))
@@ -278,67 +215,35 @@ async def handle_terminal_exec(session: "WebSocketSession", data: dict[str, Any]
     perm_level = checker.check("terminal.exec", command_args, context=session.permission_context)
     denial = checker.get_denial_reason("terminal.exec", command_args, context=session.permission_context)
     if denial or perm_level == PermissionLevel.ALWAYS_DENY:
-        await session._send_ws_payload({
-            "type": "terminal.output",
-            "command": command,
-            "output": denial or "terminal.exec is blocked by the current permission policy.",
-            "exit_code": -1,
-        }, log_context="terminal.output")
+        await session._send_ws_payload(
+            terminal_output_payload(command, denial or "terminal.exec is blocked by the current permission policy.", -1),
+            log_context="terminal.output",
+        )
         return True
     if perm_level in {PermissionLevel.CONFIRM, PermissionLevel.DIFF_REVIEW}:
         request_id = f"terminal_exec_{uuid.uuid4().hex}"
-        event = AgentEvent.approval_request(
-            tool_call_id=request_id,
-            tool_name="terminal.exec",
-            args=command_args,
+        event = terminal_exec_approval_event(
+            request_id=request_id,
+            command_args=command_args,
+            conversation_id=str(getattr(session, "active_conversation_id", "") or ""),
         )
-        conversation_id = str(getattr(session, "active_conversation_id", "") or "").strip()
-        if conversation_id:
-            event.data["conversation_id"] = conversation_id
         payload = session._build_approval_request_payload(event)
         await session._send_ws_payload(payload, log_context="terminal.approval_request")
         approval = await session._approval_handler(request_id)
         if not isinstance(approval, dict) or approval.get("action") != "approve":
-            guidance = str((approval or {}).get("guidance") or "terminal command rejected").strip()
-            await session._send_ws_payload({
-                "type": "terminal.output",
-                "command": command,
-                "output": f"Command rejected: {guidance}",
-                "exit_code": -1,
-            }, log_context="terminal.output")
+            await session._send_ws_payload(
+                terminal_exec_rejected_payload(command, approval),
+                log_context="terminal.output",
+            )
             return True
-    try:
-        proc = await asyncio.create_subprocess_shell(
+    await session._send_ws_payload(
+        await run_terminal_exec_command(
             command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-            env=sanitized_subprocess_env({"MINICODE_TERMINAL_EXEC": "1"}),
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-        output = stdout.decode("utf-8", errors="replace")
-        if stderr:
-            output += "\n" + stderr.decode("utf-8", errors="replace")
-        await session._send_ws_payload({
-            "type": "terminal.output",
-            "command": command,
-            "output": output[:10000],
-            "exit_code": proc.returncode,
-        }, log_context="terminal.output")
-    except asyncio.TimeoutError:
-        await session._send_ws_payload({
-            "type": "terminal.output",
-            "command": command,
-            "output": "Command timed out (30s limit)",
-            "exit_code": -1,
-        }, log_context="terminal.output")
-    except Exception as exc:
-        await session._send_ws_payload({
-            "type": "terminal.output",
-            "command": command,
-            "output": f"Error: {exc}",
-            "exit_code": -1,
-        }, log_context="terminal.output")
+            cwd,
+            create_subprocess_shell=asyncio.create_subprocess_shell,
+        ),
+        log_context="terminal.output",
+    )
     return True
 
 

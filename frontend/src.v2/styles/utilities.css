@@ -277,7 +277,7 @@
    Panel switching transition (Phase 6 UI optimization)
    ════════════════════════════════════════════════════════ */
 .panel-content-wrapper {
-  animation: panel-fade-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  animation: panel-fade-in var(--duration-enter) var(--easing-decelerate);
 }
 
 @keyframes panel-fade-in {

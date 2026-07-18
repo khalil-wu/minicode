@@ -7,6 +7,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+from urllib.parse import quote
 
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
@@ -129,7 +130,9 @@ class WorkspaceService:
             raise HTTPException(status_code=400, detail="Path must point to a file.")
         self.ensure_not_sensitive_file(target)
         media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-        return FileResponse(target, media_type=media_type, filename=target.name)
+        ascii_name = target.name.encode("ascii", errors="ignore").decode("ascii").replace('"', "") or "file"
+        disposition = f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(target.name)}"
+        return FileResponse(target, media_type=media_type, headers={"Content-Disposition": disposition})
 
     def write_file(self, path: str, content: str) -> WorkspaceFileResponse:
         target = self.resolve_workspace_path(path)

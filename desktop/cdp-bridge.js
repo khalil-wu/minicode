@@ -7,6 +7,9 @@ const { sleep, isHttpUrl } = require("./utils");
 // ---------------------------------------------------------------------------
 
 let appendDesktopLog = () => {};
+const CDP_SCREENSHOT_MAX_DIMENSION = 4096;
+const CDP_SCREENSHOT_MAX_BASE64_CHARS = 32 * 1024 * 1024;
+const CDP_TYPE_MAX_CHARS = 200_000;
 
 function init({ logger }) {
   if (typeof logger === "function") appendDesktopLog = logger;
@@ -314,16 +317,27 @@ async function resolveSelectorTarget(call, selector) {
 
 async function captureScreenshotWithCall(call) {
   const metrics = await call("Page.getLayoutMetrics", {}, 3000).catch(() => null);
+  const contentWidth = typeof metrics?.contentSize?.width === "number" ? metrics.contentSize.width : 0;
+  const contentHeight = typeof metrics?.contentSize?.height === "number" ? metrics.contentSize.height : 0;
+  const width = Math.max(1, Math.min(Math.round(contentWidth || CDP_SCREENSHOT_MAX_DIMENSION), CDP_SCREENSHOT_MAX_DIMENSION));
+  const height = Math.max(1, Math.min(Math.round(contentHeight || CDP_SCREENSHOT_MAX_DIMENSION), CDP_SCREENSHOT_MAX_DIMENSION));
   const screenshot = await call(
     "Page.captureScreenshot",
-    { format: "png", fromSurface: true, captureBeyondViewport: true, optimizeForSpeed: true },
+    {
+      format: "png",
+      fromSurface: true,
+      captureBeyondViewport: true,
+      optimizeForSpeed: true,
+      clip: { x: 0, y: 0, width, height, scale: 1 },
+    },
     12000,
   );
   if (!screenshot || typeof screenshot.data !== "string" || !screenshot.data) {
     throw new Error("Chrome did not return screenshot data.");
   }
-  const width = typeof metrics?.contentSize?.width === "number" ? Math.round(metrics.contentSize.width) : undefined;
-  const height = typeof metrics?.contentSize?.height === "number" ? Math.round(metrics.contentSize.height) : undefined;
+  if (screenshot.data.length > CDP_SCREENSHOT_MAX_BASE64_CHARS) {
+    throw new Error("Chrome screenshot exceeded the desktop transfer limit.");
+  }
   return { data: screenshot.data, width, height };
 }
 
@@ -422,20 +436,33 @@ function isPrivateOrLocalBrowserHost(host) {
 }
 
 function assertBrowserNavigationPolicy(targetUrl, options = {}) {
+  const assessment = assessBrowserNavigationPolicy(targetUrl);
+  if (assessment.requiresPrivateNetworkApproval && !options.allowPrivateNetwork) {
+    throw new Error("Local or private browser navigation requires approval.");
+  }
+  return assessment;
+}
+
+function assessBrowserNavigationPolicy(targetUrl) {
+  const normalizedUrl = normalizeBrowserNavigationUrl(targetUrl);
   let parsed;
   try {
-    parsed = new URL(targetUrl);
+    parsed = new URL(normalizedUrl);
   } catch {
     throw new Error("Navigation URL is invalid.");
   }
-  if (isPrivateOrLocalBrowserHost(parsed.hostname) && !options.allowPrivateNetwork) {
-    throw new Error("Local or private browser navigation requires approval.");
-  }
+  const requiresPrivateNetworkApproval = isPrivateOrLocalBrowserHost(parsed.hostname);
+  return {
+    url: normalizedUrl,
+    host: parsed.hostname,
+    risk: requiresPrivateNetworkApproval ? "private_or_local" : "public",
+    requiresPrivateNetworkApproval,
+  };
 }
 
 async function navigateChromeTarget(targetEndpoint, targetId, url, options = {}) {
-  const targetUrl = normalizeBrowserNavigationUrl(url);
-  assertBrowserNavigationPolicy(targetUrl, options);
+  const assessment = assertBrowserNavigationPolicy(url, options);
+  const targetUrl = assessment.url;
   return await withChromePageTarget(targetEndpoint, targetId, async ({ call, target, discovery }) => {
     await call("Page.navigate", { url: targetUrl }, 8000);
     await waitForDocumentReady(call, 15000).catch(() => null);
@@ -504,6 +531,9 @@ async function typeIntoChromeTarget(targetEndpoint, targetId, selector, text) {
   const value = typeof text === "string" ? text : "";
   if (!value) {
     throw new Error("Text is required.");
+  }
+  if (value.length > CDP_TYPE_MAX_CHARS) {
+    throw new Error(`Text exceeds the ${CDP_TYPE_MAX_CHARS} character browser input limit.`);
   }
   return await withChromePageTarget(targetEndpoint, targetId, async ({ call, target, discovery }) => {
     const selectorLiteral = JSON.stringify(typeof selector === "string" ? selector.trim() : "");
@@ -574,6 +604,7 @@ async function typeIntoChromeTarget(targetEndpoint, targetId, selector, text) {
 
 module.exports = {
   init,
+  assessBrowserNavigationPolicy,
   discoverChromeCdp,
   captureChromeTargetScreenshot,
   navigateChromeTarget,

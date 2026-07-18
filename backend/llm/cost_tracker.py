@@ -1,5 +1,7 @@
 import logging
 import time
+from collections import defaultdict
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import Any
 
@@ -43,6 +45,8 @@ class CostTrackerState:
     output_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
+    prompt_cache_total_tokens: int = 0
+    reasoning_output_tokens: int = 0
     total_cost_usd: float = 0.0
     total_duration_sec: float = 0.0
 
@@ -55,7 +59,18 @@ class CostTracker:
 
     def __init__(self):
         self.state = CostTrackerState()
+        self._session_states: dict[str, CostTrackerState] = defaultdict(CostTrackerState)
         self._start_time = time.monotonic()
+
+    _session_scope: ContextVar[str] = ContextVar("llm_cost_session_scope", default="")
+
+    @classmethod
+    def bind_session(cls, session_id: str) -> Token:
+        return cls._session_scope.set(str(session_id or "").strip())
+
+    @classmethod
+    def unbind_session(cls, token: Token) -> None:
+        cls._session_scope.reset(token)
 
     @classmethod
     def get_instance(cls) -> "CostTracker":
@@ -69,15 +84,22 @@ class CostTracker:
         output_tokens: int,
         cache_creation_input_tokens: int = 0,
         cache_read_input_tokens: int = 0,
+        reasoning_output_tokens: int = 0,
         elapsed_sec: float = 0.0,
         model_id: str | None = None,
+        provider: str = "",
+        session_id: str = "",
     ) -> float:
         """
         Record token usage and elapsed time, update global totals, and return the cost for this turn.
         """
-        # Exclude cached tokens if the API double-counts them as input_tokens
-        # OpenAI/Anthropic APIs usually report input_tokens *including* cache tokens
-        base_input = max(0, input_tokens - cache_read_input_tokens)
+        is_anthropic = "anthropic" in str(provider or "").strip().lower()
+        base_input = max(0, input_tokens if is_anthropic else input_tokens - cache_read_input_tokens)
+        prompt_cache_total = (
+            input_tokens + cache_read_input_tokens + cache_creation_input_tokens
+            if is_anthropic
+            else max(input_tokens, cache_read_input_tokens) + cache_creation_input_tokens
+        )
         input_price, output_price, cache_write_price, cache_read_price = _prices_for_model(model_id)
 
         cost = (
@@ -87,26 +109,62 @@ class CostTracker:
             (cache_read_input_tokens / 1_000_000) * cache_read_price
         )
 
-        self.state.input_tokens += input_tokens
-        self.state.output_tokens += output_tokens
-        self.state.cache_creation_input_tokens += cache_creation_input_tokens
-        self.state.cache_read_input_tokens += cache_read_input_tokens
-        self.state.total_cost_usd += cost
-        self.state.total_duration_sec += elapsed_sec
+        self._add_usage(
+            self.state,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_creation_input_tokens=cache_creation_input_tokens,
+            cache_read_input_tokens=cache_read_input_tokens,
+            prompt_cache_total=prompt_cache_total,
+            reasoning_output_tokens=reasoning_output_tokens,
+            cost=cost,
+            elapsed_sec=elapsed_sec,
+        )
+        scoped_session_id = str(session_id or "").strip() or self._session_scope.get()
+        if scoped_session_id:
+            self._add_usage(
+                self._session_states[scoped_session_id],
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_creation_input_tokens=cache_creation_input_tokens,
+                cache_read_input_tokens=cache_read_input_tokens,
+                prompt_cache_total=prompt_cache_total,
+                reasoning_output_tokens=reasoning_output_tokens,
+                cost=cost,
+                elapsed_sec=elapsed_sec,
+            )
 
         return cost
 
-    def get_summary(self) -> dict[str, Any]:
+    @staticmethod
+    def _add_usage(state: CostTrackerState, **values: Any) -> None:
+        state.input_tokens += int(values["input_tokens"])
+        state.output_tokens += int(values["output_tokens"])
+        state.cache_creation_input_tokens += int(values["cache_creation_input_tokens"])
+        state.cache_read_input_tokens += int(values["cache_read_input_tokens"])
+        state.prompt_cache_total_tokens += max(0, int(values["prompt_cache_total"]))
+        state.reasoning_output_tokens += int(values["reasoning_output_tokens"])
+        state.total_cost_usd += float(values["cost"])
+        state.total_duration_sec += float(values["elapsed_sec"])
+
+    def get_summary(self, session_id: str = "") -> dict[str, Any]:
+        clean_session_id = str(session_id or "").strip()
+        state = self._session_states.get(clean_session_id, CostTrackerState()) if clean_session_id else self.state
         return {
-            "input_tokens": self.state.input_tokens,
-            "output_tokens": self.state.output_tokens,
-            "cache_creation_tokens": self.state.cache_creation_input_tokens,
-            "cache_read_tokens": self.state.cache_read_input_tokens,
-            "total_cost_usd": round(self.state.total_cost_usd, 4),
-            "total_duration_sec": round(self.state.total_duration_sec, 2),
+            "scope": "session" if clean_session_id else "runtime",
+            "session_id": clean_session_id or None,
+            "input_tokens": state.input_tokens,
+            "output_tokens": state.output_tokens,
+            "cache_creation_tokens": state.cache_creation_input_tokens,
+            "cache_read_tokens": state.cache_read_input_tokens,
+            "prompt_cache_total_tokens": state.prompt_cache_total_tokens,
+            "reasoning_output_tokens": state.reasoning_output_tokens,
+            "total_cost_usd": round(state.total_cost_usd, 4),
+            "total_duration_sec": round(state.total_duration_sec, 2),
             "uptime_sec": round(time.monotonic() - self._start_time, 2)
         }
 
     def reset(self) -> None:
         self.state = CostTrackerState()
+        self._session_states.clear()
         self._start_time = time.monotonic()

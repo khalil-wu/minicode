@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from typing import Any, Iterable
 
@@ -21,8 +22,10 @@ def postprocess_tool_schema(schema: dict[str, Any], *, visible_tool_names: Itera
     description = str(function.get("description") or "")
     if not description:
         return result
-    description = _strip_unavailable_tool_references(description, visible)
-    hint = _availability_hint(visible)
+    stripped_description = _strip_unavailable_tool_references(description, visible)
+    stripped_unavailable_reference = stripped_description != description
+    description = stripped_description
+    hint = _availability_hint(visible) if stripped_unavailable_reference else ""
     if hint and "Available direct tools:" not in description:
         description = f"{description.rstrip()} {hint}".strip()
     function["description"] = description
@@ -45,11 +48,18 @@ def _strip_unavailable_tool_references(description: str, visible: set[str]) -> s
         "tool_search",
         "tool_describe",
         "tool_call",
-        "task",
         "ask_user",
     }
     for name in sorted(known_tool_names - visible, key=len, reverse=True):
-        text = text.replace(name, "an available tool")
+        pattern = re.compile(rf"(?<![\w.-]){re.escape(name)}(?![\w.-])")
+        text = pattern.sub("an available tool", text)
+    if "task" not in visible:
+        text = re.sub(
+            r"(?i)(\b(?:use|call|invoke|via)\s+)task\b",
+            r"\1an available tool",
+            text,
+        )
+        text = re.sub(r"`task`", "an available tool", text)
     return text
 
 

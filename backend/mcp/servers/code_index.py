@@ -81,6 +81,7 @@ IGNORE_DIRS = {
 # 分块大小
 CHUNK_MAX_LINES = 60
 CHUNK_OVERLAP_LINES = 5
+COLLECTION_SCAN_BATCH_SIZE = 1000
 
 _collection = None
 _client = None
@@ -245,6 +246,205 @@ def _file_hash(content: str) -> str:
     return hashlib.md5(content.encode()).hexdigest()[:12]
 
 
+def _path_key(path: str | Path) -> str:
+    try:
+        return Path(path).expanduser().resolve(strict=False).as_posix().lower()
+    except OSError:
+        return str(path).replace("\\", "/").lower()
+
+
+def _collection_file_paths_by_key(collection: Any, root: Path) -> dict[str, set[str]]:
+    """Return indexed file_path metadata under root, grouped by normalized path."""
+    try:
+        total = int(collection.count())
+    except Exception:
+        total = 0
+
+    raw_paths: list[str] = []
+    if total > 0:
+        for offset in range(0, total, COLLECTION_SCAN_BATCH_SIZE):
+            try:
+                batch = collection.get(
+                    include=["metadatas"],
+                    limit=COLLECTION_SCAN_BATCH_SIZE,
+                    offset=offset,
+                )
+            except TypeError:
+                batch = collection.get(include=["metadatas"])
+                total = 0
+            except Exception as exc:
+                logger.debug("读取代码索引元数据失败: %s", exc)
+                break
+            for meta in batch.get("metadatas") or []:
+                if isinstance(meta, dict) and isinstance(meta.get("file_path"), str):
+                    raw_paths.append(meta["file_path"])
+            if total == 0:
+                break
+
+    root_key = _path_key(root)
+    grouped: dict[str, set[str]] = {}
+    for raw_path in raw_paths:
+        key = _path_key(raw_path)
+        if key == root_key or key.startswith(root_key.rstrip("/") + "/"):
+            grouped.setdefault(key, set()).add(raw_path)
+    return grouped
+
+
+def _delete_chunks_for_file_paths(collection: Any, file_paths: set[str]) -> int:
+    deleted_files = 0
+    for file_path in sorted(path for path in file_paths if path):
+        deleted = False
+        for where in (
+            {"file_path": {"$eq": file_path}},
+            {"file_path": file_path},
+        ):
+            try:
+                collection.delete(where=where)
+                deleted = True
+                break
+            except TypeError:
+                try:
+                    collection.delete(where)
+                    deleted = True
+                    break
+                except Exception:
+                    continue
+            except Exception:
+                continue
+        if deleted:
+            deleted_files += 1
+        else:
+            logger.debug("清理旧代码索引失败: %s", file_path)
+    return deleted_files
+
+
+def index_codebase(
+    root_dir: str,
+    extensions: list[str] | None = None,
+    *,
+    collection: Any | None = None,
+) -> str:
+    """Index a repository directory and reconcile stale chunks."""
+    collection = collection or _get_collection()
+    if collection is None:
+        return "错误: 向量数据库未初始化。请确认已安装 chromadb。"
+
+    root = Path(root_dir).expanduser()
+    if not root.exists():
+        return f"错误: 目录不存在: {root_dir}"
+    try:
+        root = root.resolve()
+    except OSError:
+        pass
+
+    exts = set(extensions) if extensions else DEFAULT_EXTENSIONS
+
+    # 扫描文件
+    files_to_index: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        # 过滤忽略目录
+        dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS]
+
+        for fname in filenames:
+            if Path(fname).suffix.lower() in exts:
+                files_to_index.append(Path(dirpath) / fname)
+
+    current_path_keys = {_path_key(path) for path in files_to_index}
+    indexed_paths_by_key = _collection_file_paths_by_key(collection, root)
+    indexed_manifest_by_key: dict[str, set[str]] = {}
+    for raw_path in _indexed_files:
+        key = _path_key(raw_path)
+        if key == _path_key(root) or key.startswith(_path_key(root).rstrip("/") + "/"):
+            indexed_manifest_by_key.setdefault(key, set()).add(raw_path)
+    for key, paths in indexed_manifest_by_key.items():
+        indexed_paths_by_key.setdefault(key, set()).update(paths)
+    stale_indexed_files = {
+        raw_path
+        for key, raw_paths in indexed_paths_by_key.items()
+        if key not in current_path_keys
+        for raw_path in raw_paths
+    }
+    removed_files = _delete_chunks_for_file_paths(collection, stale_indexed_files)
+    for fpath in stale_indexed_files:
+        _indexed_files.pop(fpath, None)
+
+    if not files_to_index:
+        return (
+            f"在 {root_dir} 中未找到匹配的代码文件。\n"
+            f"- **清理失效索引**: {removed_files} 个文件"
+        )
+
+    # 索引
+    total_chunks = 0
+    new_files = 0
+    skipped_files = 0
+
+    for fpath in files_to_index:
+        try:
+            content = fpath.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+
+        # 增量：检查文件是否已变更
+        fhash = _file_hash(content)
+        try:
+            fpath = fpath.resolve()
+        except OSError:
+            pass
+        fpath_str = str(fpath)
+        if _indexed_files.get(fpath_str) == fhash:
+            skipped_files += 1
+            continue
+
+        # 删除该文件的旧分块，避免文件缩短/重命名后遗留孤儿 chunk。
+        old_paths = indexed_paths_by_key.get(_path_key(fpath_str), {fpath_str})
+        _delete_chunks_for_file_paths(collection, set(old_paths))
+
+        # 分块
+        chunks = _chunk_code(content, fpath_str)
+
+        # 存入向量库
+        ids = []
+        documents = []
+        metadatas = []
+
+        for j, chunk in enumerate(chunks):
+            chunk_id = f"code_{hashlib.md5(f'{fpath_str}:{j}'.encode()).hexdigest()[:10]}"
+            ids.append(chunk_id)
+            documents.append(chunk["content"])
+            metadatas.append({
+                "file_path": fpath_str,
+                "relative_path": str(fpath.relative_to(root)),
+                "start_line": chunk["start_line"],
+                "end_line": chunk["end_line"],
+                "symbol": chunk["symbol"] or "",
+                "language": fpath.suffix.lstrip("."),
+                "content_hash": fhash,
+            })
+
+        if ids:
+            try:
+                collection.upsert(
+                    ids=ids,
+                    documents=documents,
+                    metadatas=metadatas,
+                )
+                total_chunks += len(ids)
+                new_files += 1
+                _indexed_files[fpath_str] = fhash
+            except Exception as exc:
+                logger.error("索引文件 %s 失败: %s", fpath, exc)
+
+    return (
+        f"## 索引完成\n"
+        f"- **扫描目录**: {root_dir}\n"
+        f"- **新增索引**: {new_files} 个文件, {total_chunks} 个代码块\n"
+        f"- **跳过（未变更）**: {skipped_files} 个文件\n"
+        f"- **清理失效索引**: {removed_files} 个文件\n"
+        f"- **总已索引文件**: {len(_indexed_files)}"
+    )
+
+
 # ── MCP Tools ──────────────────────────────────────────────
 
 if HAS_MCP and mcp:
@@ -271,88 +471,7 @@ if HAS_MCP and mcp:
             index("/c/Desktop/MiniCode/backend")
             index("/c/Desktop/project", extensions=[".py", ".ts"])
         """
-        collection = _get_collection()
-        if collection is None:
-            return "错误: 向量数据库未初始化。请确认已安装 chromadb。"
-
-        root = Path(root_dir)
-        if not root.exists():
-            return f"错误: 目录不存在: {root_dir}"
-
-        exts = set(extensions) if extensions else DEFAULT_EXTENSIONS
-
-        # 扫描文件
-        files_to_index: list[Path] = []
-        for dirpath, dirnames, filenames in os.walk(root):
-            # 过滤忽略目录
-            dirnames[:] = [d for d in dirnames if d not in IGNORE_DIRS]
-
-            for fname in filenames:
-                if Path(fname).suffix.lower() in exts:
-                    files_to_index.append(Path(dirpath) / fname)
-
-        if not files_to_index:
-            return f"在 {root_dir} 中未找到匹配的代码文件。"
-
-        # 索引
-        total_chunks = 0
-        new_files = 0
-        skipped_files = 0
-
-        for fpath in files_to_index:
-            try:
-                content = fpath.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                continue
-
-            # 增量：检查文件是否已变更
-            fhash = _file_hash(content)
-            fpath_str = str(fpath)
-            if _indexed_files.get(fpath_str) == fhash:
-                skipped_files += 1
-                continue
-
-            # 分块
-            chunks = _chunk_code(content, fpath_str)
-
-            # 存入向量库
-            ids = []
-            documents = []
-            metadatas = []
-
-            for j, chunk in enumerate(chunks):
-                chunk_id = f"code_{hashlib.md5(f'{fpath_str}:{j}'.encode()).hexdigest()[:10]}"
-                ids.append(chunk_id)
-                documents.append(chunk["content"])
-                metadatas.append({
-                    "file_path": fpath_str,
-                    "relative_path": str(fpath.relative_to(root)),
-                    "start_line": chunk["start_line"],
-                    "end_line": chunk["end_line"],
-                    "symbol": chunk["symbol"] or "",
-                    "language": fpath.suffix.lstrip("."),
-                })
-
-            if ids:
-                try:
-                    collection.upsert(
-                        ids=ids,
-                        documents=documents,
-                        metadatas=metadatas,
-                    )
-                    total_chunks += len(ids)
-                    new_files += 1
-                    _indexed_files[fpath_str] = fhash
-                except Exception as exc:
-                    logger.error("索引文件 %s 失败: %s", fpath, exc)
-
-        return (
-            f"## 索引完成\n"
-            f"- **扫描目录**: {root_dir}\n"
-            f"- **新增索引**: {new_files} 个文件, {total_chunks} 个代码块\n"
-            f"- **跳过（未变更）**: {skipped_files} 个文件\n"
-            f"- **总已索引文件**: {len(_indexed_files)}"
-        )
+        return index_codebase(root_dir, extensions)
 
 
     @mcp.tool()

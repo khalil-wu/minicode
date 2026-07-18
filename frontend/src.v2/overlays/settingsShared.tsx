@@ -20,6 +20,7 @@ export type ProviderSection = {
 export type LLMSettingsPayload = {
   provider?: string;
   active_model?: string;
+  prompt_persona?: string;
   openai?: ProviderSection;
   anthropic?: ProviderSection;
   custom?: ProviderSection;

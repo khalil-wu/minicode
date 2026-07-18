@@ -196,6 +196,43 @@ export interface GitChangesState {
   staged: GitChangeFile[];
   untracked: string[];
   loading: boolean;
+  /** Streaming per-turn edits surfaced before the working tree diff refresh. */
+  live?: {
+    files: GitChangeFile[];
+    toolCallId?: string;
+    progress?: number;
+    updatedAt?: number;
+  } | null;
+}
+
+// Frontend mirror of backend/agent/context_ledger.py
+export type ContextLedgerCategory =
+  | "system_runtime"
+  | "guidelines"
+  | "skills"
+  | "files_attachments"
+  | "history"
+  | "tool_results"
+  | "memory"
+  | "compaction_summaries";
+
+export interface ContextLedgerEntry {
+  category: ContextLedgerCategory;
+  label: string;
+  estimated_tokens: number;
+  item_count: number;
+  source_count: number;
+  sources: string[];
+}
+
+export interface ContextLedger {
+  schema_version?: number;
+  estimated_tokens: number;
+  actual_tokens: number;
+  compaction_count: number;
+  native_attachment_tokens?: number;
+  native_attachment_count?: number;
+  entries: ContextLedgerEntry[];
 }
 
 export interface ContextUsage {
@@ -203,6 +240,7 @@ export interface ContextUsage {
   limit: number;
   compactedAt?: number;
   compactSummary?: string;
+  ledger?: ContextLedger;
 }
 
 export interface UISlice {
@@ -242,6 +280,9 @@ export interface UISlice {
   gitChanges: GitChangesState;
   skillsMarketplaceOpen: boolean;
   liveArtifactsOpen: boolean;
+  /** Agent-driven editor surface; force-closed when the agent_editor feature flag is off. */
+  agentEditorOpen: boolean;
+  setAgentEditorOpen: (open: boolean) => void;
   setThemeMode: (m: ThemeMode) => void;
   setTextScale: (s: number) => void;
   setViewMode: (m: ViewMode) => void;
@@ -549,7 +590,7 @@ export interface ProgressContentBlock {
   type: "progress";
   id: string;
   stage: "status" | "planning" | "tool" | "approval" | "verification" | "final";
-  phase?: "orienting" | "planning" | "model" | "tool" | "approval" | "verify" | "final" | "recover" | "status" | "iteration";
+  phase?: "orienting" | "planning" | "model" | "tool" | "approval" | "verify" | "final" | "recover" | "status" | "iteration" | "subagent" | "workflow" | "cache";
   status: "running" | "completed" | "failed" | "info";
   message: string;
   label?: string;
@@ -565,6 +606,8 @@ export interface ProgressContentBlock {
   displayScope?: string;
   panelHint?: RightStackTab | string;
   requiresAttention?: boolean;
+  /** Ephemeral progress replaces the previous entry with the same groupId. */
+  ephemeral?: boolean;
   timestamp: number;
 }
 export interface AgentProgressEntry extends ProgressContentBlock {
@@ -708,8 +751,11 @@ export interface ChatSlice {
   appendProcessItem: (
     item: Omit<ProcessContentBlock, "type" | "timestamp"> & { timestamp?: number },
     conversationId?: string,
+    messageId?: string,
   ) => void;
-  appendProgress: (progress: Omit<ProgressContentBlock, "type" | "timestamp">, conversationId?: string) => void;
+  appendProgress: (progress: Omit<ProgressContentBlock, "type" | "timestamp">, conversationId?: string, messageId?: string) => void;
+  /** Replace the previous ephemeral progress block sharing the same groupId. */
+  replaceEphemeralProgress: (progress: Omit<ProgressContentBlock, "type" | "timestamp">, conversationId?: string, messageId?: string) => void;
   appendToolCallBlock: (tc: ToolCallRecord, conversationId?: string) => void;
   updateToolCall: (
     id: string,
@@ -752,6 +798,9 @@ export type PendingToolCallResume = {
 // ── Composer Slice ────────────────────────────────────────────────
 
 export type PermissionMode = "ask_permissions" | "plan" | "auto" | "bypass";
+
+/** System prompt identity (backend settings `prompt_persona`). */
+export type PromptPersona = "minicode" | "codex";
 
 export interface ComposerAttachment {
   id: string;
@@ -820,13 +869,47 @@ export interface PlanState {
 export interface SubagentState {
   id: string;
   role: string;
-  status: "running" | "done" | "error";
+  status: "pending" | "running" | "blocked" | "done" | "partial" | "cancelled" | "error";
   summary?: string;
   parentRunId?: string;
   iteration?: number;
   maxIterations?: number;
   currentTool?: string;
+  currentToolCallId?: string;
+  progressSource?: string;
   detail?: string;
+  /** User-facing description of what the delegated task is trying to achieve. */
+  objective?: string;
+  /** Latest user-visible activity line (already noise-filtered). */
+  currentActivity?: string;
+  /** What the agent is waiting on when blocked (e.g. "tool", dependency label). */
+  waitingOn?: string;
+  needsInput?: boolean;
+  // Workflow / swarm metadata
+  workflowId?: string;
+  workflowName?: string;
+  workflowMode?: string;
+  nodeId?: string;
+  taskId?: string;
+  order?: number;
+  dependsOn?: string[];
+  blockedBy?: string[];
+  writeScope?: string[];
+  requiredForFinal?: boolean;
+  blocksFinalReply?: boolean;
+  readOnly?: boolean;
+  // Result / termination
+  resultContent?: string;
+  resultError?: string;
+  resultAvailable?: boolean;
+  terminationReason?: string;
+  terminationInitiator?: string;
+  checkpointId?: string;
+  durationMs?: number;
+  toolCallCount?: number;
+  // Timestamps (epoch ms)
+  lastEventAt?: number;
+  lastProgressAt?: number;
 }
 
 export interface BudgetBucket {
@@ -846,6 +929,8 @@ export interface AgentSlice {
   plan: PlanState | null;
   todos: TodoItem[];
   subagents: SubagentState[];
+  /** Subagent currently opened in the SubagentsTab detail view. */
+  focusedSubagentId: string | null;
   agentProgress: AgentProgressEntry[];
   conversationAgentStates: Record<string, ConversationAgentState>;
   runtimeSession: RuntimeSessionSnapshot | null;
@@ -861,6 +946,7 @@ export interface AgentSlice {
   addSubagent: (s: SubagentState, conversationId?: string) => void;
   updateSubagent: (id: string, patch: Partial<SubagentState>, conversationId?: string) => void;
   removeSubagent: (id: string, conversationId?: string) => void;
+  setFocusedSubagentId: (id: string | null) => void;
   setRuntimeSession: (session: RuntimeSessionSnapshot | null) => void;
   setRuntimeCapabilities: (capabilities: AgentCapabilitiesPayload | null) => void;
   appendAgentProgress: (progress: Omit<ProgressContentBlock, "type" | "timestamp">, conversationId?: string) => void;
@@ -919,7 +1005,7 @@ export interface ApprovalSlice {
 // ── Inspector Slice ──────────────────────────────────────────────
 
 export interface InspectorEntry {
-  targetKind: "message" | "tool_call" | "artifact" | "file" | "diff" | "subagent" | "budget";
+  targetKind: "message" | "tool_call" | "artifact" | "file" | "diff" | "subagent" | "budget" | "provider" | "cache";
   targetId: string;
   payload: Record<string, unknown>;
   timestamp: number;

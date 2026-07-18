@@ -163,7 +163,7 @@
 
 /* Checkmark appear — when activity status changes to done */
 .anim-checkmark-appear {
-  animation: checkmark-appear var(--duration-fast, 150ms) cubic-bezier(0.34, 1.56, 0.64, 1);
+  animation: checkmark-appear var(--duration-fast, 150ms) var(--easing-spring);
 }
 
 /* Error shake — when activity fails */
@@ -194,7 +194,7 @@
 
 /* Smooth transform transition for interactive elements */
 .transition-transform {
-  transition: transform var(--duration-micro, 100ms) cubic-bezier(0.2, 0.8, 0.2, 1);
+  transition: transform var(--duration-micro, 100ms) var(--easing-decelerate);
 }
 
 /* Combined transition for buttons and interactive elements */
@@ -203,7 +203,7 @@
     background-color var(--duration-micro, 100ms) ease,
     color var(--duration-micro, 100ms) ease,
     border-color var(--duration-micro, 100ms) ease,
-    transform var(--duration-micro, 100ms) cubic-bezier(0.2, 0.8, 0.2, 1),
+    transform var(--duration-micro, 100ms) var(--easing-decelerate),
     box-shadow var(--duration-micro, 100ms) ease;
 }
 

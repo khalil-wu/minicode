@@ -176,6 +176,8 @@ def normalize_attachment_payloads(raw_attachments: Any) -> list[dict[str, Any]]:
             "size_bytes": int(item.get("size_bytes", 0) or 0),
             "title": str(item.get("title", "")).strip(),
             "summary": str(item.get("summary", "")).strip(),
+            "input_source": str(item.get("input_source", "")).strip(),
+            "source_char_count": int(item.get("source_char_count", 0) or 0),
         }
         if entry["kind"] == "image" or entry["media_type"] == "application/pdf":
             data = str(item.get("data", "")).strip()
@@ -199,24 +201,28 @@ def build_effective_user_message(
     lines = []
     for attachment in attachments:
         parse_error = str(attachment.get("parse_error") or "").strip()
+        kind = str(attachment.get("kind") or "document").strip() or "document"
+        media_type = str(attachment.get("media_type") or "").strip()
         status = ""
         if parse_error:
-            media_type = str(attachment.get("media_type") or "").strip()
             status = (
                 ", text_extraction=failed, warning=do_not_infer_document_body_from_title"
                 if media_type == "application/pdf"
                 else ", text_extraction=failed"
             )
+        elif kind == "image" and str(attachment.get("data") or "").strip():
+            status = ", native_image=attached, inspect_pixels_directly"
         lines.append(
             "- "
             f"{attachment['file_name']} "
-            f"({attachment['kind']}, doc_id={attachment['doc_id']}, "
+            f"({kind}, doc_id={attachment['doc_id']}, "
             f"artifact_id={attachment['artifact_id']}, indexed_chunks={attachment['indexed_chunks']}{status})"
         )
     attachment_block = (
         "Attached files are available for this request.\n"
-        "Use provider-native multimodal input first for attached images and PDFs when the active model supports it.\n"
-        "Use read_artifact only when you need extracted text, indexed chunks, or a fallback for unsupported/oversized files.\n"
+        "For attached images with native_image=attached, inspect the image pixels directly through the multimodal input; do not call OCR/read_artifact just to read the image.\n"
+        "Use provider-native multimodal input first for attached PDFs when the active model supports it.\n"
+        "Use read_artifact only when you need extracted text, indexed chunks, or a fallback for unsupported/oversized non-image files.\n"
         "If an attached PDF says text_extraction=failed and native PDF input is unavailable, do not summarize or interpret the PDF body from the file name/title alone; say the body is unavailable.\n"
         "Do not ask the user to re-upload the same file or re-parse it when artifact_id is present.\n"
         "Attachments:\n"

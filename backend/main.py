@@ -9,7 +9,7 @@ Startup initialisation:
   - MCP Server manager (loads from .mcp.json and starts)
   - Skills discovery and manager
   - File memory system
-  - Passive RAG pipeline
+  - Passive RAG pipeline for uploaded/document retrieval
 """
 
 from __future__ import annotations
@@ -31,15 +31,23 @@ from backend.artifact.store import ArtifactStore
 from backend.bootstrap.app import AppBootstrap
 from backend.config import PROJECT_ROOT, load_config
 from backend.runtime_env import ensure_utf8_console_logging
+from backend.version import __version__
 from backend.workspace import create_workspace_router
 
 # ── Decomposed sub-modules ──
-from backend.api.auth import _is_runtime_authorized, _is_websocket_authorized
+from backend.api.auth import (
+    _is_workspace_raw_token_authorized,
+    _is_runtime_authorized,
+    _is_websocket_authorized,
+    _websocket_accept_subprotocol,
+)
 from backend.api.tool_registry import _build_tool_registry as _api_build_tool_registry
 from backend.api.routes_health import _build_status_payload, get_mcp_status, get_mcp_manager
 from backend.api.routes_chat import router as chat_router
 from backend.api.routes_llm import router as llm_router
 from backend.api.routes_skills import router as skills_router
+from backend.api.routes_agents import router as agents_router
+from backend.api.routes_replay import router as replay_router
 from backend.api.routes_health import router as health_router
 from backend.api import _state
 
@@ -50,18 +58,6 @@ logger = logging.getLogger(__name__)
 ensure_utf8_console_logging()
 
 _bootstrap: AppBootstrap | None = None
-
-
-# ── Backward-compatible module-level accessors ──
-# Some modules (e.g. skill_tools.py) do `from backend.main import _skill_manager`
-# at runtime.  These shim variables keep that import path working after the
-# main.py decomposition.
-
-def __getattr__(name: str):
-    """Lazy module-level attribute for backward-compatible imports."""
-    if name == "_skill_manager":
-        return _state.bootstrap.skill_manager if _state.bootstrap else None
-    raise AttributeError(f"module 'backend.main' has no attribute {name!r}")
 
 
 def _build_tool_registry(
@@ -97,8 +93,8 @@ def _build_tool_registry(
 if hasattr(asyncio, "WindowsProactorEventLoopPolicy"):
     try:
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Failed to set WindowsProactorEventLoopPolicy: %s", exc)
 
 
 from backend.llm.model_registry import (
@@ -177,7 +173,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="MiniCode Agent API",
     description="AI coding assistant backend - REST and WebSocket interfaces",
-    version="0.2.0",
+    version=__version__,
     lifespan=lifespan,
 )
 
@@ -214,7 +210,10 @@ def _build_cors_origins() -> list[str]:
 
 
 def _build_cors_origin_regex() -> str | None:
-    if IS_PRODUCTION:
+    if os.environ.get("MINICODE_DISABLE_DEV_CORS") == "1":
+        return None
+    is_source_checkout = (PROJECT_ROOT / "frontend" / "vite.config.ts").is_file()
+    if IS_PRODUCTION and not is_source_checkout:
         return None
     return r"https?://(localhost|127\.0\.0\.1):(5[1-2][0-9]{2}|80[0-9]{2})"
 
@@ -225,7 +224,13 @@ def _build_cors_origin_regex() -> str | None:
 async def _api_v1_path_alias(request: Request, call_next):
     """Rewrite /api/v1/* -> /api/* so v1 callers reach the same handlers."""
     path = request.scope.get("path", "")
-    if request.method != "OPTIONS" and path.startswith("/api/") and not _is_runtime_authorized(request):
+    is_workspace_raw_authorized = _is_workspace_raw_token_authorized(request)
+    if (
+        request.method != "OPTIONS"
+        and path.startswith("/api/")
+        and not is_workspace_raw_authorized
+        and not _is_runtime_authorized(request)
+    ):
         return Response("Unauthorized", status_code=401)
     if path.startswith("/api/v1/"):
         rewritten = "/api/" + path[len("/api/v1/"):]
@@ -260,6 +265,8 @@ app.include_router(git_router)
 app.include_router(chat_router)
 app.include_router(llm_router)
 app.include_router(skills_router)
+app.include_router(agents_router)
+app.include_router(replay_router)
 app.include_router(health_router)
 
 
@@ -292,7 +299,8 @@ else:
                 status_code=resp.status_code,
                 media_type=content_type,
             )
-        except Exception:
+        except Exception as exc:
+            logger.debug("Vite proxy request failed: %s", exc)
             return Response(
                 content="Vite dev server is not running. Start it with npm run dev.",
                 status_code=502,
@@ -347,8 +355,9 @@ async def index():
             resp = await _vite_client.get("/")
             return Response(content=resp.content, status_code=resp.status_code,
                             media_type=resp.headers.get("content-type", "text/html"))
-        except Exception:
+        except Exception as exc:
             # Vite not running, fallback to local index.html
+            logger.debug("Vite not running, serving local index.html: %s", exc)
             return FileResponse(str(FRONTEND_SRC / "index.html"))
     return FileResponse(str(FRONTEND_SRC / "index.html"))
 
@@ -386,7 +395,7 @@ async def update_ui_preferences(
 async def websocket_endpoint(websocket: WebSocket) -> None:
     """WebSocket chat endpoint."""
     if not _is_websocket_authorized(websocket):
-        await websocket.accept()
+        await websocket.accept(subprotocol=_websocket_accept_subprotocol(websocket))
         await websocket.close(code=1008)
         return
 
@@ -396,7 +405,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     try:
         llm = _state.bootstrap.create_llm()
     except Exception as exc:
-        await websocket.accept()
+        await websocket.accept(subprotocol=_websocket_accept_subprotocol(websocket))
         await websocket.send_json(
             AgentEvent.error(f"LLM initialization failed: {exc}", recoverable=False).to_ws_message()
         )
@@ -419,7 +428,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         skill_executor=_state.bootstrap.skill_executor,
         rag_pipeline=_state.bootstrap.rag_pipeline,
         memory_manager=_state.bootstrap.file_memory,
-        vector_memory=_state.bootstrap.vector_memory,
+        vector_memory=None,
     )
 
     try:

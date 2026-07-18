@@ -6,6 +6,7 @@ import logging
 import os
 import platform
 import signal
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass
@@ -163,6 +164,7 @@ class TerminalSession:
             stderr=asyncio.subprocess.PIPE,
             cwd=self._initial_cwd,
             env=sanitized_subprocess_env({"TERM": "dumb", "NO_COLOR": "1"}),
+            **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if self._is_windows else {}),
         )
         self._started_at = time.time()
         self._output_buffer.clear()
@@ -294,7 +296,7 @@ class TerminalSession:
         marker: str,
         exit_code_marker: str,
     ) -> tuple[str, int]:
-        exit_code = 0
+        exit_code = -1
         output_lines: list[str] = []
 
         for line in output.splitlines():
@@ -305,7 +307,7 @@ class TerminalSession:
                 try:
                     exit_code = int(raw_code)
                 except (TypeError, ValueError):
-                    exit_code = 0
+                    exit_code = -1
                 continue
             output_lines.append(line)
 

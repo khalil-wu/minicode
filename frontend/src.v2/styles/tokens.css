@@ -139,40 +139,35 @@
   --shadow-medium: 0 8px 32px oklch(0 0 0 / 0.14);
   --shadow-strong-overlay: 0 10px 30px oklch(0 0 0 / 0.22);
 
-  /* ── Easing ────────────────────────────────────────── */
-  --easing-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  /* ── Easing (3) — single registry for all cubic-beziers ── */
+  --easing-standard:   cubic-bezier(0.4, 0, 0.2, 1);    /* material standard */
+  --easing-decelerate: cubic-bezier(0.2, 0.8, 0.2, 1);  /* expand / reveal */
+  --easing-spring:     cubic-bezier(0.34, 1.56, 0.64, 1); /* playful overshoot (modal/toast/checkmark) */
+  --easing-out:        cubic-bezier(0.16, 1, 0.3, 1);   /* strong ease-out (quote slide-down) */
 
   /* ── Duration primitives (4) — raw ms values for @keyframes
      Used by animations.css utility classes. The --transition-*
      shorthands below compose these with easing + property. ──── */
   --duration-micro: 100ms;
   --duration-fast:  150ms;
+  --duration-enter: 180ms;
   --duration-base:  200ms;
   --duration-slow:  250ms;
+  --duration-slower: 300ms;
 
   /* ── Transitions (4) — Cross-cutting #7
      Single registry: 100 / 150 / 200 / 250 ms with the standard
      material easing. Animation duration allowlist documented in
      design.md §Cross-cutting #7. ───────────────────────── */
-  --transition-micro:  all var(--duration-micro) cubic-bezier(0.4, 0, 0.2, 1);
-  --transition-fast:   all var(--duration-fast)  cubic-bezier(0.4, 0, 0.2, 1);
-  --transition-normal: all var(--duration-base)  cubic-bezier(0.4, 0, 0.2, 1);
-  --transition-slow:   all var(--duration-slow)  cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-micro:  all var(--duration-micro) var(--easing-standard);
+  --transition-fast:   all var(--duration-fast)  var(--easing-standard);
+  --transition-normal: all var(--duration-base)  var(--easing-standard);
+  --transition-slow:   all var(--duration-slow)  var(--easing-standard);
 
-  /* Z-index scale */
-  --z-base: 0;
-  --z-sidebar: 10;
-  --z-composer: 20;
-  --z-dropdown: 30;
-  --z-panel-popup: 30;
-  --z-overlay: 40;
-  --z-overlay-backdrop: 40;
-  --z-modal: 50;
-  --z-approval: 60;
-  --z-toast: 70;
-  --z-tooltip: 80;
-  --z-dialog-service: 80;
-  --z-context-menu: 90;
+  /* Z-index: defined exclusively in styles/z-index.css (loaded after this
+     file). The old 0–90 scale that lived here collided with that ladder
+     (e.g. --z-overlay == --z-overlay-backdrop == 40) and every shared name
+     was silently overridden anyway; removed to keep one source of truth. */
 
   /* ── Layout vars ──────────────────────────────────────── */
   --header-height:       44px;

@@ -8,6 +8,20 @@ from urllib.parse import urlparse
 
 COMMAND_OUTPUT_PREVIEW_LIMIT = 60_000
 TIMELINE_TEXT_SOURCES = {'model_preamble', 'post_tool', 'runtime'}
+TEXT_METADATA_KEYS = {
+    'source',
+    'visibility',
+    'role',
+    'phase',
+    'segmentId',
+    'iterationIndex',
+    'streamAttempt',
+    'sealReason',
+    'sealed',
+    'promoteAllUnsealedNarration',
+    'providerRaw',
+    'finishReason',
+}
 
 
 def _int_or(value: Any, fallback: int) -> int:
@@ -21,12 +35,26 @@ def _is_timeline_text_block(block: dict[str, Any]) -> bool:
     return (
         block.get('visibility') in {'timeline', 'debug'}
         or block.get('role') == 'runtime'
+        or str(block.get('phase') or '').strip().lower() == 'commentary'
         or block.get('source') in TIMELINE_TEXT_SOURCES
     )
 
 
 def _is_answer_text_block(block: dict[str, Any]) -> bool:
     return block.get('type') == 'text' and not _is_timeline_text_block(block)
+
+
+def _is_model_narration_text_block(block: dict[str, Any]) -> bool:
+    return (
+        block.get('type') == 'text'
+        and block.get('source') == 'model_narration'
+        and block.get('visibility') == 'timeline'
+        and block.get('sealed') is not True
+    )
+
+
+def _has_metadata_value(value: Any) -> bool:
+    return value is not None and value != ''
 
 
 @dataclass(slots=True)
@@ -53,12 +81,12 @@ class AgentTurnState:
         metadata = {
             key: value
             for key, value in dict(metadata or {}).items()
-            if key in {'source', 'visibility', 'role', 'phase'} and value
+            if key in TEXT_METADATA_KEYS and _has_metadata_value(value)
         }
         if self._blocks and self._blocks[-1].get('type') == 'text':
             previous_metadata = {
                 key: self._blocks[-1].get(key)
-                for key in ('source', 'visibility', 'role', 'phase')
+                for key in TEXT_METADATA_KEYS
                 if key in self._blocks[-1]
             }
             if previous_metadata == metadata:
@@ -69,7 +97,100 @@ class AgentTurnState:
         block.update(metadata)
         self._blocks.append(block)
 
-    def replace_text(self, content: str = '') -> None:
+    def finalize_text(self, metadata: dict[str, Any] | None = None) -> bool:
+        """Seal the latest streamed answer text block as the final reply."""
+        metadata = {
+            key: value
+            for key, value in dict(metadata or {}).items()
+            if key in TEXT_METADATA_KEYS and _has_metadata_value(value)
+        }
+        metadata.setdefault('source', 'model_final')
+        if not metadata.get('visibility'):
+            metadata['visibility'] = 'final'
+        if not metadata.get('phase'):
+            metadata['phase'] = 'final'
+        if metadata.get('visibility') == 'timeline' and metadata.get('source') == 'model_narration':
+            target_segment_id = str(metadata.get('segmentId') or '').strip()
+            for index in range(len(self._blocks) - 1, -1, -1):
+                block = self._blocks[index]
+                if not _is_model_narration_text_block(block):
+                    continue
+                if target_segment_id and str(block.get('segmentId') or '').strip() != target_segment_id:
+                    continue
+                next_block = dict(block)
+                next_block.update(metadata)
+                next_block['visibility'] = 'timeline'
+                next_block['sealed'] = True
+                next_block['isStreaming'] = False
+                self._blocks[index] = next_block
+                return True
+            return False
+        if (
+            metadata.get('visibility') == 'final'
+            and metadata.get('source') == 'model_narration'
+            and metadata.get('promoteAllUnsealedNarration')
+        ):
+            narration_indexes = [
+                index
+                for index, block in enumerate(self._blocks)
+                if _is_model_narration_text_block(block)
+            ]
+            if narration_indexes:
+                first_index = narration_indexes[0]
+                narration_content = ''.join(
+                    str(self._blocks[index].get('content') or '')
+                    for index in narration_indexes
+                )
+                first_block = dict(self._blocks[first_index])
+                promoted = dict(first_block)
+                promoted.update(metadata)
+                promoted['content'] = narration_content
+                promoted['visibility'] = 'final'
+                promoted['phase'] = metadata.get('phase') or 'final'
+                promoted['sealed'] = True
+                promoted['isStreaming'] = False
+                self._blocks = [
+                    promoted if index == first_index else block
+                    for index, block in enumerate(self._blocks)
+                    if index not in narration_indexes[1:]
+                ]
+                return True
+        for index in range(len(self._blocks) - 1, -1, -1):
+            block = self._blocks[index]
+            if block.get('type') != 'text':
+                continue
+            if _is_timeline_text_block(block):
+                continue
+            if not str(block.get('content') or '').strip():
+                continue
+            if block.get('sealed') is True or block.get('visibility') == 'final' or block.get('phase') == 'final':
+                return True
+            next_block = dict(block)
+            next_block.update(metadata)
+            self._blocks[index] = next_block
+            return True
+        return False
+
+    def replace_text(self, content: str = '', metadata: dict[str, Any] | None = None) -> None:
+        metadata = dict(metadata or {})
+        if metadata.get('source') == 'model_narration':
+            target_segment_id = str(metadata.get('segmentId') or '').strip()
+            self._blocks = [
+                block
+                for block in self._blocks
+                if not (
+                    _is_model_narration_text_block(block)
+                    and (
+                        not target_segment_id
+                        or str(block.get('segmentId') or '').strip() == target_segment_id
+                    )
+                )
+            ]
+            if content:
+                block = {'type': 'text', 'content': content}
+                block.update(metadata)
+                self._blocks.append(block)
+            return
         self._blocks = [
             block
             for block in self._blocks
@@ -85,7 +206,7 @@ class AgentTurnState:
         if self._blocks and self._blocks[-1].get('type') == 'thinking':
             previous_metadata = {
                 key: self._blocks[-1].get(key)
-                for key in ('source', 'visibility', 'is_raw_provider_reasoning')
+                for key in ('source', 'visibility', 'is_raw_provider_reasoning', 'provider_reasoning_type')
                 if key in self._blocks[-1]
             }
             if previous_metadata == metadata:
@@ -103,18 +224,47 @@ class AgentTurnState:
             if _is_answer_text_block(block)
         )
 
+    def _tool_call_record_matches(self, record: dict[str, Any], incoming: dict[str, Any]) -> bool:
+        if record.get('id') != incoming.get('id'):
+            return False
+        for incoming_key, record_key in (
+            ('turnId', 'turnId'),
+            ('iterationId', 'iterationId'),
+            ('stepId', 'stepId'),
+        ):
+            incoming_value = str(incoming.get(incoming_key) or '').strip()
+            record_value = str(record.get(record_key) or '').strip()
+            if incoming_value and record_value and incoming_value != record_value:
+                return False
+        return True
+
+    def _event_matches_tool_call_record(self, record: dict[str, Any], tool_id: str, data: dict[str, Any]) -> bool:
+        if record.get('id') != tool_id:
+            return False
+        for source_key, record_key in (
+            ('turn_id', 'turnId'),
+            ('iteration_id', 'iterationId'),
+            ('step_id', 'stepId'),
+        ):
+            event_value = str(data.get(source_key) or '').strip()
+            record_value = str(record.get(record_key) or '').strip()
+            if event_value and record_value and event_value != record_value:
+                return False
+        return True
+
     def _replace_tool_call_record(self, record: dict[str, Any]) -> None:
         for block in self._blocks:
             if block.get('type') == 'tool_call' and isinstance(block.get('record'), dict):
-                if block['record'].get('id') == record.get('id'):
+                if self._tool_call_record_matches(block['record'], record):
                     block['record'] = record
                     return
         self._blocks.append({'type': 'tool_call', 'record': record})
 
-    def _find_tool_call_record(self, tool_id: str) -> dict[str, Any] | None:
+    def _find_tool_call_record(self, tool_id: str, data: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        data = data or {}
         for block in self._blocks:
             if block.get('type') == 'tool_call' and isinstance(block.get('record'), dict):
-                if block['record'].get('id') == tool_id:
+                if self._event_matches_tool_call_record(block['record'], tool_id, data):
                     return block['record']
         return None
 
@@ -148,6 +298,7 @@ class AgentTurnState:
             'activity_kind': record.get('activityKind', ''),
             'group_id': record.get('groupId', ''),
             'step_id': record.get('stepId', ''),
+            'turn_id': record.get('turnId', ''),
             'iteration_id': record.get('iterationId', ''),
             'phase': record.get('phase', ''),
             'display_scope': record.get('displayScope', ''),
@@ -176,6 +327,7 @@ class AgentTurnState:
             ('activity_kind', 'activityKind'),
             ('group_id', 'groupId'),
             ('step_id', 'stepId'),
+            ('turn_id', 'turnId'),
             ('iteration_id', 'iterationId'),
             ('phase', 'phase'),
             ('display_scope', 'displayScope'),
@@ -216,8 +368,35 @@ class AgentTurnState:
             progress['detail'] = str(data.get('detail') or '')
         if data.get('count') is not None:
             progress['count'] = int(data.get('count') or 0)
+        if data.get('ephemeral'):
+            progress['ephemeral'] = True
+        # Ephemeral progress with the same group_id replaces any previous
+        # ephemeral progress in that group (cc pattern: avoid message list
+        # bloat from high-frequency sleep/bash progress ticks).
+        if data.get('ephemeral') and data.get('group_id'):
+            self._replace_ephemeral_progress(progress)
+            return progress
         self._upsert_progress(progress)
         return progress
+
+    def _replace_ephemeral_progress(self, progress: dict[str, Any]) -> None:
+        """Replace the last ephemeral progress block in the same group."""
+        group_id = str(progress.get('groupId') or '').strip()
+        if not group_id:
+            self._upsert_progress(progress)
+            return
+        # Walk blocks in reverse; replace the last ephemeral progress in
+        # the same group, or fall back to upsert by id.
+        for index in range(len(self._blocks) - 1, -1, -1):
+            block = self._blocks[index]
+            if (
+                block.get('type') == 'progress'
+                and block.get('groupId') == group_id
+                and block.get('ephemeral')
+            ):
+                self._blocks[index] = progress
+                return
+        self._blocks.append(progress)
 
     def record_process_item(self, data: dict[str, Any]) -> dict[str, Any] | None:
         content = str(data.get('content') or data.get('summary') or '').strip()
@@ -266,6 +445,20 @@ class AgentTurnState:
         for key in ('seq', 'order'):
             if data.get(key) is not None:
                 process[key] = _int_or(data.get(key), 0)
+        for source_key, target_key in (
+            ('skill_name', 'skillName'),
+            ('skillName', 'skillName'),
+            ('trigger_mode', 'triggerMode'),
+            ('triggerMode', 'triggerMode'),
+            ('source_level', 'sourceLevel'),
+            ('sourceLevel', 'sourceLevel'),
+            ('reason', 'reason'),
+        ):
+            if data.get(source_key):
+                process[target_key] = str(data.get(source_key) or '')
+        token_estimate = data.get('token_estimate', data.get('tokenEstimate'))
+        if token_estimate is not None:
+            process['tokenEstimate'] = _int_or(token_estimate, 0)
         self._upsert_process(process)
         return process
 
@@ -284,7 +477,7 @@ class AgentTurnState:
         output = str(data.get('output') or '')
         if not tool_id or not output:
             return
-        existing_record = self._find_tool_call_record(tool_id)
+        existing_record = self._find_tool_call_record(tool_id, data)
         if existing_record is None:
             return
         updated_record = dict(existing_record)
@@ -304,7 +497,7 @@ class AgentTurnState:
         tool_id = str(data.get('id') or '').strip()
         if not tool_id:
             return
-        existing_record = self._find_tool_call_record(tool_id)
+        existing_record = self._find_tool_call_record(tool_id, data)
         if existing_record is None:
             return
         updated_record = dict(existing_record)
@@ -324,6 +517,7 @@ class AgentTurnState:
             ('activity_kind', 'activityKind'),
             ('group_id', 'groupId'),
             ('step_id', 'stepId'),
+            ('turn_id', 'turnId'),
             ('limitation', 'limitation'),
             ('provider', 'provider'),
             ('provider_error_type', 'providerErrorType'),
@@ -403,7 +597,9 @@ class AgentTurnState:
             elif next_block.get('type') == 'tool_call' and isinstance(next_block.get('record'), dict):
                 record = dict(next_block['record'])
                 if record.get('status') == 'running':
-                    record['status'] = 'failed' if terminal_status == 'failed' else 'success'
+                    record['status'] = 'failed'
+                    record.setdefault('error', 'Tool result was not received before the run ended.')
+                    record.setdefault('terminationReason', 'missing_tool_result')
                     record['finishedAt'] = self._now_ms()
                 next_block['record'] = record
             blocks.append(next_block)

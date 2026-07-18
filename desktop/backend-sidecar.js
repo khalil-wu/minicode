@@ -95,6 +95,7 @@ function startBackendSidecar() {
     resolvedWsBaseUrl = "",
     resolvedFrontendUrl = "",
     runtimeToken = "",
+    stateRoot = "",
   } = config;
 
   const child = spawn(pythonCommand, ["-m", "backend"], {
@@ -110,6 +111,8 @@ function startBackendSidecar() {
       MINICODE_WS_BASE_URL: resolvedWsBaseUrl,
       MINICODE_FRONTEND_URL: resolvedFrontendUrl,
       MINICODE_RUNTIME_TOKEN: runtimeToken,
+      MINICODE_STATE_ROOT: stateRoot,
+      PYTHONPATH: [getAppRoot(), process.env.PYTHONPATH].filter(Boolean).join(require("node:path").delimiter),
     },
     windowsHide: true,
   });

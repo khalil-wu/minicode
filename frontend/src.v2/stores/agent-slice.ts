@@ -96,6 +96,7 @@ export const createAgentSlice: StateCreator<AppStore, [], [], AgentSlice> = (set
   plan: null,
   todos: [],
   subagents: [],
+  focusedSubagentId: null,
   agentProgress: [],
   conversationAgentStates: {},
   runtimeSession: null,
@@ -349,6 +350,7 @@ export const createAgentSlice: StateCreator<AppStore, [], [], AgentSlice> = (set
       };
     }),
   setRuntimeSession: (session) => set({ runtimeSession: session }),
+  setFocusedSubagentId: (id) => set({ focusedSubagentId: id }),
   setRuntimeCapabilities: (capabilities) => set({ runtimeCapabilities: capabilities }),
   appendAgentProgress: (progress, conversationId) =>
     set((s) => {

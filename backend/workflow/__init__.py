@@ -1,5 +1,8 @@
-"""Workflow 模块 - 多 Agent 编排"""
+"""Workflow package.
 
-from backend.workflow.engine import WorkflowEngine, WorkflowContext
+Production workflow execution lives in :mod:`backend.tools.workflow_tool`.
+The legacy Python ``exec`` workflow engine was removed to prevent accidental
+use of an untrusted script execution surface.
+"""
 
-__all__ = ['WorkflowEngine', 'WorkflowContext']
+__all__: list[str] = []

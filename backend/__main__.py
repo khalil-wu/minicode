@@ -54,4 +54,5 @@ if __name__ == "__main__":
         reload=_should_enable_reload(),
         ws_max_size=ws_max_size,
         ws_ping_interval=ws_ping_interval,
+        access_log=False,
     )

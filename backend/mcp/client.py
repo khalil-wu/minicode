@@ -31,8 +31,9 @@ import subprocess
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from pathlib import Path
 
+from backend.feature_flags import feature_enabled
 from backend.runtime_env import sanitized_subprocess_env
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,7 @@ def _fix_mcp_subprocess_env(env: dict[str, str]) -> dict[str, str]:
     MiniCode's ``backend/mcp/`` package has the same top-level name as the
     installed ``mcp`` SDK.  When PYTHONPATH or CWD includes the *backend*
     directory, ``import mcp`` resolves to ``backend/mcp/__init__.py`` instead
-    of the SDK — breaking FastMCP-based servers like docparse and memory-rag.
+    of the SDK — breaking FastMCP-based servers like docparse and websearch.
 
     The fix: (1) strip PYTHONPATH entries that point to the backend directory,
     (2) replace them with the project root so ``backend.*`` imports still work,
@@ -239,6 +240,9 @@ class MCPTransport(Enum):
     """传输方式。"""
     STDIO = "stdio"
     HTTP = "http"
+    WEBSOCKET = "websocket"
+    STREAMABLE_HTTP = "streamable_http"
+    IN_PROCESS = "in_process"
 
 
 @dataclass
@@ -263,6 +267,31 @@ class MCPResourceDef:
 
 
 @dataclass
+class MCPResourceTemplateDef:
+    """MCP Server 暴露的 parameterized resource template."""
+    uri_template: str
+    name: str
+    description: str = ""
+    mime_type: str = "text/plain"
+
+
+@dataclass
+class MCPPromptArgDef:
+    """MCP prompt argument definition."""
+    name: str
+    description: str = ""
+    required: bool = False
+
+
+@dataclass
+class MCPPromptDef:
+    """MCP Server 暴露的 prompt 定义。"""
+    name: str
+    description: str = ""
+    arguments: list[MCPPromptArgDef] = field(default_factory=list)
+
+
+@dataclass
 class MCPCallResult:
     """工具调用结果。"""
     content: list[dict[str, Any]] = field(default_factory=list)
@@ -277,12 +306,41 @@ class MCPCallResult:
                 parts.append(item.get("text", ""))
         return "\n".join(parts)
 
+    @property
+    def summary_text(self) -> str:
+        """Return text, falling back to compact summaries for non-text blocks."""
+        text = self.text.strip()
+        if text:
+            return text
+        parts: list[str] = []
+        for item in self.content:
+            if not isinstance(item, dict):
+                continue
+            block_type = str(item.get("type") or "").strip().lower()
+            if block_type == "image":
+                mime = str(item.get("mimeType") or item.get("media_type") or "image").strip()
+                parts.append(f"[image content: {mime}]")
+            elif block_type == "resource":
+                resource = item.get("resource")
+                if isinstance(resource, dict):
+                    uri = str(resource.get("uri") or "").strip()
+                    mime = str(resource.get("mimeType") or resource.get("media_type") or "").strip()
+                    label = uri or mime or "resource"
+                    parts.append(f"[resource content: {label}]")
+                else:
+                    parts.append("[resource content]")
+            elif block_type:
+                parts.append(f"[{block_type} content]")
+        return "\n".join(parts)
+
 
 @dataclass
 class MCPServerCapabilities:
     """Server 能力声明。"""
     tools: bool = False
     resources: bool = False
+    resources_subscribe: bool = False
+    resources_list_changed: bool = False
     prompts: bool = False
     logging: bool = False
 
@@ -299,6 +357,13 @@ class _RpcError:
         return f"MCP RPC error: {self.message} (code={self.code})"
 
 
+class MCPAuthenticationError(ConnectionError):
+    def __init__(self, message: str = "authentication required", *, expired: bool = False) -> None:
+        super().__init__(message)
+        self.mcp_auth_required = True
+        self.mcp_auth_expired = bool(expired)
+
+
 def _rpc_error_from_payload(error: Any) -> _RpcError:
     if isinstance(error, dict):
         return _RpcError(
@@ -306,6 +371,38 @@ def _rpc_error_from_payload(error: Any) -> _RpcError:
             code=str(error.get("code", "?") or "?"),
         )
     return _RpcError(message=str(error or "unknown"), code="?")
+
+
+def _mcp_prompt_content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        block_type = str(content.get("type") or "")
+        if block_type == "text" or "text" in content:
+            return str(content.get("text") or "")
+        if "resource" in content:
+            resource = content.get("resource")
+            if isinstance(resource, dict):
+                return str(resource.get("text") or resource.get("uri") or "")
+        return json.dumps(content, ensure_ascii=False)
+    if isinstance(content, list):
+        return "\n".join(
+            part
+            for part in (_mcp_prompt_content_to_text(item) for item in content)
+            if part.strip()
+        )
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _capability_enabled(capabilities: dict[str, Any], name: str) -> bool:
+    return name in capabilities and capabilities.get(name) is not False
+
+
+def _resource_capability_flag(capabilities: dict[str, Any], flag: str) -> bool:
+    resources = capabilities.get("resources")
+    return isinstance(resources, dict) and bool(resources.get(flag, False))
 
 
 class _JsonRpcHelper:
@@ -365,6 +462,8 @@ class MCPClient:
     # 客户端能力声明
     CLIENT_CAPABILITIES: dict[str, Any] = {
         "roots": {"listChanged": True},
+        "sampling": {},
+        "elicitation": {},
     }
 
     # 客户端信息
@@ -383,6 +482,10 @@ class MCPClient:
         url: str | None = None,
         timeout: float = 30.0,
         token_store: Any = None,
+        sampling_handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+        elicitation_handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+        server_factory: Callable[[], dict[str, Any]] | None = None,
+        on_disconnect: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         """
         初始化 MCP 客户端。
@@ -396,6 +499,9 @@ class MCPClient:
             url: HTTP SSE 端点（HTTP 模式）
             timeout: 请求超时（秒）
             token_store: 可选的 OAuth TokenStore（HTTP 模式注入 Bearer token）
+            sampling_handler: 可选的 sampling 回调（server→client 请求 LLM 生成）
+            elicitation_handler: 可选的 elicitation 回调（server→client 请求用户输入）
+            server_factory: in-process 模式的服务器工厂函数
         """
         self.server_name = server_name
         self._command = command
@@ -409,12 +515,25 @@ class MCPClient:
         self._token_store = token_store
         self._tokens = token_store.get(server_name) if token_store is not None else None
 
+        # Sampling & elicitation handlers (server→client requests)
+        self._sampling_handler = sampling_handler
+        self._elicitation_handler = elicitation_handler
+        self._server_factory = server_factory
+        self._on_disconnect = on_disconnect
+        self._client_capabilities = self._build_client_capabilities()
+
         # 运行时状态
         self._process: asyncio.subprocess.Process | None = None
         self._connected = False
         self._server_capabilities = MCPServerCapabilities()
         self._server_info: dict[str, Any] = {}
         self._instructions: str = ""
+        self._subscribed_resources: set[str] = set()
+        self._resource_notifications: list[dict[str, Any]] = []
+
+        # WebSocket / in-process transport state
+        self._ws: Any = None
+        self._in_process_server: Any = None
 
         # 请求-响应关联
         self._pending: dict[int, asyncio.Future] = {}
@@ -424,6 +543,39 @@ class MCPClient:
         self._sync_process: subprocess.Popen[bytes] | None = None
         self._sync_stdout_thread: threading.Thread | None = None
         self._sync_stderr_thread: threading.Thread | None = None
+        self._closing = False
+
+    def _build_client_capabilities(self) -> dict[str, Any]:
+        capabilities: dict[str, Any] = {}
+        if feature_enabled("mcp_roots"):
+            capabilities["roots"] = {"listChanged": True}
+        if feature_enabled("mcp_sampling"):
+            capabilities["sampling"] = {}
+        if feature_enabled("mcp_elicitation"):
+            capabilities["elicitation"] = {}
+        return capabilities
+
+    async def _notify_disconnect(self) -> None:
+        if self._on_disconnect is None or self._closing:
+            return
+        try:
+            await self._on_disconnect(self.server_name)
+        except Exception:
+            logger.debug("[MCP:%s] disconnect callback failed", self.server_name, exc_info=True)
+
+    def _schedule_disconnect_notification(self) -> None:
+        if self._on_disconnect is None or self._closing:
+            return
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            try:
+                current_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                current_loop = None
+            if current_loop is loop:
+                loop.create_task(self._notify_disconnect())
+            else:
+                loop.call_soon_threadsafe(lambda: loop.create_task(self._notify_disconnect()))
 
     # ── OAuth token management ──────────────────────────────
     def set_tokens(self, tokens: Any) -> None:
@@ -468,6 +620,14 @@ class MCPClient:
         """
         if self._transport == MCPTransport.STDIO:
             await self._connect_stdio()
+        elif self._transport == MCPTransport.HTTP:
+            await self._connect_http()
+        elif self._transport == MCPTransport.WEBSOCKET:
+            await self._connect_websocket()
+        elif self._transport == MCPTransport.STREAMABLE_HTTP:
+            await self._connect_streamable_http()
+        elif self._transport == MCPTransport.IN_PROCESS:
+            await self._connect_in_process()
         else:
             await self._connect_http()
 
@@ -637,6 +797,64 @@ class MCPClient:
         # HTTP 模式下的 initialize
         await self._handshake_http()
 
+    async def _connect_websocket(self) -> None:
+        """WebSocket 模式连接 — JSON-RPC over WebSocket（双向流，类似 stdio）。"""
+        if not feature_enabled("mcp_websocket_transport"):
+            raise ConnectionError("MCP WebSocket transport is disabled by feature flag")
+        if not self._url:
+            raise ConnectionError("WebSocket 模式需要指定 url")
+        try:
+            import websockets  # type: ignore[import-untyped]
+        except ImportError:
+            raise ConnectionError("WebSocket 模式需要 websockets: pip install websockets")
+
+        logger.info("[MCP:%s] WebSocket 连接: %s", self.server_name, self._url)
+        self._ws = await websockets.connect(self._url)
+
+        # WebSocket 使用与 stdio 相同的 JSON-RPC 握手流程
+        await self._handshake()
+
+        # 启动读取循环
+        self._reader_task = asyncio.create_task(self._read_ws_loop())
+
+    async def _connect_streamable_http(self) -> None:
+        """Streamable HTTP 模式连接（MCP 2025-03-26 规范）。"""
+        if not feature_enabled("mcp_streamable_http_transport"):
+            raise ConnectionError("MCP Streamable HTTP transport is disabled by feature flag")
+        if not self._url:
+            raise ConnectionError("Streamable HTTP 模式需要指定 url")
+        try:
+            import httpx
+        except ImportError:
+            raise ConnectionError("Streamable HTTP 模式需要 httpx: pip install httpx")
+
+        logger.info("[MCP:%s] Streamable HTTP 连接: %s", self.server_name, self._url)
+        self._http_endpoint = self._url.strip()
+        self._http_client = httpx.AsyncClient(timeout=self._timeout)
+        # Streamable HTTP 复用 HTTP 模式的握手 + 请求逻辑，
+        # SSE 解析器已增强以内联分发 server→client 请求。
+        await self._handshake_http()
+
+    async def _connect_in_process(self) -> None:
+        """In-process 传输 — 无子进程/网络，直接 Python 调用。"""
+        if self._server_factory is not None:
+            self._in_process_server = self._server_factory()
+        elif self._args:
+            module_path = self._args[0]
+            try:
+                import importlib
+                module = importlib.import_module(module_path)
+                create_server = getattr(module, "create_mcp_server", None)
+                if create_server is None:
+                    raise ConnectionError(f"Module {module_path} has no create_mcp_server()")
+                self._in_process_server = create_server()
+            except ImportError as exc:
+                raise ConnectionError(f"无法导入 in-process server '{module_path}': {exc}")
+        else:
+            raise ConnectionError("In-process 模式需要 server_factory 或 args[0] 指定模块路径")
+
+        await self._handshake_in_process()
+
     async def _handshake(self) -> None:
         """
         MCP 协议握手（DESIGN.md §六 连接流程）。
@@ -647,7 +865,7 @@ class MCPClient:
         """
         init_result = await self._send_request("initialize", {
             "protocolVersion": self.PROTOCOL_VERSION,
-            "capabilities": self.CLIENT_CAPABILITIES,
+            "capabilities": self._client_capabilities,
             "clientInfo": self.CLIENT_INFO,
         })
 
@@ -655,10 +873,12 @@ class MCPClient:
         if init_result:
             caps = init_result.get("capabilities", {})
             self._server_capabilities = MCPServerCapabilities(
-                tools="tools" in caps,
-                resources="resources" in caps,
-                prompts="prompts" in caps,
-                logging="logging" in caps,
+                tools=_capability_enabled(caps, "tools"),
+                resources=_capability_enabled(caps, "resources"),
+                resources_subscribe=_resource_capability_flag(caps, "subscribe"),
+                resources_list_changed=_resource_capability_flag(caps, "listChanged"),
+                prompts=_capability_enabled(caps, "prompts"),
+                logging=_capability_enabled(caps, "logging"),
             )
             self._server_info = init_result.get("serverInfo", {})
             self._instructions = str(init_result.get("instructions", "") or "")
@@ -676,24 +896,30 @@ class MCPClient:
 
     async def _handshake_http(self) -> None:
         """HTTP 模式的握手。"""
-        init_result = await self._send_http_request("initialize", {
+        init_result = await self._send_http_request_raw("initialize", {
             "protocolVersion": self.PROTOCOL_VERSION,
-            "capabilities": self.CLIENT_CAPABILITIES,
+            "capabilities": self._client_capabilities,
             "clientInfo": self.CLIENT_INFO,
         })
 
+        if isinstance(init_result, _RpcError):
+            if str(init_result.code) == "-32001":
+                raise MCPAuthenticationError(init_result.message)
+            raise ConnectionError(init_result.to_text())
         if not init_result:
-                raise ConnectionError(
+            raise ConnectionError(
                 f"MCP server '{self.server_name}' HTTP initialize returned no result"
             )
 
         if init_result:
             caps = init_result.get("capabilities", {})
             self._server_capabilities = MCPServerCapabilities(
-                tools="tools" in caps,
-                resources="resources" in caps,
-                prompts="prompts" in caps,
-                logging="logging" in caps,
+                tools=_capability_enabled(caps, "tools"),
+                resources=_capability_enabled(caps, "resources"),
+                resources_subscribe=_resource_capability_flag(caps, "subscribe"),
+                resources_list_changed=_resource_capability_flag(caps, "listChanged"),
+                prompts=_capability_enabled(caps, "prompts"),
+                logging=_capability_enabled(caps, "logging"),
             )
             self._server_info = init_result.get("serverInfo", {})
             self._instructions = str(init_result.get("instructions", "") or "")
@@ -701,6 +927,37 @@ class MCPClient:
         await self._send_http_notification("notifications/initialized")
         self._connected = True
         logger.info("[MCP:%s] HTTP 握手成功", self.server_name)
+
+    async def _handshake_in_process(self) -> None:
+        """In-process 握手：直接调用 server 的 handle_request。"""
+        server = self._in_process_server
+        if server is None:
+            raise ConnectionError("In-process server not initialized")
+        handler = server.get("handle_request")
+        if handler is None:
+            raise ConnectionError("In-process server missing handle_request")
+        init_result = await handler("initialize", {
+            "protocolVersion": self.PROTOCOL_VERSION,
+            "capabilities": self._client_capabilities,
+            "clientInfo": self.CLIENT_INFO,
+        })
+        if init_result:
+            caps = init_result.get("capabilities", {})
+            self._server_capabilities = MCPServerCapabilities(
+                tools=_capability_enabled(caps, "tools"),
+                resources=_capability_enabled(caps, "resources"),
+                resources_subscribe=_resource_capability_flag(caps, "subscribe"),
+                resources_list_changed=_resource_capability_flag(caps, "listChanged"),
+                prompts=_capability_enabled(caps, "prompts"),
+                logging=_capability_enabled(caps, "logging"),
+            )
+            self._server_info = init_result.get("serverInfo", {})
+            self._instructions = str(init_result.get("instructions", "") or "")
+        notify = server.get("handle_notification")
+        if notify:
+            await notify("notifications/initialized", {})
+        self._connected = True
+        logger.info("[MCP:%s] In-process 握手成功", self.server_name)
 
     # ── MCP 协议方法 ──────────────────────────────────
 
@@ -805,6 +1062,28 @@ class MCPClient:
             for r in resources_data
         ]
 
+    async def list_resource_templates(self) -> list[MCPResourceTemplateDef]:
+        """获取 Server 提供的 resource templates 列表。"""
+        if not self._connected or not self._server_capabilities.resources:
+            return []
+
+        result = await self._send_request_auto("resources/templates/list")
+        templates_data = result.get("resourceTemplates", []) if result else []
+        templates: list[MCPResourceTemplateDef] = []
+        for item in templates_data:
+            if not isinstance(item, dict):
+                continue
+            uri_template = str(item.get("uriTemplate") or item.get("uri_template") or "")
+            if not uri_template:
+                continue
+            templates.append(MCPResourceTemplateDef(
+                uri_template=uri_template,
+                name=str(item.get("name") or uri_template),
+                description=str(item.get("description") or ""),
+                mime_type=str(item.get("mimeType") or item.get("mime_type") or "text/plain"),
+            ))
+        return templates
+
     async def read_resource(self, uri: str) -> str:
         """读取一个资源。"""
         if not self._connected:
@@ -819,8 +1098,93 @@ class MCPClient:
             return "\n".join(parts)
         return ""
 
+    async def subscribe_resource(self, uri: str) -> bool:
+        """Subscribe to server notifications for one resource URI."""
+        if not self._connected or not self._server_capabilities.resources_subscribe:
+            return False
+        result = await self._send_request_auto("resources/subscribe", {"uri": uri})
+        if result is not None:
+            self._subscribed_resources.add(uri)
+            return True
+        return False
+
+    async def unsubscribe_resource(self, uri: str) -> bool:
+        """Remove an existing resource subscription."""
+        if not self._connected or not self._server_capabilities.resources_subscribe:
+            return False
+        result = await self._send_request_auto("resources/unsubscribe", {"uri": uri})
+        if result is not None:
+            self._subscribed_resources.discard(uri)
+            return True
+        return False
+
+    def list_resource_subscriptions(self) -> list[str]:
+        return sorted(self._subscribed_resources)
+
+    def consume_resource_notifications(self) -> list[dict[str, Any]]:
+        notifications = list(self._resource_notifications)
+        self._resource_notifications.clear()
+        return notifications
+
+    async def list_prompts(self) -> list[MCPPromptDef]:
+        """获取 Server 提供的 prompt 列表。"""
+        if not self._connected or not self._server_capabilities.prompts:
+            return []
+
+        result = await self._send_request_auto("prompts/list")
+        prompts_data = result.get("prompts", []) if result else []
+        prompts: list[MCPPromptDef] = []
+        for item in prompts_data:
+            if not isinstance(item, dict):
+                continue
+            args: list[MCPPromptArgDef] = []
+            for raw_arg in item.get("arguments", []) or []:
+                if not isinstance(raw_arg, dict):
+                    continue
+                args.append(MCPPromptArgDef(
+                    name=str(raw_arg.get("name") or ""),
+                    description=str(raw_arg.get("description") or ""),
+                    required=bool(raw_arg.get("required", False)),
+                ))
+            prompts.append(MCPPromptDef(
+                name=str(item.get("name") or ""),
+                description=str(item.get("description") or ""),
+                arguments=[arg for arg in args if arg.name],
+            ))
+        return [prompt for prompt in prompts if prompt.name]
+
+    async def get_prompt(
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+    ) -> str:
+        """Render one MCP prompt and return a compact text transcript."""
+        if not self._connected:
+            return ""
+
+        result = await self._send_request_auto("prompts/get", {
+            "name": name,
+            "arguments": arguments or {},
+        })
+        if not result:
+            return ""
+
+        lines: list[str] = []
+        description = str(result.get("description") or "").strip()
+        if description:
+            lines.append(description)
+        for message in result.get("messages", []) or []:
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or "user")
+            content = _mcp_prompt_content_to_text(message.get("content"))
+            if content.strip():
+                lines.append(f"{role}: {content.strip()}")
+        return "\n\n".join(lines).strip()
+
     async def close(self) -> None:
         """优雅关闭连接。"""
+        self._closing = True
         self._connected = False
 
         # 取消读取任务
@@ -872,6 +1236,18 @@ class MCPClient:
         if hasattr(self, "_http_client"):
             await self._http_client.aclose()
 
+        # 关闭 WebSocket 连接
+        if self._ws is not None:
+            try:
+                await self._ws.close()
+            except Exception as exc:
+                logger.debug("WebSocket close returned an error (harmless): %s", exc)
+            finally:
+                self._ws = None
+
+        # 清理 in-process server
+        self._in_process_server = None
+
         # 取消所有待处理请求
         for future in self._pending.values():
             if not future.done():
@@ -879,6 +1255,7 @@ class MCPClient:
         self._pending.clear()
 
         logger.info("[MCP:%s] 连接已关闭", self.server_name)
+        self._closing = False
 
     # ── 底层通信 ──────────────────────────────────────
 
@@ -895,6 +1272,10 @@ class MCPClient:
         """Return raw JSON-RPC result/error for callers that need error details."""
         if self._transport == MCPTransport.HTTP:
             return await self._send_http_request_raw(method, params)
+        if self._transport == MCPTransport.STREAMABLE_HTTP:
+            return await self._send_http_request_raw(method, params)
+        if self._transport == MCPTransport.IN_PROCESS:
+            return await self._send_in_process_request_raw(method, params)
         return await self._send_request(method, params)
 
     async def _send_request(
@@ -905,10 +1286,7 @@ class MCPClient:
 
         使用 id 字段关联请求和响应。
         """
-        if self._sync_process is not None:
-            if not self._sync_process.stdin:
-                return None
-        elif not self._process or not self._process.stdin:
+        if not self._transport_ready():
             return None
 
         req_id, payload = _JsonRpcHelper.request(method, params)
@@ -920,15 +1298,12 @@ class MCPClient:
 
         # 发送请求
         try:
-            if self._sync_process is not None:
-                await asyncio.to_thread(self._write_sync_stdin, payload)
-            else:
-                self._process.stdin.write(payload)
-                await self._process.stdin.drain()
+            await self._write_raw(payload)
         except (BrokenPipeError, ConnectionResetError, OSError, ValueError) as exc:
             self._pending.pop(req_id, None)
             logger.error("[MCP:%s] 写入失败: %s", self.server_name, exc)
             self._connected = False
+            await self._notify_disconnect()
             return None
 
         # 等待响应
@@ -947,21 +1322,83 @@ class MCPClient:
         self, method: str, params: dict[str, Any] | None = None,
     ) -> None:
         """发送 JSON-RPC 通知（不期望响应）。"""
-        if self._sync_process is not None:
-            if not self._sync_process.stdin:
-                return
-        elif not self._process or not self._process.stdin:
+        if not self._transport_ready():
             return
 
         payload = _JsonRpcHelper.notification(method, params)
         try:
-            if self._sync_process is not None:
-                await asyncio.to_thread(self._write_sync_stdin, payload)
-            else:
-                self._process.stdin.write(payload)
-                await self._process.stdin.drain()
+            await self._write_raw(payload)
         except (BrokenPipeError, ConnectionResetError, OSError, ValueError) as exc:
             logger.error("[MCP:%s] 通知发送失败: %s", self.server_name, exc)
+
+    async def _send_rpc_response(self, msg_id: Any, result: dict[str, Any]) -> None:
+        await self._write_rpc_payload({
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": result,
+        })
+
+    async def _send_rpc_error(self, msg_id: Any, *, code: int, message: str) -> None:
+        await self._write_rpc_payload({
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "error": {"code": code, "message": message},
+        })
+
+    async def _write_rpc_payload(self, payload: dict[str, Any]) -> None:
+        if not self._transport_ready():
+            return
+
+        data = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+        try:
+            await self._write_raw(data)
+        except (BrokenPipeError, ConnectionResetError, OSError, ValueError) as exc:
+            logger.error("[MCP:%s] RPC response send failed: %s", self.server_name, exc)
+
+    def _transport_ready(self) -> bool:
+        """检查当前传输是否可写（stdio / WebSocket / in-process）。"""
+        if self._ws is not None:
+            return True
+        if self._sync_process is not None and self._sync_process.stdin:
+            return True
+        if self._process is not None and self._process.stdin:
+            return True
+        return False
+
+    async def _write_raw(self, data: bytes) -> None:
+        """传输层写入 — 根据传输方式路由到 stdin 或 WebSocket。"""
+        if self._ws is not None:
+            await self._ws.send(data.decode("utf-8"))
+        elif self._sync_process is not None:
+            if not self._sync_process.stdin:
+                raise BrokenPipeError("sync stdin unavailable")
+            await asyncio.to_thread(self._write_sync_stdin, data)
+        elif self._process is not None and self._process.stdin:
+            self._process.stdin.write(data)
+            await self._process.stdin.drain()
+        else:
+            raise BrokenPipeError("no transport available")
+
+    async def _send_in_process_request_raw(
+        self, method: str, params: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | _RpcError | None:
+        """In-process 传输：直接函数调用，无序列化。"""
+        if self._in_process_server is None:
+            return None
+        handler = self._in_process_server.get("handle_request")
+        if handler is None:
+            return None
+        try:
+            result = await handler(method, params or {})
+            if isinstance(result, dict) and "error" in result:
+                err = result["error"]
+                if isinstance(err, dict):
+                    return _RpcError(code=err.get("code", -1), message=err.get("message", "unknown"))
+                return _RpcError(code=-1, message=str(err))
+            return result if isinstance(result, dict) else None
+        except Exception as exc:
+            logger.error("[MCP:%s] in-process request failed: %s", self.server_name, exc)
+            return None
 
     def _write_sync_stdin(self, payload: bytes) -> None:
         process = self._sync_process
@@ -1007,9 +1444,12 @@ class MCPClient:
             # 401 → token missing/expired: surface a needs-auth signal so the
             # manager can refresh or prompt for authorization, rather than
             # silently treating it as a generic failure.
-            if resp.status_code == 401:
-                logger.warning("[MCP:%s] HTTP 401 — OAuth token missing or expired", self.server_name)
-                return _RpcError(code=-32001, message="authentication required")
+            if resp.status_code in {401, 403}:
+                logger.warning("[MCP:%s] HTTP %s — authorization required", self.server_name, resp.status_code)
+                return _RpcError(
+                    code=-32001,
+                    message="authentication required" if resp.status_code == 401 else "access forbidden",
+                )
             resp.raise_for_status()
             return self._parse_http_rpc_result(resp, req_id)
         except Exception as exc:
@@ -1106,6 +1546,7 @@ class MCPClient:
         *,
         expected_id: int | None = None,
     ) -> dict[str, Any] | None:
+        result: dict[str, Any] | None = None
         for frame in text.replace("\r\n", "\n").split("\n\n"):
             data_lines: list[str] = []
             for raw_line in frame.splitlines():
@@ -1121,11 +1562,18 @@ class MCPClient:
                 continue
             if not isinstance(message, dict):
                 continue
+            # Streamable HTTP: inline server→client requests / notifications
+            if message.get("method") and message.get("id") is not None:
+                self._schedule_client_request_response(message)
+                continue
+            if message.get("method"):
+                self._handle_notification(message["method"], message.get("params", {}))
+                continue
             if expected_id is not None and message.get("id") != expected_id:
                 continue
             if "result" in message or "error" in message:
-                return message
-        return None
+                result = message
+        return result
 
     def _read_sync_stdout_loop(self) -> None:
         process = self._sync_process
@@ -1190,6 +1638,31 @@ class MCPClient:
             if not future.done():
                 future.cancel()
         self._pending.clear()
+        self._schedule_disconnect_notification()
+
+    async def _read_ws_loop(self) -> None:
+        """WebSocket 模式读取循环 — 持续读取并分发 JSON-RPC 消息。"""
+        try:
+            async for raw in self._ws:
+                if isinstance(raw, bytes):
+                    line_str = raw.decode("utf-8", errors="replace")
+                else:
+                    line_str = raw
+                line_str = line_str.strip()
+                if not line_str:
+                    continue
+                try:
+                    msg = json.loads(line_str)
+                except json.JSONDecodeError:
+                    logger.debug("[MCP:%s] 非 JSON WebSocket 帧: %s", self.server_name, line_str[:100])
+                    continue
+                self._dispatch_message(msg)
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.error("[MCP:%s] WebSocket 读取异常: %s", self.server_name, exc)
+            self._connected = False
+            await self._notify_disconnect()
 
     async def _read_stdout_loop(self) -> None:
         """
@@ -1214,6 +1687,7 @@ class MCPClient:
                         if not fut.done():
                             fut.cancel()
                     self._pending.clear()
+                    await self._notify_disconnect()
                     break
 
                 line_str = line.decode("utf-8", errors="replace").strip()
@@ -1247,6 +1721,7 @@ class MCPClient:
         except Exception as exc:
             logger.error("[MCP:%s] 读取异常: %s", self.server_name, exc)
             self._connected = False
+            await self._notify_disconnect()
 
     def _dispatch_message(self, msg: dict[str, Any]) -> None:
         """
@@ -1271,14 +1746,103 @@ class MCPClient:
                     future.set_result(None)
                 else:
                     future.set_result(msg.get("result", {}))
+        elif msg_id is not None and msg.get("method"):
+            self._schedule_client_request_response(msg)
         else:
             # 通知处理
             method = msg.get("method", "")
             if method.startswith("notifications/"):
+                self._handle_notification(method, msg.get("params", {}))
                 logger.debug(
                     "[MCP:%s] 收到通知: %s",
                     self.server_name, method,
                 )
+
+    def _handle_notification(self, method: str, params: Any) -> None:
+        if method in {"notifications/resources/updated", "notifications/resources/list_changed"}:
+            payload = params if isinstance(params, dict) else {}
+            self._resource_notifications.append({
+                "method": method,
+                "uri": str(payload.get("uri") or ""),
+                "params": payload,
+            })
+            if len(self._resource_notifications) > 100:
+                self._resource_notifications = self._resource_notifications[-100:]
+
+    def _schedule_client_request_response(self, msg: dict[str, Any]) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._call_soon_threadsafe(self._schedule_client_request_response, msg)
+            return
+        loop.create_task(self._respond_to_client_request(msg))
+
+    async def _respond_to_client_request(self, msg: dict[str, Any]) -> None:
+        msg_id = msg.get("id")
+        method = str(msg.get("method") or "")
+        try:
+            if method == "roots/list":
+                if not feature_enabled("mcp_roots"):
+                    await self._send_rpc_error(msg_id, code=-32601, message="roots not supported")
+                    return
+                await self._send_rpc_response(msg_id, {"roots": self._client_roots()})
+                return
+            if method == "sampling/createMessage":
+                if not feature_enabled("mcp_sampling"):
+                    await self._send_rpc_error(msg_id, code=-32601, message="sampling not supported")
+                elif self._sampling_handler:
+                    params = msg.get("params") or {}
+                    result = await self._sampling_handler(params)
+                    await self._send_rpc_response(msg_id, result)
+                else:
+                    await self._send_rpc_error(msg_id, code=-32601, message="sampling not supported")
+                return
+            if method == "elicitation/create":
+                if not feature_enabled("mcp_elicitation"):
+                    await self._send_rpc_error(msg_id, code=-32601, message="elicitation not supported")
+                elif self._elicitation_handler:
+                    params = msg.get("params") or {}
+                    result = await self._elicitation_handler(params)
+                    await self._send_rpc_response(msg_id, result)
+                else:
+                    await self._send_rpc_error(msg_id, code=-32601, message="elicitation not supported")
+                return
+            await self._send_rpc_error(
+                msg_id,
+                code=-32601,
+                message=f"Client method not implemented: {method}",
+            )
+        except Exception as exc:
+            logger.debug("[MCP:%s] Failed to respond to client request %s: %s", self.server_name, method, exc)
+
+    def _client_roots(self) -> list[dict[str, str]]:
+        from backend.config import PROJECT_ROOT
+        from backend.workspace.state import get_active_workspace_root
+
+        roots: list[dict[str, str]] = []
+        seen: set[str] = set()
+
+        search_paths = []
+        try:
+            active_root = get_active_workspace_root().resolve()
+            search_paths.append(active_root)
+        except Exception as exc:
+            logger.debug("Could not resolve active workspace root: %s", exc)
+
+        search_paths.extend([Path.cwd(), PROJECT_ROOT])
+
+        for path in search_paths:
+            try:
+                resolved = path.resolve()
+                key = str(resolved).lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                roots.append({"uri": resolved.as_uri(), "name": resolved.name or str(resolved)})
+            except Exception as exc:
+                logger.debug("Skipping unresolvable root entry: %s", exc)
+                continue
+        return roots
 
     async def _read_stderr_loop(self) -> None:
         """读取子进程 stderr 输出（用于调试日志）。"""

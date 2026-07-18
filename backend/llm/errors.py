@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -131,6 +132,49 @@ def classify_llm_error(message: str | BaseException | None) -> LLMErrorClassific
         return LLMErrorClassification(fatal=False, retryable=True, error_type="api", provider_error_type="busy")
     if any(code in status_codes for code in (500, 502, 503, 504)) or _contains_any(text, _NETWORK_KEYWORDS):
         return LLMErrorClassification(fatal=False, retryable=True, error_type="api", provider_error_type="network")
+
+    # Size-class recoveries: media rejections and prompt-too-long should enter the
+    # withholding ladder (strip media / emergency compact) rather than generic API fail.
+    if _contains_any(
+        text,
+        (
+            "image exceeds",
+            "image too large",
+            "image dimensions exceed",
+            "many-image",
+            "media size",
+            "media too large",
+            "pdf specified was not valid",
+        ),
+    ) or ("maximum" in text and ("image" in text or "media" in text or "pdf" in text)):
+        return LLMErrorClassification(
+            fatal=False,
+            retryable=True,
+            error_type="media_size",
+            provider_error_type="media_size",
+        )
+    if 413 in status_codes or _contains_any(
+        text,
+        (
+            "prompt is too long",
+            "prompt too long",
+            "context_length",
+            "maximum context",
+            "context window",
+            "request_too_large",
+            "request entity too large",
+            "request body too large",
+            "payload too large",
+            "content too large",
+        ),
+    ):
+        return LLMErrorClassification(
+            fatal=False,
+            retryable=True,
+            error_type="prompt_too_long",
+            provider_error_type="prompt_too_long",
+        )
+
     return LLMErrorClassification(fatal=False, retryable=False, error_type="api", provider_error_type="unknown")
 
 
@@ -257,21 +301,55 @@ def _flatten_json(value: Any, out: list[str]) -> None:
 def sanitize_llm_error_message(
     message: str | BaseException | None,
     classification: LLMErrorClassification | None = None,
+    *,
+    include_provider_details: bool = True,
 ) -> str:
     """Return user-facing model error text without leaking provider internals."""
     kind = (classification or classify_llm_error(message)).provider_error_type
+    suffix = _safe_provider_error_suffix(message, kind) if include_provider_details else ""
     if kind in {"busy", "rate_limit"}:
-        return "\u6a21\u578b\u6682\u65f6\u7e41\u5fd9\u6216\u8fbe\u5230\u5e76\u53d1\u9650\u5236\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u6216\u5207\u6362\u6a21\u578b\u3002"
+        return "\u6a21\u578b\u6682\u65f6\u7e41\u5fd9\u6216\u8fbe\u5230\u5e76\u53d1\u9650\u5236\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u6216\u5207\u6362\u6a21\u578b\u3002" + suffix
     if kind == "auth":
-        return "\u6a21\u578b\u9274\u6743\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5 API Key \u548c\u6a21\u578b\u8bbe\u7f6e\u3002"
+        return "\u6a21\u578b\u9274\u6743\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5 API Key \u548c\u6a21\u578b\u8bbe\u7f6e\u3002" + suffix
     if kind == "billing":
-        return "\u6a21\u578b\u670d\u52a1\u989d\u5ea6\u6216\u8ba1\u8d39\u4e0d\u53ef\u7528\uff0c\u8bf7\u68c0\u67e5\u8d26\u6237\u72b6\u6001\u3002"
+        return "\u6a21\u578b\u670d\u52a1\u989d\u5ea6\u6216\u8ba1\u8d39\u4e0d\u53ef\u7528\uff0c\u8bf7\u68c0\u67e5\u8d26\u6237\u72b6\u6001\u3002" + suffix
     if kind == "blocked":
-        return "\u6a21\u578b\u8bf7\u6c42\u88ab\u670d\u52a1\u5546\u6216\u7f51\u5173\u62e6\u622a\uff0c\u8bf7\u68c0\u67e5\u6a21\u578b\u3001Base URL\u3001\u7f51\u5173\u89c4\u5219\u6216\u8bf7\u6c42\u5185\u5bb9\u3002"
+        return "\u6a21\u578b\u8bf7\u6c42\u88ab\u670d\u52a1\u5546\u6216\u7f51\u5173\u62e6\u622a\uff0c\u8bf7\u68c0\u67e5\u6a21\u578b\u3001Base URL\u3001\u7f51\u5173\u89c4\u5219\u6216\u8bf7\u6c42\u5185\u5bb9\u3002" + suffix
     if kind == "proxy":
-        return "\u8054\u7f51\u8bf7\u6c42\u5931\u8d25\uff1a\u4ee3\u7406\u8ba4\u8bc1\u5931\u8d25\uff08407 Proxy Authentication Required\uff09\u3002\u8bf7\u68c0\u67e5 HTTP_PROXY / HTTPS_PROXY \u6216\u4ee3\u7406\u8ba4\u8bc1\u4fe1\u606f\u3002"
+        return "\u8054\u7f51\u8bf7\u6c42\u5931\u8d25\uff1a\u4ee3\u7406\u8ba4\u8bc1\u5931\u8d25\uff08407 Proxy Authentication Required\uff09\u3002\u8bf7\u68c0\u67e5 HTTP_PROXY / HTTPS_PROXY \u6216\u4ee3\u7406\u8ba4\u8bc1\u4fe1\u606f\u3002" + suffix
     if kind == "model":
-        return "\u6a21\u578b\u540d\u6216\u6a21\u578b\u914d\u7f6e\u65e0\u6548\uff0c\u8bf7\u68c0\u67e5 provider\u3001Base URL \u548c model \u8bbe\u7f6e\u3002"
+        return "\u6a21\u578b\u540d\u6216\u6a21\u578b\u914d\u7f6e\u65e0\u6548\uff0c\u8bf7\u68c0\u67e5 provider\u3001Base URL \u548c model \u8bbe\u7f6e\u3002" + suffix
     if kind == "network":
-        return "\u6a21\u578b\u670d\u52a1\u7f51\u7edc\u8bf7\u6c42\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002"
-    return "\u6a21\u578b\u8c03\u7528\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u6216\u5207\u6362\u6a21\u578b\u3002"
+        return "\u6a21\u578b\u670d\u52a1\u7f51\u7edc\u8bf7\u6c42\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002" + suffix
+    return "\u6a21\u578b\u8c03\u7528\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u6216\u5207\u6362\u6a21\u578b\u3002" + suffix
+
+
+def _safe_provider_error_suffix(message: str | BaseException | None, provider_error_type: str) -> str:
+    """Append safe provider diagnostics such as HTTP status/code.
+
+    Keep provider response bodies out of user-facing text, but preserve compact
+    metadata that explains what actually happened (for example HTTP 403).
+    """
+    text = _normalize_error_text(message)
+    parts: list[str] = []
+    if provider_error_type and provider_error_type != "unknown":
+        parts.append(f"provider={provider_error_type}")
+
+    status_codes = sorted(_extract_status_codes(message))
+    for match in re.finditer(r"\bstatus=(\d{3})\b|\bhttp\s*(\d{3})\b", text, re.IGNORECASE):
+        raw = match.group(1) or match.group(2)
+        try:
+            status_codes.append(int(raw))
+        except (TypeError, ValueError):
+            continue
+    for status in sorted(set(status_codes)):
+        parts.append(f"HTTP {status}")
+
+    code_match = re.search(r"\bprovider_error_code=([A-Za-z0-9._:-]{1,80})", text)
+    if code_match:
+        parts.append(f"code={code_match.group(1)}")
+    schema_match = re.search(r"\bprovider_error_schema_type=([A-Za-z0-9._:-]{1,80})", text)
+    if schema_match:
+        parts.append(f"type={schema_match.group(1)}")
+
+    return f"\uff08{', '.join(parts)}\uff09" if parts else ""

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from contextlib import contextmanager
 import json
 import logging
@@ -11,8 +12,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from backend.config import PROJECT_ROOT
+from backend.config import DATA_ROOT
 from backend.encoding_repair import repair_mojibake_payload
+from backend.agent.tool_projection import (
+    sanitize_internal_tool_names_for_user_text,
+    user_facing_tool_name,
+)
 
 from .models import (
     DEFAULT_CONVERSATION_PERMISSION_MODE,
@@ -24,7 +29,7 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
-CONVERSATION_DATA_DIR = PROJECT_ROOT / "data" / "conversations"
+CONVERSATION_DATA_DIR = DATA_ROOT / "conversations"
 _CONVERSATION_ID_PATTERN = re.compile(
     r"^(?:conv|side|local)_[A-Za-z0-9_-]{6,80}$|^(?:conv|side)-[A-Za-z0-9_-]{6,80}$"
 )
@@ -51,8 +56,7 @@ class ConversationRepository:
         self._process_lock = threading.RLock()
         self._store_lock_path = self._base_dir / ".conversation-store.lock"
         self._summary_index: dict[str, ConversationSummary] | None = None
-        self._record_cache: dict[str, ConversationRecord] = {}
-        self._record_cache_order: list[str] = []
+        self._record_cache: OrderedDict[str, ConversationRecord] = OrderedDict()
 
     def create_conversation(
         self,
@@ -161,7 +165,10 @@ class ConversationRepository:
             if record.title == "New chat" and next_message.get("role") == "user":
                 record.title = _derive_title(str(next_message.get("content", "")))
             record.updated_at = utc_now_iso()
-            self._write_transcript(conversation_id, record.transcript)
+            if self._requires_transcript_rewrite(conversation_id):
+                self._write_transcript(conversation_id, record.transcript)
+            else:
+                self._append_transcript_message(conversation_id, next_message)
             if self._requires_snapshot_rewrite(conversation_id):
                 self._write_snapshot(conversation_id, record.context_snapshot)
             self._write_meta(record)
@@ -331,6 +338,38 @@ class ConversationRepository:
             self._cache_record(record)
             return record
 
+    def patch_context_snapshot(
+        self,
+        conversation_id: str,
+        patch: dict[str, Any],
+        *,
+        revision: int | None = None,
+        revision_key: str = "_snapshot_patch_revision",
+    ) -> ConversationRecord | None:
+        with self._store_lock():
+            record = self._record_cache.get(conversation_id) or self._load_record(conversation_id)
+            if record is None:
+                return None
+            snapshot = dict(record.context_snapshot or {})
+            if revision is not None:
+                try:
+                    current_revision = int(snapshot.get(revision_key) or 0)
+                except (TypeError, ValueError):
+                    current_revision = 0
+                if revision <= current_revision:
+                    return record
+                snapshot[revision_key] = revision
+            snapshot.update(dict(patch or {}))
+            record.context_snapshot = snapshot
+            record.updated_at = utc_now_iso()
+            if self._requires_transcript_rewrite(conversation_id):
+                self._write_transcript(conversation_id, record.transcript)
+            self._write_snapshot(conversation_id, snapshot)
+            self._write_meta(record)
+            self._delete_legacy_file(conversation_id)
+            self._cache_record(record)
+            return record
+
     def _persist_meta_only(self, record: ConversationRecord) -> ConversationRecord:
         with self._store_lock():
             record.updated_at = utc_now_iso()
@@ -346,12 +385,9 @@ class ConversationRepository:
 
     def _cache_record(self, record: ConversationRecord) -> None:
         self._record_cache[record.id] = record
-        if record.id in self._record_cache_order:
-            self._record_cache_order.remove(record.id)
-        self._record_cache_order.append(record.id)
-        while len(self._record_cache_order) > self._MAX_RECORD_CACHE:
-            evict_id = self._record_cache_order.pop(0)
-            self._record_cache.pop(evict_id, None)
+        self._record_cache.move_to_end(record.id)
+        while len(self._record_cache) > self._MAX_RECORD_CACHE:
+            self._record_cache.popitem(last=False)
         if self._summary_index is not None:
             self._summary_index[record.id] = record.to_summary()
 
@@ -632,7 +668,7 @@ def _normalize_loaded_transcript(
             normalized.append(message)
             continue
         if not _is_legacy_tool_only_assistant_needing_text(transcript, index):
-            normalized.append(message)
+            normalized.append(_sanitize_historical_assistant_message(message))
             continue
 
         records = _message_tool_records(message)
@@ -647,8 +683,61 @@ def _normalize_loaded_transcript(
         next_message = dict(message)
         next_message["content"] = fallback
         next_message["blocks"] = _blocks_with_text_fallback(message, records, fallback)
-        normalized.append(next_message)
+        normalized.append(_sanitize_historical_assistant_message(next_message))
     return normalized
+
+
+def _sanitize_historical_assistant_message(message: dict[str, Any]) -> dict[str, Any]:
+    if str(message.get("role") or "") != "assistant":
+        return message
+    records = _message_tool_records(message)
+    if not _records_include_web_tool(records):
+        return message
+    content = str(message.get("content") or "")
+    cjk = _contains_cjk(content)
+    next_message = dict(message)
+    changed = False
+    if content:
+        sanitized = sanitize_internal_tool_names_for_user_text(content, cjk=cjk)
+        if sanitized != content:
+            next_message["content"] = sanitized
+            changed = True
+
+    blocks = message.get("blocks")
+    if isinstance(blocks, list):
+        next_blocks: list[Any] = []
+        for block in blocks:
+            if not isinstance(block, dict):
+                next_blocks.append(block)
+                continue
+            next_block = dict(block)
+            if str(next_block.get("type") or "") == "text":
+                block_content = str(next_block.get("content") or "")
+                sanitized = sanitize_internal_tool_names_for_user_text(
+                    block_content,
+                    cjk=_contains_cjk(block_content) or cjk,
+                )
+                if sanitized != block_content:
+                    next_block["content"] = sanitized
+                    changed = True
+            next_blocks.append(next_block)
+        if changed:
+            next_message["blocks"] = next_blocks
+
+    return next_message if changed else message
+
+
+def _records_include_web_tool(records: list[dict[str, Any]]) -> bool:
+    return any(_record_is_web_tool(record) for record in records)
+
+
+def _record_is_web_tool(record: dict[str, Any]) -> bool:
+    name = str(record.get("name") or "").strip().lower()
+    if name in {"web_search", "web_fetch", "search_web", "fetch_web", "fetch_url", "fetch_page"}:
+        return True
+    if not name.startswith("mcp__"):
+        return False
+    return "websearch" in name or "web_search" in name or "__web__" in name
 
 
 def _is_legacy_tool_only_assistant_needing_text(
@@ -762,6 +851,44 @@ def _tool_record_detail(record: dict[str, Any], *, fallback: str) -> str:
     return fallback
 
 
+def _ask_user_question_from_record(record: dict[str, Any]) -> str:
+    args = record.get("args")
+    if isinstance(args, dict):
+        question = str(args.get("question") or args.get("prompt") or "").strip()
+        if question:
+            return question
+    request = record.get("request")
+    if isinstance(request, dict):
+        question = str(request.get("question") or request.get("prompt") or "").strip()
+        if question:
+            return question
+    return str(record.get("inputSummary") or record.get("displaySummary") or "").strip()
+
+
+def _format_failed_ask_user_reply(
+    records: list[dict[str, Any]],
+    *,
+    user_message: str,
+) -> str:
+    failed = [
+        record
+        for record in records
+        if str(record.get("status") or "").strip().lower() in _FAILED_TOOL_STATUSES
+    ]
+    if not failed:
+        return ""
+    if any(str(record.get("name") or "").strip().lower() != "ask_user" for record in failed):
+        return ""
+    question = next(
+        (value for value in (_ask_user_question_from_record(record) for record in failed) if value),
+        "",
+    )
+    cjk = _contains_cjk(user_message) or _contains_cjk(question)
+    if question:
+        return f"需要你确认一下：{question}" if cjk else f"I need one detail before continuing: {question}"
+    return "需要你补充一个必要信息后我才能继续。" if cjk else "I need one detail before I can continue."
+
+
 def _format_legacy_tool_activity_without_final_reply(
     records: list[dict[str, Any]],
     *,
@@ -774,6 +901,9 @@ def _format_legacy_tool_activity_without_final_reply(
         for record in records
         if str(record.get("status") or "").strip().lower() in _FAILED_TOOL_STATUSES
     ]
+    ask_user_reply = _format_failed_ask_user_reply(records, user_message=user_message)
+    if ask_user_reply:
+        return ask_user_reply
     records_to_show = failed or records
     if _contains_cjk(user_message):
         if failed:
@@ -806,10 +936,11 @@ def _format_legacy_tool_activity_without_final_reply(
         no_details = "The tool did not return a usable summary."
 
     parts = [intro]
+    cjk = _contains_cjk(user_message)
     for item_index, record in enumerate(records_to_show[-3:], start=1):
-        name = str(record.get("name") or "tool")
+        name = user_facing_tool_name(str(record.get("name") or "tool"), cjk=cjk)
         status = str(record.get("status") or ("failed" if failed else "completed"))
-        detail = _tool_record_detail(record, fallback=no_details)
+        detail = sanitize_internal_tool_names_for_user_text(_tool_record_detail(record, fallback=no_details), cjk=cjk)
         parts.append(f"{item_index}. {name} [{status}]\n{detail}")
     return "\n\n".join(parts)
 

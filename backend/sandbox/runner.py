@@ -70,8 +70,9 @@ class SandboxRunner:
     Isolation strategy by platform:
       - Linux: unshare --net (network), or firejail if available
       - macOS: sandbox-exec (Seatbelt profile)
-      - Windows: Job Object (kill-on-close) + application-layer path enforcement
-                 (true network isolation requires Windows containers or WSL2)
+      - Windows: CREATE_NEW_PROCESS_GROUP + CREATE_BREAKAWAY_FROM_JOB
+                 (process-group isolation for clean taskkill /T propagation;
+                 true OS-level sandboxing requires containers or WSL2)
     """
 
     def __init__(self, policy: SandboxPolicy) -> None:
@@ -231,6 +232,7 @@ class SandboxRunner:
             kwargs["creationflags"] = (
                 subprocess.CREATE_NEW_PROCESS_GROUP
                 | subprocess.CREATE_BREAKAWAY_FROM_JOB
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
             )
         else:
             kwargs["start_new_session"] = True

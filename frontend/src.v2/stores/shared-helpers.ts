@@ -356,6 +356,23 @@ export const findLastStreamingIndex = (messages: AppStore["messages"]): number =
   return -1;
 };
 
+/**
+ * Resolve the message a turn-scoped block should attach to: the streaming
+ * assistant message with the given id when provided, otherwise the last
+ * streaming message. A stale messageId (already sealed) attaches nothing.
+ */
+export const findStreamingTargetIndex = (
+  messages: AppStore["messages"],
+  messageId?: string,
+): number => {
+  if (!messageId) return findLastStreamingIndex(messages);
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message?.id === messageId) return message.isStreaming ? i : -1;
+  }
+  return findLastStreamingIndex(messages);
+};
+
 export const computeToolCallCount = (messages: ChatMessage[]): number =>
   messages.reduce((sum, m) => sum + getToolCallsFromMessage(m).length, 0);
 

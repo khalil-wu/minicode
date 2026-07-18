@@ -10,18 +10,27 @@ NATIVE_PDF_LIMIT_BYTES = 50 * 1024 * 1024
 
 PDF_MEDIA_TYPE = "application/pdf"
 
+# Small text attachments are inlined verbatim into the user message so the model
+# sees them without calling read_artifact (matches cc/Codex pasted-text behavior;
+# avoids the "model didn't look at the pasted file" failure where the model only
+# gets a hint and guesses instead). Larger docs keep the read_artifact hint.
+INLINE_TEXT_LIMIT_CHARS = 8_000
+PASTED_TEXT_INLINE_LIMIT_CHARS = 64_000
+
 
 @dataclass(frozen=True)
 class AttachmentInputPlan:
     images: list[dict[str, str]] = field(default_factory=list)
     documents: list[dict[str, str]] = field(default_factory=list)
     text_hints: list[str] = field(default_factory=list)
+    inlined_texts: list[dict[str, str]] = field(default_factory=list)
 
 
 def build_attachment_input_plan(
     attachments: list[dict[str, Any]],
     *,
     llm: Any | None = None,
+    attachment_store: Any | None = None,
 ) -> AttachmentInputPlan:
     """Choose native multimodal payloads and cheap artifact fallbacks.
 
@@ -31,10 +40,12 @@ def build_attachment_input_plan(
     replaying large files into every prompt turn.
     """
 
-    mode = _detect_llm_wire_mode(llm)
+    capability_llm = _primary_llm_adapter(llm)
+    mode = _detect_llm_wire_mode(capability_llm)
     images: list[dict[str, str]] = []
     documents: list[dict[str, str]] = []
     hints: list[str] = []
+    inlined_texts: list[dict[str, str]] = []
 
     for attachment in attachments:
         file_name = str(attachment.get("file_name") or "attachment").strip() or "attachment"
@@ -46,11 +57,12 @@ def build_attachment_input_plan(
         indexed_chunks = int(attachment.get("indexed_chunks") or 0)
         size_bytes = int(attachment.get("size_bytes") or 0)
         parse_error = str(attachment.get("parse_error") or "").strip()
+        input_source = str(attachment.get("input_source") or "").strip()
 
         used_native = False
         if kind == "image" and data:
             metadata_hint = _attachment_source_hint(artifact_id, fallback="the attachment metadata")
-            if not _supports_native_images(mode, llm):
+            if not _supports_native_images(mode, capability_llm):
                 hints.append(
                     f"- {file_name}: the active model/API does not support native image input, "
                     "so the image pixels were not sent to the model. "
@@ -109,6 +121,31 @@ def build_attachment_input_plan(
                 )
             continue
 
+        # Inline small text attachments directly into the user message so the
+        # model sees them without calling read_artifact (cc/Codex pasted-text
+        # behavior). This also makes the content persist in history for
+        # follow-up turns. Large docs keep the read_artifact hint below.
+        if (
+            attachment_store is not None
+            and artifact_id
+            and kind != "image"
+            and not used_native
+        ):
+            inline_limit = (
+                PASTED_TEXT_INLINE_LIMIT_CHARS
+                if input_source == "pasted_text"
+                else INLINE_TEXT_LIMIT_CHARS
+            )
+            inlined = _inline_small_text(
+                attachment_store,
+                artifact_id,
+                file_name,
+                limit_chars=inline_limit,
+            )
+            if inlined is not None:
+                inlined_texts.append(inlined)
+                continue
+
         if artifact_id and kind != "image":
             if used_native and media_type == PDF_MEDIA_TYPE:
                 hints.append(
@@ -120,9 +157,67 @@ def build_attachment_input_plan(
                 if doc_id:
                     source_hint += f" or doc_id {doc_id}"
                 chunk_hint = f"; {indexed_chunks} indexed chunks" if indexed_chunks else ""
-                hints.append(f"- {file_name}: parsed text is available via {source_hint}{chunk_hint}.")
+                if input_source == "pasted_text":
+                    hints.append(
+                        f"- {file_name}: this file is the user's pasted message body. Before responding, "
+                        f"you must read its full contents with {source_hint}{chunk_hint} and treat those "
+                        "contents as the user message. Do not answer from the filename, title, or summary."
+                    )
+                else:
+                    hints.append(
+                        f"- {file_name}: before answering about this file, use {source_hint}{chunk_hint} "
+                        "and base claims on the returned contents. "
+                        "Do not infer document contents from the filename, title, or summary."
+                    )
 
-    return AttachmentInputPlan(images=images, documents=documents, text_hints=_dedupe(hints))
+    return AttachmentInputPlan(
+        images=images,
+        documents=documents,
+        text_hints=_dedupe(hints),
+        inlined_texts=inlined_texts,
+    )
+
+
+def _inline_small_text(
+    attachment_store: Any,
+    artifact_id: str,
+    file_name: str,
+    *,
+    limit_chars: int = INLINE_TEXT_LIMIT_CHARS,
+) -> dict[str, str] | None:
+    """Return {file_name, artifact_id, content} for a small text attachment, or
+    None if the content is missing/empty/too large to inline safely."""
+    try:
+        content = attachment_store.get(artifact_id)
+    except Exception:  # noqa: BLE001 — never break the turn on store read errors
+        return None
+    if not content or not content.strip():
+        return None
+    if len(content) > limit_chars:
+        return None
+    return {"file_name": file_name, "artifact_id": artifact_id, "content": content}
+
+
+def _primary_llm_adapter(llm: Any | None) -> Any | None:
+    """Return the first concrete adapter hidden behind fallback/cache wrappers."""
+    current = llm
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        adapters = getattr(current, "_adapters", None)
+        if isinstance(adapters, list) and adapters:
+            current = adapters[0]
+            continue
+        adapters = getattr(current, "adapters", None)
+        if isinstance(adapters, list) and adapters:
+            current = adapters[0]
+            continue
+        wrapped = getattr(current, "_llm", None) or getattr(current, "llm", None)
+        if wrapped is not None:
+            current = wrapped
+            continue
+        break
+    return current
 
 
 def _attachment_source_hint(
@@ -176,15 +271,33 @@ def _supports_native_images(mode: str, llm: Any | None) -> bool:
     base_url = str(getattr(settings, "base_url", "") or "").strip().lower()
     host = urlsplit(base_url).netloc.lower()
 
-    if "deepseek" in host or "deepseek" in model:
-        return False
-    if ("dashscope" in host or "aliyuncs.com" in host or "qwen" in model) and not any(
-        marker in model for marker in ("vl", "vision", "omni")
-    ):
-        return False
-    if "siliconflow" in host and not any(marker in model for marker in ("vl", "vision", "omni", "gpt-4o", "gemini")):
+    if _is_known_text_only_image_provider(host, model):
         return False
 
+    if _model_declares_vision_support(model):
+        return True
+
+    if "api.openai.com" in host:
+        return True
+    # For custom OpenAI-compatible endpoints, prefer native image input unless
+    # the provider/model is explicitly known to reject it. Silently dropping the
+    # pixels is worse than surfacing a provider error the user can act on.
+    return mode.startswith("openai_")
+
+
+def _is_known_text_only_image_provider(host: str, model: str) -> bool:
+    """Providers/models where OpenAI-compatible chat rejects image_url input."""
+    if "deepseek" in host or "deepseek" in model:
+        return True
+    if ("dashscope" in host or "aliyuncs.com" in host or "qwen" in model) and not _model_declares_vision_support(model):
+        return True
+    if "siliconflow" in host and not _model_declares_vision_support(model):
+        return True
+    return False
+
+
+def _model_declares_vision_support(model: str) -> bool:
+    normalized = model.replace("_", "-").lower()
     vision_markers = (
         "gpt-4o",
         "gpt-4.1",
@@ -194,15 +307,26 @@ def _supports_native_images(mode: str, llm: Any | None) -> bool:
         "claude",
         "gemini",
         "vision",
-        "vl",
+        "visual",
+        "-vl",
+        "vl-",
+        "qwen-vl",
+        "qwen2-vl",
+        "qwen2.5-vl",
+        "qwen3-vl",
         "omni",
         "qvq",
+        "glm-4v",
+        "glm-4.5v",
+        "doubao-vision",
+        "doubao-seed-vision",
+        "pixtral",
+        "llava",
+        "internvl",
+        "minicpm-v",
+        "grok-vision",
     )
-    if any(marker in model for marker in vision_markers):
-        return True
-    if "api.openai.com" in host:
-        return True
-    return False
+    return any(marker in normalized for marker in vision_markers)
 
 
 def _fits_limit(size_bytes: int, limit: int) -> bool:

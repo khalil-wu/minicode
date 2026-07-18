@@ -25,10 +25,11 @@ LAYER1_SUMMARY_MAX_CHARS = 8000
 
 # Skill 注入模板
 SKILL_SECTION_HEADER = """
-## 激活的 Skills
+## Selected Skills
 
-以下 Skills 定义了你在当前会话中的特殊行为模式。
-严格遵守每个 Skill 的指令。如果 Skill 之间有冲突，以最后激活的为准。
+The following SKILL.md instructions were selected for this turn. Follow them
+for the current task. If multiple skills conflict, prefer the most recently
+selected one.
 """
 
 
@@ -45,7 +46,7 @@ class SkillExecutor:
     def __init__(self, skill_manager: SkillManager) -> None:
         self._manager = skill_manager
 
-    def build_skill_context(self, budget: int = 4000) -> str:
+    def build_skill_context(self, budget: int = 4000, *, consume: bool = False) -> str:
         """
         构建 Skill 注入内容。
 
@@ -60,7 +61,10 @@ class SkillExecutor:
         if not active_names:
             return ""
 
-        content = self._manager.get_active_content(budget=budget)
+        if consume and hasattr(self._manager, "consume_active_content"):
+            content = self._manager.consume_active_content(budget=budget)
+        else:
+            content = self._manager.get_active_content(budget=budget)
         if not content:
             return ""
 
@@ -87,9 +91,8 @@ class SkillExecutor:
         summary = _cap_layer1_summary(summary, max_chars=max_chars)
         return (
             "\n\n## Available Skills\n"
-            "When the user's request matches a skill description below, "
-            "use load_skill to activate it automatically — no need to ask the user first. "
-            "The user can also invoke skills explicitly via /skill-name.\n\n"
+            "Skills are reusable SKILL.md workflows. If one clearly helps, call load_skill before substantive work. "
+            "Users can also invoke $skill-name or /skill-name. Do not claim a skill was used unless it was loaded.\n\n"
             + summary
         )
 

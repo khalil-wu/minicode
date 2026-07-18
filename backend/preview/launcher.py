@@ -4,7 +4,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
+import subprocess
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -270,6 +272,7 @@ async def start_preview_launch(
         env=env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
     )
     launched = PreviewLaunchProcess(id=config.name, config=config, process=process)
     _RUNNING[config.name] = launched

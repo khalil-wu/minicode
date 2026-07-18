@@ -17,14 +17,21 @@ MEMORY.md 格式（启动注入的是这个索引，不是正文）：
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 
-from backend.config import PROJECT_ROOT
+from backend.config import DATA_ROOT
 
 logger = logging.getLogger(__name__)
 
-MEMORY_DIR = PROJECT_ROOT / "data" / "memory"
+MEMORY_DIR = DATA_ROOT / "memory"
 MEMORY_INDEX_FILE = MEMORY_DIR / "MEMORY.md"
+
+# Memories older than this are surfaced with a staleness warning so the model
+# verifies before trusting them (Claude Code memory doc §11: memory is a
+# historical snapshot, not present truth — code/paths/timelines must be
+# re-checked against the live workspace before use).
+STALE_THRESHOLD_DAYS = 14
 
 # 默认记忆文件模板
 DEFAULT_MEMORY_INDEX = """\
@@ -105,6 +112,26 @@ class FileMemory:
         except (OSError, UnicodeDecodeError) as exc:
             logger.warning("读取记忆文件 %s 失败: %s", filename, exc)
             return None
+
+    def file_age_days(self, filename: str) -> float | None:
+        """Return how many days since *filename* was last written.
+
+        Uses the file's mtime — zero extra storage, and it advances naturally
+        every time save_file rewrites the memory. Returns None when the file
+        does not exist. Callers use this to attach a staleness warning so the
+        model re-verifies old memories against the live workspace before
+        trusting them.
+        """
+        safe_name = Path(filename).name
+        filepath = self._dir / safe_name
+        if not filepath.exists():
+            return None
+        try:
+            age_seconds = max(0.0, time.time() - filepath.stat().st_mtime)
+        except OSError as exc:
+            logger.warning("读取记忆文件 %s 修改时间失败: %s", filename, exc)
+            return None
+        return age_seconds / 86400.0
 
     def save_file(self, filename: str, content: str) -> bool:
         """

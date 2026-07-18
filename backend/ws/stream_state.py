@@ -3,10 +3,15 @@ from __future__ import annotations
 from typing import Any
 
 
-def create_stream_state(conversation_id: str, message_id: str) -> dict[str, Any]:
+def create_stream_state(
+    conversation_id: str,
+    message_id: str,
+    turn_id: str = "",
+) -> dict[str, Any]:
     return {
         "conversation_id": conversation_id,
         "message_id": message_id,
+        "turn_id": turn_id,
         "accumulated_text": "",
         "tool_calls": {},
     }

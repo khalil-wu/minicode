@@ -31,6 +31,9 @@ class CommandRegistry:
             logger.warning("Slash command name conflict for '%s'", name)
         self._slash_handlers[name] = handler
 
+    def clear_slash_handlers(self) -> None:
+        self._slash_handlers.clear()
+
     def dispatch_slash_sync(self, name: str) -> bool:
         return name in self._slash_handlers
 

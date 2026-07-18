@@ -4,6 +4,8 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from difflib import SequenceMatcher
+from pathlib import PurePosixPath
 from typing import Any, Callable
 
 from backend.agent.tool_common import WEB_SEARCH_TOOL_NAMES, WEB_TOOL_NAMES, _text_arg
@@ -17,18 +19,32 @@ from backend.agent.tool_common import WEB_SEARCH_TOOL_NAMES, WEB_TOOL_NAMES, _te
 
 IDEMPOTENT_TOOL_NAMES: frozenset[str] = frozenset({
     "read_file", "list_files", "grep_files", "glob_files", "fuzzy_search",
-    "web_search", "web_fetch", "read_artifact", "read_memory", "recall_memory",
+    "web_search", "web_fetch", "read_artifact", "read_memory",
 })
 
 MUTATING_TOOL_NAMES: frozenset[str] = frozenset({
     "run_command", "write_file", "edit_file", "git_commit",
-    "save_memory", "remember_memory",
+    "save_memory",
 })
 
-MAX_WEB_OPS_PER_TURN = 8
-MAX_WEB_SEARCH_CALLS_PER_TURN = 5
-SIMILAR_WEB_SEARCH_BLOCK_AFTER = 2
-SIMILAR_EMPTY_WEB_SEARCH_BLOCK_AFTER = 2
+MAX_WEB_OPS_PER_TURN = 5
+# After this many web ops in one turn, further web calls are blocked (warn at
+# MAX_WEB_OPS_PER_TURN first). Stops the over-research death spiral where the
+# agent keeps fetching until the iteration cap truncates the turn into a recovery
+# summary. Web-specific: other tools are still allowed so the agent can act/answer.
+MAX_WEB_OPS_HALT = 10
+SINGLE_OUTPUT_WRITE_TOOL_NAMES = frozenset({"write_file"})
+SINGLE_OUTPUT_DOCUMENT_EXTENSIONS = frozenset({
+    ".md",
+    ".markdown",
+    ".txt",
+    ".html",
+    ".htm",
+    ".doc",
+    ".docx",
+    ".pdf",
+    ".rtf",
+})
 
 _SEARCH_QUERY_STOP_TOKENS = {
     "http",
@@ -41,13 +57,23 @@ _SEARCH_QUERY_STOP_TOKENS = {
     "search",
     "query",
 }
-_EMPTY_SEARCH_MARKERS = (
-    "no results",
-    "no search results",
-    "returned no results",
-    "no result returned",
-    "未返回结果",
-    "没有返回结果",
+_DUPLICATE_STEM_SUFFIX_RE = re.compile(
+    r"(?:"
+    r"\s*[\(\uff08\[]\s*(?:copy|副本|版本?\s*\d+|v\s*\d+|[0-9]+|[一二两三四五六七八九十]+)\s*[\)\uff09\]]"
+    r"|[\s_\-]+(?:copy|副本|版本?\s*\d+|v\s*\d+|[0-9]+|[一二两三四五六七八九十]+(?:版|份|稿)?)"
+    r")+$",
+    re.I,
+)
+_MULTIPLE_OUTPUT_REQUEST_RE = re.compile(
+    r"("
+    r"(?:[2-9]|1[0-9])\s*(?:个|份|版|版本|文件|文档|方案|计划|页面|稿)"
+    r"|[二两三四五六七八九十]\s*(?:个|份|版|版本|文件|文档|方案|计划|页面|稿)"
+    r"|多(?:个|份|版|版本|文件|文档|方案|计划|页面|稿)"
+    r"|几个(?:文件|文档|版本|方案|计划)"
+    r"|分别(?:写|生成|创建|输出|保存)"
+    r"|(?:two|three|four|five|several|multiple)\s+(?:files?|versions?|drafts?|plans?|pages?)"
+    r")",
+    re.I,
 )
 
 
@@ -77,23 +103,6 @@ def _search_query_similarity(left: str, right: str) -> float:
     return max(overlap, jaccard)
 
 
-def _search_queries_are_similar(left: str, right: str) -> bool:
-    return _search_query_similarity(left, right) >= 0.75
-
-
-def _record_search_query(record: Any) -> str:
-    args = getattr(record, "tool_input", None)
-    if not isinstance(args, dict):
-        args = getattr(record, "arguments", None)
-    return _text_arg((args or {}).get("query")) or _text_arg(args or {})
-
-
-def _search_output_is_empty(record: Any) -> bool:
-    output = str(getattr(record, "tool_output", "") or "").lower()
-    extraction = str(getattr(record, "extraction_status", "") or "").lower()
-    return extraction == "failed" or any(marker in output for marker in _EMPTY_SEARCH_MARKERS)
-
-
 def _canonical_tool_args(tool_name: str, args: dict[str, Any] | None) -> dict[str, Any]:
     if tool_name in WEB_SEARCH_TOOL_NAMES:
         query = _text_arg((args or {}).get("query")) or _text_arg(args or {})
@@ -103,126 +112,84 @@ def _canonical_tool_args(tool_name: str, args: dict[str, Any] | None) -> dict[st
     return dict(args or {})
 
 
-def _legacy_web_guard_reason(
-    state: Any,
-    tc: Any,
-    *,
-    queued_tool_calls: list[Any] | None = None,
-) -> str:
-    """Return soft-stop guidance when web calls exceed per-turn budgets."""
-    if tc.name not in WEB_TOOL_NAMES:
-        return ""
+def _path_arg(args: dict[str, Any] | None) -> str:
+    args = args or {}
+    return str(args.get("file_path") or args.get("path") or args.get("target") or args.get("filename") or "").strip()
 
-    prior_web = [
-        record
-        for record in getattr(state, "tool_calls", [])
-        if getattr(record, "tool_name", "") in WEB_TOOL_NAMES
-    ]
-    queued_web = [
-        queued
-        for queued in (queued_tool_calls or [])
-        if queued.name in WEB_TOOL_NAMES
-    ]
-    total_web_ops = len(prior_web) + len(queued_web)
-    if total_web_ops >= MAX_WEB_OPS_PER_TURN:
-        return (
-            f"搜索预算已达：本轮已执行或排队 {total_web_ops} 次网络操作。"
-            "请使用已有结果回答，或基于已有证据给出带有不确定性的回答。"
-        )
 
-    if tc.name not in WEB_SEARCH_TOOL_NAMES:
-        return ""
-
-    prior_searches = [
-        record
-        for record in prior_web
-        if getattr(record, "tool_name", "") in WEB_SEARCH_TOOL_NAMES
-    ]
-    queued_searches = [
-        queued
-        for queued in queued_web
-        if queued.name in WEB_SEARCH_TOOL_NAMES
-    ]
-    total_searches = len(prior_searches) + len(queued_searches)
-    if total_searches >= MAX_WEB_SEARCH_CALLS_PER_TURN:
-        return (
-            f"搜索预算已达：本轮已执行或排队 {total_searches} 次网页搜索。"
-            "请使用已有结果回答，抓取已知来源，或基于不确定性回答。"
-        )
-
-    query = _text_arg((tc.arguments or {}).get("query")) or _text_arg(tc.arguments or {})
-    if not query:
-        return ""
-    recent_empty = 0
-    for record in reversed(prior_searches):
-        output = str(getattr(record, "tool_output", "") or "").lower()
-        if not any(
-            marker in output
-            for marker in (
-                "no results",
-                "no search results",
-                "returned no results",
-                "未返回结果",
-                "没有返回结果",
-            )
-        ):
+def _output_path_parts(path_value: str) -> tuple[str, str, str]:
+    normalized = str(path_value or "").replace("\\", "/").strip()
+    if not normalized:
+        return "", "", ""
+    path = PurePosixPath(normalized)
+    directory = str(path.parent)
+    if directory == ".":
+        directory = ""
+    suffix = path.suffix.casefold()
+    stem = path.stem.casefold().strip()
+    while True:
+        updated = _DUPLICATE_STEM_SUFFIX_RE.sub("", stem).strip()
+        if updated == stem:
             break
-        recent_empty += 1
-    if recent_empty >= MAX_WEB_SEARCH_CALLS_PER_TURN:
-        return (
-            f"连续 {recent_empty} 次网页搜索没有返回结果。"
-            "请尝试不同来源类型、抓取已知 URL，或基于当前证据回答。"
-        )
-    return ""
+        stem = updated
+    comparable = re.sub(r"[\s_\-\(\)\[\]\uff08\uff09（）【】]+", "", stem)
+    return directory.casefold(), comparable, suffix
 
 
-def web_guard_reason(
-    state: Any,
-    tc: Any,
-    *,
-    queued_tool_calls: list[Any] | None = None,
-) -> str:
-    """Return hard-stop guidance for repeated no-progress web searches.
+def _user_requested_multiple_output_artifacts(message: str) -> bool:
+    text = str(message or "")
+    return bool(_MULTIPLE_OUTPUT_REQUEST_RE.search(text))
 
-    Search volume limits are soft guidance emitted after successful calls. This
-    pre-call guard only blocks calls that look like the same search path again.
+
+def _output_stems_are_similar(left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    shorter = min(len(left), len(right))
+    longer = max(len(left), len(right))
+    if shorter < 4:
+        return False
+    if longer and shorter / longer < 0.72:
+        return False
+    return SequenceMatcher(a=left, b=right).ratio() >= 0.86
+
+
+def duplicate_output_write_guard_reason(state: Any, tc: Any) -> str:
+    """Prevent one turn from drifting into multiple sibling output copies.
+
+    This is intentionally conservative: it only targets successful prior
+    write_file calls in the same turn with the same directory, same extension,
+    and a near-identical stem after stripping copy/version suffixes.
     """
-    del queued_tool_calls
-    if tc.name not in WEB_SEARCH_TOOL_NAMES:
+    if getattr(tc, "name", "") not in SINGLE_OUTPUT_WRITE_TOOL_NAMES:
+        return ""
+    if _user_requested_multiple_output_artifacts(getattr(state, "user_message", "")):
         return ""
 
-    query = _text_arg((tc.arguments or {}).get("query")) or _text_arg(tc.arguments or {})
-    if not query:
+    target_path = _path_arg(getattr(tc, "arguments", None))
+    target_dir, target_stem, target_suffix = _output_path_parts(target_path)
+    if not target_stem or target_suffix not in SINGLE_OUTPUT_DOCUMENT_EXTENSIONS:
         return ""
 
-    prior_searches = [
-        record
-        for record in getattr(state, "tool_calls", [])
-        if getattr(record, "tool_name", "") in WEB_SEARCH_TOOL_NAMES
-    ]
-    similar_records = [
-        record
-        for record in prior_searches
-        if _search_queries_are_similar(query, _record_search_query(record))
-    ]
-    empty_similar_records = [
-        record for record in similar_records if _search_output_is_empty(record)
-    ]
-
-    if len(empty_similar_records) >= SIMILAR_EMPTY_WEB_SEARCH_BLOCK_AFTER:
+    for record in reversed(getattr(state, "tool_calls", []) or []):
+        if getattr(record, "tool_name", "") not in SINGLE_OUTPUT_WRITE_TOOL_NAMES:
+            continue
+        if getattr(record, "status", "") != "success":
+            continue
+        prior_path = _path_arg(getattr(record, "tool_input", None))
+        prior_dir, prior_stem, prior_suffix = _output_path_parts(prior_path)
+        if not prior_stem:
+            continue
+        if (prior_dir, prior_suffix) != (target_dir, target_suffix):
+            continue
+        if not _output_stems_are_similar(target_stem, prior_stem):
+            continue
         return (
-            f"\u8fde\u7eed {len(empty_similar_records)} \u6b21\u76f8\u4f3c\u7f51\u9875\u641c\u7d22\u672a\u8fd4\u56de\u7ed3\u679c\u3002"
-            "\u8bf7\u6362\u7528\u660e\u663e\u4e0d\u540c\u7684\u5173\u952e\u8bcd\u3001\u4e0d\u540c\u6765\u6e90\u7c7b\u578b\uff0c"
-            "\u6293\u53d6\u5df2\u77e5 URL\uff0c\u6216\u57fa\u4e8e\u5f53\u524d\u8bc1\u636e\u56de\u7b54\u3002"
+            f"Skipped duplicate output write: this turn already wrote a similar output file '{prior_path}'. "
+            f"Do not create another sibling copy such as '{target_path}' unless the user explicitly asked for multiple files or versions. "
+            "Read or verify the existing file, edit that target if needed, then give the final answer."
         )
-
-    if len(similar_records) >= SIMILAR_WEB_SEARCH_BLOCK_AFTER:
-        return (
-            f"\u4f60\u5df2\u7ecf {len(similar_records)} \u6b21\u641c\u7d22\u76f8\u540c\u5173\u952e\u8bcd\u6216\u9ad8\u5ea6\u76f8\u4f3c\u7684\u67e5\u8be2\u3002"
-            "\u8bf7\u505c\u6b62\u91cd\u590d\u641c\u7d22\uff1a\u5148\u4f7f\u7528\u5df2\u6709\u7ed3\u679c\u603b\u7ed3\uff0c"
-            "\u6216\u6362\u7528\u771f\u6b63\u4e0d\u540c\u7684\u89d2\u5ea6\u3001\u8bed\u8a00\u3001\u65f6\u95f4\u8303\u56f4\u6216\u6743\u5a01\u6765\u6e90\u3002"
-        )
-
     return ""
 
 
@@ -326,7 +293,9 @@ class ToolCallGuardrailController:
         self._no_progress: dict[ToolCallSignature, tuple[str, int]] = {}
         self._halt_decision: ToolGuardrailDecision | None = None
         self._total_web_calls: int = 0
+        self._web_halt: bool = False
         self._call_counts: dict[ToolCallSignature, int] = {}
+        self._blocked_repeat_counts: dict[ToolCallSignature, int] = {}
 
     @property
     def halt_decision(self) -> ToolGuardrailDecision | None:
@@ -345,6 +314,21 @@ class ToolCallGuardrailController:
             )
 
         signature = ToolCallSignature.from_call(tool_name, args)
+
+        # Web over-use halt: block further web calls once MAX_WEB_OPS_HALT is
+        # reached. Other tools remain allowed so the agent can still act/answer.
+        if self._web_halt and tool_name in ("web_search", "web_fetch"):
+            return ToolGuardrailDecision(
+                action="halt",
+                code="many_web_operations_halt",
+                message=(
+                    f"本轮网络工具已调用 {self._total_web_calls} 次，超过上限，已拦截此次网络调用。"
+                    "请立即基于已抓取的来源用 [1]、[2] 引用标记作答，不要再发起网络请求。"
+                ),
+                tool_name=tool_name,
+                count=self._total_web_calls,
+                signature=signature,
+            )
 
         # Dimension 2: same-tool failure halt (pre-execution check)
         same_count = self._same_tool_failure_counts.get(tool_name, 0)
@@ -399,26 +383,37 @@ class ToolCallGuardrailController:
                         msg += (
                             "请使用已提供的结果，或尝试不同方法。"
                         )
-                    return ToolGuardrailDecision(
-                        action="block",
+                    blocked_count = self._blocked_repeat_counts.get(signature, 0) + 1
+                    self._blocked_repeat_counts[signature] = blocked_count
+                    action = "halt" if blocked_count >= 2 else "block"
+                    decision = ToolGuardrailDecision(
+                        action=action,
                         code="idempotent_no_progress",
-                        message=msg,
+                        message=(
+                            f"{msg} 已再次提交相同调用，现已终止本轮工具循环。"
+                            if action == "halt"
+                            else msg
+                        ),
                         tool_name=tool_name,
                         count=repeat_count,
                         signature=signature,
                     )
+                    if action == "halt":
+                        self._halt_decision = decision
+                    return decision
 
-        # Dimension 4: repeated call count (catches same-args retries even with varying results)
-        # Increment BEFORE the check so blocked calls are also counted
+        # Dimension 4: repeated executed calls (catches same-args retries even
+        # with varying results). The count is updated in after_call(), not here:
+        # pre-call checks must be pure observations of already-executed work.
+        # Counting attempted-but-rejected calls here makes queued tools,
+        # permission denials, or guardrail blocks look like real progress loops.
         if self._is_idempotent(tool_name, args):
-            prev = self._call_counts.get(signature, 0)
-            self._call_counts[signature] = prev + 1
-            call_count = prev + 1
-            if call_count > self.config.repeated_call_block_after:
+            call_count = self._call_counts.get(signature, 0)
+            if call_count >= self.config.repeated_call_block_after:
                 is_web = tool_name in ("web_search", "web_fetch")
                 msg = (
-                    f"你已用相同关键词搜索 {call_count} 次，"
-                    "上下文中已有足够结果。"
+                    f"这个 {tool_name} 调用已用相同参数实际执行 {call_count} 次，"
+                    "上下文中已有这些结果。"
                 )
                 if is_web:
                     msg += (
@@ -454,6 +449,11 @@ class ToolCallGuardrailController:
         _WEB_TOOLS = ("web_search", "web_fetch")
         if tool_name in _WEB_TOOLS:
             self._total_web_calls += 1
+            if self._total_web_calls >= MAX_WEB_OPS_HALT:
+                # Further web calls are blocked in before_call; force the agent
+                # to answer with evidence on hand instead of fetching until the
+                # iteration cap truncates the turn into a recovery summary.
+                self._web_halt = True
 
         if failed:
             # Track exact failure
@@ -518,6 +518,9 @@ class ToolCallGuardrailController:
             self._no_progress.pop(signature, None)
             return ToolGuardrailDecision(tool_name=tool_name, signature=signature)
 
+        self._call_counts[signature] = self._call_counts.get(signature, 0) + 1
+        self._blocked_repeat_counts.pop(signature, None)
+
         result_raw = "\x00NONE" if result is None else (result or "")
         result_hash = hashlib.md5(result_raw.encode()).hexdigest()[:12]
         previous = self._no_progress.get(signature)
@@ -539,20 +542,34 @@ class ToolCallGuardrailController:
                 signature=signature,
             )
 
-        # Soft guidance: too many total web operations
-        if tool_name in _WEB_TOOLS and self._total_web_calls >= 8:
-            return ToolGuardrailDecision(
-                action="warn",
-                code="many_web_operations",
-                message=(
-                    f"本轮你已调用网络工具 {self._total_web_calls} 次。"
-                    "请判断证据是否已经足够组织有帮助的回答。"
-                    "如果足够，请停止搜索并立即用 [1]、[2] 引用标记回答。"
-                ),
-                tool_name=tool_name,
-                count=self._total_web_calls,
-                signature=signature,
-            )
+        # Web over-use: warn at MAX_WEB_OPS_PER_TURN, escalate to a halt warning
+        # at MAX_WEB_OPS_HALT (further web calls are blocked in before_call).
+        if tool_name in _WEB_TOOLS:
+            if self._total_web_calls >= MAX_WEB_OPS_HALT:
+                return ToolGuardrailDecision(
+                    action="warn",
+                    code="many_web_operations_halt",
+                    message=(
+                        f"本轮网络工具已调用 {self._total_web_calls} 次，超过上限。"
+                        "停止搜索，立即基于已抓取的来源用 [1]、[2] 引用标记作答；下一次网络调用将被拦截。"
+                    ),
+                    tool_name=tool_name,
+                    count=self._total_web_calls,
+                    signature=signature,
+                )
+            if self._total_web_calls >= MAX_WEB_OPS_PER_TURN:
+                return ToolGuardrailDecision(
+                    action="warn",
+                    code="many_web_operations",
+                    message=(
+                        f"本轮你已调用网络工具 {self._total_web_calls} 次。"
+                        "请判断证据是否已经足够组织有帮助的回答。"
+                        "如果足够，请停止搜索并立即用 [1]、[2] 引用标记回答。"
+                    ),
+                    tool_name=tool_name,
+                    count=self._total_web_calls,
+                    signature=signature,
+                )
 
         return ToolGuardrailDecision(tool_name=tool_name, count=repeat_count, signature=signature)
 

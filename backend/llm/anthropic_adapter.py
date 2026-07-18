@@ -6,20 +6,23 @@ Anthropic Claude 适配器（DESIGN.md §一 LLM Adapter）。
   - message_delta 最终 usage（含 cache tokens）
   - 自动 retry（429 rate limit / 529 overloaded）
   - stop_reason 处理（end_turn / tool_use / max_tokens）
-  - system prompt cache_control 支持
+  - system prompt byte-stable prefix split
   - extended thinking 支持（Claude 4+）
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import os
 import re
 from typing import Any, AsyncIterator
 
 import httpx
 
+from backend.agent.prompting import split_sys_prompt_prefix
 from backend.llm.base import (
     LLMAdapter,
     LLMMessage,
@@ -29,14 +32,15 @@ from backend.llm.base import (
     ToolCallEvent,
     ToolCallStartEvent,
     UsageInfo,
+    sanitize_llm_request_metadata,
 )
+from backend.llm.capabilities import ProviderCapabilities, capabilities_from_anthropic_adapter
 
 logger = logging.getLogger(__name__)
 
 _MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 1.0
 _RETRYABLE_STATUS_CODES = {429, 529}
-_MAX_PROMPT_CACHE_BREAKPOINTS = 4
 _DELTA_DEBOUNCE_BYTES = 128
 _THINKING_TRIGGER_RE = re.compile(
     r"(debug|fix|bug|error|traceback|refactor|architect|design|plan|"
@@ -44,6 +48,41 @@ _THINKING_TRIGGER_RE = re.compile(
     r"修复|报错|错误|调试|重构|架构|设计|计划|分析|实现|测试|审查)",
     re.IGNORECASE,
 )
+
+_ANTHROPIC_PROMPT_CACHE_CONTROL = {"type": "ephemeral"}
+
+# Anthropic 1h prompt-cache TTL requires this beta header.
+# https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching#1-hour-cache-duration
+_EXTENDED_CACHE_TTL_BETA_HEADER = "extended-cache-ttl-2025-04-11"
+
+
+def _cache_ttl_1h_enabled() -> bool:
+    """Whether the 1h prompt-cache TTL is opted in (env MINICODE_CACHE_TTL_1H).
+
+    Mirrors cc's ``should1hCacheTTL`` opt-in gating (claude.ts getCacheControl):
+    cache_control stays ``{"type": "ephemeral"}`` by default and only gains
+    ``"ttl": "1h"`` when explicitly enabled.
+    """
+    return os.getenv("MINICODE_CACHE_TTL_1H", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _cache_reference_enabled() -> bool:
+    """Whether to tag tool_result blocks with ``cache_reference`` (opt-in).
+
+    In cc this only happens when the cache-editing beta (``useCachedMC``,
+    first-party + repl_main_thread only) is active — it is NOT part of the
+    stable public Messages API. Default off; enable via
+    MINICODE_CACHE_TOOL_RESULT_REFERENCE=1 against gateways that support it.
+    The gateway-fallback path strips it if rejected.
+    """
+    return os.getenv("MINICODE_CACHE_TOOL_RESULT_REFERENCE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _cache_control() -> dict[str, Any]:
+    """Build the cache_control marker, cc's ``getCacheControl`` equivalent."""
+    if _cache_ttl_1h_enabled():
+        return {"type": "ephemeral", "ttl": "1h"}
+    return {"type": "ephemeral"}
 
 
 def _clean_error_message(exc: Exception) -> str:
@@ -65,6 +104,238 @@ def _is_retryable(exc: Exception) -> bool:
     return "RateLimitError" in cls_name or "OverloadedError" in cls_name
 
 
+def _anthropic_request_metadata(metadata: dict[str, Any] | None) -> dict[str, str]:
+    clean = sanitize_llm_request_metadata(metadata)
+    source = (
+        clean.get("conversation_id")
+        or clean.get("minicode_session_id")
+        or clean.get("session_id")
+        or ""
+    )
+    if not source:
+        return {}
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:32]
+    return {"user_id": f"minicode-{digest}"}
+
+
+def _is_cache_control_unsupported_error(exc: Exception) -> bool:
+    text = _clean_error_message(exc).lower()
+    status_code = getattr(exc, "status_code", None)
+    mentions_cache_control = "cache_control" in text or "cache control" in text
+    mentions_incompatibility = any(
+        token in text
+        for token in (
+            "invalid",
+            "unsupported",
+            "not supported",
+            "not support",
+            "unrecognized",
+            "unknown parameter",
+            "unknown field",
+            "extra inputs",
+            "badrequest",
+            "bad request",
+        )
+    )
+    return bool(status_code in {400, 422} and mentions_cache_control and mentions_incompatibility)
+
+
+def _short_sha256(value: str, length: int = 12) -> str:
+    if not value:
+        return ""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:length]
+
+
+def _json_fingerprint(value: Any, length: int = 12) -> str:
+    try:
+        raw = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+    except TypeError:
+        raw = repr(value)
+    return _short_sha256(raw, length=length)
+
+
+def _anthropic_tool_names(tools: list[dict[str, Any]]) -> list[str]:
+    return [
+        str(tool.get("name") or "").strip()
+        for tool in tools
+        if str(tool.get("name") or "").strip()
+    ]
+
+
+def _anthropic_tool_schema_hashes(tools: list[dict[str, Any]]) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    for index, tool in enumerate(tools):
+        name = str(tool.get("name") or f"tool_{index}").strip()
+        hashes[name] = _json_fingerprint(tool)
+    return hashes
+
+
+def _anthropic_tool_schema_size_summary(tools: list[dict[str, Any]]) -> dict[str, Any]:
+    total_chars = 0
+    largest: list[dict[str, Any]] = []
+    for index, tool in enumerate(tools):
+        try:
+            raw = json.dumps(
+                tool,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+        except TypeError:
+            raw = repr(tool)
+        chars = len(raw)
+        total_chars += chars
+        name = str(tool.get("name") or f"tool_{index}").strip()
+        largest.append({"name": name, "chars": chars})
+    largest.sort(key=lambda item: (-int(item["chars"]), str(item["name"])))
+    return {"tools_chars": total_chars, "largest_tools": largest[:5]}
+
+
+def _anthropic_input_size_summary(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    total_chars = 0
+    largest: list[dict[str, Any]] = []
+    duplicate_groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for index, message in enumerate(messages):
+        try:
+            raw = json.dumps(
+                message,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+        except TypeError:
+            raw = repr(message)
+        chars = len(raw)
+        total_chars += chars
+        content_hash = _json_fingerprint(message.get("content")) if message.get("content") not in (None, "", [], {}) else ""
+        role = str(message.get("role") or "message")[:80]
+        largest.append(
+            {
+                "index": index,
+                "type": "message",
+                "role": role,
+                "chars": chars,
+                **({"content_hash": content_hash} if content_hash else {}),
+            }
+        )
+        if content_hash:
+            key = (role, content_hash)
+            group = duplicate_groups.setdefault(
+                key,
+                {
+                    "type": "message",
+                    "role": role,
+                    "content_hash": content_hash,
+                    "count": 0,
+                    "chars": 0,
+                },
+            )
+            group["count"] = int(group["count"]) + 1
+            group["chars"] = int(group["chars"]) + chars
+    largest.sort(key=lambda item: (-int(item["chars"]), int(item["index"])))
+    duplicates = [group for group in duplicate_groups.values() if int(group.get("count") or 0) > 1]
+    duplicates.sort(key=lambda item: (-int(item.get("chars") or 0), str(item.get("role") or "")))
+    return {
+        "input_chars": total_chars,
+        "largest_input_items": largest[:5],
+        "duplicate_input_content": duplicates[:5],
+    }
+
+
+def _contains_turn_aborted_marker(value: Any) -> bool:
+    if isinstance(value, str):
+        return "<turn_aborted>" in value
+    if isinstance(value, dict):
+        return any(_contains_turn_aborted_marker(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_turn_aborted_marker(item) for item in value)
+    content = getattr(value, "content", None)
+    if content is not None:
+        return _contains_turn_aborted_marker(content)
+    return False
+
+
+def _safe_anthropic_request_params(kwargs: dict[str, Any]) -> dict[str, Any]:
+    params: dict[str, Any] = {}
+    for key in ("model", "max_tokens", "stream", "tool_choice", "thinking"):
+        if key in kwargs:
+            params[key] = kwargs[key]
+    # Detect cache_control at any level (system blocks, tools, messages)
+    cache_breakpoints = 0
+    system = kwargs.get("system")
+    if isinstance(system, list):
+        for block in system:
+            if isinstance(block, dict) and "cache_control" in block:
+                cache_breakpoints += 1
+    tools_list = kwargs.get("tools")
+    if isinstance(tools_list, list):
+        for tool in tools_list:
+            if isinstance(tool, dict) and "cache_control" in tool:
+                cache_breakpoints += 1
+    messages_list = kwargs.get("messages")
+    if isinstance(messages_list, list):
+        for msg in messages_list:
+            if isinstance(msg, dict):
+                content = msg.get("content")
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and "cache_control" in block:
+                            cache_breakpoints += 1
+    params["cache_control_present"] = cache_breakpoints > 0 or "cache_control" in kwargs
+    params["cache_breakpoints"] = cache_breakpoints
+    params["metadata_present"] = "metadata" in kwargs
+    params["system_blocks"] = len(kwargs.get("system") or []) if isinstance(kwargs.get("system"), list) else 0
+    params["tools_len"] = len(kwargs.get("tools") or []) if isinstance(kwargs.get("tools"), list) else 0
+    return params
+
+
+def _anthropic_safe_request_summary(
+    *,
+    model: str,
+    system_text: str,
+    api_messages: list[dict[str, Any]],
+    anthropic_tools: list[dict[str, Any]],
+    metadata: dict[str, Any] | None,
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    clean_metadata = sanitize_llm_request_metadata(metadata)
+    stable_system = split_sys_prompt_prefix(system_text).stable_prefix if system_text else ""
+    input_counts: dict[str, int] = {}
+    for message in api_messages:
+        role = str(message.get("role") or "message")
+        input_counts[role] = input_counts.get(role, 0) + 1
+    return {
+        "model": model,
+        "wire_api": "anthropic_messages",
+        "metadata_keys": sorted(clean_metadata.keys()),
+        "prompt_cache_key_present": False,
+        "prompt_cache_key_hash": "",
+        "previous_response_id_present": False,
+        "previous_response_id_hash": "",
+        "request_params": _safe_anthropic_request_params(kwargs),
+        "turn_aborted_marker_present": _contains_turn_aborted_marker(api_messages),
+        "instructions_len": len(system_text),
+        "instructions_hash": _short_sha256(stable_system or system_text),
+        "instructions_full_hash": _short_sha256(system_text),
+        "tools_len": len(anthropic_tools),
+        "tools_hash": _json_fingerprint(anthropic_tools) if anthropic_tools else "",
+        "tool_names": _anthropic_tool_names(anthropic_tools),
+        "tool_schema_hashes": _anthropic_tool_schema_hashes(anthropic_tools),
+        **_anthropic_tool_schema_size_summary(anthropic_tools),
+        "input_items_len": len(api_messages),
+        **_anthropic_input_size_summary(api_messages),
+        "input_item_counts": input_counts,
+    }
+
+
 class AnthropicAdapter(LLMAdapter):
     """
     Anthropic Claude 适配器。
@@ -74,6 +345,14 @@ class AnthropicAdapter(LLMAdapter):
         async for event in adapter.stream_chat(messages, tools):
             ...
     """
+
+    # Session-scoped cache of converted tool schemas. Tool schemas sit at
+    # API position 2 (after system prompt), so any byte-level change busts
+    # the entire tool block AND everything downstream. Memoizing per-adapter
+    # (session) locks the schema bytes at first render — mid-session tool
+    # description drift no longer churns the serialized array.
+    # Mirrors cc's toolSchemaCache.ts.
+    _tool_schema_cache: dict[str, dict[str, Any]]
 
     def __init__(
         self,
@@ -93,6 +372,11 @@ class AnthropicAdapter(LLMAdapter):
         self._use_auth_token = use_auth_token
         self._use_raw_http = use_raw_http
         self._client = None
+        self._tool_schema_cache = {}
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return capabilities_from_anthropic_adapter(self)
 
     def _get_client(self):
         """懒初始化 Anthropic 客户端。"""
@@ -149,48 +433,59 @@ class AnthropicAdapter(LLMAdapter):
         self,
         messages: list[LLMMessage],
         tools: list[dict[str, Any]] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """流式调用 Claude Messages API。"""
         # 分离 system prompt + 消息交替保证
         system_text, api_messages = self._convert_messages(messages)
-        anthropic_tools = self._convert_tools(tools or []) if tools else []
-        cache_budget = _MAX_PROMPT_CACHE_BREAKPOINTS
-        if system_text:
-            cache_budget -= 1
-        if anthropic_tools:
-            cache_budget -= 1
-        api_messages = self._apply_prompt_cache_controls(
-            api_messages,
-            max_breakpoints=cache_budget,
-            scan_all=True,
+        anthropic_tools = self._convert_tools_cached(tools or []) if tools else []
+
+        # Add cache_control breakpoints to last message and last tool.
+        # System blocks get cache_control from _build_system_blocks.
+        cached_messages, cached_tools = self._add_cache_breakpoints(
+            api_messages, anthropic_tools if tools else None,
         )
 
         kwargs: dict[str, Any] = {
             "model": self._model,
             "max_tokens": self._max_tokens,
-            "messages": api_messages,
+            "messages": cached_messages,
             "stream": True,
         }
+        request_metadata = _anthropic_request_metadata(metadata)
+        if request_metadata:
+            kwargs["metadata"] = request_metadata
 
-        # System prompt（带 cache_control）
+        # 1h cache TTL requires the extended-cache-ttl beta header. The SDK
+        # accepts extra_headers on messages.create; the raw-HTTP path pops it
+        # into HTTP headers. _strip_all_cache_control removes it on fallback.
+        if _cache_ttl_1h_enabled():
+            kwargs["extra_headers"] = {"anthropic-beta": _EXTENDED_CACHE_TTL_BETA_HEADER}
+
+        # System prompt: split stable/dynamic blocks with cache_control on
+        # the stable prefix so Anthropic caches it across turns.
         if system_text:
-            kwargs["system"] = [
-                {"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}},
-            ]
+            kwargs["system"] = self._build_system_blocks(system_text)
 
         # Extended thinking（Claude 4+）
         if self._should_enable_thinking(messages, anthropic_tools):
             kwargs["thinking"] = {"type": "enabled", "budget_tokens": self._thinking_budget}
 
-        # 转换工具定义，末尾工具加 cache_control（缓存 system+tools 前缀）
-        if tools:
-            if anthropic_tools:
-                anthropic_tools[-1]["cache_control"] = {"type": "ephemeral"}
-                kwargs["tools"] = anthropic_tools
-                kwargs["tool_choice"] = {"type": "auto"}
+        if tools and cached_tools:
+            kwargs["tools"] = cached_tools
+            kwargs["tool_choice"] = {"type": "auto"}
+
+        request_summary = _anthropic_safe_request_summary(
+            model=self._model,
+            system_text=system_text,
+            api_messages=api_messages,
+            anthropic_tools=anthropic_tools,
+            metadata=metadata,
+            kwargs=kwargs,
+        )
 
         if self._use_raw_http:
-            async for event in self._stream_chat_raw_http(kwargs):
+            async for event in self._stream_chat_raw_http(kwargs, request_summary=request_summary):
                 yield event
             return
 
@@ -198,9 +493,34 @@ class AnthropicAdapter(LLMAdapter):
         try:
             stream = await self._call_with_retry(**kwargs)
         except Exception as exc:
-            logger.error("Anthropic API 调用失败: %s", exc)
-            yield StreamEvent(type=StreamEventType.ERROR, content=f"Claude API 调用失败: {_clean_error_message(exc)}")
-            return
+            retry_without_cache = _is_cache_control_unsupported_error(exc)
+            if retry_without_cache:
+                logger.warning(
+                    "Anthropic gateway rejected cache_control; retrying without all cache markers: %s",
+                    _clean_error_message(exc),
+                )
+                retry_kwargs = self._strip_all_cache_control(kwargs)
+                request_summary = _anthropic_safe_request_summary(
+                    model=self._model,
+                    system_text=system_text,
+                    api_messages=api_messages,
+                    anthropic_tools=anthropic_tools,
+                    metadata=metadata,
+                    kwargs=retry_kwargs,
+                )
+                try:
+                    stream = await self._call_with_retry(**retry_kwargs)
+                except Exception as retry_exc:
+                    logger.error("Anthropic API 调用失败: %s", retry_exc)
+                    yield StreamEvent(
+                        type=StreamEventType.ERROR,
+                        content=f"Claude API 调用失败: {_clean_error_message(retry_exc)}",
+                    )
+                    return
+            else:
+                logger.error("Anthropic API 调用失败: %s", exc)
+                yield StreamEvent(type=StreamEventType.ERROR, content=f"Claude API 调用失败: {_clean_error_message(exc)}")
+                return
 
         # 解析流式事件
         pending_tool_calls: list[ToolCallEvent] = []
@@ -209,6 +529,9 @@ class AnthropicAdapter(LLMAdapter):
         current_tool_args = ""
         usage = UsageInfo()
         stop_reason = ""
+        saw_message_stop = False
+        provider_items: list[dict[str, Any]] = []
+        current_reasoning_item: dict[str, Any] | None = None
 
         try:
             async for event in stream:
@@ -244,6 +567,17 @@ class AnthropicAdapter(LLMAdapter):
                                     index=len(pending_tool_calls),
                                 ),
                             )
+                        elif cb_type in {"thinking", "redacted_thinking"}:
+                            current_reasoning_item = {"type": cb_type}
+                            initial_thinking = str(getattr(content_block, "thinking", "") or "")
+                            initial_signature = str(getattr(content_block, "signature", "") or "")
+                            initial_data = str(getattr(content_block, "data", "") or "")
+                            if initial_thinking:
+                                current_reasoning_item["thinking"] = initial_thinking
+                            if initial_signature:
+                                current_reasoning_item["signature"] = initial_signature
+                            if initial_data:
+                                current_reasoning_item["data"] = initial_data
                         elif cb_type == "image":
                             source = getattr(content_block, "source", None)
                             if source:
@@ -267,8 +601,22 @@ class AnthropicAdapter(LLMAdapter):
                             yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content=text)
                     elif delta_type in {"thinking_delta", "signature_delta"}:
                         thinking = getattr(delta, "thinking", "") or getattr(delta, "text", "")
+                        signature = getattr(delta, "signature", "")
+                        if current_reasoning_item is not None:
+                            if thinking:
+                                current_reasoning_item["thinking"] = (
+                                    str(current_reasoning_item.get("thinking") or "") + str(thinking)
+                                )
+                            if signature:
+                                current_reasoning_item["signature"] = (
+                                    str(current_reasoning_item.get("signature") or "") + str(signature)
+                                )
                         if thinking:
-                            yield StreamEvent(type=StreamEventType.THINKING_CHUNK, content=thinking)
+                            yield StreamEvent(
+                                type=StreamEventType.THINKING_CHUNK,
+                                content=thinking,
+                                raw={"provider_reasoning_type": delta_type},
+                            )
                     elif delta_type == "input_json_delta":
                         partial = getattr(delta, "partial_json", "")
                         if partial:
@@ -285,6 +633,9 @@ class AnthropicAdapter(LLMAdapter):
                                 )
 
                 elif event_type == "content_block_stop":
+                    if current_reasoning_item is not None:
+                        provider_items.append(current_reasoning_item)
+                        current_reasoning_item = None
                     if current_tool_id and current_tool_name:
                         try:
                             arguments = json.loads(current_tool_args) if current_tool_args else {}
@@ -320,7 +671,7 @@ class AnthropicAdapter(LLMAdapter):
                             )
 
                 elif event_type == "message_stop":
-                    pass
+                    saw_message_stop = True
 
                 elif event_type == "ping":
                     pass
@@ -330,13 +681,38 @@ class AnthropicAdapter(LLMAdapter):
             yield StreamEvent(type=StreamEventType.ERROR, content=f"Claude 流式响应异常: {_clean_error_message(exc)}")
             return
 
+        if not saw_message_stop:
+            logger.error("Anthropic 流在 message_stop 之前结束")
+            yield StreamEvent(
+                type=StreamEventType.ERROR,
+                content="Claude 流式响应在完成前中断",
+                raw={"provider": "anthropic", "event_type": "eof_without_message_stop"},
+            )
+            return
+
         if pending_tool_calls:
             yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=pending_tool_calls)
 
         if stop_reason == "max_tokens":
             logger.warning("Claude 响应因 max_tokens 截断")
 
-        yield StreamEvent(type=StreamEventType.DONE, usage=usage, finish_reason=stop_reason)
+        yield StreamEvent(
+            type=StreamEventType.DONE,
+            usage=usage,
+            finish_reason=stop_reason,
+            raw={
+                "provider": "anthropic",
+                "stop_reason": stop_reason,
+                "usage": {
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "cache_creation_input_tokens": usage.cache_creation_input_tokens,
+                    "cache_read_input_tokens": usage.cache_read_input_tokens,
+                },
+                "request_summary": request_summary,
+            },
+            provider_items=provider_items,
+        )
 
     def _messages_url(self) -> str:
         endpoint = (self._base_url or "https://api.anthropic.com/v1").rstrip("/")
@@ -355,7 +731,12 @@ class AnthropicAdapter(LLMAdapter):
             headers["x-api-key"] = self._api_key
         return headers
 
-    async def _stream_chat_raw_http(self, kwargs: dict[str, Any]) -> AsyncIterator[StreamEvent]:
+    async def _stream_chat_raw_http(
+        self,
+        kwargs: dict[str, Any],
+        *,
+        request_summary: dict[str, Any] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
         """Stream Anthropic Messages over plain HTTP for custom gateways that block the SDK."""
         pending_tool_calls: list[ToolCallEvent] = []
         current_tool_id = ""
@@ -363,14 +744,24 @@ class AnthropicAdapter(LLMAdapter):
         current_tool_args = ""
         usage = UsageInfo()
         stop_reason = ""
+        saw_message_stop = False
+        provider_items: list[dict[str, Any]] = []
+        current_reasoning_item: dict[str, Any] | None = None
 
         try:
+            # extra_headers is an SDK-level convention — move it to HTTP
+            # headers so it doesn't leak into the JSON body.
+            body = dict(kwargs)
+            extra_headers = body.pop("extra_headers", None)
+            headers = self._raw_headers()
+            if isinstance(extra_headers, dict):
+                headers.update({str(k): str(v) for k, v in extra_headers.items()})
             async with httpx.AsyncClient(timeout=None, follow_redirects=True) as client:
                 async with client.stream(
                     "POST",
                     self._messages_url(),
-                    headers=self._raw_headers(),
-                    json=kwargs,
+                    headers=headers,
+                    json=body,
                 ) as response:
                     response.raise_for_status()
                     async for raw_line in response.aiter_lines():
@@ -378,7 +769,11 @@ class AnthropicAdapter(LLMAdapter):
                         if not line.startswith("data:"):
                             continue
                         payload_text = line[5:].strip()
-                        if not payload_text or payload_text == "[DONE]":
+                        if not payload_text:
+                            continue
+                        if payload_text == "[DONE]":
+                            if saw_message_stop:
+                                break
                             continue
                         try:
                             event = json.loads(payload_text)
@@ -419,6 +814,12 @@ class AnthropicAdapter(LLMAdapter):
                                         index=len(pending_tool_calls),
                                     ),
                                 )
+                            elif block.get("type") in {"thinking", "redacted_thinking"}:
+                                current_reasoning_item = {
+                                    key: value
+                                    for key, value in block.items()
+                                    if key in {"type", "thinking", "signature", "data"}
+                                }
 
                         elif event_type == "content_block_delta":
                             delta = event.get("delta") if isinstance(event.get("delta"), dict) else {}
@@ -429,8 +830,18 @@ class AnthropicAdapter(LLMAdapter):
                                     yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content=text)
                             elif delta_type in {"thinking_delta", "signature_delta"}:
                                 thinking = str(delta.get("thinking") or delta.get("text") or "")
+                                signature = str(delta.get("signature") or "")
+                                if current_reasoning_item is not None:
+                                    if thinking:
+                                        current_reasoning_item["thinking"] = str(current_reasoning_item.get("thinking") or "") + thinking
+                                    if signature:
+                                        current_reasoning_item["signature"] = str(current_reasoning_item.get("signature") or "") + signature
                                 if thinking:
-                                    yield StreamEvent(type=StreamEventType.THINKING_CHUNK, content=thinking)
+                                    yield StreamEvent(
+                                        type=StreamEventType.THINKING_CHUNK,
+                                        content=thinking,
+                                        raw={"provider_reasoning_type": delta_type},
+                                    )
                             elif delta_type == "input_json_delta":
                                 partial = str(delta.get("partial_json") or "")
                                 current_tool_args += partial
@@ -446,6 +857,9 @@ class AnthropicAdapter(LLMAdapter):
                                     )
 
                         elif event_type == "content_block_stop":
+                            if current_reasoning_item is not None:
+                                provider_items.append(current_reasoning_item)
+                                current_reasoning_item = None
                             if current_tool_id and current_tool_name:
                                 try:
                                     arguments = json.loads(current_tool_args) if current_tool_args else {}
@@ -476,42 +890,75 @@ class AnthropicAdapter(LLMAdapter):
                                     cache_creation_input_tokens=usage.cache_creation_input_tokens,
                                     cache_read_input_tokens=usage.cache_read_input_tokens,
                                 )
+                        elif event_type == "message_stop":
+                            saw_message_stop = True
         except Exception as exc:
             logger.error("Anthropic raw HTTP 调用失败: %s", exc)
             yield StreamEvent(type=StreamEventType.ERROR, content=f"Claude API 调用失败: {_clean_error_message(exc)}")
+            return
+
+        if not saw_message_stop:
+            logger.error("Anthropic raw HTTP 流在 message_stop 之前结束")
+            yield StreamEvent(
+                type=StreamEventType.ERROR,
+                content="Claude 流式响应在完成前中断",
+                raw={"provider": "anthropic", "event_type": "eof_without_message_stop"},
+            )
             return
 
         if pending_tool_calls:
             yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=pending_tool_calls)
         if stop_reason == "max_tokens":
             logger.warning("Claude 响应因 max_tokens 截断")
-        yield StreamEvent(type=StreamEventType.DONE, usage=usage, finish_reason=stop_reason)
+        yield StreamEvent(
+            type=StreamEventType.DONE,
+            usage=usage,
+            finish_reason=stop_reason,
+            raw={
+                "provider": "anthropic",
+                "stop_reason": stop_reason,
+                "usage": {
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "cache_creation_input_tokens": usage.cache_creation_input_tokens,
+                    "cache_read_input_tokens": usage.cache_read_input_tokens,
+                },
+                "request_summary": request_summary or {},
+            },
+            provider_items=provider_items,
+        )
 
     async def simple_chat(self, messages: list[LLMMessage]) -> str:
         """非流式调用。"""
         system_text, api_messages = self._convert_messages(messages)
-        api_messages = self._apply_prompt_cache_controls(
-            api_messages,
-            max_breakpoints=_MAX_PROMPT_CACHE_BREAKPOINTS - (1 if system_text else 0),
-            scan_all=True,
-        )
 
+        cached_messages, _ = self._add_cache_breakpoints(api_messages)
         kwargs: dict[str, Any] = {
             "model": self._model,
             "max_tokens": self._max_tokens,
-            "messages": api_messages,
+            "messages": cached_messages,
         }
 
         if system_text:
-            kwargs["system"] = [
-                {"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}},
-            ]
+            kwargs["system"] = self._build_system_blocks(system_text)
 
         try:
             response = await self._call_with_retry(**kwargs)
         except Exception as exc:
-            logger.error("Anthropic simple_chat 失败: %s", exc)
-            raise RuntimeError(f"Claude 调用失败: {exc}") from exc
+            if _is_cache_control_unsupported_error(exc):
+                logger.warning(
+                    "Anthropic gateway rejected cache_control; retrying without it: %s",
+                    _clean_error_message(exc),
+                )
+                retry_kwargs = self._strip_all_cache_control(kwargs)
+                try:
+                    response = await self._call_with_retry(**retry_kwargs)
+                except Exception as retry_exc:
+                    logger.error("Anthropic simple_chat 失败: %s", retry_exc)
+                    raise RuntimeError(f"Claude 调用失败: {retry_exc}") from retry_exc
+            else:
+                logger.error("Anthropic simple_chat 失败: %s", exc)
+                raise RuntimeError(f"Claude 调用失败: {exc}") from exc
 
         text_parts = []
         for block in getattr(response, "content", []):
@@ -520,12 +967,180 @@ class AnthropicAdapter(LLMAdapter):
                 text_parts.append(getattr(block, "text", ""))
 
         text = "\n".join(text_parts).strip()
+        # Side calls (compaction/reflection/recovery) must still be counted toward
+        # cost/token totals — the streaming DONE path doesn't see them.
+        self.record_non_stream_usage(getattr(response, "usage", None), provider="anthropic", model_id=self._model)
         if not text:
             raise RuntimeError("Claude 返回空内容")
 
         return text
 
     # ── 消息格式转换 ──────────────────────────────────────
+
+    @staticmethod
+    def _build_system_blocks(system_text: str) -> list[dict[str, Any]]:
+        """Split system prompt into cache-stable and dynamic blocks.
+
+        The stable prefix gets a ``cache_control`` breakpoint so Anthropic
+        caches the byte-stable identity/rules/tools contract across turns.
+        The dynamic suffix (workspace, skills, memory) is not cached because
+        it changes between turns.
+        """
+        split = split_sys_prompt_prefix(system_text)
+        cache_control = _cache_control()
+        blocks: list[dict[str, Any]] = []
+        if split.stable_prefix.strip():
+            blocks.append({
+                "type": "text",
+                "text": split.stable_prefix,
+                "cache_control": dict(cache_control),
+            })
+        if split.dynamic_suffix.strip():
+            blocks.append({"type": "text", "text": split.dynamic_suffix})
+        if not blocks:
+            blocks.append({
+                "type": "text",
+                "text": system_text,
+                "cache_control": dict(cache_control),
+            })
+        return blocks
+
+    @staticmethod
+    def _add_cache_breakpoints(
+        api_messages: list[dict[str, Any]],
+        anthropic_tools: list[dict[str, Any]] | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Add cache_control breakpoints to messages and tools.
+
+        Mirrors cc's ``addCacheBreakpoints``:
+        1. Exactly one message-level cache_control marker on the last message.
+        2. One cache_control marker on the last tool definition.
+        3. tool_result blocks strictly before the last cache_control marker get
+           ``cache_reference: tool_use_id`` to improve cache-hit tracking.
+        Combined with the system-block breakpoint from
+        ``_build_system_blocks``, this gives Anthropic three cache segments:
+          1. Stable system prefix (identity, rules, contracts)
+          2. Tool definitions (stable across turns)
+          3. Conversation history prefix (grows turn-by-turn)
+        """
+        cache_control = _cache_control()
+        messages = [dict(msg) for msg in api_messages]
+        if messages:
+            last = messages[-1]
+            content = last.get("content")
+            if isinstance(content, list) and content:
+                blocks = [dict(block) for block in content]
+                blocks[-1]["cache_control"] = dict(cache_control)
+                last["content"] = blocks
+            elif isinstance(content, str):
+                last["content"] = [
+                    {"type": "text", "text": content, "cache_control": dict(cache_control)}
+                ]
+
+            # Add cache_reference to tool_result blocks strictly before the
+            # last cache_control marker (cc claude.ts addCacheBreakpoints:
+            # "The API requires cache_reference to appear before or on the
+            # last cache_control — we use strict before"). Opt-in: cc only
+            # sends this under the cache-editing beta (useCachedMC), not on
+            # the public Messages API. Only user messages carry tool_results.
+            if _cache_reference_enabled():
+                for msg in messages[:-1]:
+                    if msg.get("role") != "user":
+                        continue
+                    content = msg.get("content")
+                    if not isinstance(content, list):
+                        continue
+                    new_blocks: list[Any] = []
+                    changed = False
+                    for block in content:
+                        if (
+                            isinstance(block, dict)
+                            and block.get("type") == "tool_result"
+                            and block.get("tool_use_id")
+                            and "cache_reference" not in block
+                        ):
+                            new_block = dict(block)
+                            new_block["cache_reference"] = block["tool_use_id"]
+                            new_blocks.append(new_block)
+                            changed = True
+                        else:
+                            new_blocks.append(block)
+                    if changed:
+                        msg["content"] = new_blocks
+
+        tools = list(anthropic_tools or [])
+        if tools:
+            tools[-1] = dict(tools[-1])
+            tools[-1]["cache_control"] = dict(cache_control)
+
+        return messages, tools
+
+    @staticmethod
+    def _strip_all_cache_control(kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Remove all cache_control and cache_reference markers for gateway fallback.
+
+        Strips cache_control from system blocks, tool definitions, and
+        message content blocks, and cache_reference from tool_result blocks.
+        Used when a gateway rejects cache_control.
+        """
+        cleaned = dict(kwargs)
+        cleaned.pop("cache_control", None)
+        cleaned.pop("cache_edits", None)
+
+        # Drop the extended-cache-ttl beta header along with the markers —
+        # sending it without any cache_control is pointless and some gateways
+        # reject unknown beta headers.
+        extra_headers = cleaned.get("extra_headers")
+        if isinstance(extra_headers, dict) and extra_headers.get("anthropic-beta") == _EXTENDED_CACHE_TTL_BETA_HEADER:
+            extra_headers = dict(extra_headers)
+            extra_headers.pop("anthropic-beta", None)
+            if extra_headers:
+                cleaned["extra_headers"] = extra_headers
+            else:
+                cleaned.pop("extra_headers", None)
+
+        _strip_keys = {"cache_control", "cache_reference"}
+
+        system = cleaned.get("system")
+        if isinstance(system, list):
+            cleaned["system"] = [
+                {k: v for k, v in dict(block).items() if k not in _strip_keys}
+                if isinstance(block, dict)
+                else block
+                for block in system
+            ]
+
+        tools_list = cleaned.get("tools")
+        if isinstance(tools_list, list):
+            cleaned["tools"] = [
+                {k: v for k, v in dict(tool).items() if k not in _strip_keys}
+                if isinstance(tool, dict)
+                else tool
+                for tool in tools_list
+            ]
+
+        messages_list = cleaned.get("messages")
+        if isinstance(messages_list, list):
+            new_messages: list[dict[str, Any]] = []
+            for msg in messages_list:
+                if not isinstance(msg, dict):
+                    new_messages.append(msg)
+                    continue
+                content = msg.get("content")
+                if isinstance(content, list):
+                    new_msg = dict(msg)
+                    new_msg["content"] = [
+                        {k: v for k, v in dict(block).items() if k not in _strip_keys}
+                        if isinstance(block, dict)
+                        else block
+                        for block in content
+                    ]
+                    new_messages.append(new_msg)
+                else:
+                    new_messages.append(msg)
+            cleaned["messages"] = new_messages
+
+        return cleaned
 
     @staticmethod
     def _convert_messages(
@@ -587,6 +1202,10 @@ class AnthropicAdapter(LLMAdapter):
 
             elif msg.role == "assistant":
                 content_parts: list[dict[str, Any]] = []
+                for item in msg.provider_items:
+                    item_type = str(item.get("type") or "")
+                    if item_type in {"thinking", "redacted_thinking"}:
+                        content_parts.append(dict(item))
                 if msg.content:
                     content_parts.append({"type": "text", "text": msg.content})
                 if msg.tool_calls:
@@ -675,28 +1294,16 @@ class AnthropicAdapter(LLMAdapter):
         max_breakpoints: int | None = None,
         scan_all: bool = False,
     ) -> list[dict[str, Any]]:
-        """Apply cache_control breakpoints using a stable "turn boundary" strategy.
+        """Return messages with stale Anthropic cache_control markers removed.
 
-        Instead of scoring messages (which shifts breakpoint positions each turn and
-        invalidates the cache), we place breakpoints at fixed structural positions:
-        1. The last message before the current user turn (stable as conversation grows)
-        2. A midpoint in longer conversations (for partial prefix reuse)
-
-        This mirrors Claude Code's approach: the prefix up to a breakpoint stays
-        byte-identical across turns, maximizing cache hits.
+        The signature is kept for older tests/extensions, but MiniCode now relies
+        on provider automatic prefix caching instead of sending vendor-specific
+        cache_control markers.
         """
-        breakpoint_budget = recent_count if max_breakpoints is None else max(0, max_breakpoints)
-        if breakpoint_budget <= 0 or not api_messages:
-            return [dict(message) for message in api_messages]
-
-        selected_indices = AnthropicAdapter._select_prompt_cache_breakpoint_indices(
-            api_messages,
-            breakpoint_budget,
-            scan_all=scan_all,
-        )
+        _ = (recent_count, max_breakpoints, scan_all)
 
         cloned_messages: list[dict[str, Any]] = []
-        for index, message in enumerate(api_messages):
+        for message in api_messages:
             cloned = dict(message)
             content = cloned.get("content")
 
@@ -706,94 +1313,9 @@ class AnthropicAdapter(LLMAdapter):
                     for block in content
                 ]
 
-            if index not in selected_indices:
-                cloned_messages.append(cloned)
-                continue
-
-            if isinstance(content, str):
-                cloned["content"] = [
-                    {
-                        "type": "text",
-                        "text": content,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ]
-            elif isinstance(cloned.get("content"), list) and cloned["content"]:
-                last_block = dict(cloned["content"][-1])
-                last_block["cache_control"] = {"type": "ephemeral"}
-                cloned["content"][-1] = last_block
-
             cloned_messages.append(cloned)
 
         return cloned_messages
-
-    @staticmethod
-    def _select_prompt_cache_breakpoint_indices(
-        api_messages: list[dict[str, Any]],
-        breakpoint_budget: int,
-        *,
-        scan_all: bool = False,
-    ) -> set[int]:
-        """Select message breakpoints within Anthropic's cache_control budget."""
-        if not api_messages:
-            return set()
-
-        n = len(api_messages)
-        budget = max(0, min(breakpoint_budget, n))
-        if budget <= 0:
-            return set()
-
-        if not scan_all:
-            return set(range(n - budget, n))
-
-        ranked = sorted(
-            range(n),
-            key=lambda index: (
-                AnthropicAdapter._prompt_cache_candidate_score(api_messages[index]),
-                index,
-            ),
-            reverse=True,
-        )
-        indices = {
-            index
-            for index in ranked[:budget]
-            if AnthropicAdapter._prompt_cache_candidate_score(api_messages[index]) > 0
-        }
-
-        if len(indices) < budget:
-            for index in range(n - 1, -1, -1):
-                indices.add(index)
-                if len(indices) >= budget:
-                    break
-
-        return indices
-
-    @staticmethod
-    def _prompt_cache_candidate_score(message: dict[str, Any]) -> int:
-        content = message.get("content")
-        if isinstance(content, str):
-            return len(content)
-        if not isinstance(content, list):
-            return 0
-
-        score = 0
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            block_type = str(block.get("type") or "")
-            if block_type == "document":
-                score += 100_000
-            elif block_type == "image":
-                score += 80_000
-            elif block_type == "tool_result":
-                score += 20_000 + len(str(block.get("content") or ""))
-            elif block_type == "tool_use":
-                score += 10_000 + len(json.dumps(block.get("input") or {}, ensure_ascii=False))
-            elif block_type == "text":
-                score += len(str(block.get("text") or ""))
-            else:
-                score += len(str(block))
-        return score
 
     def _should_enable_thinking(
         self,
@@ -802,29 +1324,23 @@ class AnthropicAdapter(LLMAdapter):
     ) -> bool:
         if not self._thinking_budget or self._thinking_budget <= 0:
             return False
-
         if anthropic_tools:
             return True
-
-        if any(message.images or message.documents for message in messages):
+        if any(getattr(message, "documents", None) for message in messages):
             return True
-
-        # Re-enable thinking if recent tool results suggest complexity
-        # (errors, large outputs, or the model is stuck)
-        recent_tool_results = [
-            m.content or "" for m in messages[-6:]
-            if m.role == "tool"
-        ]
-        for result in recent_tool_results:
-            if any(kw in result.lower() for kw in ("error", "traceback", "failed", "exception", "not found")):
-                return True
-            if len(result) >= 3000:
-                return True
-
-        user_text = "\n".join(message.content or "" for message in messages if message.role == "user")
-        if len(user_text) >= 900:
+        latest_user = next(
+            (str(message.content or "") for message in reversed(messages) if message.role == "user"),
+            "",
+        ).lower()
+        if len(latest_user) >= 160:
             return True
-        return bool(_THINKING_TRIGGER_RE.search(user_text))
+        return bool(
+            re.search(
+                r"\b(debug|fix|failing|test|implement|refactor|analyze|investigate|plan|design|"
+                r"compare|review|optimi[sz]e|architecture|trace|root cause)\b",
+                latest_user,
+            )
+        )
 
     @staticmethod
     def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -851,3 +1367,43 @@ class AnthropicAdapter(LLMAdapter):
             anthropic_tools.append(at)
 
         return anthropic_tools
+
+    def _convert_tools_cached(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Convert tools with session-level schema caching.
+
+        Mirrors cc's ``toolSchemaCache``: the rendered Anthropic tool schema
+        (name + description + input_schema) is cached per tool name for the
+        adapter's lifetime. This prevents mid-session changes (MCP reconnects,
+        dynamic tool descriptions, feature flag flips) from churning the
+        serialized tool array bytes and busting the prompt cache.
+
+        Cache key is the tool name; if a tool's schema genuinely changes
+        (rare — usually a different tool with the same name), the first
+        render wins and the new schema is ignored until the adapter is
+        recreated (new session / /clear).
+        """
+        result: list[dict[str, Any]] = []
+        for tool in tools:
+            func = tool.get("function", {})
+            if not func:
+                continue
+            name = str(func.get("name", "")).strip()
+            if not name:
+                continue
+            cached = self._tool_schema_cache.get(name)
+            if cached is not None:
+                result.append(cached)
+                continue
+            at: dict[str, Any] = {
+                "name": name,
+                "description": func.get("description", ""),
+                "input_schema": func.get("parameters", {"type": "object", "properties": {}}),
+            }
+            self._tool_schema_cache[name] = at
+            result.append(at)
+        return result
+
+    def clear_tool_schema_cache(self) -> None:
+        """Clear the session-scoped tool schema cache (on /clear, /compact)."""
+        self._tool_schema_cache.clear()
+

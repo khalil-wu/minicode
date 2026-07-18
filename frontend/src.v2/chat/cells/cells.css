@@ -359,7 +359,7 @@
      snapping, and keeps completed cells aligned with running ones. */
   border-left: 2px solid transparent;
   transition: var(--transition-fast);
-  animation: message-in 180ms cubic-bezier(0.4, 0, 0.2, 1) both;
+  animation: message-in var(--duration-enter) var(--easing-standard) both;
 }
 
 .activity-cell-line {
@@ -577,7 +577,7 @@
   display: flex;
   flex-direction: column;
   gap: 1px;
-  animation: expand-detail 150ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  animation: expand-detail var(--duration-fast) var(--easing-decelerate);
 }
 
 @keyframes expand-detail {
@@ -1559,7 +1559,7 @@
   font-size: 0.93em;
   border-left: 1px solid var(--border-subtle);
   margin-left: 4px;
-  animation: expand-detail 150ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  animation: expand-detail var(--duration-fast) var(--easing-decelerate);
 }
 
 /* ════════════════════════════════════════════════════════
@@ -1571,7 +1571,7 @@
   gap: 4px;
   padding: 2px 0 4px;
   transition: var(--transition-fast);
-  animation: message-in 180ms cubic-bezier(0.4, 0, 0.2, 1) both;
+  animation: message-in var(--duration-enter) var(--easing-standard) both;
 }
 
 .activity-group-cell-running {
@@ -1728,7 +1728,7 @@
 }
 
 .exec-group-cell-running {
-  border-left-color: color-mix(in oklch, #3B82F6 34%, transparent);
+  border-left-color: color-mix(in oklch, var(--state-info) 34%, transparent);
 }
 
 .exec-group-cell-failed {
@@ -1767,7 +1767,7 @@
 }
 
 .exec-group-status-running {
-  color: #3B82F6;
+  color: var(--state-info);
 }
 
 .exec-group-status-failed {

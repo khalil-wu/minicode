@@ -17,10 +17,11 @@ import inspect
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 from weakref import WeakKeyDictionary
 
 from backend.config import PermissionSettings
-from backend.permissions.context import PermissionContext
+from backend.permissions.context import PermissionContext, PermissionDecision
 from backend.permissions.network import assess_network_url
 from backend.permissions.rules import PermissionRuleMatcher, SandboxValidator
 from backend.tools.base import PermissionLevel
@@ -83,7 +84,35 @@ _CATASTROPHIC_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"del\s+/[sS].*\\Windows", re.I), "delete Windows system directory"),
     (re.compile(r"rd\s+/[sS]\s+/[qQ]\s+[A-Z]:\\$", re.I), "recursive delete of drive root"),
     (re.compile(r"\b(?:rd|rmdir)\b\s+/[sS]\s+/[qQ]\s+[A-Z]:\\Users\\[^\\\s]+\\?\s*$", re.I), "recursive delete of system directory"),
+    # Environment-variable exfiltration via /proc (parser-differential defense in
+    # depth; path validation may not cover a bare `cat`). No legitimate dev use.
+    (re.compile(r"/proc/[^/\s]+/environ", re.I), "read of process environment (secret exfiltration)"),
 ]
+
+
+# ── Parser-differential / command-injection risk signals ─────────────────────
+# Mirrors CC bashSecurity.ts COMMAND_SUBSTITUTION_PATTERNS. These are RISK
+# SIGNALS, not outright blocks: a command carrying one is never silently
+# auto-classified as read-only (so it always requires confirmation), but common
+# legitimate uses like `echo $(date)` remain runnable after the user approves.
+_INJECTION_RISK_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\$\("), "$() command substitution"),
+    (re.compile(r"`"), "backtick command substitution"),
+    (re.compile(r"\$\{"), "${} parameter expansion"),
+    (re.compile(r"<\("), "process substitution <()"),
+    (re.compile(r">\("), "process substitution >()"),
+    (re.compile(r"\$'"), "ANSI-C quoting ($'...') can hide characters"),
+    (re.compile(r"\$IFS"), "IFS variable can bypass argument parsing"),
+)
+
+
+def command_injection_risk(command: str) -> str:
+    """Return a reason string when a command carries a parser-differential /
+    injection risk signal, else "". Used to withhold read-only auto-allow."""
+    for pattern, description in _INJECTION_RISK_PATTERNS:
+        if pattern.search(command or ""):
+            return description
+    return ""
 
 
 def _check_catastrophic_command(command: str) -> tuple[bool, str]:
@@ -137,6 +166,39 @@ def check_denial_reason(
         return get_reason(tool_name, args, context=context, tool=tool)
     return get_reason(tool_name, args, context=context)
 
+
+def evaluate_permission_decision(
+    checker: Any,
+    tool_name: str,
+    args: dict[str, Any] | None = None,
+    *,
+    context: PermissionContext | None = None,
+    tool: Any = None,
+) -> PermissionDecision:
+    evaluate = getattr(checker, "evaluate", None)
+    if callable(evaluate):
+        return evaluate(tool_name, args, context=context, tool=tool)
+    level = check_permission_level(checker, tool_name, args, context=context, tool=tool)
+    denial = check_denial_reason(checker, tool_name, args, context=context, tool=tool) or ""
+    decision = "deny" if denial or level == PermissionLevel.ALWAYS_DENY else "allow" if level == PermissionLevel.AUTO else "ask"
+    return PermissionDecision(
+        permission_level=level,
+        decision=decision,
+        capability_allowed=True,
+        capability_reason="External checker did not report a separate capability boundary.",
+        approval_policy={
+            PermissionLevel.AUTO: "auto",
+            PermissionLevel.CONFIRM: "confirm",
+            PermissionLevel.DIFF_REVIEW: "diff_review",
+            PermissionLevel.ALWAYS_DENY: "deny",
+        }[level],
+        matched_rule_source="external_checker",
+        matched_rule=denial or "legacy",
+        risk="medium" if level in {PermissionLevel.CONFIRM, PermissionLevel.DIFF_REVIEW} else "low",
+        scope={"workspace_scope": context.workspace_scope if context is not None else "project", "boundary": "general"},
+        expiry="call",
+    )
+
 def _is_workspace_root_file(normalized_path: str) -> bool:
     return bool(normalized_path) and "/" not in normalized_path and "\\" not in normalized_path
 
@@ -185,6 +247,10 @@ _PLAN_MODE_AUTO_ALLOW = [
     "mcp__websearch__search",
     "ask_user",
     "read_artifact",
+    "detect_python_environment",
+    "update_plan",
+    "enter_plan_mode",
+    "exit_plan_mode",
     "task",
 ]
 
@@ -202,6 +268,7 @@ _PLAN_MODE_DENY = [
 _AUTO_MODE_ALLOW = [
     *_PLAN_MODE_AUTO_ALLOW,
     "todo_write",
+    "update_plan",
     "task",
     "list_skills",
     "workspace_*",
@@ -219,8 +286,6 @@ _CONFIRM_TOOL_PATTERNS = [
     "run_*",
     "terminal_*",
     "remember_*",
-    "load_skill",
-    "unload_skill",
     "git_commit",
     "git_push",
     "git_stage_*",
@@ -265,6 +330,18 @@ _URL_LIKE_ARG_KEYS = frozenset(
 )
 _HOST_LIKE_ARG_KEYS = frozenset({"host", "hostname", "domain", "server", "address"})
 _MAX_NETWORK_TARGETS_PER_CALL = 32
+_PYTHON_DEPENDENCY_INSTALL_RE = re.compile(
+    r"(?ix)"
+    r"(?:^|[;&|]\s*)"
+    r"(?:"
+    r"(?:python(?:\d+(?:\.\d+)?)?(?:\.exe)?|py(?:\.exe)?)\s+-m\s+pip\s+install\b"
+    r"|pip(?:\d+(?:\.\d+)?)?(?:\.exe)?\s+install\b"
+    r"|uv(?:\.exe)?\s+pip\s+install\b"
+    r"|(?:conda|mamba|micromamba)(?:\.exe)?\s+(?:install|create)\b"
+    r"|poetry(?:\.exe)?\s+add\b"
+    r"|pdm(?:\.exe)?\s+add\b"
+    r")"
+)
 
 
 def _network_target_requires_confirmation(
@@ -280,6 +357,12 @@ def _network_target_requires_confirmation(
         if not assess_network_url(target, resolve_dns=False).allowed:
             return True
     return False
+
+
+def _is_python_dependency_install_command(tool_name: str, args: dict[str, Any] | None) -> bool:
+    if tool_name != "run_command" or not isinstance(args, dict):
+        return False
+    return bool(_PYTHON_DEPENDENCY_INSTALL_RE.search(str(args.get("command") or "")))
 
 
 def _matches_network_url_tool(tool_name: str) -> bool:
@@ -367,7 +450,10 @@ def _looks_like_plain_network_target(value: str) -> bool:
 # (ClaudeCode BashTool.isReadOnly pattern).
 _READ_ONLY_SHELL_COMMANDS = frozenset({
     "ls", "pwd", "cat", "head", "tail", "wc", "file", "stat", "tree",
-    "echo", "which", "whoami", "date", "uname", "hostname", "env", "printenv",
+    "echo", "which", "whoami", "date", "uname", "hostname",
+    # env/printenv deliberately excluded (CC parity): dumping the environment
+    # leaks secrets (API keys, tokens), so they require confirmation instead of
+    # being auto-allowed as read-only.
     "find", "grep", "rg", "fd", "diff", "test", "df", "du", "ps", "top",
     "dir", "type", "where", "whereis",
 })
@@ -375,8 +461,8 @@ _READ_ONLY_SHELL_COMMANDS = frozenset({
 _READ_ONLY_SUBCOMMANDS = {
     "git": frozenset({"status", "diff", "log", "show", "branch", "remote",
                       "rev-parse", "describe", "blame", "shortlog", "tag",
-                      "config", "ls-files", "ls-remote", "for-each-ref"}),
-    "gh": frozenset({"pr", "issue", "repo", "api", "run", "release"}),  # mostly read; sub-subcommand may write but rare
+                      "ls-files", "ls-remote", "for-each-ref"}),
+    "gh": frozenset(),
     "docker": frozenset({"ps", "images", "logs", "inspect", "version", "info"}),
     "npm": frozenset({"list", "ls", "view", "outdated"}),
     "pip": frozenset({"list", "show", "freeze"}),
@@ -401,6 +487,11 @@ def is_read_only_command(command: str) -> bool:
     """
     cmd = (command or "").strip()
     if not cmd or any(tok in cmd for tok in _SHELL_CONTROL_TOKENS):
+        return False
+    # Parser-differential / injection signals (ANSI-C quoting, IFS, process
+    # substitution) are never auto-read-only even if they slip past the token
+    # scan — they must go through a confirmation gate.
+    if command_injection_risk(cmd):
         return False
     parts = cmd.split()
     head = parts[0].lower().rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
@@ -523,42 +614,58 @@ class PermissionChecker:
         Returns:
             PermissionLevel
         """
+        return self._evaluate_level(tool_name, args, context=context, tool=tool)[0]
+
+    def _evaluate_level(
+        self,
+        tool_name: str,
+        args: dict[str, Any] | None = None,
+        *,
+        context: PermissionContext | None = None,
+        tool: "BaseTool | None" = None,
+    ) -> tuple[PermissionLevel, str, str]:
         # 1. 检查是否在 always_deny
-        if self._matches(tool_name, self._settings.always_deny):
-            return PermissionLevel.ALWAYS_DENY
+        matched = self._first_match(tool_name, self._settings.always_deny)
+        if matched:
+            return PermissionLevel.ALWAYS_DENY, "static_policy", matched
 
         if context is not None:
-            if self._matches(tool_name, context.tool_deny_rules):
-                return PermissionLevel.ALWAYS_DENY
+            matched = self._first_match(tool_name, context.tool_deny_rules)
+            if matched:
+                return PermissionLevel.ALWAYS_DENY, "context_deny", matched
 
-            override = self._resolve_override(tool_name, context.session_overrides)
+            override = self._resolve_override_match(tool_name, context.session_overrides)
             if override is not None:
-                return override
+                pattern, level = override
+                return level, "session_override", pattern
 
         # Content-level rules (Tool(content) syntax). A deny rule wins in every
         # mode (safety); an allow rule forces AUTO except in plan mode (plan is
         # strict read-only regardless of allow rules).
         content_decision = self._content_rule_decision(tool_name, args)
         if content_decision == PermissionLevel.ALWAYS_DENY:
-            return PermissionLevel.ALWAYS_DENY
+            return PermissionLevel.ALWAYS_DENY, "content_rule", "content_deny"
+        if _is_python_dependency_install_command(tool_name, args) and (context is None or context.mode != "bypass"):
+            return PermissionLevel.CONFIRM, "safety_policy", "python_dependency_install"
         if content_decision == PermissionLevel.AUTO and (context is None or context.mode != "plan"):
-            return PermissionLevel.AUTO
+            return PermissionLevel.AUTO, "content_rule", "content_allow"
 
         if context is not None:
             if context.mode == "confirm" and self._matches(tool_name, _READ_ONLY_NETWORK_TOOL_PATTERNS):
-                return PermissionLevel.CONFIRM
+                return PermissionLevel.CONFIRM, "mode", "confirm:network_read"
             if context.mode == "auto" and _network_target_requires_confirmation(tool_name, args, context):
-                return PermissionLevel.CONFIRM
+                return PermissionLevel.CONFIRM, "capability_boundary", "network_target"
 
             # Tool-owned permission decision (CC's checkPermissions analogue).
-            # Honored in every mode except plan/auto/bypass. Plan denies local
-            # mutations outright; auto has product-level semantics below
-            # (workspace edits are allowed without prompting), and bypass must
-            # not be narrowed by a tool's conservative default metadata.
-            if tool is not None and context.mode not in {"plan", "auto", "bypass"}:
+            # Honored in every mode except plan/bypass. Plan denies local
+            # mutations outright, and bypass must not be narrowed by a tool's
+            # conservative default metadata. Auto still consults tools first so
+            # content-specific asks and safety checks cannot be bypassed by the
+            # centralized allowlist.
+            if tool is not None and context.mode not in {"plan", "bypass"}:
                 tool_level = self._consult_tool(tool, args, context)
                 if tool_level is not None:
-                    return tool_level
+                    return tool_level, "tool", f"{tool_name}.check_permission"
 
             # Compute mode-level permission first
             mode_level: PermissionLevel | None = None
@@ -606,29 +713,32 @@ class PermissionChecker:
                     mode_level = PermissionLevel.CONFIRM
 
             if mode_level is not None:
-                return mode_level
+                return mode_level, "mode", f"{context.mode}:{mode_level.value}"
 
         # 2. 检查是否需要 diff review
         if self._matches(tool_name, _READ_ONLY_NETWORK_TOOL_PATTERNS):
-            return PermissionLevel.AUTO
+            return PermissionLevel.AUTO, "built_in", "read_only_network"
 
-        if self._matches(tool_name, self._settings.require_diff_review):
-            return PermissionLevel.DIFF_REVIEW
+        matched = self._first_match(tool_name, self._settings.require_diff_review)
+        if matched:
+            return PermissionLevel.DIFF_REVIEW, "static_policy", matched
 
         # 3. 检查是否需要 confirm
-        if self._matches(tool_name, self._settings.require_confirm):
+        matched = self._first_match(tool_name, self._settings.require_confirm)
+        if matched:
             if tool is not None:
                 tool_level = self._consult_tool(tool, args, context)
                 if tool_level is not None:
-                    return tool_level
-            return PermissionLevel.CONFIRM
+                    return tool_level, "tool", f"{tool_name}.check_permission"
+            return PermissionLevel.CONFIRM, "static_policy", matched
 
         # 4. 检查是否 auto allow
-        if self._matches(tool_name, self._settings.auto_allow):
-            return PermissionLevel.AUTO
+        matched = self._first_match(tool_name, self._settings.auto_allow)
+        if matched:
+            return PermissionLevel.AUTO, "static_policy", matched
 
         # 5. 默认：需要确认
-        return PermissionLevel.CONFIRM
+        return PermissionLevel.CONFIRM, "default", "confirm"
 
     def validate_file_operation(
         self,
@@ -642,6 +752,52 @@ class PermissionChecker:
         if not path.is_absolute():
             path = self._workspace_root / path
         return self._sandbox.validate_file_operation(str(path), operation, content)
+
+    def evaluate(
+        self,
+        tool_name: str,
+        args: dict[str, Any] | None = None,
+        *,
+        context: PermissionContext | None = None,
+        tool: "BaseTool | None" = None,
+    ) -> PermissionDecision:
+        level, rule_source, matched_rule = self._evaluate_level(
+            tool_name,
+            args,
+            context=context,
+            tool=tool,
+        )
+        capability_denial = self._capability_denial_reason(
+            tool_name,
+            args,
+            context=context,
+        )
+        decision = (
+            "deny"
+            if capability_denial or level == PermissionLevel.ALWAYS_DENY
+            else "allow"
+            if level == PermissionLevel.AUTO
+            else "ask"
+        )
+        approval_policy = {
+            PermissionLevel.AUTO: "auto",
+            PermissionLevel.CONFIRM: "confirm",
+            PermissionLevel.DIFF_REVIEW: "diff_review",
+            PermissionLevel.ALWAYS_DENY: "deny",
+        }[level]
+        scope = self._decision_scope(tool_name, args, context=context, tool=tool)
+        return PermissionDecision(
+            permission_level=level,
+            decision=decision,
+            capability_allowed=not bool(capability_denial),
+            capability_reason=capability_denial or "Capability boundary allows this tool call.",
+            approval_policy=approval_policy,
+            matched_rule_source=rule_source,
+            matched_rule=matched_rule,
+            risk=self._decision_risk(level, tool),
+            scope=scope,
+            expiry="session" if rule_source == "session_override" else "call" if rule_source == "tool" else "policy",
+        )
 
     def validate_command(self, command: str) -> tuple[bool, str]:
         return _check_catastrophic_command(command)
@@ -780,11 +936,18 @@ class PermissionChecker:
 
         用于向 Agent 提供可操作的反馈信息。
         """
-        level = self.check(tool_name, args, context=context, tool=tool)
-
-        if level == PermissionLevel.ALWAYS_DENY:
+        decision = self.evaluate(tool_name, args, context=context, tool=tool)
+        if decision.permission_level == PermissionLevel.ALWAYS_DENY:
             return f"工具 '{tool_name}' 被管理员禁止使用。"
+        return None if decision.capability_allowed else decision.capability_reason
 
+    def _capability_denial_reason(
+        self,
+        tool_name: str,
+        args: dict[str, Any] | None,
+        *,
+        context: PermissionContext | None = None,
+    ) -> str:
         # Path checks only apply to first-party local filesystem tools. Other
         # tools may legitimately use fields named "path" for remote resources.
         if args:
@@ -812,7 +975,57 @@ class PermissionChecker:
                     allowed, reason = self.validate_file_operation(str(file_path), operation)
                     if not allowed:
                         return reason
-        return None
+        return ""
+
+    def _decision_scope(
+        self,
+        tool_name: str,
+        args: dict[str, Any] | None,
+        *,
+        context: PermissionContext | None,
+        tool: "BaseTool | None",
+    ) -> dict[str, Any]:
+        scope: dict[str, Any] = {
+            "workspace_scope": context.workspace_scope if context is not None else "project",
+            "source": context.source if context is not None else "settings",
+        }
+        raw_args = args or {}
+        path = raw_args.get("file_path") or raw_args.get("directory") or raw_args.get("path")
+        url = raw_args.get("url") or raw_args.get("uri") or raw_args.get("href")
+        if path:
+            scope["boundary"] = "filesystem"
+            scope["target"] = str(path)
+        elif url:
+            scope["boundary"] = "network"
+            scope["target"] = urlparse(str(url)).hostname or str(url)
+        elif tool is not None and bool(getattr(tool, "open_world", False)):
+            scope["boundary"] = "network"
+        elif tool is not None and bool(getattr(tool, "mutates_workspace", False)):
+            scope["boundary"] = "filesystem"
+        elif re.match(r"^(?:run_|terminal_|repl)", tool_name):
+            scope["boundary"] = "system"
+        elif tool_name in {"task", "workflow", "send_message"}:
+            scope["boundary"] = "agent"
+        else:
+            scope["boundary"] = "general"
+        return scope
+
+    @staticmethod
+    def _decision_risk(level: PermissionLevel, tool: "BaseTool | None") -> str:
+        if tool is not None and bool(getattr(tool, "destructive", False)):
+            return "critical"
+        if level == PermissionLevel.ALWAYS_DENY:
+            return "high"
+        if tool is not None and (
+            bool(getattr(tool, "open_world", False))
+            or bool(getattr(tool, "mutates_external_state", False))
+        ):
+            return "high"
+        if level in {PermissionLevel.CONFIRM, PermissionLevel.DIFF_REVIEW} or (
+            tool is not None and bool(getattr(tool, "mutates_workspace", False))
+        ):
+            return "medium"
+        return "low"
 
     def policy_snapshot(self) -> dict[str, list[str]]:
         """Return the current baseline permission policy from static settings."""
@@ -867,6 +1080,20 @@ class PermissionChecker:
             if fnmatch.fnmatch(tool_name, pattern):
                 return level
         return None
+
+    @staticmethod
+    def _resolve_override_match(
+        tool_name: str,
+        overrides: dict[str, PermissionLevel],
+    ) -> tuple[str, PermissionLevel] | None:
+        for pattern, level in overrides.items():
+            if fnmatch.fnmatch(tool_name, pattern):
+                return pattern, level
+        return None
+
+    @staticmethod
+    def _first_match(tool_name: str, patterns: list[str]) -> str:
+        return next((pattern for pattern in patterns if fnmatch.fnmatch(tool_name, pattern)), "")
 
     @staticmethod
     def _matches(tool_name: str, patterns: list[str]) -> bool:

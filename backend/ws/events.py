@@ -35,11 +35,14 @@ ServerEventType = Literal[
     "agent.run.started",
     "agent.run.updated",
     "agent.run.completed",
+    "user_message.queue.updated",
     "agent.phase.updated",
     "agent.item",
     "agent.progress",
+    "runtime.span",
     "task.update",
     "approval_request",
+    "permission.decision",
     "approval.cancelled",
     "approval.file_diff",
     "ask_user",
@@ -49,6 +52,9 @@ ServerEventType = Literal[
     # Context lifecycle
     "context_usage",
     "context_compacted",
+    "context_forked",
+    "context_ledger",
+    "context_side_query_result",
     "budget_update",
     "budget.warning",            # Wave 1+ new: pre-compaction warning
     # Commands / artifacts
@@ -60,6 +66,12 @@ ServerEventType = Literal[
     "done",
     "error",
     "stream_resume",
+    # SDK / provider transparency
+    "stream_event",             # raw provider stream event passthrough (SDK mode)
+    "rate_limit",               # rate-limit / quota event for differentiated UI
+    "session.state_changed",    # idle/working state signal
+    # Tool-use summary (user-facing, async-generated)
+    "tool_use_summary",
     # MCP
     "mcp_status",
     "mcp.lifecycle",
@@ -72,6 +84,7 @@ ServerEventType = Literal[
     # Connectors marketplace
     "connectors.marketplace.list",
     # Checkpoints
+    "checkpoint.created",
     "checkpoint.list",
     "checkpoint.rewound",
     "checkpoint.run.list",
@@ -106,6 +119,7 @@ ServerEventType = Literal[
     "workspace.recent.list",
     # Session / control plane
     "session.restored",
+    "session.replay",
     "session.synced",
     "runtime.capabilities",
     "client.command.ack",
@@ -159,6 +173,8 @@ ServerEventType = Literal[
 ClientCommandType = Literal[
     # Chat
     "user_message",
+    "user_message.queue.cancel",
+    "user_message.queue.steer",
     "approval",
     "answer",
     "interrupt",
@@ -177,6 +193,7 @@ ClientCommandType = Literal[
     "conversation.switch",
     "conversation.list",
     "conversation.clear",
+    "conversation.truncate",
     "conversation.delete",
     "conversation.archive",
     "conversation.unarchive",
@@ -185,6 +202,13 @@ ClientCommandType = Literal[
     "conversation.permission_mode.set",
     "conversation.goal.set",
     "conversation.worktree.cleanup",
+    "conversation.worktree.handoff.preflight",
+    "conversation.worktree.handoff.execute",
+    # Context control
+    "context.compact",
+    "context.fork",
+    "context.side_query",
+    "context.ledger",
     # Session inspection
     "session.tasks.inspect",
     "session.status.inspect",
@@ -226,6 +250,10 @@ ClientCommandType = Literal[
     "plan.edit",                 # user accepts/rejects a proposed plan
     "task.stop",
     "subagent.cancel",           # user kills a subagent
+    "subagent.status",           # user refreshes/collects a subagent result
+    "subagent.resume",           # user resumes a retained subagent checkpoint
+    "send_message",              # user steers a running subagent through its mailbox
+    "workflow.resume",           # user resumes pending workflow nodes
     "inspector.focus",           # UI tells backend which target the user is viewing
     # Frontend UI commands
     "workspace.set",
@@ -287,7 +315,7 @@ class TaskUpdateData(TypedDict, total=False):
 class AgentProgressData(TypedDict, total=False):
     id: str
     stage: Literal["status", "planning", "tool", "approval", "verification", "final"]
-    phase: Literal["orienting", "planning", "model", "tool", "approval", "verify", "final", "recover", "status", "iteration"]
+    phase: Literal["orienting", "planning", "model", "tool", "approval", "verify", "final", "recover", "status", "iteration", "subagent", "workflow", "cache"]
     status: Literal["running", "completed", "failed", "info"]
     message: str
     label: str
@@ -302,6 +330,33 @@ class AgentProgressData(TypedDict, total=False):
     display_scope: Literal["chat", "activity", "notice", "agents", "inspector", "silent"]
     panel_hint: Literal["plan", "subagents", "diff", "inspector", "tasks", "terminal", "preview"]
     requires_attention: bool
+    ephemeral: bool       # if True, UI should replace (not append) this progress message
+
+
+class RuntimeSpanData(TypedDict, total=False):
+    event: str
+    span_id: str
+    parent_span_id: str
+    run_id: str
+    turn_id: str
+    message_id: str
+    iteration_id: str
+    phase: str
+    status: Literal["running", "completed", "failed", "info"]
+    label: str
+    summary: str
+    started_at: int
+    ended_at: int
+    duration_ms: int
+    tool_call_id: str
+    tool_name: str
+    agent_id: str
+    waiting_on: str
+    blocking_reason: str
+    ui_visible: bool
+    debug_only: bool
+    requires_attention: bool
+    data: dict[str, Any]
 
 
 class AgentLoopData(TypedDict, total=False):
@@ -324,7 +379,7 @@ class AgentRunData(TypedDict, total=False):
     parent_run_id: str
     role: str
     phase: Literal["plan", "execute", "verify", "recover", "final"]
-    status: Literal["running", "completed", "failed", "cancelled"]
+    status: Literal["running", "completed", "partial", "failed", "cancelled", "interrupted"]
     budget: dict[str, Any]
     started_at: int
     completed_at: int | None
@@ -342,7 +397,7 @@ class AgentItemData(TypedDict, total=False):
     loop_id: str
     iteration_id: str
     parent_id: str
-    kind: Literal["process_text", "action_summary", "observation", "status", "plan", "tool_group"]
+    kind: Literal["process_text", "action_summary", "observation", "status", "plan", "tool_group", "skill"]
     role: Literal["assistant", "runtime", "system", "tool"]
     source: Literal["model", "runtime", "system", "tool"]
     status: Literal["running", "completed", "failed", "info"]
@@ -360,6 +415,11 @@ class AgentItemData(TypedDict, total=False):
     display_scope: Literal["chat", "activity", "notice", "agents", "inspector", "silent"]
     panel_hint: Literal["plan", "subagents", "diff", "inspector", "tasks", "terminal", "preview"]
     requires_attention: bool
+    skill_name: str
+    trigger_mode: str
+    source_level: str
+    reason: str
+    token_estimate: int
 
 
 class ThinkingDeltaData(TypedDict, total=False):
@@ -367,6 +427,7 @@ class ThinkingDeltaData(TypedDict, total=False):
     source: Literal["provider", "model_preamble", "post_tool", "runtime"]
     visibility: Literal["debug", "timeline", "compact"]
     is_raw_provider_reasoning: bool
+    provider_reasoning_type: str
 
 
 class ToolCallData(TypedDict, total=False):
@@ -381,6 +442,7 @@ class ToolCallData(TypedDict, total=False):
     activity_kind: str
     group_id: str
     step_id: str
+    turn_id: str
     iteration_id: str
     phase: str
     display_scope: Literal["chat", "activity", "notice", "agents", "inspector", "silent"]
@@ -392,6 +454,9 @@ class ToolOutputDeltaData(TypedDict, total=False):
     id: str
     output: str
     stream: Literal["stdout", "stderr"]
+    turn_id: str
+    iteration_id: str
+    step_id: str
 
 
 class ToolResultData(TypedDict, total=False):
@@ -419,6 +484,7 @@ class ToolResultData(TypedDict, total=False):
     developer_detail: str
     recoverable: bool
     projection: Literal["silent", "status", "warning", "error", "approval"]
+    turn_id: str
     iteration_id: str
     phase: str
     display_scope: Literal["chat", "activity", "notice", "agents", "inspector", "silent"]
@@ -431,6 +497,10 @@ class SubagentStartData(TypedDict, total=False):
     parent_id: str
     role: str
     prompt: str
+    current_activity: str
+    waiting_on: str
+    blocks_final_reply: bool
+    last_progress_at: int
     display_scope: Literal["agents", "activity", "inspector"]
     panel_hint: Literal["subagents", "inspector"]
     requires_attention: bool
@@ -445,6 +515,16 @@ class SubagentDoneData(TypedDict, total=False):
     subagent_id: str
     summary: str
     error: str
+    duration_ms: int
+    iterations: int
+    tool_call_count: int
+    timed_out: bool
+    status: Literal["completed", "partial", "failed", "cancelled"]
+    termination_reason: str
+    initiator: str
+    result: dict[str, Any]
+    record: dict[str, Any]
+    prompt_cache_fork: dict[str, Any]
     display_scope: Literal["agents", "activity", "inspector"]
     panel_hint: Literal["subagents", "inspector"]
     requires_attention: bool
@@ -467,7 +547,7 @@ class ArtifactPreviewData(TypedDict, total=False):
 
 
 class InspectorUpdateData(TypedDict, total=False):
-    target_kind: Literal["message", "tool_call", "artifact", "file", "diff", "subagent", "budget"]
+    target_kind: Literal["message", "tool_call", "artifact", "file", "diff", "subagent", "budget", "provider"]
     target_id: str
     payload: dict[str, Any]
     display_scope: Literal["inspector", "silent"]
@@ -480,6 +560,37 @@ class BudgetWarningData(TypedDict, total=False):
     percent: float
     will_compact: bool
     threshold: float
+
+
+class StreamEventData(TypedDict, total=False):
+    provider: str
+    event_type: str          # e.g. "message_start", "content_block_delta", "message_delta"
+    data: dict[str, Any]     # raw provider event payload
+    sdk_only: bool           # if True, UI should not render this
+
+
+class RateLimitData(TypedDict, total=False):
+    provider: str
+    error_type: str          # "rate_limit" | "quota_exceeded" | "concurrency_limit"
+    retry_after_seconds: float
+    retry_at: int            # epoch ms when retry is expected
+    message: str
+    recoverable: bool
+
+
+class SessionStateData(TypedDict, total=False):
+    state: Literal["idle", "working"]
+    conversation_id: str
+    run_id: str
+    reason: str
+
+
+class ToolUseSummaryData(TypedDict, total=False):
+    summary: str
+    iteration_id: str
+    tool_call_ids: list[str]
+    tool_count: int
+    generated_by: Literal["heuristic", "llm"]
 
 
 class TaskEditCommand(TypedDict, total=False):
@@ -604,6 +715,7 @@ __all__ = [
     "AgentLoopData",
     "AgentRunData",
     "AgentItemData",
+    "RuntimeSpanData",
     "ThinkingDeltaData",
     "ToolCallData",
     "ToolOutputDeltaData",
@@ -615,6 +727,10 @@ __all__ = [
     "ArtifactPreviewData",
     "InspectorUpdateData",
     "BudgetWarningData",
+    "StreamEventData",
+    "RateLimitData",
+    "SessionStateData",
+    "ToolUseSummaryData",
     "TaskEditCommand",
     "PreviewServerDetectedData",
     "PreviewServersUpdatedData",

@@ -1338,6 +1338,15 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       if (Array.isArray(capabilities?.composer_commands)) {
         s.setSlashCommands(normalizeSlashCommands(capabilities.composer_commands));
       }
+      // Feature-flag gating: when a surface is disabled at runtime, close it
+      // so stale UI never lingers after a settings change.
+      const flags = capabilities?.feature_flags;
+      if (flags?.global_search?.enabled === false && useAppStore.getState().quickOpenVisible) {
+        useAppStore.setState({ quickOpenVisible: false, quickOpenResults: [], quickOpenLoading: false });
+      }
+      if (flags?.agent_editor?.enabled === false && useAppStore.getState().agentEditorOpen) {
+        s.setAgentEditorOpen(false);
+      }
       return true;
     }
     case "mcp.lifecycle": {

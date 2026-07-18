@@ -212,7 +212,7 @@
 .composer-drag-overlay {
   position: absolute;
   inset: 0;
-  background: rgba(74, 144, 226, 0.1);
+  background: color-mix(in srgb, var(--accent-primary) 10%, transparent);
   border: 2px dashed var(--accent-primary);
   border-radius: var(--radius-lg);
   display: flex;

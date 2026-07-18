@@ -65,8 +65,17 @@ const STATUS_COLOR: Record<ToolCallStatus, string> = {
   partial: "var(--state-warning)",
 };
 
+const STATUS_LABEL: Record<ToolCallStatus, string> = {
+  pending: "等待中",
+  running: "运行中",
+  success: "已完成",
+  failed: "失败",
+  blocked: "已跳过",
+  partial: "部分完成",
+};
+
 const StatusIcon = ({ status }: { status: ToolCallStatus }) => {
-  const props = { size: 13, color: STATUS_COLOR[status], className: "shrink-0" };
+  const props = { size: 13, color: STATUS_COLOR[status], className: "shrink-0", role: "img", "aria-label": STATUS_LABEL[status] };
   if (status === "success") return <CircleCheck {...props} />;
   if (status === "failed") return <CircleAlert {...props} />;
   if (status === "blocked") return <CircleDashed {...props} />;

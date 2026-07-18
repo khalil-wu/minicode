@@ -15,9 +15,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from backend.config import PROJECT_ROOT
+from backend.config import DATA_ROOT
 
-WORKTREE_SNAPSHOT_DATA_DIR = PROJECT_ROOT / "data" / "worktree-snapshots"
+WORKTREE_SNAPSHOT_DATA_DIR = DATA_ROOT / "worktree-snapshots"
 
 
 @dataclass(frozen=True)

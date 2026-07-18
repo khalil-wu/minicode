@@ -17,6 +17,98 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_INDEX_MAX_FILES = 50_000
+
+DEFAULT_IGNORED_DIRS = {
+    ".git",
+    ".svn",
+    ".hg",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    ".nox",
+    ".cache",
+    ".parcel-cache",
+    ".next",
+    ".nuxt",
+    ".turbo",
+    ".vite",
+    ".idea",
+    ".vscode",
+    ".claude",
+    ".codex",
+    ".venv",
+    "venv",
+    "env",
+    ".env",
+    "conda",
+    ".conda",
+    "miniconda",
+    "miniconda3",
+    "anaconda",
+    "anaconda3",
+    "site-packages",
+    "dist",
+    "build",
+    "target",
+    "out",
+    "coverage",
+    ".coverage",
+    "htmlcov",
+    ".ipynb_checkpoints",
+    "data",
+    "datasets",
+    "dataset",
+    "models",
+    "checkpoints",
+    "runs",
+    "wandb",
+    "mlruns",
+    "logs",
+    "tmp",
+    "temp",
+}
+
+DEFAULT_IGNORED_FILE_SUFFIXES = {
+    ".pyc",
+    ".pyo",
+    ".pyd",
+    ".so",
+    ".dll",
+    ".dylib",
+    ".exe",
+    ".bin",
+    ".pt",
+    ".pth",
+    ".onnx",
+    ".ckpt",
+    ".safetensors",
+    ".h5",
+    ".npz",
+    ".npy",
+    ".parquet",
+    ".feather",
+    ".sqlite",
+    ".sqlite3",
+    ".db",
+    ".zip",
+    ".tar",
+    ".gz",
+    ".7z",
+    ".rar",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".mp4",
+    ".mov",
+    ".avi",
+}
+
 
 @dataclass
 class ProjectMetadata:
@@ -52,11 +144,13 @@ class WorkspaceContext:
       4. CLAUDE.md 加载
     """
 
-    def __init__(self, root_path: str | Path):
+    def __init__(self, root_path: str | Path, *, max_index_files: int = DEFAULT_INDEX_MAX_FILES):
         self.root_path = Path(root_path).resolve()
         self.metadata: ProjectMetadata | None = None
         self.file_index: dict[str, FileIndexEntry] = {}
         self._gitignore_patterns: list[str] = []
+        self.max_index_files = max(1, int(max_index_files or DEFAULT_INDEX_MAX_FILES))
+        self.index_truncated = False
 
     async def initialize(self) -> ProjectMetadata:
         """初始化工作区上下文"""
@@ -152,20 +246,16 @@ class WorkspaceContext:
         import os
         self.file_index.clear()
 
-        def scan_filesystem() -> dict[str, FileIndexEntry]:
+        def scan_filesystem() -> tuple[dict[str, FileIndexEntry], bool]:
             results: dict[str, FileIndexEntry] = {}
-            default_ignore = {
-                ".git", ".svn", ".hg",
-                "node_modules", "__pycache__", ".pytest_cache",
-                "venv", ".venv", "env",
-                "dist", "build", "target",
-                ".idea", ".vscode", ".claude",
-            }
             patterns = self._gitignore_patterns
             # 无通配符的 gitignore 目录规则可直接用于剪枝
             prunable = {p.rstrip("/").lstrip("/") for p in patterns if "*" not in p and "/" not in p.rstrip("/")}
+            truncated = False
 
             def file_ignored(rel_path: str, name: str) -> bool:
+                if Path(name).suffix.lower() in DEFAULT_IGNORED_FILE_SUFFIXES:
+                    return True
                 for pattern in patterns:
                     if pattern in rel_path or name == pattern:
                         return True
@@ -175,10 +265,14 @@ class WorkspaceContext:
             for dirpath, dirnames, filenames in os.walk(self.root_path):
                 dirnames[:] = [
                     d for d in dirnames
-                    if d not in default_ignore and d not in prunable
+                    if d not in DEFAULT_IGNORED_DIRS and d not in prunable
                 ]
                 rel_dir = os.path.relpath(dirpath, self.root_path)
                 for name in filenames:
+                    if len(results) >= self.max_index_files:
+                        truncated = True
+                        dirnames[:] = []
+                        break
                     rel_path = name if rel_dir == "." else f"{rel_dir}{os.sep}{name}"
                     if file_ignored(rel_path, name):
                         continue
@@ -194,10 +288,19 @@ class WorkspaceContext:
                         )
                     except Exception as e:
                         logger.debug(f"跳过文件 {path}: {e}")
-            return results
+                if truncated:
+                    break
+            return results, truncated
 
-        results = await asyncio.to_thread(scan_filesystem)
+        results, truncated = await asyncio.to_thread(scan_filesystem)
+        self.index_truncated = truncated
         self.file_index.update(results)
+        if truncated:
+            logger.warning(
+                "工作区文件索引达到上限 %s，已截断: %s",
+                self.max_index_files,
+                self.root_path,
+            )
 
     def _is_text_file(self, path: Path) -> bool:
         """简单判断是否为文本文件"""
@@ -224,6 +327,8 @@ class WorkspaceContext:
             f"**文件数量**: {self.metadata.file_count}",
             f"**总大小**: {self.metadata.total_size / 1024 / 1024:.2f} MB",
         ]
+        if self.index_truncated:
+            lines.append(f"**索引状态**: 已截断到前 {self.max_index_files} 个文件")
 
         if self.metadata.claude_md_content:
             lines.extend([
@@ -272,4 +377,5 @@ class WorkspaceContext:
             "file_count": self.metadata.file_count,
             "total_size": self.metadata.total_size,
             "has_claude_md": bool(self.metadata.claude_md_content),
+            "index_truncated": self.index_truncated,
         }

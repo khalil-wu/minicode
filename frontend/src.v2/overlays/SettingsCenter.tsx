@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { useAppStore } from "../stores";
-import { fetchLLMSettings } from "../protocol/api";
+import type { PromptPersona } from "../stores/types";
+import { apiBase, authHeaders, fetchLLMSettings } from "../protocol/api";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { isDesktop } from "../desktop/runtime";
 import {
@@ -44,6 +45,7 @@ export const SettingsCenter = () => {
 
   const [activeTab, setActiveTab] = useState<Tab>("general");
   const [provider, setProvider] = useState<ProviderId>("deepseek");
+  const [promptPersona, setPromptPersona] = useState<PromptPersona>("codex");
   const [settingsPayload, setSettingsPayload] = useState<LLMSettingsPayload | null>(null);
   const settingsPayloadRef = useRef<LLMSettingsPayload | null>(null);
 
@@ -56,6 +58,9 @@ export const SettingsCenter = () => {
         settingsPayloadRef.current = data;
         setSettingsPayload(data);
         setProvider(p);
+        if (data.prompt_persona === "minicode" || data.prompt_persona === "codex") {
+          setPromptPersona(data.prompt_persona);
+        }
       })
       .catch(() => undefined);
   }, [settingsOpen]);
@@ -101,6 +106,15 @@ export const SettingsCenter = () => {
     setPermissionMode(mode);
   };
 
+  const switchPromptPersona = (persona: PromptPersona) => {
+    setPromptPersona(persona);
+    fetch(`${apiBase()}/api/llm/settings`, {
+      method: "PUT",
+      headers: authHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ prompt_persona: persona }),
+    }).catch(() => undefined);
+  };
+
   const handleProviderChange = (id: ProviderId) => {
     setProvider(id);
   };
@@ -141,10 +155,12 @@ export const SettingsCenter = () => {
           {activeTab === "general" && (
             <GeneralTab
               permissionMode={permissionMode}
+              promptPersona={promptPersona}
               effortLevel={effortLevel}
               currentModel={currentModel}
               showReasoningEffort={showReasoningEffort}
               switchPermissionMode={switchPermissionMode}
+              switchPromptPersona={switchPromptPersona}
               setEffortLevel={setEffortLevel}
             />
           )}

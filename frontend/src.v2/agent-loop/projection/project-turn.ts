@@ -13,6 +13,13 @@ import type {
   TurnSummaryCellState,
 } from "../../chat/cells/cellTypes";
 import type { ToolCallRecord } from "../../lib/tool-call-reducer";
+import {
+  activityGroupStatus,
+  activityRecordCount,
+  activityRecordTotal,
+  collectedContextTitle,
+  ranCommandsTitle,
+} from "../../chat/cells/activityGrouping";
 import type {
   ActivityDetail,
   ActivityGroupItem,
@@ -310,12 +317,7 @@ function activityGroupItemFromExecs(
   const status = execActivityStatus(cells);
   const count = cells.length;
   const isTestGroup = cells.every((cell) => isTestCommand(cell.command));
-  const title =
-    count === 1
-      ? status === "running" ? "正在运行命令" : "已运行命令"
-      : status === "running"
-        ? `正在运行 ${count} 条命令`
-        : `已运行 ${count} 条命令`;
+  const title = ranCommandsTitle(status === "running", count);
   const summary =
     status === "failed"
       ? "有命令未通过"
@@ -420,8 +422,7 @@ function actionChainTitle(
   status: ActivityGroupItem["status"],
 ): string {
   if (activityKind === "command" || activityKind === "test") {
-    if (records.length === 1) return status === "running" ? "正在运行命令" : "已运行命令";
-    return status === "running" ? `正在运行 ${records.length} 条命令` : `已运行 ${records.length} 条命令`;
+    return ranCommandsTitle(status === "running", records.length);
   }
   if (activityKind === "web_search") {
     const query = firstRecordQuery(records);
@@ -623,9 +624,8 @@ function execActivityStatus(cells: ExecCellState[]): ActivityGroupItem["status"]
 }
 
 function activityStatus(cells: ActivityCellState[]): ActivityGroupItem["status"] {
-  if (cells.some((cell) => cell.status === "failed" || cell.status === "interrupted")) return "failed";
-  if (cells.some((cell) => cell.status === "running")) return "running";
-  return "completed";
+  const status = activityGroupStatus(cells);
+  return status === "done" ? "completed" : status;
 }
 
 function agentActivityKind(cells: ActivityCellState[]): ActivityGroupItem["activityKind"] {
@@ -654,14 +654,13 @@ function activityTitle(
     return title || (status === "running" ? "正在打开浏览器预览" : "已打开浏览器预览");
   }
   if (kind === "command") {
-    if (count === 1) return status === "running" ? "正在运行命令" : "已运行命令";
-    return status === "running" ? `正在运行 ${count} 条命令` : `已运行 ${count} 条命令`;
+    return ranCommandsTitle(status === "running", count);
   }
   if (kind === "mcp") {
     return status === "running" ? `正在调用 ${count} 个 MCP 工具` : `已调用 ${count} 个 MCP 工具`;
   }
   if (kind === "web_search" || kind === "web_read" || kind === "file_read") {
-    return status === "running" ? "正在收集上下文" : count === 1 ? "已收集上下文" : `已收集 ${count} 个上下文来源`;
+    return collectedContextTitle(status === "running", count);
   }
   const title = cells[0]?.title?.trim();
   return title || (status === "running" ? `正在处理 ${count} 项` : `已处理 ${count} 项`);
@@ -697,16 +696,6 @@ function isProcessActivity(cell: ActivityCellState): boolean {
     "agentMessage",
     "progress",
   ].includes(cell.activityKind);
-}
-
-function activityRecordTotal(cells: ActivityCellState[]): number {
-  return Math.max(1, cells.reduce((sum, cell) => sum + activityRecordCount(cell), 0));
-}
-
-function activityRecordCount(cell: ActivityCellState): number {
-  // Count comes from the tool-call records, never from digits scraped out of
-  // localized display strings (which produced wrong counts like "文件 ×7").
-  return Math.max(1, cell.toolCallRecords?.length ?? 1);
 }
 
 function recordHasUrl(record: ToolCallRecord): boolean {
@@ -837,7 +826,7 @@ function sourceContribution(cell: Extract<HistoryCellState, { kind: "activity" }
   if (!["fileRead", "workspaceSearch", "mcpToolCall"].includes(cell.activityKind)) {
     return 0;
   }
-  return Math.max(1, cell.toolCallRecords?.length ?? 1);
+  return activityRecordCount(cell);
 }
 
 function isBrowserPreviewActivity(cell: Extract<HistoryCellState, { kind: "activity" }>): boolean {

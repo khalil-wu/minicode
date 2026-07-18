@@ -42,33 +42,47 @@ class UploadResponse(BaseModel):
 
 
 class OpenAISettingsPayload(BaseModel):
+    display_name: str = ""
     api_key: str = ""
     base_url: str = ""
     model: str = ""
     available_models: list[str] = Field(default_factory=list)
-    reasoning_effort: str = "high"
+    models_source: str = ""
+    reasoning_effort: str = "low"
+    responses_reasoning_summary: str = "off"
     max_tokens: int = 8192
     wire_api: str = "chat"
+    responses_stateful_continuation: bool = True
+    prompt_cache_retention: str = ""
+    reasoning_effort_levels: list[str] = Field(default_factory=list)
 
 
 class AnthropicSettingsPayload(BaseModel):
+    display_name: str = ""
     api_key: str = ""
     base_url: str = ""
     model: str = ""
     available_models: list[str] = Field(default_factory=list)
+    models_source: str = ""
     max_tokens: int = 8192
     thinking_budget: int = 0
 
 
 class CustomSettingsPayload(BaseModel):
+    display_name: str = ""
     api_key: str = ""
     base_url: str = ""
     model: str = ""
     available_models: list[str] = Field(default_factory=list)
-    reasoning_effort: str = "high"
+    models_source: str = ""
+    reasoning_effort: str = "low"
+    responses_reasoning_summary: str = "off"
     max_tokens: int = 8192
     thinking_budget: int = 0
     wire_api: str = "chat"
+    responses_stateful_continuation: bool = False
+    prompt_cache_retention: str = ""
+    reasoning_effort_levels: list[str] = Field(default_factory=list)
 
 
 class LLMSettingsUpdateRequest(BaseModel):
@@ -76,6 +90,17 @@ class LLMSettingsUpdateRequest(BaseModel):
     openai: OpenAISettingsPayload = Field(default_factory=OpenAISettingsPayload)
     anthropic: AnthropicSettingsPayload = Field(default_factory=AnthropicSettingsPayload)
     custom: CustomSettingsPayload = Field(default_factory=CustomSettingsPayload)
+    prompt_persona: str | None = None
+    confirm_sensitive_change: bool = False
+
+
+class LLMProviderHistoryDeleteRequest(BaseModel):
+    provider: str = "custom"
+    provider_id: str = ""
+    base_url: str = ""
+    model: str = ""
+    wire_api: str = ""
+    clear_api_key: bool = True
     confirm_sensitive_change: bool = False
 
 
@@ -85,8 +110,30 @@ class MCPConfigUpdateRequest(BaseModel):
     confirm_sensitive_change: bool = False
 
 
+class FeatureFlagsUpdateRequest(BaseModel):
+    flags: dict[str, bool | None] = Field(default_factory=dict)
+
+
 class SkillInstallRequest(BaseModel):
     skill_name: str = Field(min_length=1)
+
+
+class PluginStateUpdateRequest(BaseModel):
+    enabled: bool
+
+
+class PluginImportRequest(BaseModel):
+    source_path: str = Field(min_length=1)
+    overwrite: bool = False
+
+
+class PluginValidateRequest(BaseModel):
+    source_path: str = Field(min_length=1)
+
+
+class PluginPackageRequest(BaseModel):
+    source_path: str = Field(min_length=1)
+    output_dir: str | None = None
 
 
 class LLMModelsRefreshResponse(BaseModel):

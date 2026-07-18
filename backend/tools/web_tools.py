@@ -50,6 +50,88 @@ def _is_hostile_fetch_url(url: str) -> bool:
     return host in HOSTILE_FETCH_DOMAINS or host.endswith(".zhihu.com")
 
 
+def _url_has_credentials(url: str) -> bool:
+    """Reject URLs embedding username:password (cc utils.ts:156)."""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    return bool(parsed.username or parsed.password)
+
+
+def _strip_www(hostname: str) -> str:
+    return re.sub(r"^www\.", "", (hostname or "").lower())
+
+
+def _normalize_domain_list(value: Any) -> list[str]:
+    """Coerce an allowed/blocked_domains arg into a list of bare host suffixes."""
+    if isinstance(value, str):
+        raw = [part for part in re.split(r"[\s,]+", value) if part]
+    elif isinstance(value, list):
+        raw = [str(item) for item in value]
+    else:
+        raw = []
+    normalized: list[str] = []
+    for item in raw:
+        host = item.strip().lower()
+        if not host:
+            continue
+        # Accept bare domains or full URLs; reduce to host and strip a leading www.
+        if "://" in host:
+            host = urlparse(host).netloc or host
+        normalized.append(_strip_www(host))
+    return normalized
+
+
+def _host_matches_domain(host: str, domain: str) -> bool:
+    """True when host equals domain or is a subdomain of it (www-insensitive)."""
+    host = _strip_www(host)
+    return host == domain or host.endswith("." + domain)
+
+
+def _filter_results_by_domains(
+    results: list[dict[str, str]],
+    allowed: list[str],
+    blocked: list[str],
+) -> list[dict[str, str]]:
+    """Apply allowed/blocked domain filtering to search results (cc WebSearchTool)."""
+    if not allowed and not blocked:
+        return results
+    filtered: list[dict[str, str]] = []
+    for result in results:
+        try:
+            host = urlparse(str(result.get("url") or "")).netloc.lower()
+        except Exception:
+            host = ""
+        if allowed and not any(_host_matches_domain(host, d) for d in allowed):
+            continue
+        if blocked and any(_host_matches_domain(host, d) for d in blocked):
+            continue
+        filtered.append(result)
+    return filtered
+
+
+def _is_permitted_redirect(original_url: str, redirect_url: str) -> bool:
+    """Only follow same-origin redirects (cc isPermittedRedirect).
+
+    Permits path/query changes and www. add/remove on the SAME host; requires
+    identical scheme and port and no embedded credentials. Cross-host redirects
+    are returned to the model instead of followed (open-redirect / SSRF guard).
+    """
+    try:
+        original = urlparse(original_url)
+        redirect = urlparse(redirect_url)
+    except Exception:
+        return False
+    if redirect.scheme != original.scheme:
+        return False
+    if redirect.port != original.port:
+        return False
+    if redirect.username or redirect.password:
+        return False
+    return _strip_www(redirect.hostname or "") == _strip_www(original.hostname or "")
+
+
 def _search_provider_error_type(errors: list[str]) -> str | None:
     text = " ; ".join(str(item or "") for item in errors)
     if not text:
@@ -132,36 +214,42 @@ class WebFetchTool(BaseTool):
     name = "web_fetch"
     read_only = True
     open_world = True
+    result_kind = "web"
+    activity_kind = "webSearch"
+    display_label = "Fetch"
+    panel_hint = "inspector"
     # Self-bounds via WEB_FETCH_TOKEN_LIMIT and artifacts large pages.
     max_result_chars = None
     description = (
-        "Fetch and extract content from a specific URL. Returns cleaned text, source URL, and extraction status.\n\n"
-        "Do NOT use web_fetch for workspace files — use read_file instead.\n"
-        "Do NOT use web_fetch without a prior web_search — search first to find candidate URLs.\n"
-        "Do NOT fetch a URL whose title/snippet does not match the user's question.\n"
-        "For GitHub URLs, prefer gh via run_command when available (e.g. gh pr view, gh issue view, gh api).\n"
-        "When the fetched content informs your answer, cite it with a compact [1] marker in the final response; do not append raw URLs or a Sources section.\n"
-        "Search snippets are candidate evidence. Fetch a relevant source before making confident specific claims; "
-        "use snippets alone only for low-risk simple facts or when fetch is unavailable, and state that limitation.\n\n"
-        "Do not write routine process prose between web_fetch calls. If another URL, page section, group, or detail is needed, "
-        "call web_fetch directly; if you have enough evidence, answer directly without a bridge line like "
-        "'now I will write the answer', 'let me fetch more details', or 'continue fetching the remaining groups'.\n\n"
-        "FAILURE RECOVERY: If this fetch fails or times out, you MUST try a DIFFERENT URL from your "
-        "web_search results. Pick the next most relevant candidate. Do NOT give up after one failed fetch. "
-        "Try at least 2 different URLs before falling back to search snippets alone.\n\n"
-        "FOR RESEARCH: When investigating complex topics, fetch multiple URLs to gather diverse perspectives. "
-        "Read fetched content carefully — when it references other studies, papers, or key terms you haven't explored, "
-        "search for those to deepen your understanding (citation chaining).\n"
-        "For papers, releases, and versioned artifacts, verify dates, identifiers, authors, and project links from the fetched source. "
-        "Prefer primary sources (paper page/PDF, official repository, official docs) over blogs or reposts. "
-        "Do not cite commentary/blog summaries as the source for paper metadata or technical claims unless clearly labeled as commentary. "
-        "If a GitHub/project link is not present, omit it rather than leaving an empty label.\n"
-        "For location-specific queries, only fetch URLs that match the queried location.\n\n"
-        "PROMPT PARAMETER: Pass prompt='what to extract' to get a focused summary instead of full page text. "
-        "Useful for large pages where you only need specific information (e.g. prompt='get the pricing table', "
-        "'summarize the installation steps', 'find the API endpoint')."
+        "Fetch and extract content from a specific URL; returns cleaned text, source URL, and extraction status. "
+        "Fetch URLs from prior web_search results, not workspace files. For GitHub URLs, prefer gh via run_command when the current turn already has shell access and the task is repo-oriented. "
+        "When fetched content informs the answer, cite it with a compact [1] marker and do not append raw URLs or a Sources/References section. "
+        "Do not write routine process prose between web_fetch calls; tool activity already shows what was opened. "
+        "Search snippets are candidate evidence. Fetch a relevant source before making confident specific claims; use snippets alone only for low-risk simple facts or when fetch is unavailable. "
+        "verify dates, identifiers, authors, and project links from the fetched page. Also verify release/version metadata and bibliographic details. Prefer primary sources. Do not cite commentary/blog summaries as primary evidence. "
+        "When a citation label would be empty or low-value, omit it rather than leaving an empty label. "
+        "Use prompt='what to extract' for focused extraction from large pages."
     )
     permission = PermissionLevel.AUTO
+
+    def model_description(self) -> str:
+        return (
+            "Fetch and extract content from a specific URL. "
+            "Use URLs from prior web_search results and cite fetched content with a compact [1] marker."
+        )
+
+    def model_schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=self.name,
+            description=self.model_description(),
+            parameters={
+                "type": "object",
+                "required": ["url"],
+                "properties": {
+                    "url": {"type": "string"},
+                },
+            },
+        )
 
     def __init__(self, artifact_store: ArtifactStore) -> None:
         self._artifact_store = artifact_store
@@ -194,8 +282,7 @@ class WebFetchTool(BaseTool):
 
         self._client = httpx.AsyncClient(
             timeout=WEB_FETCH_TIMEOUT,
-            follow_redirects=True,
-            max_redirects=5,
+            follow_redirects=False,
             proxy=proxy_url,
             trust_env=False,
             headers={
@@ -204,6 +291,28 @@ class WebFetchTool(BaseTool):
             },
         )
         return self._client
+
+    async def _get_with_permitted_redirects(self, url: str, max_redirects: int = 5):
+        """Fetch, following only same-host redirects (cc getWithPermittedRedirects).
+
+        Returns (response, redirect_url). When a cross-host redirect is hit,
+        response is None and redirect_url is the target for the model to re-fetch.
+        """
+        client = self._get_client()
+        current = url
+        for _ in range(max_redirects + 1):
+            resp = await client.get(current)
+            if resp.status_code in (301, 302, 303, 307, 308):
+                location = resp.headers.get("location")
+                if not location:
+                    return resp, None
+                redirect_url = urllib.parse.urljoin(current, location)
+                if _is_permitted_redirect(current, redirect_url):
+                    current = redirect_url
+                    continue
+                return None, redirect_url
+            return resp, None
+        raise RuntimeError(f"Too many redirects (exceeded {max_redirects})")
 
     def get_spec(self):
         from backend.tools.contracts import ToolSpec
@@ -237,11 +346,11 @@ class WebFetchTool(BaseTool):
                     },
                     "prompt": {
                         "type": "string",
-                        "description": "What to extract from the page (e.g. 'get the pricing table', 'summarize the main argument'). When provided and the page is large, a small model extracts just the relevant part instead of returning the full text.",
+                        "description": "What you want from this page, e.g. 'the 7-day forecast' or 'the pricing table'. Large pages are auto-summarized to a concise answer; pass a prompt to focus that summary. Omit only for small pages.",
                     },
                     "max_length": {
                         "type": "integer",
-                        "description": "Maximum characters to fetch. Defaults to 200000. Reduce for pages where you only need a summary.",
+                        "description": "Maximum characters to fetch. Defaults to 200000.",
                     },
                 },
             },
@@ -258,6 +367,11 @@ class WebFetchTool(BaseTool):
         if not url.startswith(("http://", "https://")):
             return self._error_result("URL must start with http:// or https://")
 
+        if _url_has_credentials(url):
+            return self._error_result(
+                "URL must not embed credentials (username:password). Remove them and retry."
+            )
+
         permission = getattr(context, "permission", None)
         if getattr(permission, "mode", None) != "bypass":
             assessment = assess_network_url(url)
@@ -265,8 +379,23 @@ class WebFetchTool(BaseTool):
                 return self._error_result(f"Network target requires approval or is blocked: {assessment.reason}")
 
         try:
-            client = self._get_client()
-            resp = await client.get(url)
+            resp, redirect_url = await self._get_with_permitted_redirects(url)
+            if resp is None:
+                # Cross-host redirect: return the target for the model to re-fetch
+                # explicitly instead of silently following (open-redirect/SSRF guard).
+                return ToolResult(
+                    content=(
+                        f"{url} redirects to a different host: {redirect_url}\n\n"
+                        "The redirect was NOT followed automatically. If this destination is "
+                        "expected, call web_fetch again with that URL."
+                    ),
+                    is_error=False,
+                    source_url=url,
+                    extraction_status="partial",
+                    evidence_type="fetched",
+                    display_summary=f"Cross-host redirect: {urlparse(redirect_url).netloc or redirect_url}",
+                    result_kind="web",
+                )
             resp.raise_for_status()
 
             content_type = resp.headers.get("content-type", "")
@@ -289,8 +418,8 @@ class WebFetchTool(BaseTool):
                         f"Fetch limited for {url}: the site blocked direct extraction "
                         f"({status_code or 'anti-bot'}). "
                         "Do not retry this URL. Pick a DIFFERENT URL from your web_search results. "
-                        "Only if no relevant page can be fetched, answer from candidate search snippets with clear uncertainty "
-                        "and [1] citation markers."
+                        "Only if no relevant page can be fetched, answer from candidate search snippets with [1] citation markers. "
+                        "Lead with the usable answer; mention the limitation only locally and neutrally."
                     ),
                     is_error=False,
                     source_url=url,
@@ -305,8 +434,8 @@ class WebFetchTool(BaseTool):
                     f"Fetch failed for {url}: {exc}\n\n"
                     "IMPORTANT: This URL may be temporarily unreachable. "
                     "Try a DIFFERENT URL from your web_search results — pick the next most relevant candidate. "
-                    "If all URLs fail, answer from candidate search snippets only with clear uncertainty, "
-                    "cite with [1] markers, and tell the user you could not load full pages."
+                    "If all URLs fail, answer from candidate search snippets with [1] markers. "
+                    "Do not frame the whole reply as incomplete; say neutrally that pages that did not open are not used as primary evidence."
                 ),
                 is_error=True,
                 source_url=url,
@@ -351,9 +480,19 @@ class WebFetchTool(BaseTool):
         preview = cleaned[:CONTENT_PREVIEW_CHARS] if cleaned else ""
         estimated_tokens = len(cleaned) // 4
 
-        # If prompt given and page is large, use small model to extract relevant part (ClaudeCode pattern)
-        if prompt and estimated_tokens > WEB_FETCH_TOKEN_LIMIT:
-            extracted = await self._extract_with_prompt(cleaned[:32000], prompt, context)
+        # cc WebFetch pattern: summarize non-trivially large pages into a concise
+        # answer so the caller gets digested content in ONE fetch — instead of an
+        # artifact pointer that forces a fetch→read_artifact→fetch loop (the
+        # over-research pattern). Use the model-given prompt, or a default
+        # extraction prompt when none is supplied.
+        if estimated_tokens > WEB_FETCH_TOKEN_LIMIT:
+            extract_prompt = prompt or (
+                "Extract the key information from this page: main facts, data, "
+                "names, dates, and any direct answer to a likely question. Be "
+                "concise and faithful to the page; omit navigation, menus, and "
+                "boilerplate."
+            )
+            extracted = await self._extract_with_prompt(cleaned[:32000], extract_prompt, context)
             if extracted:
                 return ToolResult(
                     content=_wrap_untrusted_content(extracted, "web_fetch"),
@@ -361,8 +500,9 @@ class WebFetchTool(BaseTool):
                     extraction_status=status,
                     evidence_type="fetched",
                     content_preview=preview,
-                    display_summary=f"Extracted: {prompt[:60]}",
+                    display_summary=f"Extracted: {(prompt or 'key info')[:60]}",
                 )
+            # summarization unavailable (no llm / failure) → fall through to artifact
 
         if estimated_tokens <= WEB_FETCH_TOKEN_LIMIT:
             return ToolResult(
@@ -398,34 +538,35 @@ class WebSearchTool(BaseTool):
     name = "web_search"
     read_only = True
     open_world = True
+    result_kind = "search"
+    activity_kind = "webSearch"
+    display_label = "Search web"
+    panel_hint = "inspector"
     description = (
-        "Search the web for real-time information: current events, latest versions, live data, breaking news, weather. "
-        "Returns a list of candidate results with titles, URLs, and snippets.\n\n"
-        "Do NOT use web_search for stable knowledge (math, history, programming concepts) — answer directly from training data.\n"
-        "Do NOT use web_search for workspace files — use grep_files or glob_files instead.\n"
-        "Do NOT use web_search to fetch full web pages — use web_fetch instead.\n\n"
-        "When web_search informs the final answer, include compact [1], [2] citation markers in the answer. "
-        "Do not append a Sources/References section or raw URLs; the UI renders source links from tool metadata.\n\n"
-        "CANDIDATE SNIPPETS: Search snippets are candidate evidence, not verified page evidence. "
-        "Use them to choose URLs to fetch. For low-risk simple facts, you may answer from snippets only when "
-        "you cite [1] markers and make the evidence level clear. For specific, research, latest/current, "
-        "or high-impact claims, fetch a relevant source before answering confidently.\n\n"
-        "RESEARCH STRATEGY: For complex questions requiring multiple perspectives (comparisons, analyses, "
-        "surveys, 'find papers about X'), use MULTIPLE searches with DIFFERENT queries:\n"
-        "- For simple factual queries, one search is enough. Do not keep searching after the snippet answers it.\n"
-        "- Issue multiple web_search calls in the same turn when you need multiple angles; the runtime can run them in parallel.\n"
-        "- Start with 2-4 distinct queries covering different angles of the topic\n"
-        "- Do not repeat the same query. Each search should use different keywords, language, scope, or time range.\n"
-        "- Do not narrate between search batches. After the first process note, routine search/fetch continuation should be tool-only; do not write lines like 'let me fetch more details' or 'continue fetching the remaining groups'.\n"
-        "- Use synonyms, related terms, English/Chinese variants — not just the user's exact words\n"
-        "- When a fetched page mentions key terms, authors, or studies you haven't searched, search for those too\n"
-        "- For papers, releases, and versioned artifacts, choose primary sources for final citations; blogs/reposts are discovery leads or commentary, not metadata authorities.\n"
-        "- If first searches return thin results, reformulate: try jargon, narrower terms, or different phrasing\n"
-        "- Stop when new searches return mostly information you already have (saturation)\n\n"
-        "When the user asks about a specific location or topic, only select results that match — "
-        "do NOT pick results about a different place or subject just because they appeared."
+        "Search the web for current information such as news, versions, live data, and weather. Returns candidate titles, URLs, and snippets. "
+        "Do not use for stable knowledge, workspace files, or full-page extraction. Stop after one successful search when the returned evidence is already enough to answer. "
+        "Do not repeat the same query. When multiple angles are useful, Issue multiple web_search calls in the same turn with 2-4 distinct queries that vary keywords, scope, language, or time range. "
+        "Search snippets are candidate evidence; fetch a relevant source before specific or high-impact claims when possible. routine search/fetch continuation should be tool-only unless findings change direction. "
+        "choose primary sources for final citations; blogs/reposts are discovery leads or commentary, not primary evidence. Cite web-backed answers with compact [1], [2] citation markers only. Do not append a Sources/References section; UI renders source links separately. "
+        "Only select results that match the requested location, entity, or topic."
     )
     permission = PermissionLevel.AUTO
+
+    def model_description(self) -> str:
+        return "Search the web for current information and return candidate titles, URLs, and snippets."
+
+    def model_schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=self.name,
+            description=self.model_description(),
+            parameters={
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": {"type": "string"},
+                },
+            },
+        )
 
     def __init__(self, artifact_store: ArtifactStore) -> None:
         self._artifact_store = artifact_store
@@ -488,11 +629,21 @@ class WebSearchTool(BaseTool):
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Search query string. Use specific, targeted keywords for better results.",
+                        "description": "Search query string with specific, targeted keywords.",
                     },
                     "max_results": {
                         "type": "integer",
                         "description": f"Maximum number of results to return. Defaults to {WEB_SEARCH_MAX_RESULTS}, max 20.",
+                    },
+                    "allowed_domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Only include results whose URL host matches one of these domains.",
+                    },
+                    "blocked_domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Never include results whose URL host matches one of these domains.",
                     },
                 },
             },
@@ -502,9 +653,16 @@ class WebSearchTool(BaseTool):
         raw_query = args.get("query", "").strip()
         query = build_search_plan(raw_query).normalized_query if raw_query else ""
         max_results = min(int(args.get("max_results", WEB_SEARCH_MAX_RESULTS)), 20)
+        allowed_domains = _normalize_domain_list(args.get("allowed_domains"))
+        blocked_domains = _normalize_domain_list(args.get("blocked_domains"))
 
         if not query:
             return self._error_result("缺少 query 参数")
+
+        if allowed_domains and blocked_domains:
+            return self._error_result(
+                "Cannot specify both allowed_domains and blocked_domains in the same request."
+            )
 
         errors: list[str] = []
         try:
@@ -514,11 +672,11 @@ class WebSearchTool(BaseTool):
             errors.append(f"API: {exc}")
             results = []
 
+        results = _filter_results_by_domains(results, allowed_domains, blocked_domains)
+
         if results:
             provider = getattr(self, "_last_provider", "")
             lines = [f"Search '{query}' returned {len(results)} candidate sources."]
-            if provider:
-                lines.append(f"Provider: {provider}")
             lines.append("")
             for i, result in enumerate(results, 1):
                 lines.append(f"[{i}] {result['title']}")
@@ -531,7 +689,7 @@ class WebSearchTool(BaseTool):
                 content=_wrap_untrusted_content("\n".join(lines).strip(), "web_search"),
                 extraction_status="ok",
                 evidence_type="candidate",
-                display_summary=f"Searched web via {provider}: {query}" if provider else None,
+                display_summary=f"Searched web: {query}",
                 provider=provider or None,
                 result_kind="search",
                 content_preview=_json.dumps(results, ensure_ascii=False),
@@ -540,9 +698,15 @@ class WebSearchTool(BaseTool):
         # API providers unavailable (no keys or failed) — fall through to legacy scrapers
         if not errors and not getattr(self, "_last_provider", ""):
             logger.info("web_search: no API key configured, falling through to DuckDuckGo/Bing")
-        return await self._legacy_execute_removed(query, max_results)
+        return await self._legacy_execute_removed(query, max_results, allowed_domains, blocked_domains)
 
-    async def _legacy_execute_removed(self, query: str, max_results: int) -> ToolResult:
+    async def _legacy_execute_removed(
+        self,
+        query: str,
+        max_results: int,
+        allowed_domains: list[str] | None = None,
+        blocked_domains: list[str] | None = None,
+    ) -> ToolResult:
         errors: list[str] = []
         # Try Bing first (more reliable in mainland China), DuckDuckGo as fallback
         try:
@@ -568,6 +732,8 @@ class WebSearchTool(BaseTool):
                 evidence_type="candidate",
                 provider_error_type=provider_error_type,
             )
+
+        results = _filter_results_by_domains(results, allowed_domains or [], blocked_domains or [])
 
         if not results:
             return ToolResult(

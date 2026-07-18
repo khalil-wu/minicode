@@ -22,7 +22,7 @@ from backend.attachments.store import AttachmentStore
 from backend.artifact.store import ArtifactStore
 from backend.checkpoint import CheckpointManager
 from backend.commands.registry import CommandRegistry
-from backend.config import AppConfig, get_available_models, get_llm_provider
+from backend.config import AppConfig, get_available_models, get_llm_provider, get_models_source
 from backend.conversations.models import DEFAULT_CONVERSATION_PERMISSION_MODE
 from backend.conversations.repository import CONVERSATION_DATA_DIR, ConversationRepository
 from backend.llm.base import LLMAdapter
@@ -32,12 +32,15 @@ from backend.tasks.manager import TaskManager
 from backend.terminal.session import TerminalSessionManager
 from backend.terminal.manager import BackgroundCommandManager, BackgroundCommand
 from backend.tools.registry import ToolRegistry
-from backend.ws.agent_runner import SessionAgentRunnerMixin
+from backend.ws.agent_runner import SessionAgentRunnerMixin, _TURN_MESSAGE_SCOPED_EVENT_TYPES
 from backend.ws.approval_runtime import SessionApprovalRuntimeMixin
+from backend.ws.client_command_log import ClientCommandDedupStore, _clean_command_id
 from backend.ws.command_handlers import SessionCommandHandlersMixin
 from backend.ws.conversation_errors import emit_conversation_not_found
 from backend.ws.conversation_runtime import ConversationRuntime
+from backend.ws.event_log import WebSocketReplayEventStore, sanitize_ws_replay_payload
 from backend.ws.permission_runtime import SessionPermissionRuntimeMixin
+from backend.ws.run_manager import SessionRunManager
 from backend.ws.stream_state import append_stream_text
 from backend.ws.utils import (
     build_effective_transcript_content,
@@ -54,12 +57,52 @@ from backend.ws.utils import (
 )
 from backend.workspace.file_watcher import WorkspaceFileWatcher
 from backend.workspace.state import clear_active_workspace_root, get_active_workspace_root
+from backend.api.auth import _websocket_accept_subprotocol
 
 logger = logging.getLogger(__name__)
 
 MAX_PENDING_COMMAND_TASKS = 100
 COMMAND_BACKLOG_ERROR_INTERVAL_SECONDS = 2.0
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{4,64}$")
+WS_EVENT_REPLAY_MAX = 1000
+RECENT_CLIENT_COMMAND_IDS_MAX = 1024
+
+COMMAND_BACKLOG_BYPASS_TYPES = {
+    "approval",
+    "approval.respond",
+    "answer",
+    "control_response",
+    "control_cancel_request",
+    "interrupt",
+}
+
+COMMAND_BACKLOG_DROPPABLE_TYPES = {
+    "commands.list",
+    "connectors.marketplace.list",
+    "conversation.list",
+    "diff.git_staged",
+    "diff.git_working_tree",
+    "env.list",
+    "mcp.list",
+    "preview.detect",
+    "runtime.capabilities.inspect",
+    "scheduler.list",
+    "session.usage.inspect",
+    "skills.list",
+    "skills.marketplace.list",
+}
+
+NON_REPLAYABLE_WS_EVENT_TYPES = {
+    "conversation.list",
+    "conversation.switched",
+    "llm.model.updated",
+    "mcp_status",
+    "pong",
+    "runtime.capabilities",
+    "session.restored",
+    "session.synced",
+    "stream_resume",
+}
 
 
 def _invalidate_runtime_status_cache() -> None:
@@ -140,7 +183,16 @@ class WebSocketSession(
         self.ws = websocket
         self._connection_generation = 1
         self._event_instance_id = uuid.uuid4().hex
-        self._ws_event_seq = 0
+        self._ws_event_store = WebSocketReplayEventStore(
+            session_id=session_id,
+            root_dir=Path(CONVERSATION_DATA_DIR).parent / "ws-event-log",
+        )
+        self._client_command_store = ClientCommandDedupStore(
+            session_id=session_id,
+            root_dir=Path(CONVERSATION_DATA_DIR).parent / "client-command-log",
+        )
+        self._ws_event_log: list[dict[str, Any]] = self._ws_event_store.load(limit=WS_EVENT_REPLAY_MAX)
+        self._ws_event_seq = self._max_replay_event_seq(self._ws_event_log)
         self._event_connection_generation: ContextVar[int | None] = ContextVar(
             f"ws_event_generation_{session_id}",
             default=None,
@@ -162,24 +214,41 @@ class WebSocketSession(
         self._approval_diff_cache: dict[str, dict[str, Any]] = {}
         self._active_run_task: asyncio.Task[None] | None = None
         self._active_task_id: str | None = None
+        self._active_run_cancel_event: asyncio.Event | None = None
+        # Set True when agent events are silently dropped during a
+        # socket disconnect while a run is active. Reset on session.restore.
+        self._events_dropped_during_disconnect = False
         self._conversation_run_tasks: dict[str, asyncio.Task[None]] = {}
         self._conversation_run_task_ids: dict[str, str] = {}
+        self._conversation_run_cancel_events: dict[str, asyncio.Event] = {}
         self._conversation_run_locks: dict[str, asyncio.Lock] = {}
+        self._run_manager = SessionRunManager(self)
         self._interrupted = False
+        self._interrupted_conversation_ids: set[str] = set()
         self._agent_run_lock = asyncio.Lock()
+        # Conversation lifecycle commands are received concurrently so slow
+        # workspace activation cannot let a later delete/create/user message
+        # overtake an earlier switch. Keep their observable order per session.
+        self._conversation_lifecycle_lock = asyncio.Lock()
         self._command_semaphore = asyncio.Semaphore(20)  # max 20 concurrent commands
         self._command_tasks: set[asyncio.Task[Any]] = set()
         self._max_command_tasks = MAX_PENDING_COMMAND_TASKS
         self._last_command_backlog_error_at = 0.0
+        self._recent_client_command_ids: list[str] = self._load_recent_client_command_ids()
+        self._recent_client_command_id_set: set[str] = set(self._recent_client_command_ids)
         self._ws_send_lock = asyncio.Lock()
+        self._ws_event_persist_tail: asyncio.Task[None] | None = None
         self._use_control_protocol = bool(use_control_protocol)
         self._is_connected = True
         # Streaming reconnection support
         self._conversation_streams: dict[str, dict[str, Any]] = {}
         self._resolve_llm_provider = get_llm_provider
         self._resolve_available_models = get_available_models
+        self._resolve_models_source = get_models_source
+        self._llm_adapter_cache: dict[tuple[Any, ...], LLMAdapter] = {}
         self.provider = self._resolve_llm_provider()
         self.available_models = list(self._resolve_available_models(self.provider))
+        self.models_source = self._resolve_models_source(self.provider)
         self.selected_model = getattr(config.llm, "model", "").strip()
         if self.available_models and self.selected_model not in self.available_models:
             self.selected_model = ""
@@ -190,7 +259,10 @@ class WebSocketSession(
         if skill_manager is not None:
             from backend.skills.manager import SkillManager
 
-            self.skill_manager = SkillManager(loader=skill_manager._loader)
+            self.skill_manager = SkillManager(
+                loader=skill_manager._loader,
+                usage_store_path=getattr(skill_manager, "_usage_store_path", None),
+            )
             self.skill_manager._discovered = skill_manager._discovered
         else:
             self.skill_manager = None
@@ -340,8 +412,8 @@ class WebSocketSession(
                 },
                 log_context="background.completed",
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to send background.completed for %s: %s", bg_cmd.command_id, exc)
 
     def _start_file_watcher(self):
         workspace_root = self._workspace_root_for_conversation()
@@ -564,6 +636,11 @@ class WebSocketSession(
             else []
         )
         pending_approvals = self._pending_approval_runtime_items()
+        active_stream_conversation_ids = sorted(
+            str(conversation_id)
+            for conversation_id, task in getattr(self, "_conversation_run_tasks", {}).items()
+            if conversation_id and task is not None and not task.done()
+        )
         active = self.active_conversation
         if active is not None and getattr(active, "archived", False):
             active = None
@@ -593,6 +670,7 @@ class WebSocketSession(
             if active is not None
             else None,
             "active_task_id": self._active_task_id,
+            "active_stream_conversation_ids": active_stream_conversation_ids,
             "selected_model": self.selected_model or None,
             "invoked_skill_names": invoked_skill_names,
             "permission_mode": self.permission_context.mode,
@@ -655,11 +733,22 @@ class WebSocketSession(
             "summary": summary,
             "permission": permission,
             "mcp_registry_version": self._mcp_registry_version_snapshot,
+            "provider_capabilities": self._provider_capabilities_payload(),
         }
+
+    def _provider_capabilities_payload(self) -> dict[str, Any]:
+        try:
+            from backend.llm.capabilities import capabilities_for_adapter
+
+            return capabilities_for_adapter(self.llm).to_dict()
+        except Exception as exc:
+            logger.debug("session %s provider capability snapshot failed: %s", self.session_id, exc)
+            return {}
 
     def runtime_capability_snapshot(self) -> dict[str, Any]:
         """Full per-session capability contract, including current permissions."""
         from backend.commands.catalog import get_enabled_composer_command_catalog
+        from backend.feature_flags import feature_flags_payload
 
         self.refresh_tool_registry_if_mcp_changed()
         budget = int(getattr(getattr(self.config, "token_budget", None), "tool_schemas", 6000) or 6000)
@@ -670,24 +759,11 @@ class WebSocketSession(
             mcp_registry_version=self._mcp_registry_version_snapshot,
         )
         snapshot["composer_commands"] = get_enabled_composer_command_catalog()
+        snapshot["feature_flags"] = feature_flags_payload()
         if self.skill_manager is not None and not snapshot.get("skills"):
-            loader = getattr(self.skill_manager, "_loader", None)
-            if loader is not None:
-                skills: list[dict[str, Any]] = []
-                for name in loader.list_skill_names():
-                    meta = loader.get_meta(name)
-                    entry: dict[str, Any] = {
-                        "name": name,
-                        "description": getattr(meta, "description", "") if meta else "",
-                    }
-                    if meta:
-                        entry.update({
-                            "version": getattr(meta, "version", ""),
-                            "triggers": getattr(meta, "triggers", []),
-                            "tools_required": getattr(meta, "tools_required", []),
-                            "source_level": getattr(meta, "source_level", "builtin"),
-                        })
-                    skills.append(entry)
+            list_all = getattr(self.skill_manager, "list_all", None)
+            skills = list_all() if callable(list_all) else []
+            if skills:
                 snapshot["skills"] = skills
                 snapshot["summary"] = {
                     **dict(snapshot.get("summary") or {}),
@@ -695,6 +771,7 @@ class WebSocketSession(
                 }
         snapshot["permission"] = self._runtime_permission_payload()
         snapshot["mcp_registry_version"] = self._mcp_registry_version_snapshot
+        snapshot["provider_capabilities"] = self._provider_capabilities_payload()
         return snapshot
 
     def runtime_capabilities_payload(self, *, source: str = "session") -> dict[str, Any]:
@@ -718,7 +795,7 @@ class WebSocketSession(
         stays light. Reads the in-memory manager status; empty when no bootstrap.
         """
         try:
-            from backend.main import get_mcp_status
+            from backend.api.routes_health import get_mcp_status
 
             servers = get_mcp_status() or []
         except Exception:  # pragma: no cover - manager unavailable / not started
@@ -735,13 +812,104 @@ class WebSocketSession(
 
     def _has_active_run(self) -> bool:
         """True when an agent run is currently in flight in this session."""
-        task = self._active_run_task
-        if task is not None and not task.done():
-            return True
-        for run_task in self._conversation_run_tasks.values():
-            if run_task is not None and not run_task.done():
-                return True
-        return False
+        return self._run_manager.has_active_run()
+
+    def _running_agent_task_for(self, conversation_id: str) -> asyncio.Task[None] | None:
+        return self._run_manager.running_task_for(conversation_id)
+
+    def _register_agent_run(
+        self,
+        *,
+        conversation_id: str,
+        task: asyncio.Task[None],
+        task_id: str,
+        cancel_event: asyncio.Event,
+    ) -> None:
+        self._run_manager.register(
+            conversation_id=conversation_id,
+            task=task,
+            task_id=task_id,
+            cancel_event=cancel_event,
+            active_conversation_id=self.active_conversation_id,
+        )
+
+    def _cleanup_agent_run(
+        self,
+        *,
+        conversation_id: str,
+        task: asyncio.Task[None],
+        task_id: str,
+        cancel_event: asyncio.Event,
+    ) -> None:
+        self._run_manager.cleanup(
+            conversation_id=conversation_id,
+            task=task,
+            task_id=task_id,
+            cancel_event=cancel_event,
+        )
+        self._schedule_next_queued_user_message(conversation_id)
+
+    def _schedule_next_queued_user_message(self, conversation_id: str) -> None:
+        if (
+            not conversation_id
+            or self._running_agent_task_for(conversation_id)
+            or self._run_manager.is_queue_steering(conversation_id)
+        ):
+            return
+        if not self._run_manager.begin_queue_dispatch(conversation_id):
+            return
+        command = self._run_manager.dequeue_user_message(conversation_id)
+        if command is None:
+            self._run_manager.finish_queue_dispatch(conversation_id)
+            return
+        command.data["_queued_user_message_dispatch"] = True
+
+        async def _dispatch() -> None:
+            try:
+                await self._send_event(
+                    AgentEvent.user_message_queue_updated(
+                        status="dequeued",
+                        conversation_id=conversation_id,
+                        message_id=str(command.data.get("assistant_message_id") or ""),
+                        user_message_id=str(command.data.get("user_message_id") or ""),
+                    )
+                )
+                await self._handle_command(command)
+            finally:
+                self._run_manager.finish_queue_dispatch(conversation_id)
+                if not self._running_agent_task_for(conversation_id):
+                    self._schedule_next_queued_user_message(conversation_id)
+
+        task = asyncio.create_task(_dispatch())
+        self._track_command_task(task)
+
+    def _cancel_child_subagents_for_task_id(self, task_id: str | None, *, reason: str) -> None:
+        clean_task_id = str(task_id or "").strip()
+        if not clean_task_id:
+            return
+        try:
+            from backend.agent.runtime import default_runtime
+
+            runtime = default_runtime()
+            cancel_children = getattr(runtime, "cancel_child_subagent_tasks_for_task", None)
+            if callable(cancel_children):
+                cancel_children(clean_task_id, reason=reason)
+        except Exception:
+            logger.debug(
+                "Failed to cancel child subagents for task %s in session %s",
+                clean_task_id,
+                self.session_id,
+                exc_info=True,
+            )
+
+    async def _cancel_agent_runs(
+        self,
+        *,
+        conversation_id: str | None = None,
+        reason: str = "run_cancelled",
+    ) -> bool:
+        """Cancel one conversation run, or every run owned by this session."""
+        return await self._run_manager.cancel(conversation_id=conversation_id, reason=reason)
 
     def refresh_tool_registry_if_mcp_changed(self, *, allow_when_busy: bool = True) -> bool:
         """Rebuild this session's tool registry when the MCP registry changed.
@@ -870,7 +1038,7 @@ class WebSocketSession(
 
         try:
             self._ensure_workspace_context_task()
-            from backend.main import get_mcp_status
+            from backend.api.routes_health import get_mcp_status
 
             mcp_status = get_mcp_status() or []
             await self._send_event(AgentEvent(type="mcp_status", data={"servers": mcp_status}))
@@ -889,12 +1057,33 @@ class WebSocketSession(
                     continue
 
                 command = UserCommand.from_ws_message(msg)
-                await self._send_client_command_ack(command)
+                if self._client_command_seen(command):
+                    await self._send_client_command_ack(command, duplicate=True)
+                    logger.info(
+                        "Skipping duplicate client command %s in session %s",
+                        command.data.get("client_command_id"),
+                        self.session_id,
+                    )
+                    continue
                 if command.type == "ping":
+                    self._mark_client_command_seen(command)
+                    await self._send_client_command_ack(command)
                     await self._send_ws_payload({"type": "pong"}, log_context="pong")
                 else:
                     self._prune_command_tasks()
-                    if len(self._command_tasks) >= self._max_command_tasks:
+                    command_backlog_full = len(self._command_tasks) >= self._max_command_tasks
+                    command_can_bypass_backlog = command.type in COMMAND_BACKLOG_BYPASS_TYPES
+                    command_is_droppable_refresh = command.type in COMMAND_BACKLOG_DROPPABLE_TYPES
+                    if command_backlog_full and not command_can_bypass_backlog:
+                        reason = "command.dropped_refresh" if command_is_droppable_refresh else "command.backlog"
+                        await self._send_client_command_ack(command, accepted=False, reason=reason)
+                        if command_is_droppable_refresh:
+                            logger.debug(
+                                "Dropping refresh command %s during backlog in session %s",
+                                command.type,
+                                self.session_id,
+                            )
+                            continue
                         now = asyncio.get_running_loop().time()
                         if now - self._last_command_backlog_error_at >= COMMAND_BACKLOG_ERROR_INTERVAL_SECONDS:
                             self._last_command_backlog_error_at = now
@@ -907,6 +1096,9 @@ class WebSocketSession(
                                 )
                             )
                         continue
+
+                    self._mark_client_command_seen(command)
+                    await self._send_client_command_ack(command)
 
                     async def _guarded_handle(command, connection_generation):
                         async with self._command_semaphore:
@@ -952,15 +1144,66 @@ class WebSocketSession(
                 return
             logger.error("Unhandled error in _handle_command: %s", exc, exc_info=exc)
 
-    async def _send_client_command_ack(self, command: UserCommand) -> None:
+    def _load_recent_client_command_ids(self) -> list[str]:
+        try:
+            return self._client_command_store.load_ids(limit=RECENT_CLIENT_COMMAND_IDS_MAX)
+        except Exception as exc:
+            logger.debug("Failed to load recent client command ids for %s: %s", self.session_id, exc)
+            return []
+
+    def _client_command_id(self, command: UserCommand) -> str:
         client_command_id = command.data.get("client_command_id")
-        if not isinstance(client_command_id, str) or not client_command_id.strip():
+        if not isinstance(client_command_id, str):
+            return ""
+        return _clean_command_id(client_command_id)
+
+    def _client_command_seen(self, command: UserCommand) -> bool:
+        client_command_id = self._client_command_id(command)
+        return bool(client_command_id and client_command_id in self._recent_client_command_id_set)
+
+    def _mark_client_command_seen(self, command: UserCommand) -> bool:
+        client_command_id = self._client_command_id(command)
+        if not client_command_id:
+            return False
+        if client_command_id in self._recent_client_command_id_set:
+            return True
+        self._recent_client_command_id_set.add(client_command_id)
+        self._recent_client_command_ids.append(client_command_id)
+        try:
+            self._client_command_store.append(client_command_id, command_type=command.type)
+        except Exception as exc:
+            logger.debug("Failed to persist client command id for %s: %s", self.session_id, exc)
+        pruned = False
+        while len(self._recent_client_command_ids) > RECENT_CLIENT_COMMAND_IDS_MAX:
+            removed = self._recent_client_command_ids.pop(0)
+            self._recent_client_command_id_set.discard(removed)
+            pruned = True
+        if pruned:
+            try:
+                self._client_command_store.rewrite_ids(self._recent_client_command_ids)
+            except Exception as exc:
+                logger.debug("Failed to compact client command ids for %s: %s", self.session_id, exc)
+        return False
+
+    async def _send_client_command_ack(
+        self,
+        command: UserCommand,
+        *,
+        duplicate: bool = False,
+        accepted: bool = True,
+        reason: str = "",
+    ) -> None:
+        client_command_id = self._client_command_id(command)
+        if not client_command_id:
             return
         await self._send_ws_payload(
             {
                 "type": "client.command.ack",
-                "client_command_id": client_command_id.strip()[:128],
+                "client_command_id": client_command_id,
                 "command_type": command.type,
+                **({"duplicate": True} if duplicate else {}),
+                **({"accepted": False} if not accepted else {}),
+                **({"reason": reason} if reason else {}),
             },
             log_context="client.command.ack",
         )
@@ -976,7 +1219,15 @@ class WebSocketSession(
             else connection_generation
         )
         try:
-            await self._handle_command_inner(command)
+            if (
+                command.type == "user_message"
+                or command.type == "session.restore"
+                or command.type.startswith("conversation.")
+            ):
+                async with self._conversation_lifecycle_lock:
+                    await self._handle_command_inner(command)
+            else:
+                await self._handle_command_inner(command)
         finally:
             self._event_connection_generation.reset(token)
 
@@ -989,12 +1240,14 @@ class WebSocketSession(
             or ""
         ).strip()
         if not requested_workspace_root:
-            await self._send_event(AgentEvent.error("Workspace path is required", recoverable=True))
+            from backend.ws.command_results import emit_command_error
+            await emit_command_error(self, "workspace.set", "Workspace path is required")
             return
         activated = await self._activate_workspace_path(
             requested_workspace_root,
             announce=True,
             wait_for_initialize=True,
+            error_command="workspace.set",
         )
         if not activated:
             return
@@ -1039,33 +1292,28 @@ class WebSocketSession(
         Returns:
             (success, updated_target_conversation_id)
         """
-        from backend.workspace.path_utils import normalize_project_import_path
+        from backend.services.workspace_service import (
+            parse_user_message_workspace_request,
+            workspace_path_needs_activation,
+        )
 
-        try:
-            requested_workspace_path = normalize_project_import_path(requested_workspace_root)
-        except Exception as exc:
-            error_event = AgentEvent.error(f"Invalid workspace path: {exc}", recoverable=True)
-            if target_conversation_id:
-                error_event.data["conversation_id"] = target_conversation_id
-            await self._send_event(error_event)
+        request = parse_user_message_workspace_request(
+            requested_workspace_root,
+            conversation_id=target_conversation_id,
+        )
+        if request.error_event is not None:
+            await self._send_event(request.error_event)
+            return False, target_conversation_id
+        requested_workspace_path = request.project_path
+        if requested_workspace_path is None:
             return False, target_conversation_id
 
-        if not requested_workspace_path.exists() or not requested_workspace_path.is_dir():
-            error_event = AgentEvent.error(
-                f"Workspace does not exist: {requested_workspace_root}",
-                recoverable=True,
-            )
-            if target_conversation_id:
-                error_event.data["conversation_id"] = target_conversation_id
-            await self._send_event(error_event)
-            return False, target_conversation_id
-
-        current_workspace_path = self._current_workspace_root().resolve()
-        if requested_workspace_path.resolve() != current_workspace_path:
+        if workspace_path_needs_activation(requested_workspace_path, self._current_workspace_root()):
             activated = await self._activate_workspace_path(
                 str(requested_workspace_path),
                 announce=False,
                 wait_for_initialize=True,
+                error_command=None,
             )
             if not activated:
                 return False, target_conversation_id
@@ -1164,6 +1412,29 @@ class WebSocketSession(
                 for key in ("primaryFile", "primary_file", "activeTabPath", "active_tab_path")
                 if str(command.data.get(key) or "").strip()
             }
+            for source_key, target_key in (
+                ("agent_mode", "agent_mode"),
+                ("agentMode", "agent_mode"),
+                ("swarm_mode", "swarm_mode"),
+                ("swarmMode", "swarm_mode"),
+                ("agent_role", "agent_role"),
+                ("agentRole", "agent_role"),
+            ):
+                value = str(command.data.get(source_key) or "").strip()
+                if value:
+                    message_metadata[target_key] = value
+            if any(
+                str(command.data.get(key) or "").strip().lower() in {"1", "true", "yes", "on", "enabled"}
+                for key in ("coordinator", "coordinator_mode", "coordinatorMode")
+            ):
+                message_metadata["coordinator"] = True
+            assistant_message_id = str(
+                command.data.get("assistant_message_id")
+                or command.data.get("assistantMessageId")
+                or ""
+            ).strip() or f"assistant_{uuid.uuid4().hex}"
+            message_metadata["assistant_message_id"] = assistant_message_id
+            command.data["assistant_message_id"] = assistant_message_id
 
             stripped = content.lstrip()
             if stripped.startswith("/") and not stripped.startswith("//"):
@@ -1191,21 +1462,48 @@ class WebSocketSession(
                             str(target_conversation_id),
                             requested_permission_mode,
                         )
-                running_for_target = self._conversation_run_tasks.get(target_conversation_id)
-                if running_for_target and not running_for_target.done():
+                queued_dispatch = bool(command.data.pop("_queued_user_message_dispatch", False))
+                running_for_target = self._running_agent_task_for(target_conversation_id)
+                if (running_for_target or self._run_manager.is_queue_dispatching(target_conversation_id)) and not queued_dispatch:
+                    queued_command = UserCommand(
+                        type="user_message",
+                        data={
+                            **command.data,
+                            "content": content,
+                            "conversation_id": target_conversation_id,
+                            **({"assistant_message_id": assistant_message_id} if assistant_message_id else {}),
+                        },
+                    )
+                    position = self._run_manager.enqueue_user_message(target_conversation_id, queued_command)
+                    if position <= 0:
+                        await self._send_event(
+                            AgentEvent.user_message_queue_updated(
+                                status="cancelled",
+                                conversation_id=target_conversation_id,
+                                message_id=assistant_message_id,
+                                user_message_id=str(command.data.get("user_message_id") or ""),
+                                reason="queue_full",
+                            )
+                        )
+                        error = AgentEvent.error(
+                            "This conversation already has 20 queued messages. Wait for one to start or cancel a queued message.",
+                            recoverable=True,
+                            error_type="rate_limit",
+                        )
+                        error.data.update({
+                            "error_code": "agent.queue_full",
+                            "conversation_id": target_conversation_id,
+                            **({"message_id": assistant_message_id} if assistant_message_id else {}),
+                        })
+                        await self._send_event(error)
+                        return
                     await self._send_event(
-                        AgentEvent(
-                            type="error",
-                            data={
-                                "message": (
-                                    "A response is already running in this conversation. "
-                                    "Please wait, approve/reject the pending tool request, or stop it before sending another message."
-                                ),
-                                "recoverable": True,
-                                "error_type": "tool",
-                                "error_code": "agent.busy",
-                                "conversation_id": target_conversation_id,
-                            },
+                        AgentEvent.user_message_queue_updated(
+                            status="queued",
+                            conversation_id=target_conversation_id,
+                            message_id=assistant_message_id,
+                            user_message_id=str(command.data.get("user_message_id") or ""),
+                            position=position,
                         )
                     )
                     return
@@ -1229,22 +1527,27 @@ class WebSocketSession(
                             error_event
                         )
                         return
-                managed_run = self.task_manager.create(
-                    "agent.run",
-                    self._run_agent(
-                        content,
-                        attachments=attachments,
-                        conversation_id=target_conversation_id,
-                        metadata=message_metadata,
-                    ),
+                run_cancel_event = asyncio.Event()
+                event_generation_token = self._event_connection_generation.set(None)
+                try:
+                    managed_run = self.task_manager.create(
+                        "agent.run",
+                        self._run_agent(
+                            content,
+                            attachments=attachments,
+                            conversation_id=target_conversation_id,
+                            metadata=message_metadata,
+                            cancel_event=run_cancel_event,
+                        ),
+                    )
+                finally:
+                    self._event_connection_generation.reset(event_generation_token)
+                self._register_agent_run(
+                    conversation_id=target_conversation_id,
+                    task=managed_run.task,
+                    task_id=managed_run.id,
+                    cancel_event=run_cancel_event,
                 )
-                if target_conversation_id:
-                    self._conversation_run_tasks[target_conversation_id] = managed_run.task
-                    self._conversation_run_task_ids[target_conversation_id] = managed_run.id
-                if target_conversation_id == self.active_conversation_id:
-                    self._active_run_task = managed_run.task
-                    self._active_task_id = managed_run.id
-                self._schedule_task_runtime_update()
 
                 async def _wait_and_cleanup():
                     try:
@@ -1265,19 +1568,18 @@ class WebSocketSession(
                             error_event
                         )
                     finally:
-                        if target_conversation_id and self._conversation_run_tasks.get(target_conversation_id) is managed_run.task:
-                            self._conversation_run_tasks.pop(target_conversation_id, None)
-                        if target_conversation_id and self._conversation_run_task_ids.get(target_conversation_id) == managed_run.id:
-                            self._conversation_run_task_ids.pop(target_conversation_id, None)
-                        # Clean up conversation run lock
-                        self._conversation_run_locks.pop(target_conversation_id, None)
-                        if self._active_run_task is managed_run.task:
-                            self._active_run_task = None
-                        if self._active_task_id == managed_run.id:
-                            self._active_task_id = None
-                        self._schedule_task_runtime_update()
+                        self._cleanup_agent_run(
+                            conversation_id=target_conversation_id,
+                            task=managed_run.task,
+                            task_id=managed_run.id,
+                            cancel_event=run_cancel_event,
+                        )
 
-                asyncio.create_task(_wait_and_cleanup())
+                event_generation_token = self._event_connection_generation.set(None)
+                try:
+                    asyncio.create_task(_wait_and_cleanup())
+                finally:
+                    self._event_connection_generation.reset(event_generation_token)
             return
 
         if command.type == "approval":
@@ -1298,9 +1600,8 @@ class WebSocketSession(
 
         handled = await self.command_registry.dispatch(command.type, command.data)
         if not handled:
-            await self._send_event(
-                AgentEvent.error(f"Unsupported command '{command.type}'", recoverable=True, error_type="tool")
-            )
+            from backend.ws.command_results import emit_command_error
+            await emit_command_error(self, command.type, f"Unsupported command '{command.type}'")
 
 
     def _resolve_event_connection_generation(self) -> int | None:
@@ -1343,17 +1644,36 @@ class WebSocketSession(
         log_context: str,
     ) -> bool:
         generation = self._resolve_event_connection_generation() if connection_generation is None else connection_generation
-        if not self._can_send_for_generation(generation):
-            logger.debug(
-                "Skipping %s for stale or disconnected websocket in session %s",
-                log_context,
-                self.session_id,
-            )
-            return False
-
+        persist_task: asyncio.Task[None] | None = None
         try:
             async with self._ws_send_lock:
-                await self.ws.send_json(self._envelope_ws_payload(payload))
+                # Allocate, stage and send under one lock so sequence, in-memory
+                # replay order and wire order cannot diverge. Disk persistence is
+                # chained separately; a slow filesystem must not hold up live or
+                # terminal websocket events.
+                enveloped = self._envelope_ws_payload(payload)
+                if self._is_replayable_ws_payload(enveloped):
+                    replay_payload, rewrite_events = self._stage_ws_event(enveloped)
+                    persist_task = asyncio.create_task(
+                        self._persist_ws_event_after(
+                            self._ws_event_persist_tail,
+                            replay_payload,
+                            rewrite_events,
+                        )
+                    )
+                    self._ws_event_persist_tail = persist_task
+                if not self._can_send_for_generation(generation):
+                    if self._has_active_run():
+                        self._events_dropped_during_disconnect = True
+                    logger.debug(
+                        "Skipping %s for stale or disconnected websocket in session %s",
+                        log_context,
+                        self.session_id,
+                    )
+                    return False
+                await self.ws.send_json(enveloped)
+            if persist_task is not None:
+                await asyncio.shield(persist_task)
             return True
         except (AssertionError, RuntimeError) as exc:
             logger.debug(
@@ -1365,6 +1685,8 @@ class WebSocketSession(
             return False
         except Exception as exc:
             if self._is_expected_disconnect_exception(exc):
+                if self._has_active_run():
+                    self._events_dropped_during_disconnect = True
                 logger.debug(
                     "Dropping %s after websocket disconnect in session %s: %s",
                     log_context,
@@ -1378,10 +1700,109 @@ class WebSocketSession(
         self._ws_event_seq += 1
         seq = self._ws_event_seq
         enveloped = dict(payload)
-        enveloped.setdefault("seq", seq)
+        # Replay uses one transport-owned, session-global sequence. Turn-local
+        # envelope sequences reset for every query and cannot be high-water marks.
+        enveloped["seq"] = seq
         enveloped.setdefault("event_id", f"{self.session_id}:{self._event_instance_id}:{seq}")
         enveloped.setdefault("timestamp", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
         return enveloped
+
+    @staticmethod
+    def _is_replayable_ws_payload(payload: dict[str, Any]) -> bool:
+        event_type = str(payload.get("type") or "").strip()
+        if not event_type or event_type in NON_REPLAYABLE_WS_EVENT_TYPES:
+            return False
+        if event_type.startswith("session."):
+            return False
+        return bool(str(payload.get("conversation_id") or "").strip())
+
+    def _stage_ws_event(
+        self,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]] | None]:
+        replay_payload = sanitize_ws_replay_payload(payload)
+        self._ws_event_log.append(replay_payload)
+        rewrite_events: list[dict[str, Any]] | None = None
+        if len(self._ws_event_log) > WS_EVENT_REPLAY_MAX:
+            del self._ws_event_log[: len(self._ws_event_log) - WS_EVENT_REPLAY_MAX]
+            rewrite_events = [dict(event) for event in self._ws_event_log]
+        return replay_payload, rewrite_events
+
+    async def _persist_ws_event_after(
+        self,
+        previous: asyncio.Task[None] | None,
+        replay_payload: dict[str, Any],
+        rewrite_events: list[dict[str, Any]] | None,
+    ) -> None:
+        if previous is not None:
+            try:
+                await asyncio.shield(previous)
+            except asyncio.CancelledError:
+                pass
+        try:
+            if rewrite_events is not None:
+                await asyncio.to_thread(self._ws_event_store.rewrite, rewrite_events)
+            else:
+                await asyncio.to_thread(self._ws_event_store.append, replay_payload)
+        except Exception as exc:
+            logger.debug("Failed to persist websocket replay event for session %s: %s", self.session_id, exc)
+
+    @staticmethod
+    def _max_replay_event_seq(events: list[dict[str, Any]]) -> int:
+        max_seq = 0
+        for payload in events:
+            try:
+                seq = int(payload.get("seq") or 0)
+            except (TypeError, ValueError):
+                continue
+            max_seq = max(max_seq, seq)
+        return max_seq
+
+    def _replayable_events_after(self, last_seq: int) -> list[dict[str, Any]]:
+        if last_seq <= 0:
+            return []
+        events: list[dict[str, Any]] = []
+        for payload in self._ws_event_log:
+            try:
+                seq = int(payload.get("seq") or 0)
+            except (TypeError, ValueError):
+                continue
+            if seq > last_seq:
+                events.append(dict(payload))
+        return events
+
+    def _event_log_has_gap_after(self, last_seq: int) -> bool:
+        if last_seq <= 0 or last_seq >= self._ws_event_seq:
+            return False
+        if not self._ws_event_log:
+            return True
+        try:
+            first_seq = int(self._ws_event_log[0].get("seq") or 0)
+        except (TypeError, ValueError):
+            return True
+        return first_seq > last_seq + 1
+
+    async def _replay_missed_events(
+        self,
+        last_seq: int,
+        *,
+        events: list[dict[str, Any]] | None = None,
+        current_seq: int | None = None,
+    ) -> int:
+        events = self._replayable_events_after(last_seq) if events is None else [dict(event) for event in events]
+        if not events:
+            return 0
+        sent = await self._send_ws_payload(
+            {
+                "type": "session.replay",
+                "last_seq": last_seq,
+                "current_seq": self._ws_event_seq if current_seq is None else current_seq,
+                "replayed_events": len(events),
+                "events": events,
+            },
+            log_context="session.replay",
+        )
+        return len(events) if sent else 0
 
     async def _send_conversation_list(self) -> None:
         conversations = [item.to_dict() for item in self.conversation_repo.list_conversations()]
@@ -1422,6 +1843,11 @@ class WebSocketSession(
         payload = self._build_ws_payload(event)
         if target_conversation_id:
             payload.setdefault("conversation_id", target_conversation_id)
+            if event.type in _TURN_MESSAGE_SCOPED_EVENT_TYPES:
+                stream_state = getattr(self, "_conversation_streams", {}).get(target_conversation_id)
+                message_id = str((stream_state or {}).get("message_id") or "").strip()
+                if message_id:
+                    payload.setdefault("message_id", message_id)
         if event.type in {"approval_request", "ask_user"}:
             request_id = str(
                 payload.get("request_id")
@@ -1433,7 +1859,13 @@ class WebSocketSession(
             if request_id:
                 self._pending_approval_payloads[request_id] = dict(payload)
 
+        await self._run_notification_hook_for_event(event, payload)
         await self._send_ws_payload(payload, log_context=f"event:{event.type}")
+
+    async def _run_notification_hook_for_event(self, event: AgentEvent, payload: dict[str, Any]) -> None:
+        from backend.hooks.runtime import run_notification_hook_for_event
+
+        await run_notification_hook_for_event(event_type=event.type, payload=payload)
 
     def _build_ws_payload(self, event: AgentEvent) -> dict[str, Any]:
         if event.type == "approval_request":
@@ -1478,7 +1910,7 @@ class WebSocketManager:
         memory_manager: Any | None = None,
         vector_memory: Any | None = None,
     ) -> tuple[WebSocketSession, int]:
-        await websocket.accept()
+        await websocket.accept(subprotocol=_websocket_accept_subprotocol(websocket))
 
         requested_session_id = (websocket.query_params.get("session_id") or "").strip()
         use_control_protocol = uses_control_protocol(websocket.query_params.get("protocol"))
@@ -1539,37 +1971,37 @@ class WebSocketManager:
         session._is_connected = False
         _invalidate_runtime_status_cache()
 
-        # Immediately cancel pending approvals so the agent loop
-        # is not blocked for up to 5 minutes waiting for a response
-        # from a disconnected client.
-        if hasattr(session, "_cancel_pending_approvals"):
-            try:
-                cancel_result = session._cancel_pending_approvals(reason="websocket_disconnect")
-                if asyncio.iscoroutine(cancel_result):
-                    cancel_task = asyncio.create_task(cancel_result)
-
-                    def _log_cancel_error(task: asyncio.Task) -> None:
-                        try:
-                            task.result()
-                        except asyncio.CancelledError:
-                            pass
-                        except Exception:
-                            logger.debug("Error cancelling approvals for %s on disconnect", session_id)
-
-                    cancel_task.add_done_callback(_log_cancel_error)
-            except Exception:
-                logger.debug("Error cancelling approvals for %s on disconnect", session_id)
-
         async def delayed_cleanup():
             try:
                 await asyncio.sleep(30.0)
                 if session_id in self._sessions and self._sessions[session_id] is session:
-                    # Cancel active agent run to stop consuming LLM tokens.
-                    active_task = getattr(session, "_active_run_task", None)
-                    if active_task and not active_task.done():
-                        active_task.cancel()
+                    # Preserve pending approvals during the reconnect grace
+                    # period. A successfully reconnected client receives them
+                    # again through _reemit_pending_state. Only reject them once
+                    # the session is genuinely being torn down.
+                    if hasattr(session, "_cancel_pending_approvals"):
+                        try:
+                            await session._cancel_pending_approvals(reason="websocket_disconnect_timeout")
+                        except Exception:
+                            logger.debug("Error cancelling approvals for %s after disconnect timeout", session_id)
+                    # Cancel all agent runs owned by this session to stop
+                    # background conversations from consuming tokens or tools.
+                    session._run_manager.clear_all_user_message_queues()
+                    cancelled = False
+                    cancel_runs = getattr(session, "_cancel_agent_runs", None)
+                    if callable(cancel_runs):
+                        cancelled = await cancel_runs(reason="websocket_disconnect")
+                    else:
+                        active_task = getattr(session, "_active_run_task", None)
+                        if active_task and not active_task.done():
+                            active_cancel_event = getattr(session, "_active_run_cancel_event", None)
+                            if isinstance(active_cancel_event, asyncio.Event):
+                                active_cancel_event.set()
+                            active_task.cancel()
+                            cancelled = True
+                    if cancelled:
                         logger.info(
-                            "Cancelled active agent task for session %s after disconnect timeout",
+                            "Cancelled agent task(s) for session %s after disconnect timeout",
                             session_id,
                         )
 
@@ -1584,6 +2016,10 @@ class WebSocketManager:
                         await session.terminal_manager.destroy_all()
                     if hasattr(session, "background_manager"):
                         await session.background_manager.shutdown()
+
+                    from backend.hooks.runtime import run_session_end_hook
+
+                    await run_session_end_hook(session_id=session_id, reason="disconnect_timeout")
 
                     self._sessions.pop(session_id, None)
                     logger.info("Session %s cleaned up after disconnect timeout", session_id)
@@ -1648,6 +2084,9 @@ class WebSocketManager:
 
             active_task = getattr(session, "_active_run_task", None)
             if active_task and not active_task.done():
+                active_cancel_event = getattr(session, "_active_run_cancel_event", None)
+                if isinstance(active_cancel_event, asyncio.Event):
+                    active_cancel_event.set()
                 active_task.cancel()
 
             workspace_context_task = getattr(session, "_workspace_context_task", None)

@@ -50,6 +50,11 @@ export type {
   SubagentEventEvent,
   SubagentProgressEvent,
   SubagentDoneEvent,
+  RuntimeSpanEvent,
+  StreamEventEvent,
+  RateLimitEvent,
+  SessionStateEvent,
+  ToolUseSummaryEvent,
   CitationAddEvent,
   ArtifactPreviewEvent,
   InspectorUpdateEvent,
@@ -281,6 +286,11 @@ export interface UntypedServerEvent {
     | "subagent.event"
     | "subagent.progress"
     | "subagent.done"
+    | "runtime.span"
+    | "stream_event"
+    | "rate_limit"
+    | "session.state_changed"
+    | "tool_use_summary"
     | "verification.started"
     | "verification.result"
     | "citation.add"
@@ -422,6 +432,11 @@ import type {
   SubagentEventEvent,
   SubagentProgressEvent,
   SubagentDoneEvent,
+  RuntimeSpanEvent,
+  StreamEventEvent,
+  RateLimitEvent,
+  SessionStateEvent,
+  ToolUseSummaryEvent,
   CitationAddEvent,
   ArtifactPreviewEvent,
   InspectorUpdateEvent,
@@ -532,6 +547,11 @@ type ServerEventPayload =
   | SubagentEventEvent
   | SubagentProgressEvent
   | SubagentDoneEvent
+  | RuntimeSpanEvent
+  | StreamEventEvent
+  | RateLimitEvent
+  | SessionStateEvent
+  | ToolUseSummaryEvent
   | CitationAddEvent
   | ArtifactPreviewEvent
   | InspectorUpdateEvent
@@ -756,6 +776,11 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   "subagent.done",
   "verification.started",
   "verification.result",
+  "runtime.span",
+  "stream_event",
+  "rate_limit",
+  "session.state_changed",
+  "tool_use_summary",
   "citation.add",
   "inspector.update",
   "plan_step_updated",
@@ -913,6 +938,7 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "agent.resume",
   "verification.run",
   "subagent.cancel",
+  "subagent.status",
   "inspector.focus",
   // Skills / commands catalog
   "skills.list",

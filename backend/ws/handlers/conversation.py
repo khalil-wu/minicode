@@ -1,77 +1,69 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
-from backend.agent.message import AgentEvent
-from backend.conversations.models import DEFAULT_CONVERSATION_PERMISSION_MODE, utc_now_iso
 from backend.ws.conversation_errors import emit_conversation_not_found
-from backend.ws.utils import (
-    normalize_permission_level,
-    normalize_permission_mode,
-    normalize_permission_overrides,
-    normalize_tool_patterns,
-    permission_level_to_token,
-    serialize_permission_overrides,
-)
-
 if TYPE_CHECKING:
     from backend.ws.handler import WebSocketSession
 
 logger = logging.getLogger(__name__)
 
 
+async def _stop_conversation_run(session: "WebSocketSession", conversation_id: str, *, reason: str) -> None:
+    """Finish cancellation before deleting or clearing persisted state."""
+    session._run_manager.clear_user_message_queue(conversation_id)
+    task = session._running_agent_task_for(conversation_id)
+    if task is None:
+        return
+    await session._cancel_agent_runs(conversation_id=conversation_id, reason=reason)
+    with suppress(asyncio.CancelledError, Exception):
+        await task
+
+
 async def handle_conversation_create(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    memory_mode = str(data.get("memory_mode", "none"))
-    git_isolated = bool(data.get("git_isolated") or data.get("gitIsolated"))
-    activate = not bool(data.get("side_chat") or data.get("sideChat"))
-    workspace_root = str(data.get("workspace_root") or data.get("workspaceRoot") or "").strip()
-    permission_mode = normalize_permission_mode(
-        str(data.get("permission_mode") or data.get("permissionMode") or DEFAULT_CONVERSATION_PERMISSION_MODE)
-    ) or DEFAULT_CONVERSATION_PERMISSION_MODE
-    if git_isolated and not workspace_root:
-        await session._send_event(
-            AgentEvent.error(
-                "Open a workspace folder before creating an isolated Git session.",
-                recoverable=True,
-                error_type="workspace",
-                error_code="workspace_required",
-            )
-        )
+    from backend.services.conversation_payload_service import parse_conversation_create_request
+
+    request = parse_conversation_create_request(data)
+    if request.workspace_required_error is not None:
+        from backend.ws.command_results import emit_command_error
+        await emit_command_error(session, "conversation.create", request.workspace_required_error)
         return True
-    base_summary, snapshot, inherited_facts = session._build_inherited_snapshot(memory_mode)
+    base_summary, snapshot, inherited_facts = session._build_inherited_snapshot(request.memory_mode)
     created = session.conversation_repo.create_conversation(
-        conversation_id=str(data.get("conversation_id") or data.get("conversationId") or "").strip() or None,
-        title=str(data.get("title") or "New chat"),
-        memory_mode=memory_mode,
-        permission_mode=permission_mode,
+        conversation_id=request.conversation_id,
+        title=request.title,
+        memory_mode=request.memory_mode,
+        permission_mode=request.permission_mode,
         summary=base_summary,
         inherited_facts=inherited_facts,
         context_snapshot=snapshot,
-        workspace_root=workspace_root,
-        git_isolated=git_isolated,
+        workspace_root=request.workspace_root,
+        git_isolated=request.git_isolated,
     )
-    if git_isolated:
+    if request.git_isolated:
         created = await session._create_isolated_conversation_worktree(created) or created
-    elif workspace_root:
+    elif request.workspace_root:
         created = session.conversation_repo.update_workspace_binding(
             created.id,
-            workspace_root=workspace_root,
-            git_branch=session._git_branch_for(Path(workspace_root)),
+            workspace_root=request.workspace_root,
+            git_branch=session._git_branch_for(Path(request.workspace_root)),
             worktree_path="",
             git_isolated=False,
         ) or created
-    if activate:
+    if request.activate:
         session.active_conversation_id = created.id
-    if activate:
-        if workspace_root:
+    if request.activate:
+        if request.workspace_root:
             await session._switch_workspace_for_conversation(created, announce=False)
         else:
             clear_runtime = getattr(session, "_clear_workspace_runtime", None)
             if callable(clear_runtime):
                 clear_runtime()
-    if activate:
+    if request.activate:
         session._load_active_conversation_snapshot(created.id, created.context_snapshot)
         session._sync_permission_mode_with_active_conversation(source="conversation.create")
     await session._send_conversation_list()
@@ -79,6 +71,8 @@ async def handle_conversation_create(session: "WebSocketSession", data: dict[str
 
 
 async def handle_conversation_switch(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    from backend.services.conversation_payload_service import build_conversation_switched_payload
+
     conversation_id = str(data.get("conversation_id", ""))
     target = session.conversation_repo.get_conversation(conversation_id)
     if target is None:
@@ -98,13 +92,11 @@ async def handle_conversation_switch(session: "WebSocketSession", data: dict[str
         list(target.context_snapshot.keys()) if target.context_snapshot else [],
     )
     await session._send_ws_payload(
-        {
-            "type": "conversation.switched",
-            "conversation_id": target.id,
-            "conversation": target.to_dict(),
-            "is_hydrating": is_hydrating,
-            "session": session.runtime_snapshot(),
-        },
+        build_conversation_switched_payload(
+            target,
+            is_hydrating=is_hydrating,
+            runtime_snapshot=session.runtime_snapshot(),
+        ),
         log_context="conversation.switched",
     )
     if data.get("_reemit_pending", True):
@@ -124,24 +116,9 @@ def _clear_active_conversation_runtime(session: "WebSocketSession") -> None:
 
 
 async def _activate_conversation_or_blank(session: "WebSocketSession", preferred_id: str | None = None) -> None:
-    target = None
-    if preferred_id:
-        candidate = session.conversation_repo.get_conversation(preferred_id)
-        if candidate is not None and not getattr(candidate, "archived", False):
-            target = candidate
-        else:
-            _clear_active_conversation_runtime(session)
-            return
+    from backend.services.conversation_payload_service import choose_conversation_activation_target
 
-    if target is None:
-        conversations = [
-            item
-            for item in session.conversation_repo.list_conversations()
-            if not getattr(item, "archived", False)
-        ]
-        if conversations:
-            target = session.conversation_repo.get_conversation(conversations[0].id)
-
+    target = choose_conversation_activation_target(session.conversation_repo, preferred_id)
     if target is None:
         _clear_active_conversation_runtime(session)
         return
@@ -165,11 +142,12 @@ async def handle_conversation_list(session: "WebSocketSession", data: dict[str, 
 
 
 async def handle_conversation_rename(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    conversation_id = str(data.get("conversation_id", ""))
-    title = str(data.get("title", ""))
-    updated = session.conversation_repo.rename_conversation(conversation_id, title)
+    from backend.services.conversation_payload_service import parse_conversation_rename_request
+
+    request = parse_conversation_rename_request(data)
+    updated = session.conversation_repo.rename_conversation(request.conversation_id, request.title)
     if updated is None:
-        await emit_conversation_not_found(session, conversation_id)
+        await emit_conversation_not_found(session, request.conversation_id)
         return True
     await session._send_conversation_list()
     return True
@@ -198,25 +176,33 @@ async def handle_conversation_unarchive(session: "WebSocketSession", data: dict[
 
 
 async def handle_conversation_delete(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    conversation_id = str(data.get("conversation_id", ""))
-    cleanup_worktree = bool(data.get("cleanup_worktree") or data.get("cleanupWorktree"))
-    force_cleanup = bool(data.get("force"))
-    target = session.conversation_repo.get_conversation(conversation_id)
-    if cleanup_worktree and target is not None:
-        cleanup = await _cleanup_conversation_worktree(session, target, force=force_cleanup)
+    from backend.services.conversation_payload_service import (
+        build_worktree_cleanup_force_required_outcome,
+        parse_conversation_delete_request,
+    )
+
+    request = parse_conversation_delete_request(data)
+    target = session.conversation_repo.get_conversation(request.conversation_id)
+    if request.cleanup_worktree and target is not None:
+        cleanup = await _cleanup_conversation_worktree(session, target, force=request.force_cleanup)
         if not cleanup.get("removed") and cleanup.get("needs_force"):
+            outcome = build_worktree_cleanup_force_required_outcome(cleanup)
             await session._emit_command_result(
-                "conversation.worktree.cleanup",
-                str(cleanup.get("error") or "Worktree has local changes; force is required"),
-                level="warning",
-                data=cleanup,
+                outcome.command,
+                outcome.message,
+                level=outcome.level,
+                data=outcome.data,
             )
             return True
-    deleted = session.conversation_repo.delete_conversation(conversation_id)
-    if not deleted:
-        await emit_conversation_not_found(session, conversation_id)
+    if target is None:
+        await emit_conversation_not_found(session, request.conversation_id)
         return True
-    if session.active_conversation_id == conversation_id:
+    await _stop_conversation_run(session, request.conversation_id, reason="conversation_deleted")
+    deleted = session.conversation_repo.delete_conversation(request.conversation_id)
+    if not deleted:
+        await emit_conversation_not_found(session, request.conversation_id)
+        return True
+    if session.active_conversation_id == request.conversation_id:
         await _activate_conversation_or_blank(session)
     await session._send_conversation_list()
     return True
@@ -229,19 +215,22 @@ async def handle_conversation_worktree_cleanup(session: "WebSocketSession", data
         await emit_conversation_not_found(session, conversation_id)
         return True
 
+    from backend.services.conversation_payload_service import build_worktree_cleanup_outcome
+
     cleanup = await _cleanup_conversation_worktree(session, target, force=bool(data.get("force")))
-    level = "success" if cleanup.get("removed") else "warning"
+    outcome = build_worktree_cleanup_outcome(cleanup)
     await session._emit_command_result(
-        "conversation.worktree.cleanup",
-        str(cleanup.get("message") or cleanup.get("error") or "Worktree cleanup finished"),
-        level=level,
-        data=cleanup,
+        outcome.command,
+        outcome.message,
+        level=outcome.level,
+        data=outcome.data,
     )
     if cleanup.get("removed"):
+        main_workspace_root = str(cleanup.get("workspace_root") or "").strip()
         updated = session.conversation_repo.update_workspace_binding(
             target.id,
-            workspace_root=str(getattr(target, "workspace_root", "") or ""),
-            git_branch=str(getattr(target, "git_branch", "") or ""),
+            workspace_root=main_workspace_root,
+            git_branch="",
             worktree_path="",
             git_isolated=False,
         )
@@ -250,101 +239,248 @@ async def handle_conversation_worktree_cleanup(session: "WebSocketSession", data
     return True
 
 
-async def handle_conversation_clear(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    conversation_id = str(data.get("conversation_id") or session.active_conversation_id or "").strip()
-    if not conversation_id:
-        return False
+async def handle_conversation_worktree_handoff_preflight(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    from backend.services.conversation_worktree_handoff_service import build_handoff_preflight
+
+    conversation_id = str(data.get("conversation_id") or "").strip()
     target = session.conversation_repo.get_conversation(conversation_id)
     if target is None:
-        return False
-    session.conversation_repo.replace_transcript(conversation_id, [])
-    session.conversation_repo.update_summary(conversation_id, "")
-    session.conversation_repo.update_facts(conversation_id, local_facts=[])
-    session.conversation_repo.save_context_snapshot(conversation_id, {})
-    session.context_builder.clear()
-    session._load_active_conversation_snapshot(conversation_id, {})
-    await session._send_conversation_list()
-    await session._send_ws_payload(
-        {
-            "type": "conversation.switched",
-            "conversation_id": conversation_id,
-            "conversation": session.conversation_repo.get_conversation(conversation_id).to_dict(),
-            "is_hydrating": False,
-            "session": session.runtime_snapshot(),
-        },
-        log_context="conversation.switched",
+        await emit_conversation_not_found(session, conversation_id)
+        return True
+    preflight = build_handoff_preflight(
+        target,
+        target=str(data.get("target") or ("local" if getattr(target, "git_isolated", False) else "worktree")),
+        conversation_repo=session.conversation_repo,
+        main_worktree_root=session._main_worktree_root,
+        has_running_turn=session._running_agent_task_for(conversation_id) is not None,
     )
-    await session._emit_command_result("clear", "Conversation history cleared.")
+    await session._emit_command_result(
+        "conversation.worktree.handoff.preflight",
+        "Workspace handoff is ready." if preflight["allowed"] else "Workspace handoff is blocked.",
+        level="success" if preflight["allowed"] else "warning",
+        data=preflight,
+    )
+    return True
+
+
+async def handle_conversation_worktree_handoff_execute(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    from backend.services.conversation_payload_service import create_isolated_worktree_binding
+    from backend.services.conversation_worktree_handoff_service import build_handoff_preflight, switch_main_checkout
+    from backend.workspace.worktree import WorktreeManager
+
+    conversation_id = str(data.get("conversation_id") or "").strip()
+    conversation = session.conversation_repo.get_conversation(conversation_id)
+    if conversation is None:
+        await emit_conversation_not_found(session, conversation_id)
+        return True
+    target_kind = str(data.get("target") or ("local" if getattr(conversation, "git_isolated", False) else "worktree"))
+    preflight = build_handoff_preflight(
+        conversation,
+        target=target_kind,
+        conversation_repo=session.conversation_repo,
+        main_worktree_root=session._main_worktree_root,
+        has_running_turn=session._running_agent_task_for(conversation_id) is not None,
+    )
+    if not preflight["allowed"] or str(data.get("fingerprint") or "") != preflight["fingerprint"]:
+        await session._emit_command_result(
+            "conversation.worktree.handoff.execute",
+            "Workspace changed after preflight; review the checks and try again.",
+            level="warning",
+            data={**preflight, "stale": True},
+        )
+        return True
+
+    if target_kind == "worktree":
+        creation = create_isolated_worktree_binding(
+            conversation,
+            current_workspace_root=session._current_workspace_root(),
+            main_worktree_root=session._main_worktree_root,
+        )
+        if not creation.created:
+            await session._emit_command_result("conversation.worktree.handoff.execute", "Failed to create protected workspace.", level="error", data=preflight)
+            return True
+        updated = session.conversation_repo.update_workspace_binding(
+            conversation_id,
+            workspace_root=creation.workspace_root,
+            git_branch=creation.git_branch,
+            worktree_path=creation.worktree_path,
+            git_isolated=True,
+        )
+    else:
+        source_path = Path(str(getattr(conversation, "worktree_path", "") or "")).resolve()
+        base_root = session._main_worktree_root(source_path)
+        branch = str(getattr(conversation, "git_branch", "") or "").strip()
+        if session.active_conversation_id == conversation_id:
+            clear_runtime = getattr(session, "_clear_workspace_runtime", None)
+            if callable(clear_runtime):
+                clear_runtime()
+        manager = WorktreeManager(base_root)
+        if not manager.remove_worktree(source_path, force=False):
+            await session._emit_command_result("conversation.worktree.handoff.execute", "Failed to remove the protected workspace.", level="error", data=preflight)
+            return True
+        switched, error = switch_main_checkout(base_root, branch)
+        if not switched:
+            manager.create_worktree(source_path, branch=branch, new_branch=False)
+            await session._emit_command_result("conversation.worktree.handoff.execute", f"Failed to switch the local checkout: {error}", level="error", data=preflight)
+            return True
+        updated = session.conversation_repo.update_workspace_binding(
+            conversation_id,
+            workspace_root=str(base_root),
+            git_branch=branch,
+            worktree_path="",
+            git_isolated=False,
+        )
+
+    if updated is None:
+        await session._emit_command_result("conversation.worktree.handoff.execute", "Failed to update the conversation workspace binding.", level="error", data=preflight)
+        return True
+    if session.active_conversation_id == conversation_id:
+        await session._switch_workspace_for_conversation(updated, announce=True)
+    await session._send_conversation_list()
+    await session._emit_command_result(
+        "conversation.worktree.handoff.execute",
+        "Moved task to protected workspace." if target_kind == "worktree" else "Moved task to local checkout.",
+        data={**preflight, "completed": True, "workspace_root": str(getattr(updated, "workspace_root", "") or ""), "worktree_path": str(getattr(updated, "worktree_path", "") or ""), "git_branch": str(getattr(updated, "git_branch", "") or ""), "git_isolated": bool(getattr(updated, "git_isolated", False))},
+    )
+    return True
+
+
+async def handle_conversation_clear(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    from backend.services.conversation_payload_service import (
+        build_conversation_clear_outcome,
+        build_conversation_switched_payload,
+        parse_conversation_clear_request,
+    )
+
+    request = parse_conversation_clear_request(data, active_conversation_id=str(session.active_conversation_id or ""))
+    if not request.conversation_id:
+        return False
+    target = session.conversation_repo.get_conversation(request.conversation_id)
+    if target is None:
+        return False
+    await _stop_conversation_run(session, request.conversation_id, reason="conversation_cleared")
+    session.conversation_repo.replace_transcript(request.conversation_id, [])
+    session.conversation_repo.update_summary(request.conversation_id, "")
+    session.conversation_repo.update_facts(request.conversation_id, local_facts=[])
+    session.conversation_repo.update_compaction(request.conversation_id, "clean", "")
+    session.conversation_repo.save_context_snapshot(request.conversation_id, {})
+    if request.conversation_id == session.active_conversation_id:
+        session.context_builder.clear()
+        session._load_active_conversation_snapshot(request.conversation_id, {})
+    await session._send_conversation_list()
+    if request.conversation_id == session.active_conversation_id:
+        await session._send_ws_payload(
+            build_conversation_switched_payload(
+                session.conversation_repo.get_conversation(request.conversation_id),
+                is_hydrating=False,
+                runtime_snapshot=session.runtime_snapshot(),
+            ),
+            log_context="conversation.switched",
+        )
+    outcome = build_conversation_clear_outcome()
+    await session._emit_command_result(outcome.command, outcome.message, level=outcome.level, data=outcome.data)
+    return True
+
+
+async def handle_conversation_truncate(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    from backend.services.conversation_payload_service import (
+        build_conversation_truncate_failed_outcome,
+        build_conversation_truncated_outcome,
+        parse_conversation_truncate_request,
+    )
+
+    request = parse_conversation_truncate_request(data, active_conversation_id=str(session.active_conversation_id or ""))
+    if request.error is not None:
+        outcome = request.error
+        await session._emit_command_result(
+            outcome.command,
+            outcome.message,
+            level=outcome.level,
+            data=outcome.data,
+        )
+        return True
+
+    target = session.conversation_repo.get_conversation(request.conversation_id)
+    if target is None:
+        await emit_conversation_not_found(session, request.conversation_id)
+        return True
+
+    updated = session.conversation_runtime.rewind_to_user_turn(
+        conversation=target,
+        retry_from_message_id=request.message_id,
+    )
+    if updated is None:
+        outcome = build_conversation_truncate_failed_outcome(
+            conversation_id=request.conversation_id,
+            message_id=request.message_id,
+        )
+        await session._emit_command_result(
+            outcome.command,
+            outcome.message,
+            level=outcome.level,
+            data=outcome.data,
+        )
+        return True
+
+    if request.conversation_id == session.active_conversation_id:
+        session._load_active_conversation_snapshot(updated.id, updated.context_snapshot)
+        session._sync_permission_mode_with_active_conversation(source="conversation.truncate")
+
+    await session._send_conversation_list()
+    outcome = build_conversation_truncated_outcome(updated, message_id=request.message_id)
+    await session._emit_command_result(
+        outcome.command,
+        outcome.message,
+        level=outcome.level,
+        data=outcome.data,
+    )
     return True
 
 
 async def handle_conversation_memory_mode_set(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    conversation_id = str(data.get("conversation_id") or session.active_conversation_id or "")
-    memory_mode = str(data.get("memory_mode", "none"))
-    updated = session.conversation_repo.update_memory_mode(conversation_id, memory_mode)
+    from backend.services.conversation_payload_service import parse_conversation_memory_mode_request
+
+    request = parse_conversation_memory_mode_request(data, active_conversation_id=str(session.active_conversation_id or ""))
+    updated = session.conversation_repo.update_memory_mode(request.conversation_id, request.memory_mode)
     if updated is not None:
         await session._send_conversation_list()
     return True
 
 
 async def handle_conversation_permission_mode_set(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    requested = normalize_permission_mode(str(data.get("mode") or data.get("permission_mode") or ""))
-    if requested is None:
-        await session._send_event(
-            AgentEvent.error(
-                "Invalid permission mode. Use confirm|auto|bypass. Legacy modes still accepted: default|plan|accept_edits",
-                recoverable=True,
-                error_type="tool",
-            )
-        )
+    from backend.services.conversation_permission_service import plan_permission_mode_update
+
+    plan = plan_permission_mode_update(data, active_conversation_id=str(session.active_conversation_id or ""))
+    if plan.error_event is not None:
+        from backend.ws.command_results import emit_command_error
+        await emit_command_error(session, "conversation.permission_mode.set", plan.error_event)
         return True
 
-    explicit_conversation_id = str(data.get("conversation_id") or "").strip()
-    source = str(data.get("source") or "websocket.command").strip() or "websocket.command"
-    if not explicit_conversation_id and not session.active_conversation_id:
-        if session._set_permission_context_mode(requested, source=source):
+    if plan.session_only:
+        if session._set_permission_context_mode(plan.requested, source=plan.source):
             await session._emit_permission_mode_updated()
             await session._send_task_runtime_update()
         await session._send_conversation_list()
         return True
-    conversation_id = str(explicit_conversation_id or session.active_conversation_id or "").strip()
-    if not conversation_id:
-        await session._send_event(
-            AgentEvent.error("No active conversation to update", recoverable=True, error_type="tool")
-        )
-        return True
 
-    updated = session.conversation_repo.update_permission_mode(conversation_id, requested)
+    updated = session.conversation_repo.update_permission_mode(plan.conversation_id, plan.requested)
     if updated is None:
-        await emit_conversation_not_found(session, conversation_id)
+        await emit_conversation_not_found(session, plan.conversation_id)
         return True
 
-    if conversation_id == session.active_conversation_id:
-        session._set_permission_context_mode(requested, source=source)
+    if plan.conversation_id == session.active_conversation_id:
+        session._set_permission_context_mode(plan.requested, source=plan.source)
         await session._emit_permission_mode_updated()
-        if requested == "bypass":
+        if plan.auto_approve_reason:
             await session._auto_approve_pending_tool_approvals(
-                reason="permission_mode_bypass",
-                conversation_id=conversation_id,
-            )
-        elif requested == "auto":
-            await session._auto_approve_pending_tool_approvals(
-                reason="permission_mode_auto",
-                conversation_id=conversation_id,
-                only_auto_allowed=True,
+                reason=plan.auto_approve_reason,
+                conversation_id=plan.conversation_id,
+                only_auto_allowed=plan.only_auto_allowed,
             )
         await session._send_task_runtime_update()
 
     await session._send_conversation_list()
     return True
-
-
-def _resolve_goal_target(session: "WebSocketSession", data: dict[str, Any]) -> tuple[str, Any | None]:
-    explicit_conversation_id = str(data.get("conversation_id") or "").strip()
-    conversation_id = str(explicit_conversation_id or session.active_conversation_id or "").strip()
-    if not conversation_id:
-        return "", None
-    return conversation_id, session.conversation_repo.get_conversation(conversation_id)
 
 
 async def _emit_goal_updated(
@@ -354,19 +490,22 @@ async def _emit_goal_updated(
     goal: dict[str, Any],
     source: str,
 ) -> None:
+    from backend.services.conversation_goal_service import build_goal_updated_payload
+
     await session._send_ws_payload(
-        {
-            "type": "goal.updated",
-            "conversation_id": conversation_id,
-            "goal": dict(goal or {}),
-            "source": source,
-        },
+        build_goal_updated_payload(conversation_id=conversation_id, goal=goal, source=source),
         log_context="goal.updated",
     )
 
 
 async def handle_conversation_goal_set(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    conversation_id, target = _resolve_goal_target(session, data)
+    from backend.services.conversation_goal_service import prepare_goal_action, resolve_goal_target
+
+    conversation_id, target = resolve_goal_target(
+        session.conversation_repo,
+        data,
+        active_conversation_id=str(session.active_conversation_id or ""),
+    )
     source = str(data.get("source") or "websocket.command").strip() or "websocket.command"
     if not conversation_id:
         await session._emit_command_result("goal", "No active conversation to update.", level="warning")
@@ -375,117 +514,55 @@ async def handle_conversation_goal_set(session: "WebSocketSession", data: dict[s
         await session._emit_command_result("goal", f"Conversation '{conversation_id}' not found.", level="error")
         return True
 
-    action = str(data.get("action") or "set").strip().lower()
     current_goal = dict(getattr(target, "goal", {}) or {})
-
-    if action in {"show", "status", "inspect"}:
+    action = prepare_goal_action(
+        data,
+        conversation_id=conversation_id,
+        current_goal=current_goal,
+        source=source,
+    )
+    if not action.should_update and (
+        action.event_scope == "always"
+        or (action.event_scope == "active" and conversation_id == session.active_conversation_id)
+    ):
         await _emit_goal_updated(
             session,
             conversation_id=conversation_id,
-            goal=current_goal,
+            goal=action.event_goal,
             source=source,
         )
-        if current_goal.get("text"):
-            await session._emit_command_result(
-                "goal",
-                f"Goal is {current_goal.get('status', 'active')}: {current_goal.get('text')}",
-                data={"conversation_id": conversation_id, "goal": current_goal},
-            )
-        else:
-            await session._emit_command_result(
-                "goal",
-                "No goal is set for this conversation.",
-                data={"conversation_id": conversation_id, "goal": {}},
-            )
-        return True
 
-    if action in {"clear", "delete", "reset"}:
-        updated = session.conversation_repo.update_goal(conversation_id, {})
+    if action.should_update:
+        updated = session.conversation_repo.update_goal(conversation_id, action.next_goal)
         if updated is None:
             await session._emit_command_result("goal", f"Conversation '{conversation_id}' not found.", level="error")
             return True
-        if conversation_id == session.active_conversation_id:
-            await _emit_goal_updated(session, conversation_id=conversation_id, goal={}, source=source)
-        await session._send_conversation_list()
-        await session._emit_command_result(
-            "goal",
-            "Cleared the conversation goal.",
-            data={"conversation_id": conversation_id, "goal": {}},
-        )
-        return True
-
-    if action in {"pause", "resume"}:
-        if not current_goal.get("text"):
-            await session._emit_command_result(
-                "goal",
-                "No goal is set for this conversation.",
-                level="warning",
-                data={"conversation_id": conversation_id, "goal": {}},
+        if action.event_scope == "active" and conversation_id == session.active_conversation_id:
+            await _emit_goal_updated(
+                session,
+                conversation_id=conversation_id,
+                goal=action.event_goal,
+                source=source,
             )
-            return True
-        next_goal = {
-            **current_goal,
-            "status": "paused" if action == "pause" else "active",
-            "updated_at": utc_now_iso(),
-            "source": source,
-        }
-        updated = session.conversation_repo.update_goal(conversation_id, next_goal)
-        if updated is None:
-            await session._emit_command_result("goal", f"Conversation '{conversation_id}' not found.", level="error")
-            return True
-        if conversation_id == session.active_conversation_id:
-            await _emit_goal_updated(session, conversation_id=conversation_id, goal=next_goal, source=source)
         await session._send_conversation_list()
-        await session._emit_command_result(
-            "goal",
-            f"Goal {next_goal['status']}.",
-            data={"conversation_id": conversation_id, "goal": next_goal},
-        )
-        return True
 
-    text = str(data.get("text") or data.get("goal") or "").strip()
-    if not text:
-        await session._emit_command_result(
-            "goal",
-            "Usage: /goal <target> | /goal pause | /goal resume | /goal clear",
-            level="warning",
-        )
-        return True
-
-    now = utc_now_iso()
-    next_goal = {
-        "id": str(current_goal.get("id") or f"goal_{conversation_id}"),
-        "text": text[:4000],
-        "status": "active",
-        "created_at": str(current_goal.get("created_at") or now),
-        "updated_at": now,
-        "source": source,
-    }
-    updated = session.conversation_repo.update_goal(conversation_id, next_goal)
-    if updated is None:
-        await session._emit_command_result("goal", f"Conversation '{conversation_id}' not found.", level="error")
-        return True
-    if conversation_id == session.active_conversation_id:
-        await _emit_goal_updated(session, conversation_id=conversation_id, goal=next_goal, source=source)
-    await session._send_conversation_list()
     await session._emit_command_result(
-        "goal",
-        "Updated the conversation goal.",
-        data={"conversation_id": conversation_id, "goal": next_goal},
+        action.outcome.command,
+        action.outcome.message,
+        level=action.outcome.level,
+        data=action.outcome.data,
     )
     return True
 
 
-def _resolve_permission_rule_target(session: "WebSocketSession", data: dict[str, Any]) -> tuple[str, Any | None]:
-    explicit_conversation_id = str(data.get("conversation_id") or "").strip()
-    conversation_id = str(explicit_conversation_id or session.active_conversation_id or "").strip()
-    if not conversation_id:
-        return "", None
-    return conversation_id, session.conversation_repo.get_conversation(conversation_id)
-
-
 async def handle_conversation_permission_rules_list(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    conversation_id, target = _resolve_permission_rule_target(session, data)
+    from backend.services.permission_rules_service import build_permission_rules_list_outcome, resolve_permission_rule_target
+
+    conversation_id, target = resolve_permission_rule_target(
+        session.conversation_repo,
+        data,
+        active_conversation_id=str(session.active_conversation_id or ""),
+    )
     if not conversation_id:
         await session._emit_command_result("permissions.rules.list", "No active conversation to inspect", level="warning")
         return True
@@ -496,21 +573,23 @@ async def handle_conversation_permission_rules_list(session: "WebSocketSession",
     source = str(data.get("source") or "websocket.command").strip() or "websocket.command"
     await session._emit_permission_rules_updated(conversation_id=conversation_id, source=source)
     rules = session._build_permission_rules_payload(conversation=target)
-    message = (
-        f"Permission rules: mode {rules['mode']} | "
-        f"session deny {len(rules['session_deny'])} | "
-        f"overrides {len(rules['session_overrides'])} | "
-        f"system deny {len(rules['system_deny'])}"
-    )
+    outcome = build_permission_rules_list_outcome(conversation_id, rules)
     await session._emit_command_result(
-        "permissions.rules.list", message,
-        data={"conversation_id": conversation_id, "rules": rules},
+        outcome.command,
+        outcome.message,
+        data=outcome.data,
     )
     return True
 
 
 async def handle_conversation_permission_rules_add(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    conversation_id, target = _resolve_permission_rule_target(session, data)
+    from backend.services.permission_rules_service import prepare_permission_rule_add, resolve_permission_rule_target
+
+    conversation_id, target = resolve_permission_rule_target(
+        session.conversation_repo,
+        data,
+        active_conversation_id=str(session.active_conversation_id or ""),
+    )
     if not conversation_id:
         await session._emit_command_result("permissions.rules.add", "No active conversation to update", level="warning")
         return True
@@ -518,46 +597,18 @@ async def handle_conversation_permission_rules_add(session: "WebSocketSession", 
         await session._emit_command_result("permissions.rules.add", f"Conversation '{conversation_id}' not found", level="error")
         return True
 
-    rule_kind = str(data.get("rule_kind") or data.get("kind") or "deny").strip().lower()
-    pattern = str(data.get("pattern") or "").strip()
-    if not pattern:
+    mutation = prepare_permission_rule_add(target, data, conversation_id=conversation_id)
+    if not mutation.should_update:
         await session._emit_command_result(
-            "permissions.rules.add",
-            "Pattern is required. Use /permissions rules add deny <pattern> or /permissions rules add override <pattern> <level>",
-            level="warning",
+            mutation.outcome.command,
+            mutation.outcome.message,
+            level=mutation.outcome.level,
+            data=mutation.outcome.data,
         )
         return True
 
-    deny_rules = normalize_tool_patterns(getattr(target, "permission_deny_rules", []))
-    overrides = normalize_permission_overrides(getattr(target, "permission_overrides", {}))
-    level = None
-    result_level = "success"
-
-    if rule_kind in {"deny", "block"}:
-        already_present = pattern in deny_rules
-        if not already_present:
-            deny_rules.append(pattern)
-        result_message = f"Added deny rule: {pattern}"
-        if already_present:
-            result_level = "info"
-            result_message = f"Deny rule already present: {pattern}"
-    elif rule_kind in {"override", "level"}:
-        level = normalize_permission_level(data.get("level"))
-        if level is None:
-            await session._emit_command_result("permissions.rules.add", "Invalid level. Use auto|confirm|diff|deny", level="warning")
-            return True
-        previous_level = overrides.get(pattern)
-        overrides[pattern] = level
-        result_message = f"Added override rule: {pattern} -> {permission_level_to_token(level)}"
-        if previous_level == level:
-            result_level = "info"
-            result_message = f"Override rule already present: {pattern} -> {permission_level_to_token(level)}"
-    else:
-        await session._emit_command_result("permissions.rules.add", "Invalid rule kind. Use deny or override", level="warning")
-        return True
-
     updated = session.conversation_repo.update_permission_rules(
-        conversation_id, deny_rules=deny_rules, overrides=serialize_permission_overrides(overrides),
+        conversation_id, deny_rules=mutation.deny_rules, overrides=mutation.serialized_overrides,
     )
     if updated is None:
         await session._emit_command_result("permissions.rules.add", f"Conversation '{conversation_id}' not found", level="error")
@@ -565,19 +616,31 @@ async def handle_conversation_permission_rules_add(session: "WebSocketSession", 
 
     source = str(data.get("source") or "websocket.command").strip() or "websocket.command"
     if conversation_id == session.active_conversation_id:
-        session._set_permission_context_rules(session_overrides=overrides, tool_deny_rules=deny_rules, source=source)
+        session._set_permission_context_rules(
+            session_overrides=mutation.overrides,
+            tool_deny_rules=mutation.deny_rules,
+            source=source,
+        )
         await session._send_task_runtime_update()
 
     await session._emit_permission_rules_updated(conversation_id=conversation_id, source=source)
-    payload: dict[str, Any] = {"conversation_id": conversation_id, "rule_kind": "override" if rule_kind in {"override", "level"} else "deny", "pattern": pattern}
-    if level is not None:
-        payload["level"] = permission_level_to_token(level)
-    await session._emit_command_result("permissions.rules.add", result_message, level=result_level, data=payload)
+    await session._emit_command_result(
+        mutation.outcome.command,
+        mutation.outcome.message,
+        level=mutation.outcome.level,
+        data=mutation.outcome.data,
+    )
     return True
 
 
 async def handle_conversation_permission_rules_remove(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    conversation_id, target = _resolve_permission_rule_target(session, data)
+    from backend.services.permission_rules_service import prepare_permission_rule_remove, resolve_permission_rule_target
+
+    conversation_id, target = resolve_permission_rule_target(
+        session.conversation_repo,
+        data,
+        active_conversation_id=str(session.active_conversation_id or ""),
+    )
     if not conversation_id:
         await session._emit_command_result("permissions.rules.remove", "No active conversation to update", level="warning")
         return True
@@ -585,42 +648,18 @@ async def handle_conversation_permission_rules_remove(session: "WebSocketSession
         await session._emit_command_result("permissions.rules.remove", f"Conversation '{conversation_id}' not found", level="error")
         return True
 
-    rule_kind = str(data.get("rule_kind") or data.get("kind") or "deny").strip().lower()
-    pattern = str(data.get("pattern") or "").strip()
-    if not pattern:
+    mutation = prepare_permission_rule_remove(target, data, conversation_id=conversation_id)
+    if not mutation.should_update:
         await session._emit_command_result(
-            "permissions.rules.remove",
-            "Pattern is required. Use /permissions rules remove deny <pattern> or /permissions rules remove override <pattern>",
-            level="warning",
+            mutation.outcome.command,
+            mutation.outcome.message,
+            level=mutation.outcome.level,
+            data=mutation.outcome.data,
         )
         return True
 
-    deny_rules = normalize_tool_patterns(getattr(target, "permission_deny_rules", []))
-    overrides = normalize_permission_overrides(getattr(target, "permission_overrides", {}))
-    removed = False
-
-    if rule_kind in {"deny", "block"}:
-        removed = pattern in deny_rules
-        deny_rules = [item for item in deny_rules if item != pattern]
-        result_message = f"Removed deny rule: {pattern}"
-        result_level = "success"
-        if not removed:
-            result_message = f"No deny rule matched: {pattern}"
-            result_level = "info"
-    elif rule_kind in {"override", "level"}:
-        removed = pattern in overrides
-        overrides.pop(pattern, None)
-        result_message = f"Removed override rule: {pattern}"
-        result_level = "success"
-        if not removed:
-            result_message = f"No override rule matched: {pattern}"
-            result_level = "info"
-    else:
-        await session._emit_command_result("permissions.rules.remove", "Invalid rule kind. Use deny or override", level="warning")
-        return True
-
     updated = session.conversation_repo.update_permission_rules(
-        conversation_id, deny_rules=deny_rules, overrides=serialize_permission_overrides(overrides),
+        conversation_id, deny_rules=mutation.deny_rules, overrides=mutation.serialized_overrides,
     )
     if updated is None:
         await session._emit_command_result("permissions.rules.remove", f"Conversation '{conversation_id}' not found", level="error")
@@ -628,70 +667,34 @@ async def handle_conversation_permission_rules_remove(session: "WebSocketSession
 
     source = str(data.get("source") or "websocket.command").strip() or "websocket.command"
     if conversation_id == session.active_conversation_id:
-        session._set_permission_context_rules(session_overrides=overrides, tool_deny_rules=deny_rules, source=source)
+        session._set_permission_context_rules(
+            session_overrides=mutation.overrides,
+            tool_deny_rules=mutation.deny_rules,
+            source=source,
+        )
         await session._send_task_runtime_update()
 
     await session._emit_permission_rules_updated(conversation_id=conversation_id, source=source)
     await session._emit_command_result(
-        "permissions.rules.remove", result_message, level=result_level,
-        data={"conversation_id": conversation_id, "rule_kind": "override" if rule_kind in {"override", "level"} else "deny", "pattern": pattern},
+        mutation.outcome.command,
+        mutation.outcome.message,
+        level=mutation.outcome.level,
+        data=mutation.outcome.data,
     )
     return True
 
 
 async def _cleanup_conversation_worktree(session: "WebSocketSession", conversation: Any, *, force: bool = False) -> dict[str, Any]:
-    from backend.workspace.worktree import WorktreeManager
+    from backend.services.conversation_payload_service import cleanup_isolated_worktree
 
-    worktree_path = Path(str(getattr(conversation, "worktree_path", "") or "")).resolve()
-    if not str(worktree_path) or not getattr(conversation, "git_isolated", False):
-        return {
-            "removed": False, "conversation_id": getattr(conversation, "id", ""),
-            "path": str(worktree_path) if str(worktree_path) != "." else "",
-            "error": "Conversation is not bound to an isolated worktree",
-        }
-    if not worktree_path.exists():
-        return {"removed": True, "conversation_id": conversation.id, "path": str(worktree_path), "message": "Isolated worktree already removed"}
-    if worktree_path == session._current_workspace_root():
-        return {"removed": False, "conversation_id": conversation.id, "path": str(worktree_path), "error": "Cannot remove the active workspace worktree"}
-
-    base_root = session._main_worktree_root(worktree_path)
-    isolated_root = (base_root / ".claude" / "worktrees").resolve()
-    if not session._is_path_within(worktree_path, isolated_root):
-        return {"removed": False, "conversation_id": conversation.id, "path": str(worktree_path), "error": "Only isolated worktrees under .claude/worktrees can be removed"}
-
-    dirty = session._worktree_has_local_changes(worktree_path)
-    if dirty and not force:
-        return {"removed": False, "conversation_id": conversation.id, "path": str(worktree_path), "needs_force": True, "error": "Worktree has local changes; confirm force cleanup to remove it"}
-
-    try:
-        manager = WorktreeManager(base_root)
-        removal = manager.safe_remove_worktree(
-            worktree_path,
-            force=force,
-            conversation_id=conversation.id,
-            branch=str(getattr(conversation, "git_branch", "") or ""),
-        )
-    except Exception as exc:
-        return {"removed": False, "conversation_id": conversation.id, "path": str(worktree_path), "error": str(exc)}
-
-    if removal.needs_force:
-        return {"removed": False, "conversation_id": conversation.id, "path": str(worktree_path), "needs_force": True, "error": removal.error}
-
-    result: dict[str, Any] = {
-        "removed": removal.removed,
-        "conversation_id": conversation.id,
-        "path": str(worktree_path),
-        "branch": getattr(conversation, "git_branch", ""),
-        "message": "Removed isolated worktree" if removal.removed else (removal.error or "git worktree remove failed"),
-    }
-    if not removal.removed and removal.error:
-        result["error"] = removal.error
-    if removal.snapshot is not None:
-        result["snapshot_id"] = removal.snapshot.id
-        result["snapshot_ref"] = removal.snapshot.snapshot_ref
-        if removal.removed:
-            result["message"] = "Removed isolated worktree (snapshot saved; recoverable)"
-    return result
+    return cleanup_isolated_worktree(
+        conversation,
+        force=force,
+        current_workspace_root=session._current_workspace_root(),
+        main_worktree_root=session._main_worktree_root,
+        is_path_within=session._is_path_within,
+        worktree_has_local_changes=session._worktree_has_local_changes,
+    )
 
 
 async def handle_permissions_content_rule_add(session: "WebSocketSession", data: dict[str, Any]) -> bool:
@@ -701,32 +704,118 @@ async def handle_permissions_content_rule_add(session: "WebSocketSession", data:
     PermissionChecker is rebuilt from load_config() on each tool call, so the
     saved rule takes effect immediately for subsequent calls.
     """
-    from backend.config import add_permission_content_rule
+    from backend.config import SETTINGS_FILE
+    from backend.hooks.runtime import run_config_change_hook
+    from backend.services.permission_content_service import add_permission_content_rule
 
-    rule = str(data.get("rule") or "").strip()
-    deny = bool(data.get("deny", False))
-    if not rule:
-        await session._emit_command_result(
-            "permissions.content_rule.add",
-            "Rule is required, e.g. Bash(npm run:*) or Edit(src/**)",
-            level="warning",
-        )
-        return True
-    try:
-        updated = add_permission_content_rule(rule, deny=deny)
-    except Exception as exc:  # surface any persistence error to the UI
-        await session._emit_command_result(
-            "permissions.content_rule.add",
-            f"Failed to save rule: {exc}",
-            level="error",
-        )
-        return True
+    result = add_permission_content_rule(str(data.get("rule") or ""), deny=bool(data.get("deny", False)))
+    if result.should_emit_config_change:
+        await run_config_change_hook(source="permissions", file_path=str(SETTINGS_FILE))
+    outcome = result.outcome
     await session._emit_command_result(
-        "permissions.content_rule.add",
-        f"{'Denied' if deny else 'Allowed'} rule saved: {rule}",
-        level="success",
-        data={"rule": rule, "deny": deny, "rules": updated},
+        outcome.command,
+        outcome.message,
+        level=outcome.level,
+        data=outcome.data,
     )
+    return True
+
+
+async def handle_context_compact(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    """Manually trigger context compaction with an optional focus string."""
+    focus = str(data.get("focus") or "").strip()
+    ctx = session.context_builder
+    state = getattr(session, "agent_state", None)
+    try:
+        summary = await ctx.compact(focus=focus, restore_state=state)
+        await session._send_event({
+            "type": "context_compacted",
+            "data": {
+                "summary": summary,
+                "focus": focus,
+                "compaction_count": getattr(ctx, "_compaction_count", 0),
+                "estimated_tokens": ctx._history_tokens_total,
+            },
+        })
+    except Exception as exc:
+        logger.warning("Manual compact failed: %s", exc)
+        await session._send_event({
+            "type": "error",
+            "data": {"message": f"Compact failed: {exc}", "error_type": "context"},
+        })
+    return True
+
+
+async def handle_context_fork(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    """Fork the conversation context from a specific message index."""
+    message_index = int(data.get("message_index", -1))
+    ctx = session.context_builder
+    try:
+        forked = ctx.fork_from(message_index)
+        # Store the forked context for a subsequent side_query or new turn
+        if not hasattr(session, "_forked_contexts"):
+            session._forked_contexts = {}
+        fork_id = f"fork_{message_index}_{id(forked)}"
+        session._forked_contexts[fork_id] = forked
+        await session._send_event({
+            "type": "context_forked",
+            "data": {
+                "fork_id": fork_id,
+                "message_index": message_index,
+                "history_length": len(forked._history),
+                "estimated_tokens": forked._history_tokens_total,
+            },
+        })
+    except Exception as exc:
+        logger.warning("Context fork failed: %s", exc)
+        await session._send_event({
+            "type": "error",
+            "data": {"message": f"Fork failed: {exc}", "error_type": "context"},
+        })
+    return True
+
+
+async def handle_context_side_query(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    """Run a transient side query without modifying the main context."""
+    query = str(data.get("query") or "").strip()
+    focus = str(data.get("focus") or "").strip()
+    if not query:
+        return True
+    ctx = session.context_builder
+    try:
+        result = await ctx.side_query(query, focus=focus)
+        await session._send_event({
+            "type": "context_side_query_result",
+            "data": {
+                "query": query,
+                "result": result,
+                "focus": focus,
+            },
+        })
+    except Exception as exc:
+        logger.warning("Side query failed: %s", exc)
+        await session._send_event({
+            "type": "error",
+            "data": {"message": f"Side query failed: {exc}", "error_type": "context"},
+        })
+    return True
+
+
+async def handle_context_ledger(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    """Return the Context Ledger — a structured audit of context composition."""
+    ctx = session.context_builder
+    try:
+        ledger = ctx.context_ledger()
+        await session._send_event({
+            "type": "context_ledger",
+            "data": ledger,
+        })
+    except Exception as exc:
+        logger.warning("Context ledger failed: %s", exc)
+        await session._send_event({
+            "type": "error",
+            "data": {"message": f"Ledger failed: {exc}", "error_type": "context"},
+        })
     return True
 
 
@@ -739,7 +828,10 @@ HANDLERS: dict[str, Any] = {
     "conversation.unarchive": handle_conversation_unarchive,
     "conversation.delete": handle_conversation_delete,
     "conversation.clear": handle_conversation_clear,
+    "conversation.truncate": handle_conversation_truncate,
     "conversation.worktree.cleanup": handle_conversation_worktree_cleanup,
+    "conversation.worktree.handoff.preflight": handle_conversation_worktree_handoff_preflight,
+    "conversation.worktree.handoff.execute": handle_conversation_worktree_handoff_execute,
     "conversation.memory_mode.set": handle_conversation_memory_mode_set,
     "conversation.permission_mode.set": handle_conversation_permission_mode_set,
     "conversation.goal.set": handle_conversation_goal_set,
@@ -747,4 +839,8 @@ HANDLERS: dict[str, Any] = {
     "conversation.permission.rules.add": handle_conversation_permission_rules_add,
     "conversation.permission.rules.remove": handle_conversation_permission_rules_remove,
     "permissions.content_rule.add": handle_permissions_content_rule_add,
+    "context.compact": handle_context_compact,
+    "context.fork": handle_context_fork,
+    "context.side_query": handle_context_side_query,
+    "context.ledger": handle_context_ledger,
 }

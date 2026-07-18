@@ -15,11 +15,11 @@ from pathlib import Path
 from typing import Any
 
 from backend.chroma_utils import create_chroma_persistent_client
-from backend.config import PROJECT_ROOT
+from backend.config import DATA_ROOT
 
 logger = logging.getLogger(__name__)
 
-CHROMA_DIR = PROJECT_ROOT / "data" / "chroma"
+CHROMA_DIR = DATA_ROOT / "chroma"
 FALLBACK_DB_FILE = CHROMA_DIR / "memory_fallback.json"
 FALLBACK_FLUSH_INTERVAL_SECONDS = 5.0
 FALLBACK_FLUSH_BATCH_SIZE = 10

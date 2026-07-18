@@ -11,7 +11,7 @@ import json
 import logging
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Callable, Coroutine
 
 from backend.config import PROJECT_ROOT
@@ -65,19 +65,24 @@ def _parse_cron_field(field_str: str, min_val: int, max_val: int) -> set[int]:
     return values
 
 
-def cron_matches(expression: str, dt: datetime) -> bool:
-    """Check if a datetime matches a 5-field cron expression."""
+def _parse_cron_expression(expression: str) -> tuple[set[int], set[int], set[int], set[int], set[int]] | None:
     parts = expression.strip().split()
     if len(parts) != 5:
-        return False
+        return None
     try:
-        minutes = _parse_cron_field(parts[0], 0, 59)
-        hours = _parse_cron_field(parts[1], 0, 23)
-        doms = _parse_cron_field(parts[2], 1, 31)
-        months = _parse_cron_field(parts[3], 1, 12)
-        dows = _parse_cron_field(parts[4], 0, 6)
+        return (
+            _parse_cron_field(parts[0], 0, 59),
+            _parse_cron_field(parts[1], 0, 23),
+            _parse_cron_field(parts[2], 1, 31),
+            _parse_cron_field(parts[3], 1, 12),
+            _parse_cron_field(parts[4], 0, 6),
+        )
     except (ValueError, IndexError):
-        return False
+        return None
+
+
+def _cron_parts_match(parts: tuple[set[int], set[int], set[int], set[int], set[int]], dt: datetime) -> bool:
+    minutes, hours, doms, months, dows = parts
     # Python weekday: Mon=0..Sun=6; cron: Sun=0, Mon=1..Sat=6
     cron_dow = (dt.weekday() + 1) % 7
     return (
@@ -87,6 +92,62 @@ def cron_matches(expression: str, dt: datetime) -> bool:
         and dt.month in months
         and cron_dow in dows
     )
+
+
+def cron_matches(expression: str, dt: datetime) -> bool:
+    """Check if a datetime matches a 5-field cron expression."""
+    parts = _parse_cron_expression(expression)
+    return bool(parts and _cron_parts_match(parts, dt))
+
+
+def next_run_after(expression: str, dt: datetime, *, max_days: int = 366) -> datetime | None:
+    """Return the next minute matching a cron expression after dt."""
+    if max_days <= 0:
+        return None
+    parts = _parse_cron_expression(expression)
+    if not parts:
+        return None
+    current = dt.astimezone(UTC).replace(second=0, microsecond=0) + timedelta(minutes=1)
+    deadline = current + timedelta(days=max_days)
+    while current <= deadline:
+        if _cron_parts_match(parts, current):
+            return current
+        current += timedelta(minutes=1)
+    return None
+
+
+def _minute_floor(dt: datetime) -> datetime:
+    return dt.astimezone(UTC).replace(second=0, microsecond=0)
+
+
+def _parse_last_run_at(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _missed_schedule_points(task: ScheduledTask, now: datetime) -> list[datetime]:
+    """Return due minute ticks after last_run_at, including catch-up points."""
+    now_minute = _minute_floor(now)
+    last_run_at = _parse_last_run_at(task.last_run_at)
+    if last_run_at is None:
+        return [now_minute] if cron_matches(task.schedule, now_minute) else []
+
+    cursor = _minute_floor(last_run_at) + timedelta(minutes=1)
+    due: list[datetime] = []
+    # Bound catch-up so a long-sleeping desktop cannot flood the user on resume.
+    max_points = 24 * 60
+    while cursor <= now_minute and len(due) < max_points:
+        if cron_matches(task.schedule, cursor):
+            due.append(cursor)
+        cursor += timedelta(minutes=1)
+    return due
 
 
 # Callback type: async fn(task) that creates a session and runs the prompt
@@ -119,7 +180,14 @@ class TaskScheduler:
         SCHEDULE_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     def list_tasks(self) -> list[dict[str, Any]]:
-        return [t.to_dict() for t in self._tasks.values()]
+        now = datetime.now(UTC)
+        rows: list[dict[str, Any]] = []
+        for task in self._tasks.values():
+            row = task.to_dict()
+            next_run = next_run_after(task.schedule, now) if task.enabled else None
+            row["next_run_at"] = next_run.isoformat() if next_run else None
+            rows.append(row)
+        return rows
 
     def add_task(self, name: str, prompt: str, schedule: str, permission_mode: str = "auto_approve") -> ScheduledTask:
         task = ScheduledTask(name=name, prompt=prompt, schedule=schedule, permission_mode=permission_mode)
@@ -169,16 +237,19 @@ class TaskScheduler:
                 for task in list(self._tasks.values()):
                     if not task.enabled:
                         continue
-                    if cron_matches(task.schedule, now):
-                        task.last_run_at = now.isoformat()
+                    for due_at in _missed_schedule_points(task, now):
+                        task.last_run_at = due_at.isoformat()
                         self._save()
                         if self._on_fire:
-                            try:
-                                await self._on_fire(task)
-                            except Exception as exc:
-                                logger.error("scheduled task %s fire failed: %s", task.id, exc)
+                            asyncio.create_task(self._fire_one(task))
         except asyncio.CancelledError:
             pass
+
+    async def _fire_one(self, task: ScheduledTask) -> None:
+        try:
+            await self._on_fire(task)
+        except Exception as exc:
+            logger.error("scheduled task %s fire failed: %s", task.id, exc)
 
 
 _GLOBAL_SCHEDULER: TaskScheduler | None = None

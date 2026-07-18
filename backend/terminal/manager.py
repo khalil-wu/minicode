@@ -167,7 +167,10 @@ class BackgroundCommandManager:
 
             process_kwargs: dict[str, Any] = {}
             if os.name == "nt":
-                process_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+                process_kwargs["creationflags"] = (
+                    subprocess.CREATE_NEW_PROCESS_GROUP
+                    | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                )
             else:
                 process_kwargs["start_new_session"] = True
 

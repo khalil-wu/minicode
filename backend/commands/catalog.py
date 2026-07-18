@@ -3,6 +3,12 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from backend.commands.plugins import get_plugin_composer_command_catalog
+from backend.skills.loader import SkillLoader
+
+
+_TEMPLATE_SKILL_LOADER = SkillLoader()
+
 
 def _availability(
     *,
@@ -17,6 +23,13 @@ def _availability(
     if reason:
         payload["reason"] = reason
     return payload
+
+
+def _skill_template(skill_name: str) -> str:
+    full = _TEMPLATE_SKILL_LOADER.load_full(skill_name)
+    if full and full.content.strip():
+        return full.content.strip()
+    return f"Use the {skill_name} skill workflow for this slash command."
 
 
 _BUILTIN_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
@@ -158,7 +171,7 @@ _BUILTIN_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
     {
         "name": "session.usage.inspect",
         "label": "session.usage.inspect",
-        "description": "Inspect token, context, and cost usage for the current session.",
+        "description": "Inspect current context plus process-runtime token and cost totals.",
         "type": "protocol",
         "source": "builtin",
         "enabled": True,
@@ -237,14 +250,12 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "command": "review",
         "label": "/review",
         "description": "审查当前项目并按严重级别列出问题",
-        "template": (
-            "Please review this project and list findings ordered by severity. "
-            "Include file references and concrete fixes."
-        ),
+        "template": _skill_template("code-review"),
         "search_text": "review audit code quality bug risk",
         "type": "template",
         "kind": "template",
         "source": "builtin",
+        "skill_name": "code-review",
         "enabled": True,
         "availability": _availability(),
     },
@@ -254,14 +265,12 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "command": "debug",
         "label": "/debug",
         "description": "端到端定位并修复当前问题",
-        "template": (
-            "Help me debug the current issue end to end: reproduce, isolate root cause, "
-            "apply minimal fix, and verify."
-        ),
+        "template": _skill_template("debug-mode"),
         "search_text": "debug reproduce root cause fix verify",
         "type": "template",
         "kind": "template",
         "source": "builtin",
+        "skill_name": "debug-mode",
         "enabled": True,
         "availability": _availability(),
     },
@@ -271,14 +280,12 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "command": "refactor",
         "label": "/refactor",
         "description": "提出并执行小步重构方案",
-        "template": (
-            "Propose a safe refactor plan for this area, then implement it in small steps "
-            "with validation after each step."
-        ),
+        "template": _skill_template("refactor"),
         "search_text": "refactor architecture cleanup maintainability",
         "type": "template",
         "kind": "template",
         "source": "builtin",
+        "skill_name": "refactor",
         "enabled": True,
         "availability": _availability(),
     },
@@ -288,11 +295,12 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "command": "test",
         "label": "/test",
         "description": "补测试并保证回归通过",
-        "template": "Add or update tests for this change, explain coverage gaps, and run the relevant test suite.",
+        "template": _skill_template("test-writer"),
         "search_text": "test regression coverage vitest pytest",
         "type": "template",
         "kind": "template",
         "source": "builtin",
+        "skill_name": "test-writer",
         "enabled": True,
         "availability": _availability(),
     },
@@ -301,13 +309,13 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "name": "plan",
         "command": "plan",
         "label": "/plan",
-        "description": "切换执行权限模式（默认进入 plan）",
+        "description": "进入只读 Plan 模式，先探索并提交实施方案",
         "template": "/plan",
         "search_text": "local legacy plan readonly permissions",
         "type": "local",
         "kind": "local",
         "source": "builtin",
-        "enabled": False,
+        "enabled": True,
         "availability": _availability(scope="session"),
     },
     {
@@ -349,18 +357,21 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "name": "effort",
         "command": "effort",
         "label": "/effort",
-        "description": "Set reasoning effort: low, medium, high, or max.",
+        "description": "Set reasoning effort: none, minimal, low, medium, high, xhigh, or max.",
         "template": "/effort high",
-        "search_text": "local effort reasoning low medium high max",
+        "search_text": "local effort reasoning none minimal low medium high xhigh max",
         "type": "local",
         "kind": "local",
         "source": "builtin",
         "enabled": True,
         "availability": _availability(scope="session"),
         "args": [
+            {"value": "none", "description": "关闭 reasoning（供应商支持时）"},
+            {"value": "minimal", "description": "最少推理"},
             {"value": "low", "description": "最快，适合简单任务"},
             {"value": "medium", "description": "平衡速度与质量"},
             {"value": "high", "description": "更深入的推理"},
+            {"value": "xhigh", "description": "OpenAI 官方最高推理档"},
             {"value": "max", "description": "最强推理，最慢"},
         ],
     },
@@ -384,11 +395,12 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "command": "docs",
         "label": "/docs",
         "description": "阅读代码并产出结构化文档",
-        "template": "Read the relevant code and produce concise developer documentation with architecture, data flow, and key decisions.",
+        "template": _skill_template("docs-writer"),
         "search_text": "docs documentation architecture data flow",
         "type": "template",
         "kind": "template",
         "source": "builtin",
+        "skill_name": "docs-writer",
         "enabled": True,
         "availability": _availability(),
     },
@@ -398,11 +410,12 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "command": "explain",
         "label": "/explain",
         "description": "解释关键模块和执行路径",
-        "template": "Explain this code path clearly with key files, control flow, and practical examples.",
+        "template": _skill_template("docs-writer"),
         "search_text": "explain walkthrough files control flow",
         "type": "template",
         "kind": "template",
         "source": "builtin",
+        "skill_name": "docs-writer",
         "enabled": True,
         "availability": _availability(),
     },
@@ -412,11 +425,12 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "command": "commit",
         "label": "/commit",
         "description": "整理改动并生成提交说明",
-        "template": "Summarize the changes made, list validation performed, and propose a clean commit message.",
+        "template": _skill_template("commit-message"),
         "search_text": "commit summary changelog validation",
         "type": "template",
         "kind": "template",
         "source": "builtin",
+        "skill_name": "commit-message",
         "enabled": True,
         "availability": _availability(),
     },
@@ -595,7 +609,7 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "name": "cost",
         "command": "cost",
         "label": "/cost",
-        "description": "查看当前会话成本和各模型用量",
+        "description": "查看当前上下文及本次应用运行期的成本和模型用量",
         "template": "/cost",
         "search_text": "local cost usage spend price",
         "type": "local",
@@ -610,21 +624,12 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "command": "init",
         "label": "/init",
         "description": "分析代码库并生成 CLAUDE.md 项目说明",
-        "template": (
-            "Analyze this codebase and create a CLAUDE.md file at the workspace root "
-            "documenting, concisely and accurately:\n"
-            "- Build, lint, and test commands (verify them before writing)\n"
-            "- Code style and naming conventions\n"
-            "- High-level architecture and key modules\n"
-            "- Important patterns and gotchas a new contributor must know\n"
-            "Read the actual config files (package.json, pyproject.toml, etc.) to get "
-            "commands right. Keep it short and useful — do not pad. Write the file with "
-            "the write_file tool when done."
-        ),
+        "template": _skill_template("init"),
         "search_text": "template init claudemd documentation bootstrap",
         "type": "template",
         "kind": "template",
         "source": "builtin",
+        "skill_name": "init",
         "enabled": True,
         "availability": _availability(scope="session"),
     },
@@ -668,7 +673,19 @@ def get_builtin_command_names() -> list[str]:
 
 
 def get_composer_command_catalog() -> list[dict[str, Any]]:
-    return [deepcopy(entry) for entry in _COMPOSER_COMMAND_CATALOG]
+    entries = [deepcopy(entry) for entry in _COMPOSER_COMMAND_CATALOG]
+    seen_commands = {
+        str(entry.get("command", "")).strip().lower()
+        for entry in entries
+        if str(entry.get("command", "")).strip()
+    }
+    for plugin_entry in get_plugin_composer_command_catalog():
+        command = str(plugin_entry.get("command", "")).strip().lower()
+        if not command or command in seen_commands:
+            continue
+        seen_commands.add(command)
+        entries.append(deepcopy(plugin_entry))
+    return entries
 
 
 def get_enabled_composer_command_catalog() -> list[dict[str, Any]]:

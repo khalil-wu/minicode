@@ -16,11 +16,11 @@ import secrets
 from pathlib import Path
 from typing import Any
 
-from backend.config import PROJECT_ROOT
+from backend.config import STATE_ROOT
 
 logger = logging.getLogger(__name__)
 
-VAULT_FILE = PROJECT_ROOT / ".minicode" / "vault.json"
+VAULT_FILE = STATE_ROOT / ".minicode" / "vault.json"
 _KDF_ITERATIONS = 100_000
 _SALT_BYTES = 16
 

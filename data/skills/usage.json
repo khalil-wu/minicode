@@ -1,0 +1,10 @@
+{
+  "dispatching-parallel-agents": {
+    "failure_count": 0,
+    "last_event": "loaded",
+    "last_invoked_at": "2026-07-12T09:37:05Z",
+    "load_count": 1,
+    "reuse_count": 0,
+    "unload_count": 0
+  }
+}

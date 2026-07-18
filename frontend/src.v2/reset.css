@@ -127,35 +127,35 @@ select {
 /* ── Overlay & Modal Animations ──────────────────────── */
 
 .overlay-backdrop {
-  animation: overlay-in 200ms cubic-bezier(0.4, 0, 0.2, 1) both;
+  animation: overlay-in var(--duration-base) var(--easing-standard) both;
 }
 
 .overlay-backdrop.closing {
-  animation: overlay-out 150ms ease-in both;
+  animation: overlay-out var(--duration-fast) ease-in both;
 }
 
 .modal-content {
-  animation: modal-in 250ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  animation: modal-in var(--duration-slow) var(--easing-spring) both;
 }
 
 /* ── Message Animations ──────────────────────────────── */
 
 .message-enter {
-  animation: message-in 200ms cubic-bezier(0.4, 0, 0.2, 1) both;
+  animation: message-in var(--duration-base) var(--easing-standard) both;
 }
 
 .tool-call-enter {
-  animation: slide-up 250ms cubic-bezier(0.4, 0, 0.2, 1) both;
+  animation: slide-up var(--duration-slow) var(--easing-standard) both;
 }
 
 /* ── Toast Notifications ─────────────────────────────── */
 
 .toast-enter {
-  animation: toast-in 300ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  animation: toast-in var(--duration-slower) var(--easing-spring) both;
 }
 
 .toast-exit {
-  animation: toast-out 200ms ease-in both;
+  animation: toast-out var(--duration-base) ease-in both;
 }
 
 /* ── Progress & Loading ──────────────────────────────── */
@@ -173,7 +173,7 @@ select {
   height: 100%;
   background: var(--accent-primary);
   border-radius: 2px;
-  animation: progress-indeterminate 1.5s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  animation: progress-indeterminate 1.5s var(--easing-standard) infinite;
 }
 
 .spinner {
@@ -211,7 +211,7 @@ select {
     color-mix(in oklch, var(--accent-primary) 52%, var(--text-muted))
   );
   transform-origin: 50% 100%;
-  animation: thinking-wave 1.05s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  animation: thinking-wave 1.05s var(--easing-standard) infinite;
 }
 
 .thinking-wave > span:nth-child(2) {
@@ -310,7 +310,7 @@ button:hover {
 /* ── Sidebar & Panel Transitions ─────────────────────── */
 
 .sidebar-animate {
-  transition: width 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  transition: width var(--duration-base) var(--easing-standard);
 }
 
 

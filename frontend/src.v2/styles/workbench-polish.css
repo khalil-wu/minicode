@@ -275,9 +275,6 @@ button:hover {
 
 .turn-summary-cell {
   padding-left: 0;
-}
-
-.turn-summary-cell {
   width: max-content;
   max-width: 100%;
   min-height: 26px;
@@ -520,16 +517,9 @@ button:hover {
 }
 
 .composer-container {
-  border-radius: var(--radius-lg) !important;
-  background: color-mix(in oklch, var(--surface-base) 88%, var(--surface-page)) !important;
-  border-color: var(--border-subtle) !important;
-  box-shadow: none !important;
+  /* Visual treatment (background/border/radius/shadow) lives in the final
+     composer pass near the end of this file; keep only layout here. */
   flex-shrink: 0;
-}
-
-.composer-container:focus-within {
-  border-color: color-mix(in oklch, var(--accent-primary) 20%, var(--border-soft)) !important;
-  box-shadow: 0 0 0 1px color-mix(in oklch, var(--accent-primary) 5%, transparent) !important;
 }
 
 .composer-container textarea::placeholder {
@@ -1153,21 +1143,6 @@ body,
   padding: 0;
 }
 
-.chat-turn-process::before {
-  content: none;
-  display: none;
-}
-
-.chat-turn-process[data-active="true"]::before {
-  content: none;
-  display: none;
-}
-
-.chat-turn-process[data-active="true"]::after {
-  content: none;
-  display: none;
-}
-
 .chat-turn-process-stack {
   gap: 3px;
 }
@@ -1782,21 +1757,6 @@ body,
   font-size: 13px;
 }
 
-.composer-container {
-  width: var(--chat-composer-axis-width) !important;
-  margin: 0 auto 14px !important;
-  padding: 7px 9px 9px !important;
-  background: #FFFFFF !important;
-  border: 1px solid #E5EAF0 !important;
-  border-radius: 12px !important;
-  box-shadow: 0 1px 2px rgb(15 23 42 / 0.04) !important;
-}
-
-.composer-container:focus-within {
-  border-color: #CBD5E1 !important;
-  box-shadow: 0 0 0 1px rgb(37 99 235 / 0.08) !important;
-}
-
 .composer-container::before {
   content: "";
   position: absolute;
@@ -1814,48 +1774,6 @@ body,
 
 .composer-textarea-wrap {
   padding: 0 2px 7px !important;
-}
-
-.composer-textarea {
-  min-height: 48px;
-  font-size: 14px;
-  line-height: 1.55;
-}
-
-.composer-footer {
-  padding: 6px 0 0 !important;
-  border-top: 1px solid #E5EAF0 !important;
-  background: transparent !important;
-}
-
-.composer-attach-btn,
-.composer-permission-btn,
-.composer-model-select {
-  background: #FFFFFF !important;
-  border-color: #E5EAF0 !important;
-  color: #667085 !important;
-  box-shadow: none !important;
-}
-
-.composer-attach-btn:hover,
-.composer-permission-btn:hover,
-.composer-model-select:hover {
-  transform: none !important;
-  background: #F1F5F9 !important;
-  border-color: #CBD5E1 !important;
-}
-
-.composer-send-btn {
-  width: 30px;
-  height: 30px;
-  background: #2563EB !important;
-  box-shadow: none !important;
-}
-
-.composer-send-btn:hover:not(:disabled) {
-  background: #1D4ED8 !important;
-  transform: none !important;
-  box-shadow: none !important;
 }
 
 /* Composer input and skill picker: keep controls on one visual plane. */
@@ -2174,12 +2092,15 @@ body.layout-dragging * {
 }
 
 /* Codex-like compact process output */
+/* Codex-like compact process output.
+   AgentLoop V2: process content uses boxed disclosures, not timeline rails. */
 .chat-turn-process {
   margin-top: 7px !important;
   padding-left: 0 !important;
 }
 
-.chat-turn-process::before {
+.chat-turn-process::before,
+.chat-turn-process::after {
   content: none !important;
   display: none !important;
 }
@@ -2191,17 +2112,6 @@ body.layout-dragging * {
 .activity-group-cell[data-group-kind="context"].activity-group-cell-done {
   padding: 1px 0 !important;
   border-left: 0 !important;
-}
-
-/* AgentLoop V2: process content uses boxed disclosures, not timeline rails. */
-.chat-turn-process {
-  padding-left: 0 !important;
-}
-
-.chat-turn-process::before,
-.chat-turn-process::after {
-  content: none !important;
-  display: none !important;
 }
 
 .activity-group-cell[data-group-kind="context"].activity-group-cell-done .activity-group-header {

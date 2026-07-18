@@ -59,13 +59,22 @@ class ToolsetPolicy:
             ]
         )
 
-    def is_directly_visible(self, spec: ToolSpec) -> bool:
+    def is_available(self, spec: ToolSpec) -> bool:
         if spec.name in self.disabled_tools or spec.toolset in self.disabled_toolsets:
             return False
         if spec.exposure == "hidden":
             return False
+        if not self.enabled_toolsets:
+            return spec.name in self.enabled_tools
+        return True
+
+    def is_directly_visible(self, spec: ToolSpec) -> bool:
+        if not self.is_available(spec):
+            return False
         if spec.name in self.enabled_tools:
             return True
+        if not self.enabled_toolsets:
+            return False
         # always_load forces a deferred tool into the direct list (CC parity):
         # its full schema must appear on turn 1 without a tool_search round-trip.
         if getattr(spec, "always_load", False):

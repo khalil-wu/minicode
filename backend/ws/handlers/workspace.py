@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-import asyncio
 import logging
-import shutil
 from typing import Any, TYPE_CHECKING
-
-from backend.agent.message import AgentEvent
 
 if TYPE_CHECKING:
     from backend.ws.handler import WebSocketSession
@@ -14,33 +10,20 @@ logger = logging.getLogger(__name__)
 
 
 async def handle_workspace_import(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    from backend.workspace.path_utils import build_missing_path_hint, normalize_project_import_path
+    from backend.services.workspace_service import parse_workspace_import_request, workspace_conversation_switched_payload
 
-    path_str = str(data.get("path", "")).strip()
-    if not path_str:
-        await session._send_event(AgentEvent.error("Project path is required", recoverable=True))
+    request = parse_workspace_import_request(data)
+    if request.error_event is not None:
+        from backend.ws.command_results import emit_command_error
+        await emit_command_error(session, "workspace.import", request.error_event)
         return True
 
-    project_path = normalize_project_import_path(path_str)
-    if not project_path.exists() or not project_path.is_dir():
-        hint = build_missing_path_hint(path_str)
-        message = f"Invalid project path: {path_str}"
-        if hint:
-            message = f"{message}. {hint}"
-        await session._send_event(
-            AgentEvent.error(
-                message,
-                recoverable=True,
-                error_type="workspace",
-                error_code="workspace_missing",
-            )
-        )
-        return True
-
+    project_path = request.project_path
     activated = await session._activate_workspace_path(
         str(project_path),
         announce=True,
         wait_for_initialize=True,
+        error_command="workspace.import",
     )
     if activated and session.active_conversation_id:
         branch = session._git_branch_for(project_path)
@@ -53,12 +36,7 @@ async def handle_workspace_import(session: "WebSocketSession", data: dict[str, A
         )
         if updated is not None:
             await session._send_ws_payload(
-                {
-                    "type": "conversation.switched",
-                    "conversation_id": updated.id,
-                    "conversation": updated.to_dict(),
-                    "is_hydrating": False,
-                },
+                workspace_conversation_switched_payload(updated),
                 log_context="conversation.switched",
             )
         await session._send_conversation_list()
@@ -66,76 +44,27 @@ async def handle_workspace_import(session: "WebSocketSession", data: dict[str, A
 
 
 async def handle_workspace_recent(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    from backend.workspace.recent_projects import RecentProjectStore
+    from backend.services.workspace_service import list_workspace_recent_payload
 
-    store = RecentProjectStore()
-    projects = store.list()
-    await session._send_ws_payload({
-        "type": "workspace.recent.list",
-        "projects": [project.to_dict() for project in projects],
-    }, log_context="workspace.recent.list")
+    await session._send_ws_payload(list_workspace_recent_payload(), log_context="workspace.recent.list")
     return True
 
 
 async def handle_workspace_set(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    from backend.ws.command_results import emit_command_error
+
     path_str = str(data.get("path", "")).strip()
     if not path_str:
-        await session._send_event(AgentEvent.error("Path is required", recoverable=True))
+        await emit_command_error(session, "workspace.set", "Path is required")
         return True
     return await handle_workspace_import(session, {"path": path_str})
 
 
 async def handle_git_pr_status(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    gh_path = shutil.which("gh")
-    if not gh_path:
-        await session._send_ws_payload(
-            {"type": "git.pr_status", "error": "gh CLI not found", "pr": None, "checks": []},
-            log_context="git.pr_status",
-        )
-        return True
-
-    cwd = str(session._current_workspace_root())
-
-    async def run_gh(*args: str) -> tuple[int, str]:
-        proc = await asyncio.create_subprocess_exec(
-            gh_path, *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
-        return proc.returncode or 0, (stdout or stderr or b"").decode(errors="replace").strip()
-
-    pr_info: dict[str, Any] | None = None
-    checks: list[dict[str, str]] = []
-
-    try:
-        code, out = await run_gh("pr", "view", "--json", "number,title,state,url,headRefName,statusCheckRollup")
-        if code == 0 and out:
-            import json as _json
-            raw = _json.loads(out)
-            pr_info = {
-                "number": raw.get("number"),
-                "title": raw.get("title", ""),
-                "state": raw.get("state", ""),
-                "url": raw.get("url", ""),
-                "branch": raw.get("headRefName", ""),
-            }
-            for check in raw.get("statusCheckRollup", []) or []:
-                checks.append({
-                    "name": check.get("name") or check.get("context", ""),
-                    "status": (check.get("conclusion") or check.get("status") or "pending").lower(),
-                    "url": check.get("detailsUrl") or check.get("targetUrl", ""),
-                })
-    except Exception as exc:
-        await session._send_ws_payload(
-            {"type": "git.pr_status", "error": str(exc), "pr": None, "checks": []},
-            log_context="git.pr_status",
-        )
-        return True
+    from backend.services.workspace_service import fetch_git_pr_status_payload
 
     await session._send_ws_payload(
-        {"type": "git.pr_status", "pr": pr_info, "checks": checks},
+        await fetch_git_pr_status_payload(session._current_workspace_root()),
         log_context="git.pr_status",
     )
     return True

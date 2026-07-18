@@ -1,12 +1,17 @@
-"""
-Projects API
+"""Projects API."""
 
-项目管理相关的 API 端点
-"""
-
-from typing import List
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+
+from backend.services.project_service import (
+    ProjectRecord,
+    ProjectServiceError,
+    activate_project as activate_project_record,
+    create_project as create_project_record,
+    delete_project as delete_project_record,
+    get_project as get_project_record,
+    list_projects,
+)
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -25,56 +30,43 @@ class ProjectCreateRequest(BaseModel):
     type: str = "unknown"
 
 
-# 临时存储（实际应该使用数据库）
-_projects: List[ProjectInfo] = []
+_projects: list[ProjectRecord] = []
+
+
+def _to_project_info(record: ProjectRecord) -> ProjectInfo:
+    return ProjectInfo(**record.to_dict())
 
 
 @router.get("")
-async def get_projects() -> List[ProjectInfo]:
-    """获取所有项目列表"""
-    return _projects
+async def get_projects() -> list[ProjectInfo]:
+    return [_to_project_info(project) for project in list_projects(_projects)]
 
 
 @router.post("")
 async def create_project(request: ProjectCreateRequest) -> ProjectInfo:
-    """创建新项目"""
-    import uuid
-    from datetime import datetime
-
-    project = ProjectInfo(
-        id=str(uuid.uuid4()),
-        name=request.name,
-        path=request.path,
-        type=request.type,
-        last_opened=datetime.now().isoformat()
+    return _to_project_info(
+        create_project_record(_projects, name=request.name, path=request.path, type=request.type)
     )
-    _projects.append(project)
-    return project
 
 
 @router.get("/{project_id}")
 async def get_project(project_id: str) -> ProjectInfo:
-    """获取指定项目信息"""
-    for project in _projects:
-        if project.id == project_id:
-            return project
-    raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        return _to_project_info(get_project_record(_projects, project_id))
+    except ProjectServiceError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/{project_id}/activate")
 async def activate_project(project_id: str) -> dict:
-    """激活项目"""
-    for project in _projects:
-        if project.id == project_id:
-            from datetime import datetime
-            project.last_opened = datetime.now().isoformat()
-            return {"status": "success", "project_id": project_id}
-    raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        return activate_project_record(_projects, project_id)
+    except ProjectServiceError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.delete("/{project_id}")
 async def delete_project(project_id: str) -> dict:
-    """删除项目"""
     global _projects
-    _projects = [p for p in _projects if p.id != project_id]
-    return {"status": "success", "project_id": project_id}
+    _projects, result = delete_project_record(_projects, project_id)
+    return result

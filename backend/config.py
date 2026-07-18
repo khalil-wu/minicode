@@ -10,10 +10,13 @@ import json
 import logging
 import os
 import shlex
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Mapping
 from urllib.parse import urlsplit, urlunsplit
+
+from backend.feature_flags import FeatureFlags, coerce_feature_bool, load_feature_flags
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +28,8 @@ if TYPE_CHECKING:
 
 # ── 项目根目录（backend/ 的父目录）──────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+STATE_ROOT = Path(os.environ.get("MINICODE_STATE_ROOT") or PROJECT_ROOT).expanduser().resolve()
+DATA_ROOT = STATE_ROOT / "data"
 
 # ── 自动加载 .env ─────────────────────────────────────────────
 def _parse_env_assignment(line: str) -> tuple[str, str] | None:
@@ -64,7 +69,7 @@ _load_env_file(PROJECT_ROOT / ".env")
 _load_env_file(PROJECT_ROOT / "backend" / ".env")
 
 # ── settings.json 路径 ─────────────────────────────────────────
-SETTINGS_FILE = PROJECT_ROOT / "settings.json"
+SETTINGS_FILE = STATE_ROOT / "settings.json"
 
 
 class SettingsError(RuntimeError):
@@ -78,14 +83,40 @@ class LLMSettings:
     api_key: str
     base_url: str = "https://api.openai.com/v1"
     model: str = "gpt-5.4"
-    reasoning_effort: str = "high"
+    reasoning_effort: str = "low"
+    responses_reasoning_summary: str = "off"
     max_tokens: int = 8192
     wire_api: str = "chat"  # "responses", "chat", or "anthropic"
+    responses_stateful_continuation: bool = True
+    prompt_cache_retention: str = ""
+    reasoning_effort_levels: tuple[str, ...] = ()
+
+
+# 模型上下文窗口解析（参照 cc utils/context.ts getContextWindowForModel）。
+MODEL_CONTEXT_WINDOW_DEFAULT = 200_000
+
+
+def resolve_context_window(model: str) -> int:
+    """按模型名解析上下文窗口大小。
+
+    优先级：MINICODE_MAX_CONTEXT_TOKENS 环境变量 > `[1m]` 后缀 → 1M > 默认 200K。
+    """
+    override = os.environ.get("MINICODE_MAX_CONTEXT_TOKENS", "").strip()
+    if override:
+        try:
+            value = int(override)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    if "[1m]" in str(model or "").lower():
+        return 1_000_000
+    return MODEL_CONTEXT_WINDOW_DEFAULT
 
 
 @dataclass(frozen=True)
 class TokenBudget:
-    """Token 预算分配（基于 128K 窗口）。"""
+    """Token 预算分配（默认按 128K 窗口；load_config 会按模型动态解析 total）。"""
 
     total: int = 128_000
     system_prompt: int = 2_000
@@ -172,7 +203,8 @@ class PermissionSettings:
 class AgentSettings:
     """Agent Loop 运行参数。"""
 
-    max_iterations: int = 15  # 降低到 15，避免无限循环浪费 token
+    max_iterations: int = 30
+    max_tool_calls: int = 200  # 单次 run 工具调用总数硬上限；复杂代码库调研不能被过早截断
     turn_error_budget: int = 5  # 单轮最多允许的内部重试/恢复次数
     compaction_threshold: float = 0.75  # token 使用率阈值
     stagnation_limit: int = 3  # 同一工具+参数调用 N 次判定停滞
@@ -180,16 +212,21 @@ class AgentSettings:
     fallback_providers: tuple[str, ...] = ()  # 主 LLM 失败时按顺序尝试的备用 provider
     reflection_pass: bool = False  # 完成回复后是否执行一次自我审查和修正（默认关闭，减少不必要的"注意"提示）
     reflection_multi_perspective: bool = True  # 高风险回合（有 mutation/web 断言）用对抗式双维度复核；低风险回合零开销跳过
-    answer_gate_enabled: bool = False  # 默认关闭（仅弱模型需要；强模型兜底用）
     agent_mode: str = "react"
 
     # Stream assistant text live (token-by-token) instead of buffering and
     # emitting once at turn end. When on, text_chunk deltas are yielded during
     # streaming, the process_text agent.item emission is skipped (live text
     # replaces it), and a contentless text_chunk(finalize=True) seals the last
-    # streamed block as the final answer. DEFAULT OFF — verify live typing +
-    # multi-segment routing in the app before enabling broadly.
-    live_text_streaming: bool = False
+    # streamed block as the final answer. Default on for Codex-like live turn
+    # updates; set agent.live_text_streaming=false to force final-only output.
+    live_text_streaming: bool = True
+    # Stream provider text without an explicit phase as a provisional answer
+    # draft. The low-level/library default remains conservative, while
+    # load_config() enables it for the desktop app because Chat-Completions-
+    # compatible providers usually do not expose a Codex-style message phase.
+    # If a tool call follows, the provisional draft is cleared.
+    speculative_unphased_streaming: bool = False
 
     # Action-level verification: run this command after workspace mutations and
     # feed failures back to the model before accepting the final answer.
@@ -199,6 +236,8 @@ class AgentSettings:
 
     # Stream retry fields (match current module-level constants in loop.py)
     stream_timeout_seconds: float = 180.0
+    first_byte_warning_seconds: float = 12.0
+    first_byte_timeout_seconds: float = 0.0
     stream_max_attempts: int = 2
     stream_retry_delay_seconds: float = 0.8
     stream_retryable_substrings: tuple[str, ...] = (
@@ -208,22 +247,24 @@ class AgentSettings:
         "too many requests",
         "429",
     )
+    # Provider prompt-cache settling. DeepSeek documents that cache construction
+    # takes seconds; for large low-hit prompts, waiting briefly before the next
+    # model request lets the just-finished request boundary become reusable.
+    prompt_cache_settle_enabled: bool = False
+    prompt_cache_settle_delay_seconds: float = 0.8
+    prompt_cache_settle_min_prompt_tokens: int = 12_000
+    prompt_cache_settle_target_hit_rate: float = 0.92
+
+    # Start broad desktop iteration budgets with a small ReAct window, then let
+    # the loop extend only when tools produce new progress. Explicit low limits
+    # stay exact.
+    dynamic_max_iterations_enabled: bool = False
+    dynamic_max_iterations_min_configured: int = 30
+    dynamic_max_iterations_simple: int = 6
 
     # Policy slots — None means the Loop_Core fills in the default implementation
     reflection_policy: "ReflectionPolicy | None" = None
     stream_retry_policy: "StreamRetryPolicy | None" = None
-
-
-def get_answer_gate_enabled(model_name: str, config_value: bool | None = None) -> bool:
-    """判断是否启用answer gate，与模型能力联动。
-
-    强模型默认关闭（节省token/延迟），弱模型默认开启（兜底）。
-    显式配置值优先。
-    """
-    if config_value is not None:
-        return config_value
-    weak_models = {"deepseek", "qwen", "llama-3", "mistral", "gemma", "llama3"}
-    return any(wm in model_name.lower() for wm in weak_models)
 
 
 @dataclass(frozen=True)
@@ -247,6 +288,7 @@ class AppConfig:
     permissions: PermissionSettings = field(default_factory=PermissionSettings)
     agent: AgentSettings = field(default_factory=AgentSettings)
     ui: UISettings = field(default_factory=UISettings)
+    feature_flags: FeatureFlags = field(default_factory=FeatureFlags)
 
 
 def _normalize_provider(provider: str) -> str:
@@ -258,8 +300,31 @@ def _normalize_provider(provider: str) -> str:
     return "openai"
 
 
-def _set_runtime_api_key(provider: str, api_key: str) -> None:
+def _provider_key_scope(base_url: str) -> str:
+    parsed = urlsplit(str(base_url or "").strip())
+    identity = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{parsed.path.rstrip('/')}"
+    if not identity.strip(":/"):
+        return ""
+    import hashlib
+
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12].upper()
+
+
+def _scoped_vault_name(provider: str, base_url: str) -> str:
+    scope = _provider_key_scope(base_url)
+    if not scope:
+        return ""
+    prefix = {
+        "anthropic": "ANTHROPIC_API_KEY",
+        "custom": "CUSTOM_API_KEY",
+        "openai": "OPENAI_API_KEY",
+    }.get(provider, "OPENAI_API_KEY")
+    return f"{prefix}_{scope}"
+
+
+def _set_runtime_api_key(provider: str, api_key: str, base_url: str = "") -> None:
     if not api_key:
+        _clear_runtime_api_key(provider, base_url)
         return
     if provider == "anthropic":
         os.environ["ANTHROPIC_API_KEY"] = api_key
@@ -281,6 +346,56 @@ def _set_runtime_api_key(provider: str, api_key: str) -> None:
         )
     except Exception as exc:
         logger.debug("vault API key write failed for %s: %s", vault_name, exc)
+
+    scoped_name = _scoped_vault_name(provider, base_url)
+    if not scoped_name:
+        return
+    try:
+        from backend.vault import EnvVault
+
+        EnvVault().set(
+            scoped_name,
+            api_key,
+            description=f"{provider} provider API key for {urlsplit(base_url).netloc or base_url}",
+            scope="global",
+        )
+    except Exception as exc:
+        logger.debug("vault scoped API key write failed for %s: %s", scoped_name, exc)
+
+
+def _clear_runtime_api_key(provider: str, base_url: str = "") -> None:
+    if provider == "anthropic":
+        vault_name = "ANTHROPIC_API_KEY"
+    elif provider == "custom":
+        vault_name = "CUSTOM_API_KEY"
+    else:
+        vault_name = "OPENAI_API_KEY"
+    os.environ.pop(vault_name, None)
+    names = [vault_name]
+    scoped_name = _scoped_vault_name(provider, base_url)
+    if scoped_name:
+        names.append(scoped_name)
+    try:
+        from backend.vault import EnvVault
+
+        vault = EnvVault()
+        for name in names:
+            vault.delete(name)
+    except Exception as exc:
+        logger.debug("vault API key clear failed for %s: %s", vault_name, exc)
+
+
+def _clear_scoped_runtime_api_key(provider: str, base_url: str = "") -> None:
+    scoped_name = _scoped_vault_name(provider, base_url)
+    if not scoped_name:
+        return
+    os.environ.pop(scoped_name, None)
+    try:
+        from backend.vault import EnvVault
+
+        EnvVault().delete(scoped_name)
+    except Exception as exc:
+        logger.debug("vault scoped API key clear failed for %s: %s", scoped_name, exc)
 
 
 def _vault_api_key(name: str) -> str:
@@ -311,21 +426,61 @@ def _custom_allows_openai_key_fallback(base_url: str) -> bool:
     return _same_url_host(base_url, os.getenv("OPENAI_BASE_URL", ""))
 
 
-def _custom_provider_api_key(base_url: str) -> str:
-    direct = (os.getenv("CUSTOM_API_KEY") or _vault_api_key("CUSTOM_API_KEY")).strip()
+def _provider_api_key_for_base_url(provider: str, base_url: str) -> str:
+    provider = _normalize_provider(provider)
+    if provider == "custom":
+        return _custom_provider_api_key(base_url)
+
+    env_name = "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY"
+    scoped_name = _scoped_vault_name(provider, base_url)
+    if scoped_name:
+        scoped = _vault_api_key(scoped_name).strip()
+        if scoped:
+            return scoped
+
+    direct = os.getenv(env_name, "").strip()
     if direct:
         return direct
+
+    return _vault_api_key(env_name).strip()
+
+
+def _custom_provider_api_key(base_url: str, *, allow_scoped: bool = True) -> str:
+    if allow_scoped:
+        scoped_name = _scoped_vault_name("custom", base_url)
+        if scoped_name:
+            scoped = _vault_api_key(scoped_name).strip()
+            if scoped:
+                return scoped
+
+    direct = os.getenv("CUSTOM_API_KEY", "").strip()
+    if direct:
+        return direct
+
+    direct = _vault_api_key("CUSTOM_API_KEY").strip()
+    if direct:
+        return direct
+
     if _custom_allows_openai_key_fallback(base_url):
-        return (os.getenv("OPENAI_API_KEY") or _vault_api_key("OPENAI_API_KEY")).strip()
+        openai_scoped_name = _scoped_vault_name("openai", base_url)
+        if openai_scoped_name:
+            openai_scoped = _vault_api_key(openai_scoped_name).strip()
+            if openai_scoped:
+                return openai_scoped
+        openai_env = os.getenv("OPENAI_API_KEY", "").strip()
+        if openai_env:
+            return openai_env
+        return _vault_api_key("OPENAI_API_KEY").strip()
     return ""
 
 
 def _provider_api_key(provider: str) -> str:
+    provider = _normalize_provider(provider)
     if provider == "anthropic":
-        return (os.getenv("ANTHROPIC_API_KEY") or _vault_api_key("ANTHROPIC_API_KEY")).strip()
+        return _provider_api_key_for_base_url("anthropic", os.getenv("ANTHROPIC_BASE_URL", ""))
     if provider == "custom":
         return _custom_provider_api_key(os.getenv("OPENAI_BASE_URL", ""))
-    return (os.getenv("OPENAI_API_KEY") or _vault_api_key("OPENAI_API_KEY")).strip()
+    return _provider_api_key_for_base_url("openai", os.getenv("OPENAI_BASE_URL", ""))
 
 
 def _merge_unique(values: list[str], required: list[str]) -> list[str]:
@@ -345,11 +500,25 @@ def _coerce_int(value: Any, default: int) -> int:
 
 
 _SUPPORTED_AGENT_MODES = {"react", "auto"}
+_SUPPORTED_PROMPT_PERSONAS = {"minicode", "codex"}
+
+
+def _normalize_prompt_persona(value: Any) -> str:
+    persona = str(value or "").strip().lower()
+    return persona if persona in _SUPPORTED_PROMPT_PERSONAS else "codex"
 
 
 def _normalize_agent_mode(value: Any) -> str:
     mode = str(value or "react").strip().lower() or "react"
     return mode if mode in _SUPPORTED_AGENT_MODES else "react"
+
+
+def get_prompt_persona(settings_data: dict[str, Any] | None = None) -> str:
+    env_value = str(os.getenv("MINICODE_PROMPT_PERSONA", "")).strip().lower()
+    if env_value in _SUPPORTED_PROMPT_PERSONAS:
+        return env_value
+    raw = settings_data if settings_data is not None else _load_settings_json()
+    return _normalize_prompt_persona(raw.get("prompt_persona") if isinstance(raw, dict) else "")
 
 
 def _coerce_model_list(value: Any) -> list[str]:
@@ -390,17 +559,24 @@ def normalize_custom_wire_api(base_url: str, value: str, default: str = "chat") 
 
 
 def provider_supports_reasoning_effort(provider: str, section: dict[str, Any] | None) -> bool:
-    """Return True when the configured runtime path applies reasoning_effort."""
+    """Return True when the selected model declares reasoning-effort support."""
     normalized = _normalize_provider(provider)
     if normalized == "anthropic":
         return False
     data = section if isinstance(section, dict) else {}
-    wire_api = str(data.get("wire_api") or "chat").strip().lower()
+    default_wire_api = "responses" if normalized == "openai" else "chat"
+    wire_api = str(data.get("wire_api") or default_wire_api).strip().lower()
     if normalized == "custom":
         wire_api = normalize_custom_wire_api(str(data.get("base_url") or ""), wire_api, "chat")
     else:
-        wire_api = _normalize_wire_api(wire_api, "chat")
-    return wire_api == "responses"
+        wire_api = _normalize_wire_api(wire_api, default_wire_api)
+    from backend.llm.reasoning_effort import reasoning_effort_levels
+
+    return bool(reasoning_effort_levels(
+        str(data.get("model") or ""),
+        wire_api,
+        data.get("reasoning_effort_levels"),
+    ))
 
 
 def active_provider_supports_reasoning_effort(payload: dict[str, Any] | None = None) -> bool:
@@ -473,34 +649,322 @@ def _normalize_custom_model(base_url: str, model: str) -> str:
     return normalized
 
 
+def _filter_deepseek_models(models: list[str]) -> list[str]:
+    filtered: list[str] = []
+    for item in models:
+        candidate = str(item or "").strip()
+        lowered = candidate.lower()
+        if not candidate:
+            continue
+        if lowered.startswith("deepseek-") or lowered in {"deepseek-chat", "deepseek-reasoner"}:
+            if candidate not in filtered:
+                filtered.append(candidate)
+    return filtered
+
+
+def _provider_display_name(provider_data: dict[str, Any]) -> str:
+    for key in ("display_name", "name", "label"):
+        value = str(provider_data.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _normalize_prompt_cache_retention(value: Any, default: str = "") -> str:
+    text = str(value if value is not None else default).strip().lower()
+    if text in {"", "off", "none", "false", "0"}:
+        return ""
+    if text in {"24h", "in_memory"}:
+        return text
+    return default
+
+
+def _responses_stateful_default(enabled: bool) -> bool:
+    return coerce_feature_bool(os.getenv("OPENAI_RESPONSES_STATEFUL"), True) if enabled else False
+
+
+def _responses_prompt_cache_retention_default(enabled: bool) -> str:
+    if not enabled:
+        return ""
+    return _normalize_prompt_cache_retention(os.getenv("OPENAI_PROMPT_CACHE_RETENTION", "24h"), "24h")
+
+
+def _llm_history(settings_data: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    llm_data = _get_llm_section(settings_data)
+    raw_history = llm_data.get("provider_history", [])
+    if not isinstance(raw_history, list):
+        return []
+    history: list[dict[str, Any]] = []
+    for raw in raw_history:
+        if not isinstance(raw, dict):
+            continue
+        provider = _normalize_provider(str(raw.get("provider") or ""))
+        base_url = str(raw.get("base_url") or "").strip()
+        model = str(raw.get("model") or "").strip()
+        wire_api = _history_identity(provider, base_url, str(raw.get("wire_api") or ""))[2]
+        responses_defaults_enabled = wire_api == "responses"
+        responses_stateful_default = _responses_stateful_default(responses_defaults_enabled)
+        prompt_cache_retention_default = _responses_prompt_cache_retention_default(responses_defaults_enabled)
+        available_models = _coerce_model_list(raw.get("available_models"))
+        api_key = _provider_api_key_for_base_url(provider, base_url)
+        has_api_key = bool(raw.get("has_api_key")) or bool(api_key)
+        history.append({
+            "provider": provider,
+            "provider_id": str(raw.get("provider_id") or "").strip(),
+            "display_name": _provider_display_name(raw),
+            "api_key": api_key,
+            "base_url": base_url,
+            "model": model,
+            "available_models": available_models,
+            "models_source": str(raw.get("models_source") or "").strip(),
+            "wire_api": wire_api,
+            "responses_reasoning_summary": str(raw.get("responses_reasoning_summary") or "auto").strip(),
+            "responses_stateful_continuation": coerce_feature_bool(
+                raw.get("responses_stateful_continuation", responses_stateful_default),
+                responses_stateful_default,
+            ),
+            "prompt_cache_retention": _normalize_prompt_cache_retention(
+                raw.get("prompt_cache_retention", prompt_cache_retention_default),
+                prompt_cache_retention_default,
+            ),
+            "reasoning_effort_levels": _coerce_model_list(raw.get("reasoning_effort_levels")),
+            "thinking_budget": _coerce_int(raw.get("thinking_budget", 0), 0),
+            "has_api_key": has_api_key,
+            "updated_at": float(raw.get("updated_at") or 0),
+        })
+    history.sort(key=lambda item: float(item.get("updated_at") or 0), reverse=True)
+    return history[:16]
+
+
+def _provider_id_for_history(provider: str, base_url: str, wire_api: str) -> str:
+    if provider == "anthropic":
+        return "anthropic_off"
+    if provider == "custom" and wire_api == "anthropic":
+        return "custom_anthropic"
+    return _resolve_provider_id_for_config(base_url)
+
+
+def _resolve_provider_id_for_config(base_url: str) -> str:
+    host = urlsplit(str(base_url or "").strip()).netloc.lower()
+    if "lucen.cc" in host:
+        return "lucen"
+    if "api.openai.com" in host:
+        return "openai_official"
+    if "api.deepseek.com" in host:
+        return "deepseek"
+    if "dashscope" in host or "aliyuncs.com" in host:
+        return "qwen"
+    if "bigmodel.cn" in host:
+        return "zhipu"
+    if "openrouter.ai" in host:
+        return "openrouter"
+    if "siliconflow.cn" in host:
+        return "siliconflow"
+    return "custom_openai"
+
+
+def _upsert_llm_history(
+    settings_data: dict[str, Any],
+    provider: str,
+    section: dict[str, Any],
+) -> list[dict[str, Any]]:
+    llm_data = settings_data.setdefault("llm", {})
+    base_url = str(section.get("base_url") or "").strip()
+    model = str(section.get("model") or "").strip()
+    default_wire_api = "anthropic" if provider == "anthropic" else "responses" if provider == "openai" else "chat"
+    wire_api = _history_identity(provider, base_url, str(section.get("wire_api") or default_wire_api))[2]
+    if not (base_url or model):
+        return _llm_history(settings_data)
+
+    provider_id = _provider_id_for_history(provider, base_url, wire_api)
+    key = (provider, base_url.lower().rstrip("/"), wire_api)
+    responses_defaults_enabled = wire_api == "responses"
+    responses_stateful_default = _responses_stateful_default(responses_defaults_enabled)
+    prompt_cache_retention_default = _responses_prompt_cache_retention_default(responses_defaults_enabled)
+    next_entry = {
+        "provider": provider,
+        "provider_id": provider_id,
+        "display_name": _provider_display_name(section),
+        "base_url": base_url,
+        "model": model,
+        "available_models": _coerce_model_list(section.get("available_models")),
+        "models_source": str(section.get("models_source") or "").strip(),
+        "wire_api": wire_api,
+        "responses_reasoning_summary": str(section.get("responses_reasoning_summary") or "auto").strip(),
+        "responses_stateful_continuation": coerce_feature_bool(
+            section.get("responses_stateful_continuation", responses_stateful_default),
+            responses_stateful_default,
+        ),
+        "prompt_cache_retention": _normalize_prompt_cache_retention(
+            section.get("prompt_cache_retention", prompt_cache_retention_default),
+            prompt_cache_retention_default,
+        ),
+        "reasoning_effort_levels": _coerce_model_list(section.get("reasoning_effort_levels")),
+        "thinking_budget": _coerce_int(section.get("thinking_budget", 0), 0),
+        "has_api_key": bool(_provider_api_key_for_base_url(provider, base_url)),
+        "updated_at": time.time(),
+    }
+
+    merged: list[dict[str, Any]] = [next_entry]
+    for entry in _llm_history(settings_data):
+        entry_key = (
+            _normalize_provider(str(entry.get("provider") or "")),
+            str(entry.get("base_url") or "").lower().rstrip("/"),
+            str(entry.get("wire_api") or "").strip(),
+        )
+        if entry_key == key:
+            continue
+        merged.append(entry)
+    llm_data["provider_history"] = merged[:16]
+    return llm_data["provider_history"]
+
+
+def _history_identity(provider: str, base_url: str, wire_api: str) -> tuple[str, str, str]:
+    normalized_provider = _normalize_provider(provider)
+    normalized_base_url = str(base_url or "").strip().lower().rstrip("/")
+    default_wire_api = (
+        "anthropic"
+        if normalized_provider == "anthropic"
+        else "responses"
+        if normalized_provider == "openai"
+        else "chat"
+    )
+    raw_wire_api = str(wire_api or default_wire_api).strip()
+    if normalized_provider == "custom":
+        normalized_wire_api = normalize_custom_wire_api(normalized_base_url, raw_wire_api, "chat")
+    elif normalized_provider == "openai":
+        normalized_wire_api = _normalize_wire_api(raw_wire_api, "responses")
+    else:
+        normalized_wire_api = "anthropic"
+    return normalized_provider, normalized_base_url, normalized_wire_api
+
+
+def _history_entry_matches_delete(entry: dict[str, Any], target: dict[str, Any]) -> bool:
+    entry_identity = _history_identity(
+        str(entry.get("provider") or ""),
+        str(entry.get("base_url") or ""),
+        str(entry.get("wire_api") or ""),
+    )
+    target_identity = _history_identity(
+        str(target.get("provider") or ""),
+        str(target.get("base_url") or ""),
+        str(target.get("wire_api") or ""),
+    )
+    if entry_identity != target_identity:
+        return False
+
+    target_provider_id = str(target.get("provider_id") or "").strip()
+    if target_provider_id and str(entry.get("provider_id") or "").strip() != target_provider_id:
+        return False
+
+    target_model = str(target.get("model") or "").strip()
+    if target_model and str(entry.get("model") or "").strip() != target_model:
+        return False
+
+    return True
+
+
+def delete_llm_provider_history(payload: dict[str, Any]) -> dict[str, Any]:
+    settings_data = _load_settings_json()
+    llm_data = settings_data.setdefault("llm", {})
+    raw_history = llm_data.get("provider_history", [])
+    if not isinstance(raw_history, list):
+        raw_history = []
+
+    provider = _normalize_provider(str(payload.get("provider") or "custom"))
+    base_url = str(payload.get("base_url") or "").strip()
+    provider_id = str(payload.get("provider_id") or "").strip()
+    model = str(payload.get("model") or "").strip()
+    wire_api = str(
+        payload.get("wire_api")
+        or ("anthropic" if provider == "anthropic" else "responses" if provider == "openai" else "chat")
+    ).strip()
+    if not (base_url or provider_id or model):
+        raise SettingsError("Provider history deletion requires base_url, provider_id, or model.")
+
+    target = {
+        "provider": provider,
+        "base_url": base_url,
+        "wire_api": wire_api,
+        "provider_id": provider_id,
+        "model": model,
+    }
+    next_history: list[dict[str, Any]] = []
+    removed: list[dict[str, Any]] = []
+    for entry in raw_history:
+        if isinstance(entry, dict) and _history_entry_matches_delete(entry, target):
+            removed.append(entry)
+        else:
+            next_history.append(entry)
+
+    if not removed:
+        raise SettingsError("Saved provider configuration was not found.")
+
+    llm_data["provider_history"] = next_history[:16]
+    if bool(payload.get("clear_api_key", True)):
+        for entry in removed:
+            entry_provider = _normalize_provider(str(entry.get("provider") or provider))
+            entry_base_url = str(entry.get("base_url") or base_url).strip()
+            _clear_scoped_runtime_api_key(entry_provider, entry_base_url)
+
+    _write_settings_json(settings_data)
+    return get_llm_settings_payload(settings_data)
+
+
 def get_openai_settings(settings_data: dict[str, Any] | None = None) -> dict[str, Any]:
     llm_data = _get_llm_section(settings_data)
     raw = llm_data.get("openai", {})
     provider_data = raw if isinstance(raw, dict) else {}
 
-    api_key = _provider_api_key("openai")
     base_url = str(provider_data.get("base_url") or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")).strip()
+    api_key = _provider_api_key_for_base_url("openai", base_url)
     model = str(provider_data.get("model") or os.getenv("OPENAI_MODEL", "gpt-5.4")).strip()
     reasoning_effort = str(
-        provider_data.get("reasoning_effort") or os.getenv("OPENAI_REASONING_EFFORT", "high")
+        provider_data.get("reasoning_effort") or os.getenv("OPENAI_REASONING_EFFORT", "low")
     ).strip()
-    wire_api = str(provider_data.get("wire_api") or os.getenv("OPENAI_WIRE_API", "chat")).strip()
+    responses_reasoning_summary = str(
+        provider_data.get("responses_reasoning_summary")
+        or os.getenv("OPENAI_RESPONSES_REASONING_SUMMARY", "off")
+    ).strip()
+    wire_api = str(provider_data.get("wire_api") or os.getenv("OPENAI_WIRE_API", "responses")).strip()
     max_tokens = _coerce_int(provider_data.get("max_tokens", os.getenv("OPENAI_MAX_TOKENS", "8192")), 8192)
+    responses_stateful_continuation = coerce_feature_bool(
+        provider_data.get(
+            "responses_stateful_continuation",
+            os.getenv("OPENAI_RESPONSES_STATEFUL", "true"),
+        ),
+        _responses_stateful_default(True),
+    )
+    prompt_cache_retention = _normalize_prompt_cache_retention(
+        provider_data.get(
+            "prompt_cache_retention",
+            os.getenv("OPENAI_PROMPT_CACHE_RETENTION", "24h"),
+        ),
+        _responses_prompt_cache_retention_default(True),
+    )
 
     available_models = _coerce_model_list(provider_data.get("available_models"))
     if not available_models:
         available_models = _coerce_model_list(os.getenv("OPENAI_AVAILABLE_MODELS", ""))
     if model and model not in available_models:
         available_models.insert(0, model)
+    models_source = str(provider_data.get("models_source") or "").strip()
+    reasoning_effort_levels = _coerce_model_list(provider_data.get("reasoning_effort_levels"))
 
     return {
+        "display_name": _provider_display_name(provider_data),
         "api_key": api_key,
         "base_url": _normalize_openai_base_url(base_url),
         "model": model,
         "available_models": available_models,
+        "models_source": models_source,
         "reasoning_effort": reasoning_effort,
+        "responses_reasoning_summary": responses_reasoning_summary,
         "max_tokens": max_tokens,
         "wire_api": wire_api,
+        "responses_stateful_continuation": responses_stateful_continuation,
+        "prompt_cache_retention": prompt_cache_retention,
+        "reasoning_effort_levels": reasoning_effort_levels,
     }
 
 
@@ -509,8 +973,8 @@ def get_anthropic_settings(settings_data: dict[str, Any] | None = None) -> dict[
     raw = llm_data.get("anthropic", {})
     provider_data = raw if isinstance(raw, dict) else {}
 
-    api_key = _provider_api_key("anthropic")
     base_url = str(provider_data.get("base_url") or os.getenv("ANTHROPIC_BASE_URL", "")).strip()
+    api_key = _provider_api_key_for_base_url("anthropic", base_url)
     model = str(
         provider_data.get("model") or os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
     ).strip()
@@ -528,12 +992,15 @@ def get_anthropic_settings(settings_data: dict[str, Any] | None = None) -> dict[
         available_models = _coerce_model_list(os.getenv("ANTHROPIC_AVAILABLE_MODELS", ""))
     if model and model not in available_models:
         available_models.insert(0, model)
+    models_source = str(provider_data.get("models_source") or "").strip()
 
     return {
+        "display_name": _provider_display_name(provider_data),
         "api_key": api_key,
         "base_url": base_url,
         "model": model,
         "available_models": available_models,
+        "models_source": models_source,
         "max_tokens": max_tokens,
         "thinking_budget": thinking_budget,
     }
@@ -549,10 +1016,35 @@ def get_custom_settings(settings_data: dict[str, Any] | None = None) -> dict[str
     api_key = _custom_provider_api_key(base_url)
     model = str(provider_data.get("model") or os.getenv("OPENAI_MODEL", "")).strip()
     reasoning_effort = str(
-        provider_data.get("reasoning_effort") or os.getenv("OPENAI_REASONING_EFFORT", "high")
+        provider_data.get("reasoning_effort") or os.getenv("OPENAI_REASONING_EFFORT", "low")
+    ).strip()
+    responses_reasoning_summary = str(
+        provider_data.get("responses_reasoning_summary")
+        or os.getenv("OPENAI_RESPONSES_REASONING_SUMMARY", "off")
     ).strip()
     wire_api = normalize_custom_wire_api(base_url, str(provider_data.get("wire_api", "chat")), "chat")
     max_tokens = _coerce_int(provider_data.get("max_tokens", os.getenv("OPENAI_MAX_TOKENS", "8192")), 8192)
+    responses_defaults_enabled = wire_api == "responses"
+    responses_stateful_continuation = coerce_feature_bool(
+        provider_data.get(
+            "responses_stateful_continuation",
+            os.getenv(
+                "OPENAI_RESPONSES_STATEFUL",
+                "true" if _responses_stateful_default(responses_defaults_enabled) else "false",
+            ),
+        ),
+        _responses_stateful_default(responses_defaults_enabled),
+    )
+    prompt_cache_retention = _normalize_prompt_cache_retention(
+        provider_data.get(
+            "prompt_cache_retention",
+            os.getenv(
+                "OPENAI_PROMPT_CACHE_RETENTION",
+                _responses_prompt_cache_retention_default(responses_defaults_enabled),
+            ),
+        ),
+        _responses_prompt_cache_retention_default(responses_defaults_enabled),
+    )
     thinking_budget = _coerce_int(
         provider_data.get("thinking_budget", os.getenv("ANTHROPIC_THINKING_BUDGET", "0")),
         0,
@@ -565,21 +1057,30 @@ def get_custom_settings(settings_data: dict[str, Any] | None = None) -> dict[str
     else:
         model = _normalize_custom_model(base_url, model)
     if "deepseek.com" in urlsplit(base_url).netloc.lower():
+        available_models = _filter_deepseek_models(available_models)
         for preset in ("deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"):
             if preset not in available_models:
                 available_models.append(preset)
     if model and model not in available_models:
         available_models.insert(0, model)
+    models_source = str(provider_data.get("models_source") or "").strip()
+    reasoning_effort_levels = _coerce_model_list(provider_data.get("reasoning_effort_levels"))
 
     return {
+        "display_name": _provider_display_name(provider_data),
         "api_key": api_key,
         "base_url": (_normalize_openai_base_url(base_url) if base_url and wire_api != "anthropic" else base_url),
         "model": model,
         "available_models": available_models,
+        "models_source": models_source,
         "reasoning_effort": reasoning_effort,
+        "responses_reasoning_summary": responses_reasoning_summary,
         "max_tokens": max_tokens,
         "thinking_budget": thinking_budget,
         "wire_api": wire_api,
+        "responses_stateful_continuation": responses_stateful_continuation,
+        "reasoning_effort_levels": reasoning_effort_levels,
+        "prompt_cache_retention": prompt_cache_retention,
     }
 
 
@@ -595,11 +1096,22 @@ def get_available_models(
     return get_openai_settings(settings_data)["available_models"]
 
 
+def get_models_source(
+    provider: str | None = None,
+    settings_data: dict[str, Any] | None = None,
+) -> str:
+    """Return the persisted model list source ('live' or '') for the given provider."""
+    active_provider = _normalize_provider(provider or get_llm_provider(settings_data))
+    if active_provider == "anthropic":
+        return get_anthropic_settings(settings_data).get("models_source", "")
+    if active_provider == "custom":
+        return get_custom_settings(settings_data).get("models_source", "")
+    return get_openai_settings(settings_data).get("models_source", "")
+
+
 def resolve_provider_api_key_for_base_url(provider: str, base_url: str) -> str:
     normalized = _normalize_provider(provider)
-    if normalized == "custom":
-        return _custom_provider_api_key(base_url)
-    return _provider_api_key(normalized)
+    return _provider_api_key_for_base_url(normalized, base_url)
 
 
 def _load_settings_json() -> dict:
@@ -634,45 +1146,75 @@ def get_llm_settings_payload(settings_data: dict[str, Any] | None = None) -> dic
         "openai": openai["model"],
     }
 
+    def mask_api_key(value: str) -> str:
+        value = str(value or "")
+        if len(value) <= 8:
+            return "" if not value else "••••"
+        return f"{value[:3]}…{value[-4:]}"
+
     return {
         "provider": provider,
         "providers": ["openai", "anthropic", "custom"],
         "openai": {
+            "display_name": openai["display_name"],
             "has_api_key": bool(openai["api_key"]),
-            "api_key": "",
+            "api_key": mask_api_key(openai["api_key"]),
             "base_url": openai["base_url"],
             "model": openai["model"],
             "available_models": openai["available_models"],
+            "models_source": openai.get("models_source", ""),
             "reasoning_effort": openai["reasoning_effort"],
+            "responses_reasoning_summary": openai["responses_reasoning_summary"],
             "max_tokens": openai["max_tokens"],
             "wire_api": openai["wire_api"],
+            "responses_stateful_continuation": openai["responses_stateful_continuation"],
+            "prompt_cache_retention": openai["prompt_cache_retention"],
+            "reasoning_effort_levels": openai["reasoning_effort_levels"],
         },
         "anthropic": {
+            "display_name": anthropic["display_name"],
             "has_api_key": bool(anthropic["api_key"]),
-            "api_key": "",
+            "api_key": mask_api_key(anthropic["api_key"]),
             "base_url": anthropic["base_url"],
             "model": anthropic["model"],
             "available_models": anthropic["available_models"],
+            "models_source": anthropic.get("models_source", ""),
             "max_tokens": anthropic["max_tokens"],
             "thinking_budget": anthropic["thinking_budget"],
         },
         "custom": {
+            "display_name": custom["display_name"],
             "has_api_key": bool(custom["api_key"]),
-            "api_key": "",
+            "api_key": mask_api_key(custom["api_key"]),
             "base_url": custom["base_url"],
             "model": custom["model"],
             "available_models": custom["available_models"],
+            "models_source": custom.get("models_source", ""),
             "reasoning_effort": custom["reasoning_effort"],
+            "responses_reasoning_summary": custom["responses_reasoning_summary"],
             "max_tokens": custom["max_tokens"],
             "thinking_budget": custom["thinking_budget"],
             "wire_api": custom["wire_api"],
+            "responses_stateful_continuation": custom["responses_stateful_continuation"],
+            "prompt_cache_retention": custom["prompt_cache_retention"],
+            "reasoning_effort_levels": custom["reasoning_effort_levels"],
         },
+        "provider_history": [
+            {
+                **entry,
+                "api_key": mask_api_key(str(entry.get("api_key") or "")),
+            }
+            for entry in _llm_history(settings_data)
+        ],
         "active_model": active_by_provider.get(provider, openai["model"]),
+        "prompt_persona": get_prompt_persona(settings_data),
     }
 
 
 def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
     settings_data = _load_settings_json()
+    if "prompt_persona" in payload:
+        settings_data["prompt_persona"] = _normalize_prompt_persona(payload.get("prompt_persona"))
     current_openai = get_openai_settings(settings_data)
     current_anthropic = get_anthropic_settings(settings_data)
     current_custom = get_custom_settings(settings_data)
@@ -682,44 +1224,108 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
 
     raw_openai = payload.get("openai", {})
     openai_updates = raw_openai if isinstance(raw_openai, dict) else {}
+    openai_api_key_provided = "api_key" in openai_updates
     openai_api_key = str(openai_updates.get("api_key", "")).strip()
-    _set_runtime_api_key("openai", openai_api_key)
     openai_base_url = str(openai_updates.get("base_url", current_openai["base_url"])).strip()
+    if openai_api_key_provided:
+        _set_runtime_api_key("openai", openai_api_key, openai_base_url)
     openai_model = str(openai_updates.get("model", current_openai["model"])).strip()
+    openai_capabilities_match = (
+        openai_model == current_openai["model"]
+        and _normalize_openai_base_url(openai_base_url) == current_openai["base_url"]
+    )
     openai_reasoning_effort = str(
         openai_updates.get("reasoning_effort", current_openai["reasoning_effort"])
     ).strip()
+    openai_responses_reasoning_summary = str(
+        openai_updates.get(
+            "responses_reasoning_summary",
+            current_openai["responses_reasoning_summary"],
+        )
+    ).strip()
     openai_wire_api = str(openai_updates.get("wire_api", current_openai["wire_api"])).strip()
+    current_openai_wire_api = _normalize_wire_api(str(current_openai["wire_api"]), "responses")
+    next_openai_wire_api = _normalize_wire_api(
+        openai_wire_api or current_openai["wire_api"],
+        current_openai["wire_api"],
+    )
+    openai_switched_to_responses = current_openai_wire_api != "responses" and next_openai_wire_api == "responses"
+    openai_responses_stateful_default = (
+        _responses_stateful_default(True)
+        if openai_switched_to_responses
+        else current_openai["responses_stateful_continuation"] if next_openai_wire_api == "responses" else False
+    )
+    openai_prompt_cache_retention_default = (
+        _responses_prompt_cache_retention_default(True)
+        if openai_switched_to_responses
+        else current_openai["prompt_cache_retention"] if next_openai_wire_api == "responses" else ""
+    )
+    openai_prompt_cache_retention = (
+        _normalize_prompt_cache_retention(
+            openai_updates.get("prompt_cache_retention", openai_prompt_cache_retention_default),
+            openai_prompt_cache_retention_default,
+        )
+        if next_openai_wire_api == "responses"
+        else ""
+    )
     next_openai = {
+        "display_name": str(openai_updates.get("display_name", current_openai["display_name"])).strip(),
         "api_key": "",
         "base_url": _normalize_openai_base_url(openai_base_url),
         "model": openai_model or current_openai["model"],
         "available_models": _coerce_model_list(
             openai_updates.get("available_models", current_openai["available_models"])
         ),
+        "models_source": str(openai_updates.get("models_source", current_openai.get("models_source", ""))).strip(),
         "reasoning_effort": openai_reasoning_effort or current_openai["reasoning_effort"],
+        "responses_reasoning_summary": (
+            openai_responses_reasoning_summary
+            or current_openai["responses_reasoning_summary"]
+        ),
         "max_tokens": _coerce_int(
             openai_updates.get("max_tokens", current_openai["max_tokens"]),
             current_openai["max_tokens"],
         ),
-        "wire_api": openai_wire_api or current_openai["wire_api"],
+        "wire_api": next_openai_wire_api,
+        "responses_stateful_continuation": (
+            coerce_feature_bool(
+                openai_updates.get(
+                    "responses_stateful_continuation",
+                    openai_responses_stateful_default,
+                ),
+                bool(openai_responses_stateful_default),
+            )
+            if next_openai_wire_api == "responses"
+            else False
+        ),
+        "prompt_cache_retention": openai_prompt_cache_retention,
+        "reasoning_effort_levels": _coerce_model_list(
+            openai_updates.get(
+                "reasoning_effort_levels",
+                current_openai["reasoning_effort_levels"] if openai_capabilities_match else [],
+            )
+        ),
     }
     if next_openai["model"] and next_openai["model"] not in next_openai["available_models"]:
         next_openai["available_models"].insert(0, next_openai["model"])
 
     raw_anthropic = payload.get("anthropic", {})
     anthropic_updates = raw_anthropic if isinstance(raw_anthropic, dict) else {}
+    anthropic_api_key_provided = "api_key" in anthropic_updates
     anthropic_api_key = str(anthropic_updates.get("api_key", "")).strip()
-    _set_runtime_api_key("anthropic", anthropic_api_key)
     anthropic_base_url = str(anthropic_updates.get("base_url", current_anthropic["base_url"])).strip()
+    if anthropic_api_key_provided:
+        _set_runtime_api_key("anthropic", anthropic_api_key, anthropic_base_url)
     anthropic_model = str(anthropic_updates.get("model", current_anthropic["model"])).strip()
     next_anthropic = {
+        "display_name": str(anthropic_updates.get("display_name", current_anthropic["display_name"])).strip(),
         "api_key": "",
         "base_url": anthropic_base_url,
         "model": anthropic_model or current_anthropic["model"],
         "available_models": _coerce_model_list(
             anthropic_updates.get("available_models", current_anthropic["available_models"])
         ),
+        "models_source": str(anthropic_updates.get("models_source", current_anthropic.get("models_source", ""))).strip(),
         "max_tokens": _coerce_int(
             anthropic_updates.get("max_tokens", current_anthropic["max_tokens"]),
             current_anthropic["max_tokens"],
@@ -734,14 +1340,32 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
 
     raw_custom = payload.get("custom", {})
     custom_updates = raw_custom if isinstance(raw_custom, dict) else {}
+    custom_api_key_provided = "api_key" in custom_updates
     custom_api_key = str(custom_updates.get("api_key", "")).strip()
-    _set_runtime_api_key("custom", custom_api_key)
     custom_base_url = str(custom_updates.get("base_url", current_custom["base_url"])).strip()
+    if custom_api_key_provided:
+        _set_runtime_api_key("custom", custom_api_key, custom_base_url)
     custom_model = str(custom_updates.get("model", current_custom["model"])).strip()
     custom_wire_api = normalize_custom_wire_api(
         custom_base_url,
         str(custom_updates.get("wire_api", current_custom["wire_api"])),
         current_custom["wire_api"],
+    )
+    current_custom_wire_api = normalize_custom_wire_api(
+        str(current_custom.get("base_url") or custom_base_url),
+        str(current_custom["wire_api"]),
+        "chat",
+    )
+    custom_switched_to_responses = current_custom_wire_api != "responses" and custom_wire_api == "responses"
+    custom_responses_stateful_default = (
+        _responses_stateful_default(True)
+        if custom_switched_to_responses
+        else current_custom["responses_stateful_continuation"] if custom_wire_api == "responses" else False
+    )
+    custom_prompt_cache_retention_default = (
+        _responses_prompt_cache_retention_default(True)
+        if custom_switched_to_responses
+        else current_custom["prompt_cache_retention"] if custom_wire_api == "responses" else ""
     )
     next_custom_available = _coerce_model_list(
         custom_updates.get("available_models", current_custom["available_models"])
@@ -751,8 +1375,13 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
         next_custom_model = _select_anthropic_model(custom_model or current_custom["model"], next_custom_available)
     else:
         next_custom_model = _normalize_custom_model(custom_base_url, custom_model or current_custom["model"])
+    custom_capabilities_match = (
+        next_custom_model == current_custom["model"]
+        and custom_base_url.rstrip("/") == str(current_custom["base_url"]).rstrip("/")
+    )
 
     next_custom = {
+        "display_name": str(custom_updates.get("display_name", current_custom["display_name"])).strip(),
         "api_key": "",
         "base_url": (
             _normalize_openai_base_url(custom_base_url)
@@ -761,7 +1390,14 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
         ),
         "model": next_custom_model,
         "available_models": next_custom_available,
+        "models_source": str(custom_updates.get("models_source", current_custom.get("models_source", ""))).strip(),
         "reasoning_effort": str(custom_updates.get("reasoning_effort", current_custom["reasoning_effort"])).strip(),
+        "responses_reasoning_summary": str(
+            custom_updates.get(
+                "responses_reasoning_summary",
+                current_custom["responses_reasoning_summary"],
+            )
+        ).strip(),
         "max_tokens": _coerce_int(
             custom_updates.get("max_tokens", current_custom["max_tokens"]),
             current_custom["max_tokens"],
@@ -771,6 +1407,31 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
             current_custom["thinking_budget"],
         ),
         "wire_api": custom_wire_api or current_custom["wire_api"],
+        "responses_stateful_continuation": (
+            coerce_feature_bool(
+                custom_updates.get(
+                    "responses_stateful_continuation",
+                    custom_responses_stateful_default,
+                ),
+                bool(custom_responses_stateful_default),
+            )
+            if custom_wire_api == "responses"
+            else False
+        ),
+        "prompt_cache_retention": (
+            _normalize_prompt_cache_retention(
+                custom_updates.get("prompt_cache_retention", custom_prompt_cache_retention_default),
+                custom_prompt_cache_retention_default,
+            )
+            if custom_wire_api == "responses"
+            else ""
+        ),
+        "reasoning_effort_levels": _coerce_model_list(
+            custom_updates.get(
+                "reasoning_effort_levels",
+                current_custom["reasoning_effort_levels"] if custom_capabilities_match else [],
+            )
+        ),
     }
     if next_custom["model"] and next_custom["model"] not in next_custom["available_models"]:
         next_custom["available_models"].insert(0, next_custom["model"])
@@ -780,7 +1441,27 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
         "openai": next_openai,
         "anthropic": next_anthropic,
         "custom": next_custom,
+        "provider_history": _llm_history(settings_data),
     }
+    upserted_providers: set[str] = set()
+    for section_provider, updates, section in (
+        ("openai", openai_updates, next_openai),
+        ("anthropic", anthropic_updates, next_anthropic),
+        ("custom", custom_updates, next_custom),
+    ):
+        if updates:
+            _upsert_llm_history(settings_data, section_provider, section)
+            upserted_providers.add(section_provider)
+    active_section = {
+        "openai": next_openai,
+        "anthropic": next_anthropic,
+        "custom": next_custom,
+    }.get(provider)
+    # Only create a history card when the caller explicitly selected a
+    # provider. Persona-only and other unrelated settings saves must not turn
+    # built-in/default provider sections into user-configured profiles.
+    if active_section is not None and not upserted_providers and raw_provider is not None:
+        _upsert_llm_history(settings_data, provider, active_section)
     _write_settings_json(settings_data)
     return get_llm_settings_payload(settings_data)
 
@@ -821,8 +1502,12 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSetting
             base_url=anthropic["base_url"],
             model=anthropic["model"],
             reasoning_effort="",
+            responses_reasoning_summary="",
             max_tokens=anthropic["max_tokens"],
-            wire_api="responses",
+            wire_api="anthropic",
+            responses_stateful_continuation=False,
+            prompt_cache_retention="",
+            reasoning_effort_levels=(),
         )
 
     if active_provider == "custom":
@@ -834,8 +1519,12 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSetting
             base_url=custom["base_url"],
             model=custom["model"],
             reasoning_effort=custom["reasoning_effort"],
+            responses_reasoning_summary=custom["responses_reasoning_summary"],
             max_tokens=custom["max_tokens"],
             wire_api=custom["wire_api"],
+            responses_stateful_continuation=custom["responses_stateful_continuation"],
+            prompt_cache_retention=custom["prompt_cache_retention"],
+            reasoning_effort_levels=tuple(custom.get("reasoning_effort_levels") or ()),
         )
 
     openai = get_openai_settings(settings_data)
@@ -847,14 +1536,19 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSetting
         base_url=openai["base_url"],
         model=openai["model"],
         reasoning_effort=openai["reasoning_effort"],
+        responses_reasoning_summary=openai["responses_reasoning_summary"],
         max_tokens=openai["max_tokens"],
         wire_api=openai["wire_api"],
+        responses_stateful_continuation=openai["responses_stateful_continuation"],
+        prompt_cache_retention=openai["prompt_cache_retention"],
+        reasoning_effort_levels=tuple(openai.get("reasoning_effort_levels") or ()),
     )
 
 
 def load_config() -> AppConfig:
     """加载完整应用配置：环境变量 + settings.json。"""
     settings_data = _load_settings_json()
+    feature_flags = load_feature_flags(settings_data)
 
     # LLM 来自环境变量
     try:
@@ -902,26 +1596,63 @@ def load_config() -> AppConfig:
         value = str(item).strip().lower()
         if value and value not in fallback_providers:
             fallback_providers.append(value)
+    raw_stream_retryable = agent_data.get(
+        "stream_retryable_substrings",
+        AgentSettings.stream_retryable_substrings,
+    )
+    if isinstance(raw_stream_retryable, str):
+        raw_stream_retryable = [item.strip() for item in raw_stream_retryable.split(",")]
 
     agent = AgentSettings(
         max_iterations=agent_data.get("max_iterations", 30),
+        max_tool_calls=agent_data.get("max_tool_calls", 200),
         compaction_threshold=agent_data.get("compaction_threshold", 0.75),
         stagnation_limit=agent_data.get("stagnation_limit", 3),
         history_keep_recent=agent_data.get("history_keep_recent", 15),
         fallback_providers=tuple(fallback_providers),
         reflection_pass=bool(agent_data.get("reflection_pass", False)),
         reflection_multi_perspective=bool(agent_data.get("reflection_multi_perspective", True)),
-        answer_gate_enabled=bool(agent_data.get("answer_gate_enabled", False)),
         agent_mode=_normalize_agent_mode(agent_data.get("agent_mode", "react")),
         verify_command=str(agent_data.get("verify_command", "") or "").strip(),
         verify_timeout_seconds=float(agent_data.get("verify_timeout_seconds", 120.0)),
-        live_text_streaming=bool(agent_data.get("live_text_streaming", False)),
+        live_text_streaming=coerce_feature_bool(agent_data.get("live_text_streaming", True), True),
+        speculative_unphased_streaming=coerce_feature_bool(
+            agent_data.get("speculative_unphased_streaming", False),
+            False,
+        ),
+        stream_timeout_seconds=float(agent_data.get("stream_timeout_seconds", 180.0)),
+        first_byte_warning_seconds=float(agent_data.get("first_byte_warning_seconds", 12.0)),
+        first_byte_timeout_seconds=float(agent_data.get("first_byte_timeout_seconds", 0.0)),
+        stream_max_attempts=int(agent_data.get("stream_max_attempts", 2)),
+        stream_retry_delay_seconds=float(agent_data.get("stream_retry_delay_seconds", 0.8)),
+        stream_retryable_substrings=tuple(
+            str(item).strip()
+            for item in raw_stream_retryable
+            if str(item).strip()
+        ),
+        prompt_cache_settle_enabled=coerce_feature_bool(
+            agent_data.get("prompt_cache_settle_enabled", False),
+            False,
+        ),
+        prompt_cache_settle_delay_seconds=float(agent_data.get("prompt_cache_settle_delay_seconds", 0.8)),
+        prompt_cache_settle_min_prompt_tokens=int(agent_data.get("prompt_cache_settle_min_prompt_tokens", 12_000)),
+        prompt_cache_settle_target_hit_rate=float(agent_data.get("prompt_cache_settle_target_hit_rate", 0.92)),
+        dynamic_max_iterations_enabled=coerce_feature_bool(
+            agent_data.get("dynamic_max_iterations_enabled", False),
+            False,
+        ),
+        dynamic_max_iterations_min_configured=int(
+            agent_data.get("dynamic_max_iterations_min_configured", 30)
+        ),
+        dynamic_max_iterations_simple=int(agent_data.get("dynamic_max_iterations_simple", 6)),
     )
 
     # Token 预算
     budget_data = settings_data.get("token_budget", {})
+    # 未显式配置 total 时，按当前模型能力动态解析（1M 模型不再被按 128K 预算）。
+    default_total = resolve_context_window(getattr(llm, "model", ""))
     token_budget = TokenBudget(
-        total=budget_data.get("total", 128_000),
+        total=budget_data.get("total", default_total),
         system_prompt=budget_data.get("system_prompt", 2_000),
         active_skills=budget_data.get("active_skills", 4_000),
         memory_index=budget_data.get("memory_index", 1_000),
@@ -936,4 +1667,5 @@ def load_config() -> AppConfig:
         token_budget=token_budget,
         permissions=permissions,
         agent=agent,
+        feature_flags=feature_flags,
     )

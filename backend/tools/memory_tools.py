@@ -1,13 +1,14 @@
 """
 记忆操作工具（DESIGN.md §2.2 + §4.3 + §8.2）。
 
-让 Agent 可以读写文件记忆和向量记忆系统。
+让 Agent 可以读写文件记忆。
 
 工具：
   read_memory(filename)   — 读取具体记忆文件
   save_memory(filename, content) — 写入/更新记忆文件
-  recall_memory(query)    — 语义检索向量记忆
-  remember_memory(content) — 写入长期向量记忆
+
+The legacy vector-memory tools below are retained only for explicit opt-in
+compatibility. The default registry does not expose them.
 """
 
 from __future__ import annotations
@@ -15,10 +16,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from backend.memory.file_memory import FileMemory
-from backend.memory.vector_memory import VectorMemory
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 
 if TYPE_CHECKING:
+    from backend.memory.vector_memory import VectorMemory
     from backend.permissions.context import ToolExecutionContext
 
 
@@ -35,6 +36,11 @@ class ReadMemoryTool(BaseTool):
         "Use this at the start of a session to recall context, or when the user references prior work."
     )
     permission = PermissionLevel.AUTO
+
+    # Beyond this age a memory file may describe stale paths/decisions, so we
+    # wrap it in a staleness reminder telling the model to re-verify against the
+    # live workspace before trusting it (Claude Code memory doc §11).
+    STALE_AFTER_DAYS = 14.0
 
     def __init__(self, memory: FileMemory) -> None:
         self._memory = memory
@@ -70,7 +76,27 @@ class ReadMemoryTool(BaseTool):
                 f"记忆文件 '{filename}' 不存在。可用文件: {available}"
             )
 
+        content = self._with_staleness_reminder(filename, content)
         return self._success_result(content=content)
+
+    def _with_staleness_reminder(self, filename: str, content: str) -> str:
+        """Prepend a staleness reminder when the memory file is old.
+
+        Memory is a historical snapshot, not ground truth. The closer its
+        content is to code, paths, or timelines, the more it must be verified
+        against the live workspace before use.
+        """
+        age_days = self._memory.file_age_days(filename)
+        if age_days is None or age_days < self.STALE_AFTER_DAYS:
+            return content
+        reminder = (
+            f"<system-reminder>\n"
+            f"This memory ({filename}) was last updated {int(age_days)} days ago and may be stale. "
+            f"Verify anything path-, symbol-, or time-sensitive against the current workspace "
+            f"(read the file, grep the symbol) before relying on it.\n"
+            f"</system-reminder>\n\n"
+        )
+        return reminder + content
 
 
 class SaveMemoryTool(BaseTool):
@@ -82,7 +108,14 @@ class SaveMemoryTool(BaseTool):
         "Write or update a persistent memory file for cross-session recall. "
         "Use this when the user provides explicit preferences (coding style, language, frameworks), "
         "project context (goals, tech stack, constraints), or corrections to your behavior. "
-        "Files persist across sessions. Use sparingly — only save what the user explicitly states or corrects."
+        "Files persist across sessions. Use sparingly — only save what the user explicitly states or corrects.\n\n"
+        "RULES:\n"
+        "- Do NOT store what the live workspace already records: code structure, file paths, "
+        "current function signatures, git history, past fixes — these are derivable and go stale.\n"
+        "- Convert relative dates to absolute (\"next Thursday\" → the actual date) so the memory "
+        "stays meaningful later.\n"
+        "- Keep it to the four kinds of durable memory: user profile, project context, "
+        "behavior feedback, and external references."
     )
     permission = PermissionLevel.CONFIRM  # 写操作需确认
 

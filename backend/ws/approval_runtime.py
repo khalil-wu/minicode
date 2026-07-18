@@ -29,7 +29,9 @@ class SessionApprovalRuntimeMixin:
             args_str = json.dumps(args, sort_keys=True, ensure_ascii=False)
         except (TypeError, ValueError):
             args_str = str(sorted(args.items())) if isinstance(args, dict) else ""
-        return f"{tool_name}::{args_str}"
+        session_id = str(getattr(self, "session_id", "") or "").strip()
+        conversation_id = str(getattr(self, "active_conversation_id", "") or "").strip()
+        return f"{session_id}::{conversation_id}::{tool_name}::{args_str}"
 
     def _is_session_approved(self, tool_name: str, args: dict[str, Any]) -> bool:
         """Check if this tool+args was already approved for the session."""
@@ -168,6 +170,12 @@ class SessionApprovalRuntimeMixin:
         if "guidance" not in payload and isinstance(message, str) and message.strip():
             payload["guidance"] = message.strip()
 
+        # Tab-to-amend: user-supplied feedback on approve/reject becomes the
+        # model-facing guidance (mirrors cc's PermissionPrompt feedback).
+        feedback = payload.get("feedback")
+        if "guidance" not in payload and isinstance(feedback, str) and feedback.strip():
+            payload["guidance"] = feedback.strip()
+
         return request_id, payload
 
     async def _approval_handler(self, tool_call_id: str) -> dict[str, Any]:
@@ -243,8 +251,14 @@ class SessionApprovalRuntimeMixin:
             await self._send_event(event)
         return request_ids
 
-    async def _reemit_pending_state(self, conversation_id: str | None = None) -> None:
+    async def _reemit_pending_state(
+        self,
+        conversation_id: str | None = None,
+        *,
+        skip_stream_conversation_ids: set[str] | None = None,
+    ) -> None:
         target_conversation_id = str(conversation_id or "").strip()
+        skip_stream_conversation_ids = skip_stream_conversation_ids or set()
         for payload in list(self._pending_approval_payloads.values()):
             if target_conversation_id:
                 payload_conversation_id = str(payload.get("conversation_id") or "").strip()
@@ -260,6 +274,8 @@ class SessionApprovalRuntimeMixin:
         for stream_conversation_id, task in list(getattr(self, "_conversation_run_tasks", {}).items()):
             if not stream_conversation_id or task is None or task.done():
                 continue
+            if stream_conversation_id in skip_stream_conversation_ids:
+                continue
             if target_conversation_id and stream_conversation_id != target_conversation_id:
                 continue
             stream_state = stream_states.get(stream_conversation_id)
@@ -271,6 +287,7 @@ class SessionApprovalRuntimeMixin:
                     "type": "stream_resume",
                     "conversation_id": stream_conversation_id,
                     "message_id": stream_state.get("message_id") or "",
+                    "turn_id": stream_state.get("turn_id") or "",
                     "accumulated_text": stream_state.get("accumulated_text") or "",
                     "tool_calls_pending": list(tool_calls.values()) if isinstance(tool_calls, dict) else [],
                 },
@@ -325,6 +342,10 @@ class SessionApprovalRuntimeMixin:
             "tool_name": str(event.data.get("tool_name", "")).strip(),
             "args": dict(event.data.get("args") or {}),
         }
+        for key in ("source_agent", "source_thread", "source_tool"):
+            value = str(event.data.get(key) or "").strip()
+            if value:
+                payload[key] = value
         if conversation_id:
             payload["conversation_id"] = conversation_id
         diff = self._sanitize_approval_diff_for_client(request_id, event.data.get("diff"))
@@ -345,6 +366,9 @@ class SessionApprovalRuntimeMixin:
         }
         if "diff" in payload:
             request["diff"] = payload["diff"]
+        for key in ("source_agent", "source_thread", "source_tool"):
+            if key in payload:
+                request[key] = payload[key]
         control_payload = {
             "type": "control_request",
             "request_id": request_id,

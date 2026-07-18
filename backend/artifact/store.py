@@ -16,10 +16,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING  # noqa: F401  (reserved for forward references in later tasks)
 
-from backend.config import PROJECT_ROOT
+from backend.config import DATA_ROOT
 
 # ── Storage paths and limits ─────────────────────────────────
-ARTIFACT_DATA_DIR = PROJECT_ROOT / "data" / "artifacts"
+ARTIFACT_DATA_DIR = DATA_ROOT / "artifacts"
 DEFAULT_ARTIFACT_TTL_SECONDS = 86_400
 DEFAULT_MAX_CACHE_ENTRIES = 128
 DEFAULT_CLEANUP_INTERVAL_SECONDS = 600.0

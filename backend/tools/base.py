@@ -5,6 +5,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
+import hashlib
+import json
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -101,6 +103,16 @@ LEGACY_CONCURRENCY_SAFE_TOOL_NAMES = frozenset({
     "tool_search",
     "tool_describe",
 })
+TOOL_SIDE_EFFECT_NONE = "none"
+TOOL_SIDE_EFFECT_WORKSPACE = "workspace"
+TOOL_SIDE_EFFECT_EXTERNAL = "external"
+TOOL_SIDE_EFFECT_DESTRUCTIVE = "destructive"
+TOOL_SIDE_EFFECT_KINDS = frozenset({
+    TOOL_SIDE_EFFECT_NONE,
+    TOOL_SIDE_EFFECT_WORKSPACE,
+    TOOL_SIDE_EFFECT_EXTERNAL,
+    TOOL_SIDE_EFFECT_DESTRUCTIVE,
+})
 
 
 def truncate_tool_result(content: str, max_chars: int = MAX_TOOL_RESULT_CHARS) -> str:
@@ -142,6 +154,24 @@ class ToolSchema:
         """Return a compact one-line summary for constrained context budgets."""
         return f"- {self.name}: {self.description.split('.')[0]}"
 
+    def with_description(self, description: str) -> "ToolSchema":
+        """Return a copy with a model-facing description override."""
+        return ToolSchema(
+            name=self.name,
+            description=description,
+            parameters=self.parameters,
+            strict=self.strict,
+        )
+
+    def with_parameters(self, parameters: dict[str, Any]) -> "ToolSchema":
+        """Return a copy with model-facing parameter overrides."""
+        return ToolSchema(
+            name=self.name,
+            description=self.description,
+            parameters=parameters,
+            strict=self.strict,
+        )
+
 
 class BaseTool(ABC):
     """Base class for all tools."""
@@ -158,12 +188,29 @@ class BaseTool(ABC):
     always_load: bool = False  # full schema must appear on turn 1 even under deferred discovery
     should_defer: bool = False  # hidden behind tool_search until explicitly described
     search_hint: str = ""  # extra keywords for tool_search matching (not in the name)
+    # Which deferred-tool directories should list this tool. Empty means the
+    # tool can still be direct-enabled by a policy but is not invokable through
+    # the generic tool_search/tool_call bridge.
+    deferred_catalog_scopes: tuple[str, ...] = ("default",)
     # Execution metadata (Phase 4.2). Tools self-declare these instead of the
     # runtime keeping hardcoded per-name tables. None timeout = use the runtime
     # default. mutates_* drive result-cache invalidation and checkpointing.
     timeout_seconds: float | None = None
     mutates_workspace: bool = False  # writes files / workspace state
     mutates_external_state: bool = False  # commits, sends, external side effects
+    # Side-effect/idempotency policy. ``None`` means derive from legacy
+    # capability hints; subclasses can set these to make retry/prefetch
+    # decisions explicit. ``side_effect_kind`` is intentionally coarse because
+    # it is used for runtime scheduling and UI diagnostics, not model prompting.
+    side_effect_kind: str | None = None
+    idempotent: bool | None = None
+    # UI/event projection hints. These are non-model-facing and let each tool own
+    # its display category while legacy name inference remains the fallback.
+    result_kind: str | None = None
+    activity_kind: str | None = None
+    display_scope: str | None = None
+    panel_hint: str | None = None
+    display_label: str | None = None
     # Max chars of result content kept inline before the global truncation
     # backstop fires. Tools that already self-bound and store overflow as an
     # artifact (read_file, web_fetch, run_command) set this to None to skip the
@@ -179,6 +226,14 @@ class BaseTool(ABC):
         """
         return getattr(self, "description", "") or ""
 
+    def model_schema(self) -> ToolSchema | None:
+        """Optional compact schema shown only to the model.
+
+        Override when the runtime/UI schema should stay rich but the model-facing
+        schema can be narrower or terser for latency and prompt-cache efficiency.
+        """
+        return None
+
     def runtime_description(self) -> str:
         """Human/UI-facing description. Defaults to ``description``."""
         return getattr(self, "description", "") or ""
@@ -191,18 +246,39 @@ class BaseTool(ABC):
         """
         permission = self.permission
         permission_value = permission.value if isinstance(permission, PermissionLevel) else PermissionLevel.AUTO.value
-        return {
+        metadata = {
             "permission": permission_value,
             "read_only": self.read_only,
             "destructive": self.destructive,
             "open_world": self.open_world,
             "always_load": self.always_load,
             "should_defer": self.should_defer,
+            "deferred_catalog_scopes": self.deferred_catalog_scopes,
             "timeout_seconds": self.timeout_seconds,
             "mutates_workspace": self.mutates_workspace,
             "mutates_external_state": self.mutates_external_state,
+            "side_effect_kind": self.get_side_effect_kind(),
+            "idempotent": self.is_idempotent(),
+            "supports_idempotency_key": self.is_idempotent(),
             "max_result_chars": self.max_result_chars,
         }
+        metadata.update(self.to_projection_metadata())
+        return metadata
+
+    def to_projection_metadata(self) -> dict[str, Any]:
+        """Return UI projection hints owned by this tool.
+
+        Empty values are omitted so the projection registry can continue using
+        its legacy name-based fallback for tools that have not migrated yet.
+        """
+        metadata = {
+            "result_kind": self.result_kind,
+            "activity_kind": self.activity_kind,
+            "display_scope": self.display_scope,
+            "panel_hint": self.panel_hint,
+            "display_label": self.display_label,
+        }
+        return {key: value for key, value in metadata.items() if value}
 
     def validate_input(self, args: dict[str, Any] | None = None) -> str:
         """Tool-owned input validation, run before permission/execution.
@@ -241,6 +317,8 @@ class BaseTool(ABC):
         """Return whether this tool can safely run alongside other read-only work."""
         if self.mutates_workspace or self.mutates_external_state:
             return False
+        if self.get_side_effect_kind(args) != TOOL_SIDE_EFFECT_NONE:
+            return False
         try:
             if self.is_read_only(args):
                 return True
@@ -250,6 +328,49 @@ class BaseTool(ABC):
         if self._declares_metadata("read_only"):
             return False
         return self.name in LEGACY_CONCURRENCY_SAFE_TOOL_NAMES
+
+    def get_side_effect_kind(self, args: dict[str, Any] | None = None) -> str:
+        """Return the coarse side-effect class for this invocation.
+
+        Tools with argument-dependent behavior can override this method. The
+        default derives from legacy hints so existing tools keep their behavior
+        while newer tools can declare a single explicit policy.
+        """
+        declared = str(self.side_effect_kind or "").strip().lower()
+        if declared in TOOL_SIDE_EFFECT_KINDS:
+            return declared
+        if self.destructive:
+            return TOOL_SIDE_EFFECT_DESTRUCTIVE
+        if self.mutates_external_state:
+            return TOOL_SIDE_EFFECT_EXTERNAL
+        if self.mutates_workspace:
+            return TOOL_SIDE_EFFECT_WORKSPACE
+        return TOOL_SIDE_EFFECT_NONE
+
+    def is_idempotent(self, args: dict[str, Any] | None = None) -> bool:
+        """Return whether repeating this exact invocation is side-effect safe."""
+        if self.idempotent is not None:
+            return bool(self.idempotent)
+        if self.get_side_effect_kind(args) != TOOL_SIDE_EFFECT_NONE:
+            return False
+        try:
+            if self.is_read_only(args):
+                return True
+        except Exception:
+            if self.read_only:
+                return True
+        try:
+            return bool(self.is_concurrency_safe(args))
+        except Exception:
+            return bool(getattr(self, "read_only", False))
+
+    def idempotency_key(self, args: dict[str, Any] | None = None) -> str | None:
+        """Stable key for deduping/retry diagnostics of idempotent calls."""
+        if not self.is_idempotent(args):
+            return None
+        canonical = json.dumps(args or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+        return f"{self.name}:{digest}"
 
     def _declares_metadata(self, name: str) -> bool:
         """Return whether this instance or subclass explicitly declares metadata."""

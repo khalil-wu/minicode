@@ -1,14 +1,12 @@
 """Agent event and WebSocket command conversion helpers.
 
-Output-protocol note (vs. Codex): Codex's wire shape carries `phase` as a field
-on a structured `message` output item (`{type:"message", phase:"commentary"|"final_answer"}`).
-MiniCode instead attaches `phase`/`visibility` as metadata on `text_chunk` events
-(see `text_chunk` below) and projects them into process/answer channels on the
-frontend (`frontend/src.v2/lib/turn-projection.ts`). The two are functionally
-equivalent — both separate in-progress narration from the final answer — and a
-full migration to Codex-style structured message items is intentionally deferred
-(wire-protocol + projection + test rewrite for no functional gain). Do not
-"fix" this difference without revisiting that decision.
+Output-protocol note (vs. Codex): the agent loop routes model text by phase at
+the event source. Commentary/preamble text is emitted as timeline/process
+activity, while accepted answers are emitted on the final-answer path. The
+legacy `text_chunk` event name is retained for frontend and transcript
+compatibility. Runtimes may send provisional answer drafts for unphased provider
+text when configured; if a later tool call proves the text was a preamble, the
+draft is withdrawn and preserved as process output.
 """
 
 from __future__ import annotations
@@ -16,6 +14,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from backend.agent.context_ledger import ContextLedger
+from backend.agent.prompt_cache import prompt_cache_usage_stats
 from backend.ws.events import ClientCommandType, ServerEventType
 
 
@@ -29,6 +29,30 @@ class AgentEvent:
     def to_ws_message(self) -> dict[str, Any]:
         """Serialize this event as WebSocket JSON."""
         return {"type": self.type, **self.data}
+
+    @classmethod
+    def user_message_queue_updated(
+        cls,
+        *,
+        status: str,
+        conversation_id: str,
+        message_id: str,
+        user_message_id: str = "",
+        position: int = 0,
+        reason: str = "",
+    ) -> AgentEvent:
+        data: dict[str, Any] = {
+            "status": status,
+            "conversation_id": conversation_id,
+            "message_id": message_id,
+        }
+        if user_message_id:
+            data["user_message_id"] = user_message_id
+        if position > 0:
+            data["position"] = position
+        if reason:
+            data["reason"] = reason
+        return cls(type="user_message.queue.updated", data=data)
 
     @classmethod
     def text_chunk(
@@ -60,8 +84,25 @@ class AgentEvent:
         return cls(type="text_chunk", data=data)
 
     @classmethod
-    def text_replace(cls, content: str = "") -> AgentEvent:
-        return cls(type="text_replace", data={"content": content})
+    def text_replace(
+        cls,
+        content: str = "",
+        *,
+        source: str = "",
+        visibility: str = "",
+        phase: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> AgentEvent:
+        data: dict[str, Any] = {"content": content}
+        if source:
+            data["source"] = source
+        if visibility:
+            data["visibility"] = visibility
+        if phase:
+            data["phase"] = phase
+        if metadata:
+            data["metadata"] = metadata
+        return cls(type="text_replace", data=data)
 
     @classmethod
     def thinking_chunk(
@@ -112,6 +153,9 @@ class AgentEvent:
         display_scope: str = "activity",
         panel_hint: str = "inspector",
         requires_attention: bool = False,
+        side_effect_kind: str = "",
+        idempotent: bool | None = None,
+        idempotency_key: str = "",
     ) -> AgentEvent:
         data: dict[str, Any] = {
             "id": id,
@@ -142,6 +186,12 @@ class AgentEvent:
             data["iteration_id"] = iteration_id
         if phase:
             data["phase"] = phase
+        if side_effect_kind:
+            data["side_effect_kind"] = side_effect_kind
+        if idempotent is not None:
+            data["idempotent"] = idempotent
+        if idempotency_key:
+            data["idempotency_key"] = idempotency_key
         return cls(type="tool_call", data=data)
 
     @classmethod
@@ -202,6 +252,10 @@ class AgentEvent:
         display_scope: str = "activity",
         panel_hint: str = "inspector",
         requires_attention: bool = False,
+        side_effect_kind: str = "",
+        idempotent: bool | None = None,
+        idempotency_key: str = "",
+        outcome: dict[str, Any] | None = None,
     ) -> AgentEvent:
         result: dict[str, Any] = {
             "id": id,
@@ -258,6 +312,14 @@ class AgentEvent:
             result["iteration_id"] = iteration_id
         if phase:
             result["phase"] = phase
+        if side_effect_kind:
+            result["side_effect_kind"] = side_effect_kind
+        if idempotent is not None:
+            result["idempotent"] = idempotent
+        if idempotency_key:
+            result["idempotency_key"] = idempotency_key
+        if outcome is not None:
+            result["outcome"] = outcome
         return cls(type="tool_result", data=result)
 
     @classmethod
@@ -270,6 +332,8 @@ class AgentEvent:
         summary: str = "",
         started_at: int | None = None,
         default_collapsed: bool = False,
+        transition_reason: str = "",
+        transition_details: dict[str, Any] | None = None,
     ) -> AgentEvent:
         payload: dict[str, Any] = {
             "item_id": loop_id,
@@ -282,6 +346,10 @@ class AgentEvent:
         }
         if started_at is not None:
             payload["started_at"] = started_at
+        if transition_reason:
+            payload["transition_reason"] = transition_reason
+        if transition_details:
+            payload["transition_details"] = transition_details
         return cls(type="agent.loop.started", data=payload)
 
     @classmethod
@@ -428,6 +496,7 @@ class AgentEvent:
         display_scope: str = "",
         panel_hint: str = "",
         requires_attention: bool = False,
+        ephemeral: bool = False,
     ) -> AgentEvent:
         payload: dict[str, Any] = {
             "id": id or f"{stage}:{message}",
@@ -440,6 +509,8 @@ class AgentEvent:
             "visibility": visibility,
             "requires_attention": requires_attention,
         }
+        if ephemeral:
+            payload["ephemeral"] = True
         if display_scope:
             payload["display_scope"] = display_scope
         if panel_hint:
@@ -597,12 +668,21 @@ class AgentEvent:
         tool_name: str,
         args: dict[str, Any],
         diff: Any | None = None,
+        source_agent: str = "",
+        source_thread: str = "",
+        source_tool: str = "",
     ) -> AgentEvent:
         data: dict[str, Any] = {
             "tool_call_id": tool_call_id,
             "tool_name": tool_name,
             "args": args,
         }
+        if source_agent:
+            data["source_agent"] = source_agent
+        if source_thread:
+            data["source_thread"] = source_thread
+        if source_tool:
+            data["source_tool"] = source_tool
         if diff is not None:
             data["diff"] = diff
         return cls(type="approval_request", data=data)
@@ -617,6 +697,12 @@ class AgentEvent:
         source: str = "hook",
         permission_level: str = "",
         message: str = "",
+        capability: dict[str, Any] | None = None,
+        approval_policy: str = "",
+        matched_rule: dict[str, str] | None = None,
+        risk: str = "",
+        scope: dict[str, Any] | None = None,
+        expiry: str = "",
     ) -> AgentEvent:
         data: dict[str, Any] = {
             "tool_call_id": tool_call_id,
@@ -628,6 +714,18 @@ class AgentEvent:
             data["permission_level"] = permission_level
         if message:
             data["message"] = message
+        if capability:
+            data["capability"] = capability
+        if approval_policy:
+            data["approval_policy"] = approval_policy
+        if matched_rule:
+            data["matched_rule"] = matched_rule
+        if risk:
+            data["risk"] = risk
+        if scope:
+            data["scope"] = scope
+        if expiry:
+            data["expiry"] = expiry
         return cls(type="permission.decision", data=data)
 
     @classmethod
@@ -639,6 +737,8 @@ class AgentEvent:
         cache_read_input_tokens: int = 0,
         reasoning_output_tokens: int = 0,
         provider_raw: dict[str, Any] | None = None,
+        status: str = "completed",
+        reason: str = "",
     ) -> AgentEvent:
         usage = {
             "input_tokens": input_tokens,
@@ -648,7 +748,12 @@ class AgentEvent:
         }
         if reasoning_output_tokens:
             usage["reasoning_output_tokens"] = reasoning_output_tokens
-        data: dict[str, Any] = {"usage": usage}
+        if cache_read_input_tokens or cache_creation_input_tokens:
+            usage.update(prompt_cache_usage_stats(usage, provider_raw))
+        normalized_status = status if status in {"completed", "partial", "cancelled", "failed"} else "completed"
+        data: dict[str, Any] = {"usage": usage, "status": normalized_status}
+        if reason:
+            data["reason"] = reason
         if provider_raw:
             data["providerRaw"] = provider_raw
         return cls(
@@ -689,8 +794,25 @@ class AgentEvent:
         )
 
     @classmethod
-    def context_compacted(cls, summary: str) -> AgentEvent:
-        return cls(type="context_compacted", data={"summary": summary})
+    def context_compacted(
+        cls,
+        summary: str,
+        *,
+        before_tokens: int | None = None,
+        after_tokens: int | None = None,
+        retained_categories: list[str] | None = None,
+        ledger: ContextLedger | None = None,
+    ) -> AgentEvent:
+        data: dict[str, Any] = {"summary": summary}
+        if before_tokens is not None:
+            data["before_tokens"] = max(0, int(before_tokens))
+        if after_tokens is not None:
+            data["after_tokens"] = max(0, int(after_tokens))
+        if retained_categories is not None:
+            data["retained_categories"] = retained_categories
+        if ledger is not None:
+            data["ledger"] = ledger
+        return cls(type="context_compacted", data=data)
 
     @classmethod
     def stream_resume(
@@ -747,20 +869,35 @@ class AgentEvent:
 
     @classmethod
     def subagent_start(
-        cls, subagent_id: str, parent_id: str, role: str, prompt: str = ""
+        cls,
+        subagent_id: str,
+        parent_id: str,
+        role: str,
+        prompt: str = "",
+        *,
+        current_activity: str = "",
+        waiting_on: str = "",
+        blocks_final_reply: bool | None = None,
+        last_progress_at: int | None = None,
     ) -> AgentEvent:
-        return cls(
-            type="subagent.start",
-            data={
-                "subagent_id": subagent_id,
-                "parent_id": parent_id,
-                "role": role,
-                "prompt": prompt,
-                "display_scope": "agents",
-                "panel_hint": "subagents",
-                "requires_attention": False,
-            },
-        )
+        data: dict[str, Any] = {
+            "subagent_id": subagent_id,
+            "parent_id": parent_id,
+            "role": role,
+            "prompt": prompt,
+            "display_scope": "agents",
+            "panel_hint": "subagents",
+            "requires_attention": False,
+        }
+        if current_activity:
+            data["current_activity"] = current_activity
+        if waiting_on:
+            data["waiting_on"] = waiting_on
+        if blocks_final_reply is not None:
+            data["blocks_final_reply"] = blocks_final_reply
+        if last_progress_at is not None:
+            data["last_progress_at"] = last_progress_at
+        return cls(type="subagent.start", data=data)
 
     @classmethod
     def subagent_progress(
@@ -771,6 +908,10 @@ class AgentEvent:
         max_iterations: int = 0,
         tool_name: str = "",
         detail: str = "",
+        current_activity: str = "",
+        waiting_on: str = "",
+        blocks_final_reply: bool | None = None,
+        last_progress_at: int | None = None,
     ) -> AgentEvent:
         """Emitted during subagent execution to report intermediate progress."""
         data: dict[str, Any] = {
@@ -786,6 +927,14 @@ class AgentEvent:
             data["tool_name"] = tool_name
         if detail:
             data["detail"] = detail
+        if current_activity:
+            data["current_activity"] = current_activity
+        if waiting_on:
+            data["waiting_on"] = waiting_on
+        if blocks_final_reply is not None:
+            data["blocks_final_reply"] = blocks_final_reply
+        if last_progress_at is not None:
+            data["last_progress_at"] = last_progress_at
         return cls(type="subagent.progress", data=data)
 
     @classmethod
@@ -799,6 +948,10 @@ class AgentEvent:
         iterations: int = 0,
         tool_call_count: int = 0,
         timed_out: bool = False,
+        status: str = "completed",
+        termination_reason: str = "success",
+        initiator: str = "runtime",
+        usage: dict[str, Any] | None = None,
     ) -> AgentEvent:
         data: dict[str, Any] = {
             "subagent_id": subagent_id,
@@ -806,6 +959,9 @@ class AgentEvent:
             "display_scope": "agents",
             "panel_hint": "subagents",
             "requires_attention": bool(error or timed_out),
+            "status": status,
+            "termination_reason": termination_reason,
+            "initiator": initiator,
         }
         if error:
             data["error"] = error
@@ -817,7 +973,97 @@ class AgentEvent:
             data["tool_call_count"] = tool_call_count
         if timed_out:
             data["timed_out"] = True
+        if usage:
+            data["usage"] = dict(usage)
         return cls(type="subagent.done", data=data)
+
+    @classmethod
+    def stream_event(
+        cls,
+        *,
+        provider: str,
+        event_type: str,
+        data: dict[str, Any],
+        sdk_only: bool = True,
+    ) -> AgentEvent:
+        """Raw provider stream event passthrough for SDK consumers.
+
+        When sdk_only is True (default), the UI should not render this — it's
+        intended for programmatic consumers that need access to the underlying
+        provider stream (e.g. RawMessageStreamEvent from Anthropic SDK).
+        """
+        return cls(
+            type="stream_event",
+            data={
+                "provider": provider,
+                "event_type": event_type,
+                "data": data,
+                "sdk_only": sdk_only,
+            },
+        )
+
+    @classmethod
+    def rate_limit(
+        cls,
+        *,
+        provider: str = "",
+        error_type: str = "rate_limit",
+        retry_after_seconds: float = 0.0,
+        message: str = "",
+        recoverable: bool = True,
+    ) -> AgentEvent:
+        import time as _time
+        data: dict[str, Any] = {
+            "provider": provider,
+            "error_type": error_type,
+            "recoverable": recoverable,
+        }
+        if retry_after_seconds > 0:
+            data["retry_after_seconds"] = retry_after_seconds
+            data["retry_at"] = int(_time.time() * 1000) + int(retry_after_seconds * 1000)
+        if message:
+            data["message"] = message
+        return cls(type="rate_limit", data=data)
+
+    @classmethod
+    def session_state_changed(
+        cls,
+        *,
+        state: str,
+        conversation_id: str = "",
+        run_id: str = "",
+        reason: str = "",
+    ) -> AgentEvent:
+        data: dict[str, Any] = {"state": state}
+        if conversation_id:
+            data["conversation_id"] = conversation_id
+        if run_id:
+            data["run_id"] = run_id
+        if reason:
+            data["reason"] = reason
+        return cls(type="session.state_changed", data=data)
+
+    @classmethod
+    def tool_use_summary(
+        cls,
+        *,
+        summary: str,
+        iteration_id: str = "",
+        tool_call_ids: list[str] | None = None,
+        tool_count: int = 0,
+        generated_by: str = "heuristic",
+    ) -> AgentEvent:
+        data: dict[str, Any] = {
+            "summary": summary,
+            "generated_by": generated_by,
+        }
+        if iteration_id:
+            data["iteration_id"] = iteration_id
+        if tool_call_ids:
+            data["tool_call_ids"] = tool_call_ids
+        if tool_count:
+            data["tool_count"] = tool_count
+        return cls(type="tool_use_summary", data=data)
 
     @classmethod
     def budget_warning(

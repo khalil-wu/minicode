@@ -1,18 +1,11 @@
 """Session utility mixin for WebSocketSession."""
 from __future__ import annotations
 
-import logging
-import os
-import subprocess
 import asyncio
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
-logger = logging.getLogger(__name__)
-
 from backend.agent.message import AgentEvent
-from backend.config import get_available_models, get_llm_provider, load_config
-from backend.runtime_env import sanitized_git_env
 
 if TYPE_CHECKING:
     pass
@@ -29,49 +22,43 @@ class SessionCommandHandlersMixin:
         register_domain_handlers(self)
 
     def _refresh_llm_selection(self, *, prefer_config: bool = False) -> None:
-        previous_provider = getattr(self, "provider", "")
-        self.config = load_config()
-        provider_resolver = getattr(self, "_resolve_llm_provider", get_llm_provider)
-        models_resolver = getattr(self, "_resolve_available_models", get_available_models)
-        self.provider = provider_resolver()
-        self.available_models = list(models_resolver(self.provider))
-        config_model = str(getattr(self.config.llm, "model", "") or "").strip()
-        selected = str(getattr(self, "selected_model", "") or "").strip()
+        from backend.services.llm_config_service import refresh_llm_selection_state
 
-        if self.provider != previous_provider:
-            self._model_override_active = False
-            selected = config_model
-        elif prefer_config or not getattr(self, "_model_override_active", False):
-            selected = config_model
+        provider_resolver = getattr(self, "_resolve_llm_provider", None)
+        models_resolver = getattr(self, "_resolve_available_models", None)
+        models_source_resolver = getattr(self, "_resolve_models_source", None)
+        selection = refresh_llm_selection_state(
+            previous_provider=str(getattr(self, "provider", "") or ""),
+            selected_model=str(getattr(self, "selected_model", "") or ""),
+            model_override_active=bool(getattr(self, "_model_override_active", False)),
+            prefer_config=prefer_config,
+            provider_resolver=provider_resolver if callable(provider_resolver) else None,
+            models_resolver=models_resolver if callable(models_resolver) else None,
+        )
+        self.config = selection.config
+        self.provider = selection.provider
+        self.available_models = selection.available_models
+        self.selected_model = selection.selected_model
+        self._model_override_active = selection.model_override_active
+        if callable(models_source_resolver):
+            self.models_source = models_source_resolver(self.provider)
 
-        if self.available_models and selected and selected not in self.available_models:
-            selected = ""
-            self._model_override_active = False
-        if not selected and self.available_models:
-            selected = self.available_models[0]
-        self.selected_model = selected
+    async def _run_cwd_changed_hook(self, *, old_cwd: str, new_cwd: str) -> None:
+        from backend.hooks.runtime import run_cwd_changed_hook
+
+        await run_cwd_changed_hook(old_cwd=old_cwd, new_cwd=new_cwd)
 
     # ── Skill toggle ─────────────────────────────────────
 
     async def _toggle_skill(self, skill_name: str, *, activate: bool) -> None:
-        if not self.skill_manager or not skill_name:
-            await self._send_event(AgentEvent.error("Skills are unavailable", recoverable=True))
-            return
-        success = self.skill_manager.activate(skill_name) if activate else self.skill_manager.deactivate(skill_name)
-        if success:
-            await self._send_event(
-                AgentEvent(
-                    type="skill_activated" if activate else "skill_deactivated",
-                    data={"skill_name": skill_name},
-                )
-            )
-        else:
-            await self._send_event(
-                AgentEvent.error(
-                    f"Skill '{skill_name}' {'activate' if activate else 'deactivate'} failed",
-                    recoverable=True,
-                )
-            )
+        from backend.services.skills_service import toggle_skill_events
+        from backend.ws.command_results import emit_command_error
+
+        for event in toggle_skill_events(self.skill_manager, skill_name, activate=activate):
+            if event.type == "error":
+                await emit_command_error(self, "skills.toggle", event)
+            else:
+                await self._send_event(event)
 
     # ── LLM model selection ──────────────────────────────
 
@@ -81,92 +68,67 @@ class SessionCommandHandlersMixin:
             return
         self._refresh_llm_selection()
         if self.available_models and normalized not in self.available_models:
-            await self._send_event(
-                AgentEvent.error(
-                    (
-                        f"Model '{normalized}' is not in the configured model list. "
-                        f"Open Settings to add it, or choose one of: {', '.join(self.available_models)}."
-                    ),
-                    recoverable=True,
-                    error_type="llm",
-                    provider_error_type="model",
-                )
-            )
+            from backend.services.llm_config_service import model_unavailable_event
+            from backend.ws.command_results import emit_command_error
+            await emit_command_error(self, "model.set", model_unavailable_event(normalized, self.available_models))
             self._refresh_llm_selection(prefer_config=True)
             return
         self.selected_model = normalized
         self._model_override_active = manual_override
+        from backend.ws.agent_runner import _clear_session_llm_cache, _get_or_create_session_llm
 
-        from backend.llm.model_registry import create_session_llm
-
-        self.llm = create_session_llm(self.config, model_override=self.selected_model)
+        _clear_session_llm_cache(self)
+        self.llm = _get_or_create_session_llm(
+            self,
+            config=self.config,
+            provider=str(getattr(self, "provider", "") or ""),
+            model=self.selected_model,
+        )
         self.context_builder._llm = self.llm
 
     async def _send_llm_state(self) -> None:
+        from backend.services.llm_config_service import llm_model_updated_payload
+
         self._refresh_llm_selection()
         workspace_root = self._workspace_root_for_conversation()
         await self._send_ws_payload(
-            {
-                "type": "llm.model.updated",
-                "provider": self.provider,
-                "model": self.selected_model,
-                "current_model": self.selected_model,
-                "available_models": self.available_models,
-                "working_directory": str(workspace_root) if workspace_root is not None else "",
-            },
+            llm_model_updated_payload(
+                provider=self.provider,
+                selected_model=self.selected_model,
+                available_models=self.available_models,
+                workspace_root=workspace_root,
+                models_source=getattr(self, "models_source", ""),
+            ),
             log_context="llm.model.updated",
         )
 
     # ── Workspace utilities ──────────────────────────────
 
     async def _create_isolated_conversation_worktree(self, conversation: Any) -> Any | None:
-        from backend.workspace.worktree import WorktreeManager
+        from backend.services.conversation_payload_service import create_isolated_worktree_binding
 
-        base_root = self._main_worktree_root(Path(conversation.workspace_root or self._current_workspace_root()))
-        try:
-            manager = WorktreeManager(base_root)
-        except Exception as exc:
-            await self._send_event(
-                AgentEvent.error(f"Git isolation unavailable for this workspace: {exc}", recoverable=True)
-            )
+        result = create_isolated_worktree_binding(
+            conversation,
+            current_workspace_root=self._current_workspace_root(),
+            main_worktree_root=self._main_worktree_root,
+        )
+        if result.error_event is not None:
+            from backend.ws.command_results import emit_command_error
+            await emit_command_error(self, "conversation.create", result.error_event)
             return conversation
 
-        worktree_root = base_root / ".claude" / "worktrees"
-        worktree_path = worktree_root / conversation.id
-        branch = f"minicode/{conversation.id}"
-        try:
-            worktree_root.mkdir(parents=True, exist_ok=True)
-            created = manager.create_worktree(worktree_path, branch=branch, new_branch=True)
-        except Exception as exc:
-            await self._send_event(
-                AgentEvent.error(f"Failed to create isolated Git worktree: {exc}", recoverable=True)
-            )
-            return conversation
-
-        if not created:
-            await self._send_event(
-                AgentEvent.error("Failed to create isolated Git worktree", recoverable=True)
-            )
+        if not result.created:
             return conversation
 
         updated = self.conversation_repo.update_workspace_binding(
             conversation.id,
-            workspace_root=str(worktree_path),
-            git_branch=branch,
-            worktree_path=str(worktree_path),
+            workspace_root=result.workspace_root,
+            git_branch=result.git_branch,
+            worktree_path=result.worktree_path,
             git_isolated=True,
         )
-        await self._send_event(
-            AgentEvent(
-                type="system_notice",
-                data={
-                    "content": (
-                        "Created an isolated workspace for this session. "
-                        "Edits in this session are separated from your main checkout until you review or merge them."
-                    )
-                },
-            )
-        )
+        if result.notice_event is not None:
+            await self._send_event(result.notice_event)
         return updated or conversation
 
     async def _switch_workspace_for_conversation(
@@ -176,26 +138,17 @@ class SessionCommandHandlersMixin:
         announce: bool,
         wait_for_initialize: bool = False,
     ) -> None:
-        workspace_path = str(
-            getattr(conversation, "worktree_path", "")
-            or getattr(conversation, "workspace_root", "")
-            or ""
-        ).strip()
+        from backend.services.workspace_service import conversation_workspace_path, workspace_matches_context
+
+        workspace_path = conversation_workspace_path(conversation)
         if not workspace_path:
             clear_runtime = getattr(self, "_clear_workspace_runtime", None)
             if callable(clear_runtime):
                 clear_runtime()
             return
 
-        if self._workspace_context:
-            current_root = str(self._workspace_context.root_path).strip()
-            from backend.workspace.path_utils import normalize_project_import_path
-            try:
-                target_root = str(normalize_project_import_path(workspace_path)).strip()
-                if current_root.lower() == target_root.lower() or os.path.normpath(current_root) == os.path.normpath(target_root):
-                    return
-            except Exception:
-                pass
+        if workspace_matches_context(workspace_path, self._workspace_context):
+            return
 
         await self._activate_workspace_path(
             workspace_path,
@@ -209,58 +162,55 @@ class SessionCommandHandlersMixin:
         *,
         announce: bool = False,
         wait_for_initialize: bool = False,
+        error_command: str | None = "workspace.activate",
     ) -> bool:
-        from backend.workspace.context import WorkspaceContext
-        from backend.workspace.path_utils import normalize_project_import_path
-        from backend.workspace.recent_projects import RecentProjectStore
-        from backend.workspace.state import set_active_workspace_root
+        from backend.services.workspace_service import (
+            create_workspace_context,
+            parse_workspace_activation_request,
+            record_recent_workspace_project,
+            set_active_workspace,
+            workspace_context_root,
+            workspace_imported_payload,
+        )
 
-        project_path = normalize_project_import_path(path_str)
-        if not project_path.exists() or not project_path.is_dir():
-            await self._send_event(
-                AgentEvent.error(
-                    f"Session workspace does not exist: {path_str}",
-                    recoverable=True,
-                    error_type="workspace",
-                    error_code="workspace_missing",
-                )
-            )
+        request = parse_workspace_activation_request(path_str)
+        if request.error_event is not None:
+            await self._send_event(request.error_event)
+            return False
+        project_path = request.project_path
+        if project_path is None:
             return False
 
         try:
-            ctx = WorkspaceContext(project_path)
+            ctx = create_workspace_context(project_path)
+            old_workspace_root = workspace_context_root(getattr(self, "_workspace_context", None))
             # 先切换全局工作区指针与会话上下文，使 git/file API 立即指向新目录，
             # 再做耗时的文件索引扫描。
             self._workspace_context = ctx
-            set_active_workspace_root(project_path)
+            set_active_workspace(project_path)
+            await self._run_cwd_changed_hook(old_cwd=old_workspace_root, new_cwd=str(project_path))
             restart_file_watcher = getattr(self, "_restart_file_watcher", None)
             if callable(restart_file_watcher):
                 restart_file_watcher(project_path)
             async def initialize_workspace() -> bool:
                 try:
                     metadata = await ctx.initialize()
-                    RecentProjectStore().add(
-                        path=str(project_path),
-                        name=metadata.name,
-                        project_type=metadata.project_type,
-                    )
+                    record_recent_workspace_project(project_path, metadata)
                     if announce:
                         await self._send_ws_payload(
-                            {
-                                "type": "workspace.imported",
-                                "project": ctx.to_dict(),
-                                "summary": ctx.get_project_summary()[:3000],
-                                "file_count": metadata.file_count,
-                            },
+                            workspace_imported_payload(ctx, metadata),
                             log_context="workspace.imported",
                         )
                     return True
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    await self._send_event(
-                        AgentEvent.error(f"Failed to switch session workspace: {exc}", recoverable=True)
-                    )
+                    message = f"Failed to switch session workspace: {exc}"
+                    if error_command:
+                        from backend.ws.command_results import emit_command_error
+                        await emit_command_error(self, error_command, message)
+                    else:
+                        await self._send_event(AgentEvent.error(message, recoverable=True))
                     return False
 
             if wait_for_initialize:
@@ -272,100 +222,45 @@ class SessionCommandHandlersMixin:
                 self._workspace_context_task = asyncio.create_task(initialize_workspace())
             return True
         except Exception as exc:
-            await self._send_event(
-                AgentEvent.error(f"Failed to switch session workspace: {exc}", recoverable=True)
-            )
+            message = f"Failed to switch session workspace: {exc}"
+            if error_command:
+                from backend.ws.command_results import emit_command_error
+                await emit_command_error(self, error_command, message)
+            else:
+                await self._send_event(AgentEvent.error(message, recoverable=True))
             return False
 
     def _git_branch_for(self, path: Path) -> str:
-        """Get git branch for a workspace path. Uses WorkspaceState when available."""
-        # If this path matches our current workspace state, use the cached repo
-        if hasattr(self, '_workspace_state') and path.resolve() == self._workspace_state.root:
-            return self._workspace_state.get_git_branch()
+        from backend.services.workspace_service import git_branch_for
 
-        # Otherwise, fall back to subprocess
-        try:
-            result = subprocess.run(
-                ["git", "branch", "--show-current"],
-                cwd=path,
-                env=sanitized_git_env(),
-                capture_output=True,
-                text=True, encoding="utf-8",
-                timeout=5,
-                check=True,
-            )
-            return result.stdout.strip()
-        except Exception:
-            return ""
+        return git_branch_for(path, getattr(self, "_workspace_state", None))
 
     def _main_worktree_root(self, path: Path) -> Path:
-        root = path.resolve()
-        try:
-            result = subprocess.run(
-                ["git", "worktree", "list", "--porcelain"],
-                cwd=root,
-                env=sanitized_git_env(),
-                capture_output=True,
-                text=True, encoding="utf-8",
-                timeout=5,
-                check=True,
-            )
-        except Exception:
-            return root
+        from backend.services.workspace_service import main_worktree_root
 
-        for line in result.stdout.splitlines():
-            if line.startswith("worktree "):
-                candidate = Path(line[9:].strip()).resolve()
-                if (candidate / ".git").is_dir():
-                    return candidate
-                return candidate
-        return root
+        return main_worktree_root(path)
 
     def _is_path_within(self, path: Path, parent: Path) -> bool:
-        try:
-            path.resolve().relative_to(parent.resolve())
-            return True
-        except ValueError:
-            return False
+        from backend.services.workspace_service import is_path_within
+
+        return is_path_within(path, parent)
 
     def _resolve_workspace_cwd(self, cwd: str | None = None) -> Path:
-        workspace_root = self._current_workspace_root().resolve()
-        candidate = Path(cwd).expanduser().resolve() if cwd else workspace_root
-        if not self._is_path_within(candidate, workspace_root):
-            raise ValueError(f"CWD must stay inside workspace: {workspace_root}")
-        if not candidate.exists() or not candidate.is_dir():
-            raise ValueError(f"CWD does not exist or is not a directory: {candidate}")
-        return candidate
+        from backend.services.workspace_service import resolve_workspace_cwd
+
+        return resolve_workspace_cwd(self._current_workspace_root(), cwd)
 
     def _resolve_requested_workspace(self, requested_workspace: str | None = None) -> Path:
-        workspace_root = self._current_workspace_root().resolve()
-        if not requested_workspace:
-            return workspace_root
-        requested = Path(requested_workspace).expanduser().resolve()
-        if not self._is_path_within(requested, workspace_root):
-            raise ValueError(f"Workspace must stay inside current session workspace: {workspace_root}")
-        if not requested.exists() or not requested.is_dir():
-            raise ValueError(f"Workspace does not exist or is not a directory: {requested}")
-        return requested
+        from backend.services.workspace_service import resolve_requested_workspace
+
+        return resolve_requested_workspace(self._current_workspace_root(), requested_workspace)
 
     def _validate_git_relative_path(self, path: str) -> str:
-        value = str(path or "").replace("\\", "/").strip()
-        candidate = Path(value)
-        if not value or candidate.is_absolute() or ".." in candidate.parts:
-            raise ValueError("Git path must be a relative path inside the workspace")
-        return value
+        from backend.services.workspace_service import validate_git_relative_path
+
+        return validate_git_relative_path(path)
 
     def _worktree_has_local_changes(self, path: Path) -> bool:
-        try:
-            result = subprocess.run(
-                ["git", "status", "--porcelain=v1"],
-                cwd=path,
-                env=sanitized_git_env(),
-                capture_output=True,
-                text=True, encoding="utf-8",
-                timeout=5,
-                check=True,
-            )
-            return bool(result.stdout.strip())
-        except Exception:
-            return True
+        from backend.services.workspace_service import worktree_has_local_changes
+
+        return worktree_has_local_changes(path)

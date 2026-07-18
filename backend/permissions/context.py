@@ -19,6 +19,20 @@ EventEmitter = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
 @dataclass(frozen=True)
+class PermissionDecision:
+    permission_level: PermissionLevel
+    decision: Literal["allow", "ask", "deny"]
+    capability_allowed: bool
+    capability_reason: str
+    approval_policy: Literal["auto", "confirm", "diff_review", "deny"]
+    matched_rule_source: str
+    matched_rule: str
+    risk: Literal["low", "medium", "high", "critical"]
+    scope: dict[str, Any]
+    expiry: Literal["call", "session", "policy"]
+
+
+@dataclass(frozen=True)
 class PermissionContext:
     """Structured permission state carried through one runtime/session."""
 
@@ -40,6 +54,7 @@ class ToolExecutionContext:
     metadata: dict[str, Any] = field(default_factory=dict)
     cancel_event: asyncio.Event | None = None
     emit_event: EventEmitter | None = None
+    approval_handler: Callable[[str], Any] | None = None
     stream_callback: Callable[..., Awaitable[None]] | None = None
     workspace_root: Path | None = None  # Workspace root directory for path resolution
     allow_network: bool = False
@@ -50,3 +65,4 @@ class ToolExecutionContext:
     permission_checker: "PermissionChecker | None" = None
     conversation_id: str = ""
     llm: Any | None = None  # LLMAdapter for tools that need model calls (e.g. web_fetch prompt extraction)
+    artifact_store: Any | None = None

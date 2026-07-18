@@ -14,6 +14,23 @@ if TYPE_CHECKING:
     from backend.permissions.context import ToolExecutionContext
 
 
+async def _run_worktree_hook(event: str, *, path: str, branch: str = "", base: str = "", reason: str = "") -> None:
+    from backend.hooks import get_hook_manager
+
+    hook_mgr = get_hook_manager()
+    if not hook_mgr:
+        return
+    try:
+        if event == "create":
+            await hook_mgr.run_worktree_create(path=path, branch=branch, base=base)
+        elif event == "remove":
+            await hook_mgr.run_worktree_remove(path=path, reason=reason)
+    except Exception:
+        # Worktree hooks are audit/automation side effects; tool success has
+        # already happened, so hook failures should not roll it back.
+        return
+
+
 class ListWorktreesTool(BaseTool):
     """列出所有 Git worktree"""
 
@@ -139,6 +156,12 @@ class CreateWorktreeTool(BaseTool):
 
         if success:
             branch_info = f"分支 {branch}" if branch else f"提交 {commit or 'HEAD'}"
+            await _run_worktree_hook(
+                "create",
+                path=str(path),
+                branch=str(branch or ""),
+                base=str(commit or "HEAD"),
+            )
             return self._success_result(
                 f"已创建 worktree: {path}\n基于: {branch_info}"
             )
@@ -198,6 +221,11 @@ class RemoveWorktreeTool(BaseTool):
         success = manager.remove_worktree(path=path, force=force)
 
         if success:
+            await _run_worktree_hook(
+                "remove",
+                path=str(path),
+                reason="force" if force else "remove",
+            )
             return self._success_result(f"已删除 worktree: {path}")
         else:
             return self._error_result(

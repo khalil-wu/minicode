@@ -14,6 +14,7 @@ const cdpBridge = require("./cdp-bridge");
 const ptyManager = require("./pty-manager");
 const windowManager = require("./window-manager");
 const ipcHandlers = require("./ipc-handlers");
+const updater = require("./updater");
 
 // ---------------------------------------------------------------------------
 // Optional native PTY
@@ -52,8 +53,16 @@ const RUNTIME_TOKEN =
   process.env.MINICODE_RUNTIME_TOKEN ||
   crypto.randomBytes(32).toString("hex");
 
-const PYTHON_COMMAND =
-  process.env.MINICODE_PYTHON || (process.platform === "win32" ? "py" : "python3");
+function resolvePythonCommand() {
+  if (process.env.MINICODE_PYTHON) return process.env.MINICODE_PYTHON;
+  if (app.isPackaged && process.platform === "win32") {
+    const bundled = path.join(process.resourcesPath, "python-runtime", "python.exe");
+    if (fs.existsSync(bundled)) return bundled;
+  }
+  return process.platform === "win32" ? "py" : "python3";
+}
+
+const PYTHON_COMMAND = resolvePythonCommand();
 
 // ---------------------------------------------------------------------------
 // Module-level state
@@ -74,9 +83,21 @@ let startupFailureState = {
 // App initialization
 // ---------------------------------------------------------------------------
 
-if (process.env.MINICODE_ENABLE_HARDWARE_ACCELERATION !== "1") {
+if (
+  process.env.MINICODE_DISABLE_HARDWARE_ACCELERATION === "1"
+  || process.env.MINICODE_ENABLE_HARDWARE_ACCELERATION === "0"
+) {
   app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch("disable-gpu");
   app.commandLine.appendSwitch("disable-gpu-compositing");
+  app.commandLine.appendSwitch("disable-gpu-rasterization");
+  app.commandLine.appendSwitch("disable-software-rasterizer");
+}
+if (process.env.MINICODE_DISABLE_CHROMIUM_SANDBOX === "1") {
+  app.commandLine.appendSwitch("no-sandbox");
+}
+if (process.env.MINICODE_USER_DATA_DIR) {
+  app.setPath("userData", process.env.MINICODE_USER_DATA_DIR);
 }
 
 const singleInstanceLock = app.requestSingleInstanceLock();
@@ -297,30 +318,65 @@ function getRendererAdditionalArguments() {
 // Deep link & menu helpers
 // ---------------------------------------------------------------------------
 
-function dispatchDeepLink(target) {
+function normalizeDeepLinkTarget(target) {
   if (!target) return false;
 
+  if (typeof target === "object" && target.kind === "conversation") {
+    const conversationId = String(target.conversationId || "").trim();
+    return conversationId ? { kind: "conversation", conversationId } : null;
+  }
+
   const urlStr = String(target);
-  // Only allow safe protocols for deep links
-  const ALLOWED_DEEP_LINK_PROTOCOLS = ["minicode:", "https:", "http:"];
+  const configuredDeepLinkHosts = new Set(
+    String(process.env.MINICODE_DEEP_LINK_ALLOWED_HOSTS || "")
+      .split(",")
+      .map((host) => host.trim().toLowerCase())
+      .filter(Boolean),
+  );
   try {
     const parsed = new URL(urlStr);
-    if (!ALLOWED_DEEP_LINK_PROTOCOLS.includes(parsed.protocol.toLowerCase())) {
+    const protocol = parsed.protocol.toLowerCase();
+    if (protocol !== "minicode:" && protocol !== "https:") {
       console.warn("[desktop] Blocked deep link with disallowed protocol:", parsed.protocol);
-      return false;
+      return null;
+    }
+    if (protocol === "https:" && !configuredDeepLinkHosts.has(parsed.hostname.toLowerCase())) {
+      console.warn("[desktop] Blocked deep link for untrusted host:", parsed.hostname);
+      return null;
     }
   } catch {
     // Not a valid URL — block it
     console.warn("[desktop] Blocked malformed deep link:", urlStr.slice(0, 100));
-    return false;
+    return null;
   }
 
-  pendingDeepLink = urlStr;
+  const parsed = new URL(urlStr);
+  if (parsed.protocol.toLowerCase() === "minicode:") {
+    const route = [parsed.hostname, ...parsed.pathname.split("/").filter(Boolean)];
+    const conversationIndex = route.findIndex((part) => part === "conversation" || part === "task");
+    const conversationId = parsed.searchParams.get("conversation_id") || parsed.searchParams.get("task_id") ||
+      (conversationIndex >= 0 ? route[conversationIndex + 1] : "");
+    if (conversationId) return { kind: "conversation", conversationId };
+  }
+  return { kind: "url", url: urlStr };
+}
+
+function dispatchDeepLink(target) {
+  const normalizedTarget = normalizeDeepLinkTarget(target);
+  if (!normalizedTarget) return false;
+
+  pendingDeepLink = { id: crypto.randomUUID(), target: normalizedTarget };
   const win = windowManager.getMainWindow();
   if (win && !win.isDestroyed()) {
     windowManager.focusMainWindow();
-    win.webContents.send("minicode:deep-link", { target: pendingDeepLink });
+    win.webContents.send("minicode:deep-link", pendingDeepLink);
   }
+  return true;
+}
+
+function acknowledgeDeepLink(id) {
+  if (!pendingDeepLink || pendingDeepLink.id !== String(id || "")) return false;
+  pendingDeepLink = null;
   return true;
 }
 
@@ -344,12 +400,11 @@ function showDesktopNotification(payload) {
     silent: false,
     icon: DESKTOP_ICON_PATH,
   });
+  const notificationTarget = normalizeDeepLinkTarget(payload?.target);
 
   notification.on("click", () => {
     windowManager.focusMainWindow();
-    if (pendingDeepLink) {
-      dispatchDeepLink(pendingDeepLink);
-    }
+    if (notificationTarget) dispatchDeepLink(notificationTarget);
   });
 
   notification.show();
@@ -429,7 +484,7 @@ function buildApplicationMenu() {
           accelerator: "Ctrl+`",
           click: () => { sendWorkbenchMenuEvent("minicode:shortcut:terminal"); },
         },
-        { role: "reload" },
+        { label: "Reload", accelerator: "F5", click: () => mainWindow?.reload() },
         { role: "forceReload" },
         { role: "toggleDevTools" },
         { type: "separator" },
@@ -566,6 +621,27 @@ const trustedWorkspaceRoots = new Set([
   getAppRoot(),
 ]);
 
+// Restore the last workspace before the renderer starts requesting files.
+// Without this, the first editor read races workspace activation: the IPC
+// read is rejected as untrusted, then the renderer falls back to the backend
+// while its full workspace index is still being built.
+try {
+  const activeWorkspacePath = path.join(
+    app.getPath("userData"),
+    "data",
+    "active_workspace.json",
+  );
+  const activeWorkspace = JSON.parse(fs.readFileSync(activeWorkspacePath, "utf8"));
+  const restoredRoot = typeof activeWorkspace?.root === "string"
+    ? path.resolve(activeWorkspace.root)
+    : "";
+  if (restoredRoot && fs.statSync(restoredRoot).isDirectory()) {
+    trustedWorkspaceRoots.add(restoredRoot);
+  }
+} catch {
+  // A missing or stale workspace is normal on first launch.
+}
+
 security.init({
   initialRoots: trustedWorkspaceRoots,
   logger: appendDesktopLog,
@@ -585,6 +661,7 @@ backendSidecar.init({
     get resolvedWsBaseUrl() { return resolvedWsBaseUrl; },
     get resolvedFrontendUrl() { return resolvedFrontendUrl; },
     runtimeToken: RUNTIME_TOKEN,
+    stateRoot: app.getPath("userData"),
     restartInitialDelayMs: BACKEND_RESTART_INITIAL_DELAY_MS,
     restartMaxDelayMs: BACKEND_RESTART_MAX_DELAY_MS,
     restartJitterRatio: 0.15,
@@ -617,19 +694,23 @@ windowManager.init({
 
 ipcHandlers.init({
   getMainWindow: () => windowManager.getMainWindow(),
+  getStartupFailureWindow: () => startupFailureWindow,
   showDesktopNotification,
   dispatchDeepLink,
+  acknowledgeDeepLink,
   attemptAppStartup,
   get startupFailureState() { return startupFailureState; },
   getDesktopLogPath: utils.getDesktopLogPath,
   appendDesktopLog,
   exportDesktopDiagnostics,
   discoverChromeCdp: cdpBridge.discoverChromeCdp,
+  assessBrowserNavigationPolicy: cdpBridge.assessBrowserNavigationPolicy,
   captureChromeTargetScreenshot: cdpBridge.captureChromeTargetScreenshot,
   navigateChromeTarget: cdpBridge.navigateChromeTarget,
   clickChromeTarget: cdpBridge.clickChromeTarget,
   typeIntoChromeTarget: cdpBridge.typeIntoChromeTarget,
   ptyManager,
+  updater,
   get lastPickedWorkspaceRoot() { return lastPickedWorkspaceRoot; },
   setLastPickedWorkspaceRoot: (v) => { lastPickedWorkspaceRoot = v; },
 });
@@ -718,5 +799,10 @@ app.whenReady().then(async () => {
   buildApplicationMenu();
   ipcHandlers.registerIpcHandlers();
   appendDesktopLog("[desktop] app ready");
+  const initialDeepLink = process.argv.find(
+    (arg) => typeof arg === "string" && arg.startsWith("minicode://"),
+  );
+  if (initialDeepLink) dispatchDeepLink(initialDeepLink);
   await attemptAppStartup("when-ready");
+  updater.init({ app, getMainWindow: () => windowManager.getMainWindow(), logger: appendDesktopLog });
 });

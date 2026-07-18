@@ -117,6 +117,8 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   gitChanges: { workingTree: [], staged: [], untracked: [], loading: false },
   skillsMarketplaceOpen: false,
   liveArtifactsOpen: false,
+  agentEditorOpen: false,
+  setAgentEditorOpen: (open) => set({ agentEditorOpen: open }),
   setThemeMode: (mode) => {
     writeLS(LS.theme, mode);
     applyTheme(mode);

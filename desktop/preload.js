@@ -34,9 +34,26 @@ const runtimeConfig = {
       close: () => ipcRenderer.invoke("minicode:window:close"),
     },
     notify: (payload) => ipcRenderer.invoke("minicode:notify", payload),
+    onDeepLink: (callback) => {
+      const handler = (_event, payload) => callback(payload);
+      ipcRenderer.on("minicode:deep-link", handler);
+      return () => ipcRenderer.removeListener("minicode:deep-link", handler);
+    },
+    ackDeepLink: (id) => ipcRenderer.invoke("minicode:deepLink:ack", id),
+    updates: {
+      check: () => ipcRenderer.invoke("minicode:update:check"),
+      download: () => ipcRenderer.invoke("minicode:update:download"),
+      install: () => ipcRenderer.invoke("minicode:update:install"),
+      onStatus: (callback) => {
+        const handler = (_event, payload) => callback(payload);
+        ipcRenderer.on("minicode:update:status", handler);
+        return () => ipcRenderer.removeListener("minicode:update:status", handler);
+      },
+    },
     pickDirectory: () => ipcRenderer.invoke("minicode:pickDirectory"),
     trustWorkspace: (path) => ipcRenderer.invoke("minicode:workspace:trust", path),
     openExternal: (target) => ipcRenderer.invoke("minicode:openExternal", target),
+    openPath: (target) => ipcRenderer.invoke("minicode:openPath", target),
     revealPath: (target) => ipcRenderer.invoke("minicode:revealPath", target),
     openDeepLink: (target) => ipcRenderer.invoke("minicode:deepLink:open", target),
     diagnostics: {
@@ -65,6 +82,7 @@ const runtimeConfig = {
       kill: (sessionId) => ipcRenderer.invoke("minicode:pty:kill", sessionId),
       list: () => ipcRenderer.invoke("minicode:pty:list"),
       snapshot: (sessionId, maxChars) => ipcRenderer.invoke("minicode:pty:snapshot", sessionId, maxChars),
+      ackExit: (sessionId) => ipcRenderer.invoke("minicode:pty:ackExit", sessionId),
       onData: (callback) => {
         const handler = (_event, payload) => callback(payload);
         ipcRenderer.on("minicode:pty:data", handler);
@@ -82,7 +100,7 @@ const runtimeConfig = {
     browser: {
       discover: (endpoint) => ipcRenderer.invoke("minicode:browser:discover", endpoint),
       captureScreenshot: (endpoint, targetId) => ipcRenderer.invoke("minicode:browser:captureScreenshot", endpoint, targetId),
-      navigate: (endpoint, targetId, url, options) => ipcRenderer.invoke("minicode:browser:navigate", endpoint, targetId, url, options),
+      navigate: (endpoint, targetId, url) => ipcRenderer.invoke("minicode:browser:navigate", endpoint, targetId, url),
       click: (endpoint, targetId, selector) => ipcRenderer.invoke("minicode:browser:click", endpoint, targetId, selector),
       type: (endpoint, targetId, selector, text) => ipcRenderer.invoke("minicode:browser:type", endpoint, targetId, selector, text),
     }

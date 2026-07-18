@@ -28,6 +28,14 @@ MAX_TODO_ITEMS = 50
 STATUS_ICONS = {"pending": "○", "in_progress": "◐", "completed": "●"}
 
 
+def _context_state_key(context: Any = None) -> str:
+    return str(
+        getattr(context, "conversation_id", "")
+        or getattr(context, "session_id", "")
+        or "default"
+    )
+
+
 class TodoWriteTool(BaseTool):
     """
     创建和管理会话级任务清单。
@@ -45,28 +53,56 @@ class TodoWriteTool(BaseTool):
     """
 
     name = "todo_write"
+    should_defer = True
+    search_hint = "task checklist progress tracking multi-step work verification plan"
     # Mutates internal session state, not user workspace files. Keep
     # read_only=False so it is still serialized, but do not project it as a
     # workspace/file mutation.
     mutates_workspace = False
     read_only = False  # 会修改会话状态
     description = (
-        "Create or update the current session todo checklist. Use this proactively and often for "
-        "complex coding work so progress is visible and requirements are not lost.\n\n"
-        "When to use: complex multi-step work (3+ meaningful steps), multi-file changes, a user-provided "
-        "list of tasks, non-trivial investigation, tasks that need tests/build verification, or newly discovered "
-        "follow-up work. Call todo_write before the first substantive work/tool call, with exactly one item "
-        "already in_progress.\n\n"
-        "When not to use: a single straightforward edit, a trivial command, pure conversation, or an informational "
-        "answer with no work to track.\n\n"
-        "State rules: pass the complete updated list every time; keep at most one item in_progress; mark a task "
-        "completed immediately after it is fully done; do not batch several completions into one late update. "
-        "Never mark completed while tests fail, verification is unfinished, implementation is partial, or a blocker "
-        "remains. Remove obsolete tasks entirely instead of keeping stale pending items.\n\n"
-        "Each item needs both content (imperative, e.g. 'Run tests') and activeForm (present continuous, e.g. "
-        "'Running tests'). This is a live checklist, not the larger visible update_plan."
+        "Create or replace the current session todo checklist for complex work. "
+        "When to use: before the first substantive work/tool call when the task has 3+ meaningful steps, multiple files, verification work, or user-provided task lists. "
+        "When not to use: single trivial tasks or purely informational chat. "
+        "Pass the complete list each time, keep at most one in_progress item, remove obsolete tasks, and do not batch several completions. "
+        "Never mark completed while tests fail, verification is incomplete, or implementation is partial. "
+        "Use the same language as the user's request for content and activeForm. "
+        "This is the compact live checklist, not the larger visible update_plan."
     )
     permission = PermissionLevel.AUTO
+
+    def model_description(self) -> str:
+        return (
+            "Update the current session todo checklist; keep one in_progress item, remove obsolete tasks, and do not mark work done early."
+        )
+
+    def model_schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=self.name,
+            description=self.model_description(),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {"type": "string"},
+                                "activeForm": {"type": "string"},
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["pending", "in_progress", "completed"],
+                                },
+                            },
+                            "required": ["content", "activeForm", "status"],
+                        },
+                        "maxItems": MAX_TODO_ITEMS,
+                    },
+                },
+                "required": ["todos"],
+            },
+        )
 
     def __init__(self, workspace_root: Path | None = None) -> None:
         self._todos: dict[str, list[dict[str, str]]] = {}
@@ -97,6 +133,11 @@ class TodoWriteTool(BaseTool):
             self._todos[session_id] = self._load_from_disk(session_id)
         return self._todos.get(session_id, [])
 
+    def clear_session_todos(self, session_id: str = "default") -> None:
+        """Clear live turn todos before a new user turn starts."""
+        self._todos[session_id] = []
+        self._save_to_disk(session_id, [])
+
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
             name=self.name,
@@ -107,39 +148,33 @@ class TodoWriteTool(BaseTool):
                     "todos": {
                         "type": "array",
                         "description": (
-                            "Complete updated todo list, not a patch or incremental delta. "
-                            "For active work, include exactly one in_progress item and mark completed items "
-                            "immediately when they are fully done. "
-                            "Each item: id, content (imperative, e.g. 'Run tests'), "
-                            "activeForm (present continuous, e.g. 'Running tests'), "
-                            "status (pending/in_progress/completed), priority (high/medium/low). "
-                            "Never mark completed if tests fail, verification is unfinished, work is partial, "
-                            "or a blocker remains."
+                            "Complete updated todo list, not a patch. Keep exactly one in_progress item for active work. "
+                            "Each item needs id, content, activeForm, status, and priority, and these are user-visible UI text."
                         ),
                         "items": {
                             "type": "object",
                             "properties": {
                                 "id": {
                                     "type": "string",
-                                    "description": "任务唯一标识符",
+                                    "description": "Stable task id.",
                                 },
                                 "content": {
                                     "type": "string",
-                                    "description": "任务描述（祈使形式，如'修复认证 bug'）",
+                                    "description": "Visible imperative task label.",
                                 },
                                 "activeForm": {
                                     "type": "string",
-                                    "description": "进行中时显示的描述（进行时形式，如'正在修复认证 bug'）",
+                                    "description": "Visible in-progress label.",
                                 },
                                 "status": {
                                     "type": "string",
                                     "enum": ["pending", "in_progress", "completed"],
-                                    "description": "任务状态",
+                                    "description": "Task status.",
                                 },
                                 "priority": {
                                     "type": "string",
                                     "enum": ["high", "medium", "low"],
-                                    "description": "任务优先级",
+                                    "description": "Priority.",
                                 },
                         },
                             "required": ["id", "content", "activeForm", "status", "priority"],
@@ -171,14 +206,12 @@ class TodoWriteTool(BaseTool):
             if not isinstance(item, dict):
                 return self._error_result(f"每个 todo item 必须是对象: {item}")
 
-            item_id = str(item.get("id", "")).strip()
+            item_id = str(item.get("id", "")).strip() or str(len(validated) + 1)
             content = str(item.get("content", "")).strip()
             status = str(item.get("status", "pending")).strip()
             priority = str(item.get("priority", "medium")).strip()
             active_form = str(item.get("activeForm", "")).strip()
 
-            if not item_id:
-                return self._error_result("每个 todo item 必须有 id")
             if not content:
                 return self._error_result(f"todo item '{item_id}' 缺少 content")
             if not active_form:
@@ -209,9 +242,7 @@ class TodoWriteTool(BaseTool):
             return self._error_result("同一时刻最多只能有一个 in_progress todo item")
 
         # 获取会话 ID
-        session_id = "default"
-        if context and hasattr(context, "session_id") and context.session_id:
-            session_id = context.session_id
+        session_id = _context_state_key(context)
 
         # 保存旧状态（用于 diff）
         old_todos = self._todos.get(session_id, [])
@@ -232,19 +263,21 @@ class TodoWriteTool(BaseTool):
 
         if context and context.emit_event:
             try:
-                for todo in validated:
-                    await context.emit_event("task.update", {
-                        "todo_id": todo["id"],
-                        "status": todo["status"],
-                        "content": todo["content"],
-                        "activeForm": todo.get("activeForm", ""),
-                    })
-                if all_done:
-                    await context.emit_event("task.update", {"todos": []})
+                await context.emit_event("task.update", {
+                    "todos": [
+                        {
+                            "id": todo["id"],
+                            "todo_id": todo["id"],
+                            "status": todo["status"],
+                            "content": todo["content"],
+                            "activeForm": todo.get("activeForm", ""),
+                        }
+                        for todo in new_todos
+                    ],
+                })
                 logger.info(
-                    "[TODO] Emitted %d task.update events via WebSocket%s",
-                    len(validated),
-                    " + clear snapshot" if all_done else "",
+                    "[TODO] Emitted task.update snapshot with %d visible todos via WebSocket",
+                    len(new_todos),
                 )
             except Exception as e:
                 logger.warning(f"[TODO] Failed to emit task events: {e}")
@@ -344,9 +377,7 @@ class TodoReadTool(BaseTool):
         if not self._todo_tool:
             return self._error_result("No todo_write tool available")
 
-        session_id = "default"
-        if context and hasattr(context, "session_id") and context.session_id:
-            session_id = context.session_id
+        session_id = _context_state_key(context)
 
         todos = self._todo_tool.get_session_todos(session_id)
         status_filter = args.get("status_filter", "all")

@@ -24,14 +24,6 @@ logger = logging.getLogger(__name__)
 ARTIFACT_THRESHOLD = 2000
 
 
-def _is_non_critical_mcp_timeout(server_name: str, tool_name: str, text: str) -> bool:
-    if server_name not in {"memory-rag", "memory_rag"}:
-        return False
-    if tool_name not in {"remember", "recall"}:
-        return False
-    return "timed out" in text.lower() or "timeout" in text.lower() or "超时" in text
-
-
 class MCPToolProxy(BaseTool):
     """Adapter that exposes an MCP tool through the local tool registry.
 
@@ -75,10 +67,8 @@ class MCPToolProxy(BaseTool):
         )
 
         # Permission: read-only → AUTO; destructive/open-world → CONFIRM.
-        # memory-rag stays AUTO (local, low-risk). Unknown tools default CONFIRM.
+        # Unknown tools default CONFIRM.
         if self.read_only and not (self.destructive or self.open_world):
-            self.permission = PermissionLevel.AUTO
-        elif server_name in {"memory-rag", "memory_rag"}:
             self.permission = PermissionLevel.AUTO
         else:
             self.permission = PermissionLevel.CONFIRM
@@ -140,23 +130,11 @@ class MCPToolProxy(BaseTool):
         except Exception as exc:
             return self._error_result(f"MCP tool '{self._tool_def.name}' failed: {exc}")
 
-        if result.is_error and _is_non_critical_mcp_timeout(self._server_name, self._tool_def.name, result.text or ""):
-            return ToolResult(
-                content=(
-                    f"Optional MCP tool {self._server_name}/{self._tool_def.name} timed out. "
-                    "Do not retry it in this turn; continue with the user-facing answer."
-                ),
-                is_error=False,
-                status="timeout",
-                limitation="non-critical timeout",
-                display_summary=f"Optional MCP timed out: {self._server_name}/{self._tool_def.name}",
-                result_kind="mcp",
-            )
-
+        result_text = result.summary_text
         if result.is_error:
-            return self._error_result(result.text or "MCP tool execution failed")
+            return self._error_result(result_text or "MCP tool execution failed")
 
-        full_text = result.text
+        full_text = result_text
         if len(full_text) > ARTIFACT_THRESHOLD and self._artifact_store:
             artifact_id = self._artifact_store.save(
                 content=full_text,

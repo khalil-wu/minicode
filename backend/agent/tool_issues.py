@@ -31,10 +31,10 @@ def classify_tool_issue(tc: ToolCallEvent, result: ToolResult, status: str) -> T
     if re.search(r"stale evidence|stale source|outdated evidence|evidence is stale|证据过期|过期证据", text):
         return ToolIssue(
             error_kind="stale_evidence",
-            user_summary="当前证据可能已经过期，需要刷新或说明不确定性。",
+            user_summary="当前证据可能已经过期，需要刷新或说明证据时间边界。",
             developer_detail=detail,
             projection="warning",
-            model_observation="Refresh the evidence or answer with explicit uncertainty and freshness.",
+            model_observation="Refresh the evidence or answer with a neutral freshness boundary tied to the specific claim.",
         )
     if re.search(r"disabled for this turn|tool disabled|tool is disabled|工具.*禁用|本轮.*禁用", text):
         return ToolIssue(
@@ -76,7 +76,18 @@ def classify_tool_issue(tc: ToolCallEvent, result: ToolResult, status: str) -> T
             projection="warning",
             model_observation=f"The {tool_name} call timed out.",
         )
-    if re.search(r"repeated|same tool call|no progress|相同关键词|高度相似|重复搜索|相似网页搜索", text):
+    if re.search(
+        r"file does not exist|no such file or directory|path not found|not a file|is a directory|directory does not exist|cannot read binary|non-utf-?8",
+        text,
+    ):
+        return ToolIssue(
+            error_kind="not_found",
+            user_summary="目标文件或目录不可读取。",
+            developer_detail=detail,
+            projection="status",
+            model_observation=f"The local target for {tool_name} was not readable. Try another path or continue without it.",
+        )
+    if re.search(r"repeated|same tool call|no progress|duplicate output|sibling copy|相同关键词|高度相似|重复搜索|相似网页搜索|重复写入", text):
         return ToolIssue(
             error_kind="repeat_guard",
             user_summary="已阻止重复且没有新进展的工具调用。",
@@ -86,7 +97,7 @@ def classify_tool_issue(tc: ToolCallEvent, result: ToolResult, status: str) -> T
         )
     return ToolIssue(
         error_kind="execution_error",
-        user_summary="工具执行失败。",
+        user_summary="",
         developer_detail=detail,
         projection="error",
         model_observation=f"The {tool_name} call failed. Try another approach if possible.",

@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
+from backend.tools.contracts import ToolSpec
 
 
 class PreviewServerTool(BaseTool):
@@ -19,6 +20,8 @@ class PreviewServerTool(BaseTool):
         "Example: preview_server(action='start')"
     )
     permission = PermissionLevel.CONFIRM
+    should_defer = True
+    search_hint = "preview dev server localhost browser verify screenshot frontend visual"
 
     def __init__(self, workspace_root: str | None = None) -> None:
         self._workspace_root = workspace_root
@@ -50,6 +53,17 @@ class PreviewServerTool(BaseTool):
                 },
                 "required": ["action"],
             },
+        )
+
+    def get_spec(self) -> ToolSpec:
+        return ToolSpec(
+            name=self.name,
+            capability="preview.manage",
+            toolset="default",
+            exposure="deferred",
+            required_args=("action",),
+            arg_roles={"action": "control", "url": "latest_url"},
+            empty_args_policy="block",
         )
 
     async def execute(self, args: dict[str, Any], **kwargs: Any) -> ToolResult:

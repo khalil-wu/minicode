@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from backend.config import PROJECT_ROOT
+from backend.config import DATA_ROOT
 
-WORKSPACE_STATE_FILE = PROJECT_ROOT / "data" / "active_workspace.json"
+WORKSPACE_STATE_FILE = DATA_ROOT / "active_workspace.json"
 _active_workspace_root: Path | None = None
 
 

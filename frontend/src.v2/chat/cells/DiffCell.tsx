@@ -14,6 +14,15 @@ import "./cells.css";
 
 const COLLAPSED_FILE_LIMIT = 3;
 
+// Stable, monotonically increasing id source for diff-review requests.
+// Date.now() collides on fast/concurrent clicks (same millisecond), which lets
+// a stale review response overwrite a newer one. A counter is always unique.
+let diffReviewRequestSeq = 0;
+const nextDiffReviewRequestId = (): string => {
+  diffReviewRequestSeq += 1;
+  return `diff-cell-${diffReviewRequestSeq}`;
+};
+
 /**
  * DiffCell file modification summary.
  *
@@ -180,7 +189,7 @@ function DiffFileRow({
     if (!file.patch) return;
     const store = useAppStore.getState();
     store.setDiffReviewState({
-      requestId: `diff-cell-${Date.now()}`,
+      requestId: nextDiffReviewRequestId(),
       toolName: "差异预览",
       diff: file.patch,
       files: [{

@@ -11,37 +11,81 @@ if TYPE_CHECKING:
 
 
 BRIDGE_TOOL_NAMES = {"tool_search", "tool_describe", "tool_call"}
+COORDINATOR_ONLY_TOOL_NAMES = frozenset(
+    {
+        "workflow",
+        "message_list",
+        "task_create",
+        "task_list",
+        "task_get",
+        "task_update",
+        "task_output",
+        "team_create",
+        "team_list",
+        "team_delete",
+    }
+)
 CORE_TOOL_NAMES = frozenset(
     {
         "read_file",
         "write_file",
         "edit_file",
-        "list_files",
         "grep_files",
         "glob_files",
         "run_command",
-        "ask_user",
-        "read_artifact",
         "web_search",
         "web_fetch",
         "todo_write",
         "tool_search",
         "tool_describe",
         "tool_call",
+        "sleep",
     }
 )
 
 
-def _schema_required_args(tool_registry: ToolRegistry, tool_name: str) -> tuple[str, ...]:
-    tool = tool_registry.get_tool(tool_name)
-    if tool is None:
-        return ()
-    try:
-        schema = tool.get_schema()
-    except Exception:
-        return ()
-    required = schema.parameters.get("required", []) if schema else []
-    return tuple(str(field) for field in required if isinstance(field, str))
+def _static_core_spec(tool_name: str) -> ToolSpec | None:
+    """Known core fallback specs for test doubles and lightweight registries."""
+    if tool_name in COORDINATOR_ONLY_TOOL_NAMES:
+        return ToolSpec(
+            name=tool_name,
+            capability=f"agent.coordinator.{tool_name}",
+            toolset="coordinator",
+            exposure="deferred",
+        )
+    if tool_name == "task_status":
+        return ToolSpec(
+            name=tool_name,
+            capability="agent.status",
+            toolset="agent",
+            exposure="core",
+        )
+    if tool_name == "task_stop":
+        return ToolSpec(
+            name=tool_name,
+            capability="agent.stop",
+            toolset="agent",
+            exposure="core",
+        )
+    if tool_name == "send_message":
+        return ToolSpec(
+            name=tool_name,
+            capability="agent.message",
+            toolset="agent",
+            exposure="core",
+        )
+    if tool_name == "read_artifact":
+        return ToolSpec(
+            name=tool_name,
+            capability="artifact.read",
+            exposure="core",
+            required_args=("artifact_id",),
+            arg_roles={"artifact_id": "latest_artifact"},
+            repair_policy={"artifact_id": "resource_resolver"},
+            accepted_resource_types=("artifact",),
+            empty_args_policy="repair_or_block",
+        )
+    return None
 
 
 def _registered_tool_spec(tool_registry: ToolRegistry, tool_name: str) -> ToolSpec | None:
@@ -86,30 +130,44 @@ def _exposure_for_name(tool_name: str) -> str:
 
 
 def tool_spec_for(tool_name: str, tool_registry: ToolRegistry) -> ToolSpec:
-    """Return runtime metadata for a tool, overlaying the tool's always_load hint."""
+    """Return runtime metadata for a tool, overlaying cc-style visibility hints."""
     spec = _tool_spec_for_impl(tool_name, tool_registry)
     tool = tool_registry.get_tool(tool_name)
-    if tool is not None and getattr(tool, "always_load", False) and not spec.always_load:
-        from dataclasses import replace
-
-        return replace(spec, always_load=True)
+    if tool is not None:
+        updated = spec
+        if (
+            getattr(tool, "should_defer", False)
+            and updated.exposure == "core"
+            and not updated.always_load
+            and not getattr(tool, "always_load", False)
+        ):
+            updated = replace(
+                updated,
+                exposure="deferred",
+                toolset=updated.toolset if updated.toolset != "core" else "default",
+            )
+        if getattr(tool, "always_load", False) and not updated.always_load:
+            updated = replace(updated, always_load=True)
+        return updated
     return spec
 
 
 def _tool_spec_for_impl(tool_name: str, tool_registry: ToolRegistry) -> ToolSpec:
-    """Return runtime metadata for a tool, falling back to schema-derived roles."""
+    """Return runtime metadata for a tool without materializing JSON schema."""
     registered = _registered_tool_spec(tool_registry, tool_name)
     if registered is not None:
         return registered
+    static = _static_core_spec(tool_name)
+    if static is not None:
+        return static
 
-    required = _schema_required_args(tool_registry, tool_name)
     if tool_name in WEB_SEARCH_TOOL_NAMES:
         return ToolSpec(
             name=tool_name,
             capability="web.search",
             toolset="web",
             exposure="core",
-            required_args=required or ("query",),
+            required_args=("query",),
             arg_roles={"query": "search_query"},
             arg_sources={"query": ("user_message", "search_plan")},
             repair_policy={"query": "resource_resolver"},
@@ -123,7 +181,7 @@ def _tool_spec_for_impl(tool_name: str, tool_registry: ToolRegistry) -> ToolSpec
             capability="web.fetch",
             toolset="web",
             exposure="core",
-            required_args=required or ("url",),
+            required_args=("url",),
             arg_roles={"url": "latest_url"},
             arg_sources={"url": ("previous_search_result",)},
             repair_policy={"url": "resource_resolver"},
@@ -132,19 +190,15 @@ def _tool_spec_for_impl(tool_name: str, tool_registry: ToolRegistry) -> ToolSpec
             blocked_guidance="Missing URL. Fetch a known URL from previous search results.",
         )
 
-    inferred_roles = _infer_arg_roles(required)
     return ToolSpec(
         name=tool_name,
         capability="",
         toolset="mcp" if tool_name.startswith("mcp__") else "default",
         exposure=_exposure_for_name(tool_name),  # type: ignore[arg-type]
-        required_args=required,
-        arg_roles=inferred_roles,
-        repair_policy={
-            arg: ("needs_model_generation" if role == "generated_content" else "resource_resolver")
-            for arg, role in inferred_roles.items()
-        },
-        empty_args_policy="repair_or_block" if inferred_roles else "block",
+        required_args=(),
+        arg_roles={},
+        repair_policy={},
+        empty_args_policy="block",
     )
 
 

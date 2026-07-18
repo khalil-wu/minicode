@@ -1,8 +1,8 @@
 """
 Error Withholding pattern -- hold recoverable errors before yielding to frontend.
 
-Inspired by Claude Code: when the LLM returns a recoverable error (e.g., 413 prompt
-too long, max output tokens), the error is NOT immediately yielded to the user.
+Inspired by Claude Code: when the LLM returns a context-overflow error (e.g., an
+HTTP 413 prompt-too-long response), the error is NOT immediately yielded to the user.
 Instead, recovery strategies are tried in order. Only if all fail is the error
 surfaced.
 
@@ -12,14 +12,77 @@ resolved by a successful recovery.
 
 from __future__ import annotations
 
-import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Callable, Awaitable
+from typing import Any, Awaitable, Callable
 
 from backend.agent.message import AgentEvent
 
 logger = logging.getLogger(__name__)
+
+
+# Markers for context-overflow errors (Anthropic "prompt is too long", OpenAI
+# "context_length_exceeded", DeepSeek "maximum context length", Vertex 413).
+# Mirrors the PTL markers used by ContextBuilder.full_compact's retry.
+_CONTEXT_OVERFLOW_MARKERS = (
+    "prompt is too long",
+    "prompt too long",
+    "context_length",
+    "maximum context",
+    "context window",
+    "request_too_large",
+    "request entity too large",
+    "request body too large",
+    "payload too large",
+    "content too large",
+)
+_HTTP_413_RE = re.compile(
+    r"\b(?:http(?:\s+status)?|status(?:\s+code)?|error(?:\s+code)?|code)\s*[:=]?\s*413\b",
+    re.IGNORECASE,
+)
+
+
+def is_context_overflow_error(error: Any) -> bool:
+    """True when the error text reports a context/prompt-size overflow."""
+    text = str(error or "").lower()
+    status_code = getattr(error, "status_code", None)
+    if status_code is None:
+        status_code = getattr(getattr(error, "response", None), "status_code", None)
+    return (
+        status_code == 413
+        or any(marker in text for marker in _CONTEXT_OVERFLOW_MARKERS)
+        or _HTTP_413_RE.search(text) is not None
+    )
+
+
+_MEDIA_SIZE_MARKERS = (
+    "image exceeds",
+    "image too large",
+    "image dimensions exceed",
+    "many-image",
+    "media size",
+    "media too large",
+    "pdf specified was not valid",
+    "request too large",
+)
+
+
+def is_media_size_error(error: Any) -> bool:
+    """True when the provider rejected oversized image/PDF media in context.
+
+    Mirrors Claude Code's media-size withholding path: these are recoverable by
+    stripping historical media attachments and retrying, not by generic backoff.
+    """
+    text = str(error or "").lower()
+    if not text:
+        return False
+    if any(marker in text for marker in _MEDIA_SIZE_MARKERS):
+        return True
+    # Common Anthropic/OpenAI phrasing around base64 payload limits.
+    if "maximum" in text and ("image" in text or "media" in text or "pdf" in text):
+        return True
+    return False
 
 
 @dataclass
@@ -63,7 +126,7 @@ class ErrorWithholdingController:
         controller = ErrorWithholdingController()
 
         # When an error occurs:
-        if controller.is_withholdable(error_type, full_text, pending_tool_calls):
+        if controller.is_withholdable(error_type, error):
             withheld = controller.withhold(error, error_type, [
                 RecoveryStrategy("context_drain", "Drain staged context collapses", ...),
                 RecoveryStrategy("reactive_compact", "Emergency compaction", ...),
@@ -71,7 +134,7 @@ class ErrorWithholdingController:
             for strategy in withheld.recovery_strategies:
                 if await strategy.try_recover(state, ctx):
                     # Recovery succeeded -- continue the loop without yielding the error
-                    state.transition = f"recovered_{strategy.name}"
+                    state.mark_transition(f"recovered_{strategy.name}")
                     break
             else:
                 # All strategies failed -- surface the error
@@ -81,13 +144,14 @@ class ErrorWithholdingController:
             yield error_event
     """
 
-    # Error types that should be withheld for recovery attempts
+    # Only context-overflow errors are withheld: the sole recovery strategy is
+    # emergency compaction, which cannot help rate limits or overloads — those
+    # go through the stream retry/backoff ladder instead (cc only reactive-
+    # compacts prompt-too-long / media-size errors).
     WITHHOLDABLE_ERROR_TYPES = {
         "prompt_too_long",
         "context_overflow",
-        "max_output_tokens",
-        "rate_limit",
-        "overloaded",
+        "media_size",
     }
 
     # Error types that should never be withheld
@@ -101,19 +165,13 @@ class ErrorWithholdingController:
         self._withheld: WithheldError | None = None
         self._recovery_log: list[dict[str, Any]] = []
 
-    def is_withholdable(
-        self,
-        error_type: str,
-        has_partial_text: bool = False,
-        has_tool_calls: bool = False,
-    ) -> bool:
+    def is_withholdable(self, error_type: str, error: Any = None) -> bool:
         """Determine if an error should be withheld for recovery."""
         if error_type in self.FATAL_ERROR_TYPES:
             return False
         if error_type in self.WITHHOLDABLE_ERROR_TYPES:
             return True
-        # If we have partial content, try recovery even for unknown errors
-        return has_partial_text or has_tool_calls
+        return is_context_overflow_error(error) or is_media_size_error(error)
 
     def withhold(
         self,

@@ -16,23 +16,6 @@ from __future__ import annotations
 from backend.agent.message import AgentEvent
 
 
-def is_tool_lifecycle_progress(event: AgentEvent) -> bool:
-    """Return True when an ``agent.progress`` event belongs to tool/approval
-    lifecycle noise that should not reach the UI timeline."""
-    if event.type != "agent.progress":
-        return False
-    data = event.data
-    stage = str(data.get("stage") or "").strip()
-    phase = str(data.get("phase") or "").strip()
-    event_id = str(data.get("id") or "").strip()
-    return (
-        stage in {"tool", "approval"}
-        or phase in {"tool", "approval"}
-        or bool(str(data.get("tool_call_id") or "").strip())
-        or event_id.startswith(("tool:", "approval:", "ask:"))
-    )
-
-
 # Event types emitted internally by LLM adapters (streaming tool-call
 # argument fragments).  These must never reach the UI.
 _ADAPTER_ONLY_EVENT_TYPES: frozenset[str] = frozenset({
@@ -40,16 +23,26 @@ _ADAPTER_ONLY_EVENT_TYPES: frozenset[str] = frozenset({
     "tool_call_delta",
 })
 
+# Events that are SDK-only (raw provider passthrough). These are forwarded
+# to WebSocket consumers but the UI should suppress them.
+_SDK_ONLY_EVENT_TYPES: frozenset[str] = frozenset({
+    "stream_event",
+})
+
 
 def should_emit_event(event: AgentEvent) -> bool:
     """Return True if *event* should be forwarded to the UI layer.
 
     Filters out adapter-internal streaming events (``tool_call_start``,
-    ``tool_call_delta``) and tool-lifecycle progress noise that the old
-    ``normalize_agent_event`` function used to swallow silently.
+    ``tool_call_delta``). Tool and approval lifecycle progress now flows
+    through as ``agent.progress`` so the UI can explain execution state.
+    ``stream_event`` is SDK-only and forwarded but flagged for UI suppression.
     """
     if event.type in _ADAPTER_ONLY_EVENT_TYPES:
         return False
-    if event.type == "agent.progress" and is_tool_lifecycle_progress(event):
-        return False
     return True
+
+
+def is_sdk_only_event(event_type: str) -> bool:
+    """Return True if events of this type are SDK-only (UI should suppress)."""
+    return event_type in _SDK_ONLY_EVENT_TYPES

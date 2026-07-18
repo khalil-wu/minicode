@@ -15,12 +15,21 @@ export const statusColor = (status: string): string => {
   return 'var(--text-muted)'
 }
 
+export const statusMarkLabel = (status: string): string => {
+  if (status === 'completed' || status === 'done' || status === 'success') return '已完成'
+  if (status === 'running' || status === 'in_progress') return '运行中'
+  if (status === 'blocked') return '需要处理'
+  if (status === 'failed' || status === 'error') return '失败'
+  return '等待中'
+}
+
 export const StatusMark = ({ status }: { status: string }) => {
   const size = 14
   const color = statusColor(status)
+  const label = statusMarkLabel(status)
   if (status === 'completed' || status === 'done') {
     return (
-      <svg width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
+      <svg role="img" aria-label={label} width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
         <circle cx="8" cy="8" r="7" fill={color} opacity={0.15} />
         <circle cx="8" cy="8" r="7" stroke={color} strokeWidth="1.5" fill="none" />
         <path d="M5 8.2 7 10.2 11 6" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
@@ -29,7 +38,7 @@ export const StatusMark = ({ status }: { status: string }) => {
   }
   if (status === 'running' || status === 'in_progress') {
     return (
-      <svg width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
+      <svg role="img" aria-label={label} width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
         <circle cx="8" cy="8" r="7" stroke={color} strokeWidth="1.5" fill="none" strokeDasharray="11 33" strokeLinecap="round">
           <animateTransform attributeName="transform" type="rotate" from="0 8 8" to="360 8 8" dur="0.8s" repeatCount="indefinite" />
         </circle>
@@ -39,14 +48,14 @@ export const StatusMark = ({ status }: { status: string }) => {
   }
   if (status === 'failed' || status === 'error' || status === 'blocked') {
     return (
-      <svg width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
+      <svg role="img" aria-label={label} width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
         <circle cx="8" cy="8" r="7" stroke={color} strokeWidth="1.5" fill="none" />
         <path d="M6 6l4 4M10 6l-4 4" stroke={color} strokeWidth="1.5" strokeLinecap="round" />
       </svg>
     )
   }
   return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
+    <svg role="img" aria-label={label} width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
       <circle cx="8" cy="8" r="7" stroke={color} strokeWidth="1.5" fill="none" />
     </svg>
   )

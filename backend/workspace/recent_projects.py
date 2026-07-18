@@ -13,9 +13,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from backend.config import DATA_ROOT
+
 logger = logging.getLogger(__name__)
 
-DEFAULT_STORE_PATH = Path("data/recent_projects.json")
+DEFAULT_STORE_PATH = DATA_ROOT / "recent_projects.json"
 MAX_RECENT_PROJECTS = 20
 
 
@@ -109,7 +111,18 @@ class RecentProjectStore:
         """获取最近项目列表。clean=True 时自动移除不存在的路径。"""
         if clean:
             before = len(self._projects)
-            self._projects = [p for p in self._projects if Path(p.path).exists()]
+            existing: list[RecentProject] = []
+            for project in self._projects:
+                try:
+                    if Path(project.path).exists():
+                        existing.append(project)
+                except OSError:
+                    # Stale recent entries can point at removed worktrees,
+                    # disconnected drives, or sandboxes no longer accessible
+                    # to this process. Treat them as unavailable instead of
+                    # aborting the websocket command without a response.
+                    logger.debug("Recent project path is unavailable: %s", project.path)
+            self._projects = existing
             if len(self._projects) != before:
                 self._save()
 

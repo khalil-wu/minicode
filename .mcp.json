@@ -20,16 +20,6 @@
       "autoStart": true,
       "transport": "stdio"
     },
-    "memory-rag": {
-      "command": "python",
-      "args": [
-        "-m",
-        "backend.mcp.servers.memory_rag"
-      ],
-      "env": {},
-      "autoStart": true,
-      "transport": "stdio"
-    },
     "code-index": {
       "command": "python",
       "args": [

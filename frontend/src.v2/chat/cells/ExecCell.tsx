@@ -186,6 +186,7 @@ export function ExecCell({
             type="button"
             onClick={handleCopy}
             title={copied ? "已复制" : "复制输出"}
+            aria-label={copied ? "已复制" : "复制输出"}
             className="exec-cell-copy-button"
           >
             <Copy size={11} />

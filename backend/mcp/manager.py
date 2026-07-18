@@ -81,7 +81,11 @@ _PHASE_DEFAULT_MESSAGE = {
 }
 
 
-def classify_mcp_phase(status: "ServerStatus", last_error: str) -> tuple[str, bool, bool]:
+def classify_mcp_phase(
+    status: "ServerStatus",
+    last_error: str,
+    error: BaseException | None = None,
+) -> tuple[str, bool, bool]:
     """Map (status, last_error) to (phase, recoverable, requires_user_action).
 
     phase ∈ {connecting, connected, reconnecting, auth_required, expired, failed,
@@ -98,6 +102,12 @@ def classify_mcp_phase(status: "ServerStatus", last_error: str) -> tuple[str, bo
         return ("reconnecting", True, False)
     if status == ServerStatus.OFFLINE:
         return ("stopped", True, False)
+    if error is not None and bool(getattr(error, "mcp_auth_required", False)):
+        return (
+            "expired" if bool(getattr(error, "mcp_auth_expired", False)) else "auth_required",
+            False,
+            True,
+        )
     # ServerStatus.ERROR — classify by message text.
     text = (last_error or "").lower()
     if any(marker in text for marker in _AUTH_ERROR_MARKERS):
@@ -132,11 +142,16 @@ class MCPServerState:
     tools: list[MCPToolDef] = field(default_factory=list)
     retry_count: int = 0
     last_error: str = ""
+    last_exception: BaseException | None = None
     consecutive_failures: int = 0
     circuit_open: bool = False
 
     def to_status_dict(self) -> dict[str, Any]:
-        phase, recoverable, requires_user_action = classify_mcp_phase(self.status, self.last_error)
+        phase, recoverable, requires_user_action = classify_mcp_phase(
+            self.status,
+            self.last_error,
+            self.last_exception,
+        )
         requires_user_action = requires_user_action or (
             self.config.requires_user_action and self.status != ServerStatus.CONNECTED
         )
@@ -157,7 +172,11 @@ class MCPServerState:
 
     def to_lifecycle_dict(self) -> dict[str, Any]:
         """Single-server lifecycle event payload (mcp.lifecycle)."""
-        phase, recoverable, requires_user_action = classify_mcp_phase(self.status, self.last_error)
+        phase, recoverable, requires_user_action = classify_mcp_phase(
+            self.status,
+            self.last_error,
+            self.last_exception,
+        )
         requires_user_action = requires_user_action or (
             self.config.requires_user_action and self.status != ServerStatus.CONNECTED
         )
@@ -196,11 +215,15 @@ class MCPServerManager:
         config_path: Path | None = None,
         on_status_change: Callable[[str, ServerStatus], Awaitable[None]] | None = None,
         openmcp_config_path: Path | None = None,
+        sampling_handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+        elicitation_handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
     ) -> None:
         self._config_path = config_path or MCP_CONFIG_FILE
         self._openmcp_config_path = openmcp_config_path or OPENMCP_CONFIG_FILE
         self._servers: dict[str, MCPServerState] = {}
         self._on_status_change = on_status_change
+        self._sampling_handler = sampling_handler
+        self._elicitation_handler = elicitation_handler
         self._health_tasks: dict[str, asyncio.Task[Any]] = {}
         # OAuth tokens for HTTP MCP servers, persisted alongside the MCP config.
         from backend.mcp.oauth import TokenStore
@@ -378,6 +401,7 @@ class MCPServerManager:
         state.status = ServerStatus.OFFLINE
         state.tools = []
         state.last_error = ""
+        state.last_exception = None
         await self._notify_status(config.name, ServerStatus.OFFLINE)
 
     async def stop_server(self, name: str) -> None:
@@ -398,6 +422,7 @@ class MCPServerManager:
         state.consecutive_failures = 0
         state.circuit_open = False
         state.last_error = ""
+        state.last_exception = None
         await self._notify_status(name, ServerStatus.OFFLINE)
 
     async def remove_server(self, name: str) -> None:
@@ -523,13 +548,14 @@ class MCPServerManager:
         state.client = client
 
         try:
-            await client.connect()
+            await asyncio.wait_for(client.connect(), timeout=15.0)
             state.tools = await client.list_tools()
             state.status = ServerStatus.CONNECTED
             state.retry_count = 0
             state.consecutive_failures = 0
             state.circuit_open = False
             state.last_error = ""
+            state.last_exception = None
             await self._notify_status(name, ServerStatus.CONNECTED)
             self._start_health_check(name)
         except Exception as exc:
@@ -539,6 +565,7 @@ class MCPServerManager:
                 logger.debug("Failed to close MCP client after start failure", exc_info=True)
             state.client = None
             state.status = ServerStatus.ERROR
+            state.last_exception = exc
             state.tools = []
             state.consecutive_failures += 1
             if state.consecutive_failures >= MCP_CIRCUIT_BREAKER_THRESHOLD:
@@ -569,9 +596,17 @@ class MCPServerManager:
         return state
 
     def _create_client(self, config: MCPServerConfig) -> MCPClient:
-        transport = (
-            MCPTransport.HTTP if config.transport.lower() == "http" else MCPTransport.STDIO
-        )
+        t = config.transport.lower()
+        if t == "http":
+            transport = MCPTransport.HTTP
+        elif t == "websocket":
+            transport = MCPTransport.WEBSOCKET
+        elif t == "streamable_http":
+            transport = MCPTransport.STREAMABLE_HTTP
+        elif t == "in_process":
+            transport = MCPTransport.IN_PROCESS
+        else:
+            transport = MCPTransport.STDIO
         return MCPClient(
             server_name=config.name,
             command=config.command,
@@ -580,8 +615,17 @@ class MCPServerManager:
             transport=transport,
             url=config.url,
             timeout=20.0,
-            token_store=self._token_store if transport == MCPTransport.HTTP else None,
+            token_store=self._token_store if transport in (MCPTransport.HTTP, MCPTransport.STREAMABLE_HTTP) else None,
+            sampling_handler=self._sampling_handler,
+            elicitation_handler=self._elicitation_handler,
+            on_disconnect=self._handle_client_disconnect,
         )
+
+    async def _handle_client_disconnect(self, name: str) -> None:
+        state = self._servers.get(name)
+        if state is None or state.status != ServerStatus.CONNECTED:
+            return
+        await self._try_reconnect(name)
 
     @staticmethod
     def _build_circuit_error_message() -> str:

@@ -11,6 +11,7 @@ import type {
 import { AgentTurn } from "../../agent-loop/components/AgentTurn";
 import type { RenderAgentCellArgs } from "../../agent-loop/components/AgentTurn";
 import { projectChatTurnToAgentLoop, isTestCommand } from "../../agent-loop/projection/project-turn";
+import { activityGroupMembershipKey, activityGroupStatus } from "../cells/activityGrouping";
 import {
   ActivityCell,
   ActivityGroupCell,
@@ -86,10 +87,10 @@ function groupActivityCells(cells: ChatTurnState["committedCells"]): ChatTurnSta
     if (!shouldGroupActivityBuffer(buffer)) {
       buffer.forEach(cell => grouped.push(cell));
     } else {
-      const status = groupStatus(buffer);
+      const status = activityGroupStatus(buffer);
       grouped.push({
         kind: "activity_group",
-        id: `activity-group-${activityGroupKey(buffer)}-${buffer[0]?.id ?? grouped.length}`,
+        id: `activity-group-${activityGroupMembershipKey(buffer)}-${buffer[0]?.id ?? grouped.length}`,
         cells: buffer,
         status,
         collapsed: status === "done",
@@ -124,8 +125,8 @@ function groupActivityCells(cells: ChatTurnState["committedCells"]): ChatTurnSta
         grouped.push(cell);
         continue;
       }
-      const nextKey = activityGroupKey([cell]);
-      const currentKey = buffer.length ? activityGroupKey(buffer) : nextKey;
+      const nextKey = activityGroupMembershipKey([cell]);
+      const currentKey = buffer.length ? activityGroupMembershipKey(buffer) : nextKey;
       if (buffer.length > 0 && nextKey !== currentKey) flush();
       buffer.push(cell);
       continue;
@@ -168,29 +169,12 @@ function latestExecCompletedAt(cells: ExecCellState[]): number | undefined {
 
 function canGroupActivityCell(cell: Extract<HistoryCellState, { kind: "activity" }>): boolean {
   if (cell.status === "failed" || cell.status === "interrupted") return false;
-  return activityGroupKey([cell]) !== "solo";
+  return activityGroupMembershipKey([cell]) !== "solo";
 }
 
 function shouldGroupActivityBuffer(cells: Extract<HistoryCellState, { kind: "activity" }>[]): boolean {
   if (cells.some((cell) => cell.status === "failed" || cell.status === "interrupted")) return false;
-  return activityGroupKey(cells) !== "solo";
-}
-
-function activityGroupKey(cells: Extract<HistoryCellState, { kind: "activity" }>[]): "context" | "command" | "change" | "tool" | "solo" {
-  const kinds = new Set(cells.map((cell) => cell.activityKind));
-  if ([...kinds].every((kind) => kind === "fileRead" || kind === "workspaceSearch" || kind === "webSearch" || kind === "mcpToolCall")) {
-    return "context";
-  }
-  if (kinds.size === 1 && kinds.has("commandExecution")) return "command";
-  if (kinds.size === 1 && kinds.has("fileChange")) return "change";
-  if (kinds.size === 1 && kinds.has("genericTool")) return "tool";
-  return "solo";
-}
-
-function groupStatus(cells: Extract<HistoryCellState, { kind: "activity" }>[]) {
-  if (cells.some((cell) => cell.status === "failed" || cell.status === "interrupted")) return "failed";
-  if (cells.some((cell) => cell.status === "running")) return "running";
-  return "done";
+  return activityGroupMembershipKey(cells) !== "solo";
 }
 
 function latestCompletedAt(cells: Extract<HistoryCellState, { kind: "activity" }>[]): number | undefined {

@@ -6,9 +6,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from backend.config import PROJECT_ROOT
+from backend.config import DATA_ROOT
 
-CHECKPOINT_DATA_DIR = PROJECT_ROOT / "data" / "checkpoints"
+CHECKPOINT_DATA_DIR = DATA_ROOT / "checkpoints"
 
 
 @dataclass(frozen=True)
@@ -74,7 +74,9 @@ class CheckpointStore:
 
     def save(self, record: CheckpointRecord) -> CheckpointRecord:
         path = self._path_for(record.id)
-        path.write_text(json.dumps(record.to_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(record.to_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp_path.replace(path)
         return record
 
     def get(self, checkpoint_id: str) -> CheckpointRecord | None:

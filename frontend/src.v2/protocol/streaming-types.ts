@@ -48,6 +48,12 @@ export type StreamingServerEventType =
   | "subagent.done"
   | "verification.started"
   | "verification.result"
+  // Runtime observability
+  | "runtime.span"
+  | "stream_event"
+  | "rate_limit"
+  | "session.state_changed"
+  | "tool_use_summary"
   // Citations + inspector
   | "citation.add"
   | "inspector.update"
@@ -65,6 +71,7 @@ export type StreamingClientCommandType =
   | "agent.resume"
   | "verification.run"
   | "subagent.cancel"
+  | "subagent.status"
   | "inspector.focus"
   | "pause_streaming"
   | "resume_streaming";
@@ -232,7 +239,7 @@ export interface AgentProgressEvent {
   type: "agent.progress";
   id: string;
   stage: "status" | "planning" | "tool" | "approval" | "verification" | "final";
-  phase?: "orienting" | "planning" | "model" | "tool" | "approval" | "verify" | "final" | "recover" | "status" | "iteration";
+  phase?: "orienting" | "planning" | "model" | "tool" | "approval" | "verify" | "final" | "recover" | "status" | "iteration" | "subagent" | "workflow" | "cache";
   status: "running" | "completed" | "failed" | "info";
   message: string;
   label?: string;
@@ -245,6 +252,9 @@ export interface AgentProgressEvent {
   step_id?: string;
   count?: number;
   iteration_id?: string;
+  /** Ephemeral progress replaces the previous entry with the same group_id. */
+  ephemeral?: boolean;
+  message_id?: string;
   display_scope?: DisplayScope;
   panel_hint?: PanelHint;
   requires_attention?: boolean;
@@ -414,6 +424,7 @@ export interface SubagentProgressEvent {
   max_iterations?: number;
   tool_name?: string;
   detail?: string;
+  current_activity?: string;
   display_scope?: DisplayScope;
   panel_hint?: PanelHint;
   requires_attention?: boolean;
@@ -427,9 +438,77 @@ export interface SubagentDoneEvent {
   record?: Record<string, unknown>;
   cancel_requested?: boolean;
   cancelled?: boolean;
+  timed_out?: boolean;
   display_scope?: DisplayScope;
   panel_hint?: PanelHint;
   requires_attention?: boolean;
+}
+
+// ── Runtime observability (backend/agent/runtime_spans.py) ──────
+
+export interface RuntimeSpanEvent {
+  type: "runtime.span";
+  /** Domain event name, e.g. "provider.request", "tool.execute". */
+  event: string;
+  span_id: string;
+  status?: string;
+  run_id?: string;
+  turn_id?: string;
+  iteration_id?: string;
+  phase?: string;
+  label?: string;
+  summary?: string;
+  started_at?: number;
+  ended_at?: number;
+  duration_ms?: number;
+  parent_span_id?: string;
+  tool_call_id?: string;
+  tool_name?: string;
+  agent_id?: string;
+  waiting_on?: string;
+  blocking_reason?: string;
+  ui_visible?: boolean;
+  debug_only?: boolean;
+  requires_attention?: boolean;
+  display_scope?: DisplayScope;
+  panel_hint?: PanelHint;
+  data?: Record<string, unknown>;
+}
+
+/** Raw provider stream event passthrough (SDK mode); never rendered. */
+export interface StreamEventEvent {
+  type: "stream_event";
+  provider?: string;
+  event_type?: string;
+  data?: Record<string, unknown>;
+  sdk_only?: boolean;
+}
+
+export interface RateLimitEvent {
+  type: "rate_limit";
+  provider?: string;
+  error_type?: "rate_limit" | "quota_exceeded" | "concurrency_limit" | string;
+  retry_after_seconds?: number;
+  retry_at?: number;
+  message?: string;
+  recoverable?: boolean;
+}
+
+export interface SessionStateEvent {
+  type: "session.state_changed";
+  state: "idle" | "working";
+  conversation_id?: string;
+  run_id?: string;
+  reason?: string;
+}
+
+export interface ToolUseSummaryEvent {
+  type: "tool_use_summary";
+  summary: string;
+  iteration_id?: string;
+  tool_call_ids?: string[];
+  tool_count?: number;
+  generated_by?: "heuristic" | "llm";
 }
 
 // ── Citations + inspector ───────────────────────────────────────

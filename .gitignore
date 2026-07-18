@@ -48,6 +48,7 @@ frontend/test-results/
 htmlcov/
 
 # Local runtime, logs, and tool state
+settings.json
 *.log
 *.out.log
 *.err.log
@@ -60,6 +61,7 @@ htmlcov/
 .codex-runlogs/
 .codex-run-logs/
 .claude/
+.agents/
 .kiro/
 .minicode/
 .openmcp/
@@ -72,10 +74,24 @@ data/attachments/
 data/artifacts/
 data/checkpoints/
 data/chroma/
+data/client-command-log/
 data/conversations/
 data/memory/
 data/metrics/
 data/active_workspace.json
 data/recent_projects.json
+data/ws-event-log/
 data/backend-startup.*.log
+cc/
 nul
+desktop/python-runtime/
+data/sidechains/
+data/swarm/
+data/tool-results/
+desktop/release-*/
+desktop/_start_*.txt
+tmp-artifacts-test/
+frontend/dist.backup/
+frontend/test-results/
+frontend/_build_*.txt
+.minicode/worktrees/

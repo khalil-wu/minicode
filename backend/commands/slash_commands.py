@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from backend.commands.catalog import get_composer_command_catalog
+from backend.skills.loader import SkillLoader
 
 if TYPE_CHECKING:
     from backend.ws.handler import WebSocketSession
@@ -30,10 +32,17 @@ _PERMISSION_MODE_ALIASES = {
 }
 
 _EFFORT_ALIASES = {
+    "none": "none",
+    "minimal": "minimal",
+    "min": "minimal",
     "low": "low",
     "medium": "medium",
     "med": "medium",
     "high": "high",
+    "xhigh": "xhigh",
+    "x-high": "xhigh",
+    "extra-high": "xhigh",
+    "extra_high": "xhigh",
     "max": "max",
     "maximum": "max",
 }
@@ -458,11 +467,11 @@ async def _handle_effort(
     _ = attachments
     tokens = _split_args(arg)
     if not tokens:
-        await _emit_usage_warning(ws, "effort", "Usage: /effort [low|medium|high|max]")
+        await _emit_usage_warning(ws, "effort", "Usage: /effort [none|minimal|low|medium|high|xhigh|max]")
         return True, ""
     effort = _normalize_effort(tokens[0])
     if effort is None:
-        await _emit_usage_warning(ws, "effort", "Usage: /effort [low|medium|high|max]")
+        await _emit_usage_warning(ws, "effort", "Usage: /effort [none|minimal|low|medium|high|xhigh|max]")
         return True, ""
     from backend.config import active_provider_supports_reasoning_effort
 
@@ -846,7 +855,51 @@ def _build_local_handler(command_name: str) -> SlashHandler:
     return _handler
 
 
-def _build_template_handler(command_name: str, template: str) -> SlashHandler:
+def _template_workspace_root(ws: "WebSocketSession") -> str:
+    resolver = getattr(ws, "_workspace_root_for_conversation", None)
+    root: Any = None
+    if callable(resolver):
+        try:
+            root = resolver()
+        except TypeError:
+            root = resolver(getattr(ws, "active_conversation", None))
+    if root is None:
+        active = getattr(ws, "active_conversation", None)
+        root = getattr(active, "workspace_root", "") if active is not None else ""
+    if root is None:
+        root = getattr(ws, "workspace_root", "")
+    if not root:
+        return ""
+    try:
+        return str(Path(root).expanduser().resolve())
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return str(root)
+
+
+def _template_skill_dir(skill_name: str) -> str:
+    normalized = str(skill_name or "").strip()
+    if not normalized:
+        return ""
+    meta = SkillLoader().get_meta(normalized)
+    if meta is None:
+        return ""
+    try:
+        return str(meta.source_path.parent.expanduser().resolve())
+    except (OSError, RuntimeError):
+        return str(meta.source_path.parent)
+
+
+def _expand_template_variables(template: str, ws: "WebSocketSession", skill_name: str = "") -> str:
+    if "${" not in template:
+        return template
+    return (
+        template
+        .replace("${CLAUDE_SKILL_DIR}", _template_skill_dir(skill_name))
+        .replace("${WORKSPACE}", _template_workspace_root(ws))
+    )
+
+
+def _build_template_handler(command_name: str, template: str, skill_name: str = "") -> SlashHandler:
     base_template = str(template or "").strip()
 
     async def _handler(
@@ -856,15 +909,90 @@ def _build_template_handler(command_name: str, template: str) -> SlashHandler:
         if not base_template:
             await _emit_command_unavailable(ws, command_name)
             return True, ""
-        prompt = base_template
+        prompt = _expand_template_variables(base_template, ws, skill_name)
         extra = str(arg or "").strip()
         if extra:
-            prompt = f"{base_template}\n\nAdditional command context:\n{extra}"
+            prompt = f"{prompt}\n\nAdditional command context:\n{extra}"
         await ws._emit_command_result(
             command_name,
             f"Prepared template prompt for '/{command_name}'.",
         )
         return False, prompt
+
+    return _handler
+
+
+def _build_protocol_handler(entry: dict[str, Any]) -> SlashHandler:
+    command_name = str(entry.get("command", "")).strip().lower()
+    protocol_command = str(
+        entry.get("protocol_command")
+        or entry.get("command_type")
+        or entry.get("handler")
+        or ""
+    ).strip()
+    base_payload = dict(entry.get("payload") or {}) if isinstance(entry.get("payload"), dict) else {}
+    arg_key = str(entry.get("arg_key") or "").strip()
+    plugin_name = str(entry.get("plugin_name") or "").strip()
+
+    async def _handler(
+        ws: "WebSocketSession", arg: str, attachments: Any
+    ) -> tuple[bool, str]:
+        _ = attachments
+        if not protocol_command:
+            await _emit_command_unavailable(ws, command_name)
+            return True, ""
+
+        payload = dict(base_payload)
+        payload.setdefault("source", f"slash:/{command_name}")
+        if plugin_name:
+            payload.setdefault("plugin_name", plugin_name)
+        payload.setdefault("command", command_name)
+        raw_arg = str(arg or "").strip()
+        if raw_arg:
+            payload[arg_key or "arg"] = raw_arg
+
+        handled = await _dispatch_command(ws, protocol_command, payload)
+        if not handled:
+            await _emit_command_unavailable(ws, command_name)
+        return True, ""
+
+    return _handler
+
+
+def _build_plugin_local_handler(entry: dict[str, Any]) -> SlashHandler:
+    command_name = str(entry.get("command", "")).strip().lower()
+    ui_action = str(entry.get("ui_action") or "").strip()
+    component = str(entry.get("component") or "").strip()
+    plugin_name = str(entry.get("plugin_name") or "").strip()
+    base_payload = dict(entry.get("payload") or {}) if isinstance(entry.get("payload"), dict) else {}
+    arg_key = str(entry.get("arg_key") or "").strip()
+
+    async def _handler(
+        ws: "WebSocketSession", arg: str, attachments: Any
+    ) -> tuple[bool, str]:
+        _ = attachments
+        if not ui_action:
+            await _emit_command_unavailable(ws, command_name)
+            return True, ""
+
+        raw_arg = str(arg or "").strip()
+        data = dict(base_payload)
+        data["ui_action"] = ui_action
+        if component:
+            data["component"] = component
+        data.setdefault("source", f"slash:/{command_name}")
+        if plugin_name:
+            data.setdefault("plugin_name", plugin_name)
+        data.setdefault("command", command_name)
+        if raw_arg:
+            data[arg_key or "arg"] = raw_arg
+
+        await ws._emit_command_result(
+            command_name,
+            f"Opening plugin command: /{command_name}.",
+            data=data,
+        )
+        return True, ""
 
     return _handler
 
@@ -906,14 +1034,25 @@ def register_all_slash_commands(registry: Any) -> None:
         slash_name = f"/{command_name}"
 
         if command_type == "local":
-            registry.register_slash(slash_name, _build_local_handler(command_name))
+            if str(entry.get("source", "")).strip().lower() == "plugin":
+                registry.register_slash(slash_name, _build_plugin_local_handler(entry))
+            else:
+                registry.register_slash(slash_name, _build_local_handler(command_name))
             continue
 
         if command_type == "template":
             registry.register_slash(
                 slash_name,
-                _build_template_handler(command_name, str(entry.get("template", ""))),
+                _build_template_handler(
+                    command_name,
+                    str(entry.get("template", "")),
+                    str(entry.get("skill_name", "")),
+                ),
             )
+            continue
+
+        if command_type == "protocol":
+            registry.register_slash(slash_name, _build_protocol_handler(entry))
 
     # Keep legacy aliases that map cleanly to catalog-backed permission modes.
     for command_name, mode in _PERMISSION_MODE_ALIAS_COMMANDS.items():
@@ -921,3 +1060,10 @@ def register_all_slash_commands(registry: Any) -> None:
             f"/{command_name}",
             _build_permission_mode_alias_handler(command_name, mode),
         )
+
+
+def refresh_slash_commands(registry: Any) -> None:
+    clear = getattr(registry, "clear_slash_handlers", None)
+    if callable(clear):
+        clear()
+    register_all_slash_commands(registry)

@@ -21,7 +21,7 @@ export function maybeAutoRoutePanel(event: DisplayRoutable, fallback?: RightStac
 }
 
 export function addInspectorPayload(
-  targetKind: "message" | "tool_call" | "artifact" | "file" | "diff" | "subagent" | "budget",
+  targetKind: "message" | "tool_call" | "artifact" | "file" | "diff" | "subagent" | "budget" | "provider" | "cache",
   targetId: string,
   payload: Record<string, unknown>,
 ) {
