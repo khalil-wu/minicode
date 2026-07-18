@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useState, useCallback } from "react";
-import { ChevronDown, ChevronRight, Copy, RefreshCw, Eye, EyeOff } from "lucide-react";
+import { ChevronDown, ChevronRight, Copy, Eye, EyeOff } from "lucide-react";
 import type { ActivityCellState } from "./cellTypes";
 import { useAppStore } from "../../stores";
 import {
@@ -15,6 +15,9 @@ import {
   formatDuration,
 } from "./activityCellHelpers";
 import { subscribeSecondTick } from "../../lib/shared-tick";
+import { openWebInPreview } from "../openWebInPreview";
+import { normalizeAgentErrorMessage, purifyToolErrorText } from "../errorMessages";
+import { toolDisplayName } from "../toolUtils";
 import "./cells.css";
 
 /** Real-time elapsed timer — ticks every second while tool is running.
@@ -169,11 +172,12 @@ export const ActivityCell = memo(function ActivityCell({
       {/* Expanded: detailed records */}
       {isExpanded && hasRecords && (
         <div className="activity-cell-expanded">
-          {recordDetails.map(({ label, target, targetKind, count, durationMs }, i) => (
+          {recordDetails.map(({ label, target, targetKind, lineInfo, count, durationMs }, i) => (
             <div key={`${label}-${target}-${i}`} className="activity-cell-detail-row">
               <span className="activity-cell-detail-dot">⎿</span>
               <span className="activity-cell-detail-name">{label}</span>
               <DetailTarget target={target} targetKind={targetKind} />
+              {lineInfo && <span className="activity-cell-detail-meta">{lineInfo}</span>}
               {count > 1 && <span className="activity-cell-detail-count">{`x${count}`}</span>}
               {developerMode && durationMs != null && durationMs > 0 && (
                 <span className="activity-cell-detail-duration">{durationMs}ms</span>
@@ -201,14 +205,6 @@ export const ActivityCell = memo(function ActivityCell({
         <div className="activity-cell-failed-actions">
           <button
             type="button"
-            className="cell-action-btn activity-cell-action-retry"
-            onClick={() => handleRetry(cell)}
-            title="重试此操作"
-          >
-            <RefreshCw size={12} /> 重试
-          </button>
-          <button
-            type="button"
             className="cell-action-btn"
             onClick={() => setShowErrorDetail((v) => !v)}
             title={showErrorDetail ? "隐藏错误详情" : "查看错误详情"}
@@ -222,11 +218,14 @@ export const ActivityCell = memo(function ActivityCell({
       {isFailed && showErrorDetail && hasRecords && (
         <div className="activity-cell-error-detail">
           {cell.toolCallRecords!.map((record, i) => {
-            const error = record.errorInfo?.user_summary || record.outputPreview || "";
+            const rawError = purifyToolErrorText(record.errorInfo?.user_summary || record.outputPreview || "");
+            const error = developerMode
+              ? rawError
+              : normalizeAgentErrorMessage(rawError, { includeProviderDetails: false });
             if (!error) return null;
             return (
               <div key={`error-${i}`} className="activity-cell-error-item">
-                <div className="activity-cell-error-label">{record.name}</div>
+                <div className="activity-cell-error-label">{developerMode ? record.name : toolDisplayName(record.name)}</div>
                 <pre className="activity-cell-error-pre">{error}</pre>
               </div>
             );
@@ -254,10 +253,12 @@ function DetailTarget({
       <a
         className="activity-cell-detail-path activity-cell-detail-link activity-cell-detail-link-url"
         href={text}
-        target="_blank"
         rel="noreferrer"
         title={text}
-        onClick={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          if (openWebInPreview(text)) event.preventDefault();
+        }}
       >
         {text}
       </a>
@@ -288,9 +289,3 @@ function DetailTarget({
   );
 }
 
-// ── Retry handler (stub) ───────────────────────────────────
-
-async function handleRetry(cell: ActivityCellState) {
-  const { pushToast } = await import("../../overlays/ToastContainer");
-  pushToast("重试功能正在开发中，敬请期待", "info", 3000);
-}

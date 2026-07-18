@@ -1,33 +1,34 @@
-import type React from "react";
+import { CheckCircle2, CircleAlert, Info, TriangleAlert } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import type { StatusNoticeCellState } from "./cellTypes";
 
 const TONE_STYLES: Record<
   StatusNoticeCellState["tone"],
-  { border: string; bg: string; color: string; icon: string }
+  { border: string; bg: string; color: string; icon: LucideIcon }
 > = {
   info: {
     border: "var(--state-info, #4a9eff)",
     bg: "color-mix(in oklch, var(--state-info, #4a9eff) 8%, var(--surface-soft))",
     color: "var(--state-info, #4a9eff)",
-    icon: "ℹ",
+    icon: Info,
   },
   warning: {
     border: "var(--state-warning, #f0a030)",
     bg: "color-mix(in oklch, var(--state-warning, #f0a030) 8%, var(--surface-soft))",
     color: "var(--state-warning, #f0a030)",
-    icon: "⚠",
+    icon: TriangleAlert,
   },
   success: {
     border: "var(--state-success, #2ea043)",
     bg: "color-mix(in oklch, var(--state-success, #2ea043) 8%, var(--surface-soft))",
     color: "var(--state-success, #2ea043)",
-    icon: "✓",
+    icon: CheckCircle2,
   },
   danger: {
     border: "var(--state-danger, #f85149)",
     bg: "color-mix(in oklch, var(--state-danger, #f85149) 8%, var(--surface-soft))",
     color: "var(--state-danger, #f85149)",
-    icon: "✕",
+    icon: CircleAlert,
   },
 };
 
@@ -37,6 +38,7 @@ export function StatusNoticeCell({
   cell: StatusNoticeCellState;
 }) {
   const s = TONE_STYLES[cell.tone] ?? TONE_STYLES.info;
+  const NoticeIcon = s.icon;
 
   return (
     <div
@@ -53,7 +55,7 @@ export function StatusNoticeCell({
         color: s.color,
       }}
     >
-      <span style={{ flexShrink: 0, fontWeight: 700 }}>{s.icon}</span>
+      <NoticeIcon size={14} strokeWidth={1.75} aria-hidden="true" style={{ flexShrink: 0, marginTop: 1 }} />
       <div style={{ minWidth: 0 }}>
         <div style={{ fontWeight: 650 }}>{cell.title}</div>
         {cell.message && (

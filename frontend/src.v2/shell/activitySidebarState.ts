@@ -1,17 +1,30 @@
 import { extractInlineCitationIndexes } from "../chat/citationProjection";
 import { shouldShowInActivity } from "../lib/display-intent";
-import { getToolCallsFromMessage } from "../lib/content-blocks";
+import { getContentBlocks, getToolCallsFromMessage } from "../lib/content-blocks";
+import { planStepProgressStatus, shouldSurfacePlanProgress } from "../lib/planVisibility";
+import { isAgentControlToolName } from "../lib/tool-call-reducer";
 import type {
   AgentProgressEntry,
   ArtifactContentState,
   ArtifactPreview,
+  BackgroundTaskEntry,
+  BrowserAnnotation,
   ChatMessage,
   Citation,
+  ContextUsage,
+  ConversationGoal,
+  MessageAttachmentRef,
   PlanState,
   PreviewLaunchProcessInfo,
   PreviewServerInfo,
   PreviewVerificationInfo,
+  ReplyAttachmentMeta,
+  ScheduledTaskEntry,
+  SubagentState,
+  TerminalSessionInfo,
+  TerminalSnapshotInfo,
   TodoItem,
+  WorkspaceGitState,
 } from "../stores/types";
 
 export type ActivityProgressStatus = "pending" | "running" | "completed" | "failed";
@@ -43,6 +56,21 @@ export interface ActivityBrowserItem {
   status: "idle" | "running" | "verified" | "failed";
 }
 
+export interface ActivityBrowserAnnotationItem {
+  id: string;
+  label: string;
+  url: string;
+  host: string;
+  note: string;
+  selector?: string;
+  xPercent?: number;
+  yPercent?: number;
+  title?: string;
+  detail?: string;
+  createdAt: number;
+  screenshotDetail?: string;
+}
+
 export interface ActivitySourceItem {
   id: string;
   kind: "web" | "file";
@@ -53,12 +81,62 @@ export interface ActivitySourceItem {
   host?: string;
 }
 
+export interface ActivitySummaryItem {
+  id: string;
+  label: string;
+  detail?: string;
+  kind: "goal" | "context";
+  status?: "running" | "completed" | "failed" | "info";
+}
+
+export interface ActivityWorkspaceItem {
+  id: string;
+  label: string;
+  detail?: string;
+  kind: "branch" | "worktree" | "workspace";
+  path?: string;
+  status?: "running" | "completed" | "failed" | "info";
+}
+
+export interface ActivityAttachmentItem {
+  id: string;
+  messageId: string;
+  label: string;
+  kind: "image" | "document" | "file";
+  detail?: string;
+  artifactId?: string;
+  docId?: string;
+  path?: string;
+  mediaType?: string;
+}
+
+export interface RuntimeItem {
+  id: string;
+  label: string;
+  kind: "terminal" | "background-command" | "preview" | "agent" | "automation";
+  detail?: string;
+  status: "running" | "completed" | "failed" | "idle";
+  terminalId?: string;
+  automationId?: string;
+  previewId?: string;
+  agentId?: string;
+  startedAt?: number;
+  attention?: boolean;
+}
+
+export type ActivityRunItem = RuntimeItem;
+
 export interface ActivitySidebarState {
   hasConversation: boolean;
+  summary: ActivitySummaryItem[];
+  workspace: ActivityWorkspaceItem[];
   progress: ActivityProgressItem[];
   output: ActivityOutputItem[];
   browser: ActivityBrowserItem[];
   sources: ActivitySourceItem[];
+  attachments: ActivityAttachmentItem[];
+  runs: ActivityRunItem[];
+  browserAnnotations: ActivityBrowserAnnotationItem[];
   isEmpty: boolean;
 }
 
@@ -67,12 +145,26 @@ export interface ActivitySidebarStateInput {
   messages: ChatMessage[];
   todos: TodoItem[];
   plan: PlanState | null;
+  isStreaming?: boolean;
   agentProgress: AgentProgressEntry[];
+  activeGoal?: ConversationGoal | null;
+  contextUsage?: ContextUsage | null;
+  currentModel?: string;
+  currentProvider?: string;
+  workspaceGit?: WorkspaceGitState | null;
+  workingDirectory?: string;
   livePreviewUrl: string | null;
   previewArtifact: ArtifactContentState | null;
   previewVerification: PreviewVerificationInfo | null;
   previewServers: PreviewServerInfo[];
   previewLaunchProcesses: PreviewLaunchProcessInfo[];
+  terminalSnapshots?: Record<string, TerminalSnapshotInfo>;
+  terminalSessions?: TerminalSessionInfo[];
+  activeTerminalSessionId?: string | null;
+  backgroundTasks?: BackgroundTaskEntry[];
+  subagents?: SubagentState[];
+  scheduledTasks?: ScheduledTaskEntry[];
+  browserAnnotations?: BrowserAnnotation[];
 }
 
 export function buildActivitySidebarState(input: ActivitySidebarStateInput): ActivitySidebarState {
@@ -80,50 +172,152 @@ export function buildActivitySidebarState(input: ActivitySidebarStateInput): Act
     return emptyState(false);
   }
 
+  const summary = buildSummary(input);
+  const workspace = buildWorkspace(input);
   const progress = buildProgress(input);
   const output = buildOutput(input.messages, input.previewArtifact);
   const browser = buildBrowser(input);
   const sources = buildSources(input.messages);
+  const attachments = buildAttachments(input.messages);
+  const runs = buildRuns(input);
+  const browserAnnotations = buildBrowserAnnotations(input);
 
   return {
     hasConversation: true,
+    summary,
+    workspace,
     progress,
     output,
     browser,
     sources,
-    isEmpty: progress.length === 0 && output.length === 0 && browser.length === 0 && sources.length === 0,
+    attachments,
+    runs,
+    browserAnnotations,
+    isEmpty: summary.length === 0 &&
+      workspace.length === 0 &&
+      progress.length === 0 &&
+      output.length === 0 &&
+      browser.length === 0 &&
+      sources.length === 0 &&
+      attachments.length === 0 &&
+      runs.length === 0 &&
+      browserAnnotations.length === 0,
   };
 }
 
 function emptyState(hasConversation: boolean): ActivitySidebarState {
   return {
     hasConversation,
+    summary: [],
+    workspace: [],
     progress: [],
     output: [],
     browser: [],
     sources: [],
+    attachments: [],
+    runs: [],
+    browserAnnotations: [],
     isEmpty: true,
   };
+}
+
+function buildSummary(input: ActivitySidebarStateInput): ActivitySummaryItem[] {
+  const items: ActivitySummaryItem[] = [];
+
+  if (input.activeGoal?.text) {
+    items.push({
+      id: "goal",
+      label: input.activeGoal.text,
+      detail: input.activeGoal.status === "paused" ? "Paused goal" : "Active goal",
+      kind: "goal",
+      status: input.activeGoal.status === "paused" ? "info" : "running",
+    });
+  }
+
+  if (input.contextUsage) {
+    const percent = input.contextUsage.limit > 0
+      ? Math.round((input.contextUsage.used / input.contextUsage.limit) * 100)
+      : 0;
+    items.push({
+      id: "context",
+      label: `${formatNumber(input.contextUsage.used)} / ${formatNumber(input.contextUsage.limit)} tokens`,
+      detail: input.contextUsage.compactSummary || `${percent}% context used`,
+      kind: "context",
+      status: percent >= 90 ? "failed" : percent >= 75 ? "running" : "info",
+    });
+  }
+
+  return items;
+}
+
+function buildWorkspace(input: ActivitySidebarStateInput): ActivityWorkspaceItem[] {
+  const items: ActivityWorkspaceItem[] = [];
+  const git = input.workspaceGit;
+
+  if (git?.branch) {
+    items.push({
+      id: "branch",
+      label: git.branch,
+      detail: "Git branch",
+      kind: "branch",
+      status: "info",
+    });
+  }
+
+  if (git) {
+    const nonGitWorkspace = isNonGitWorkspaceError(git.error);
+    items.push({
+      id: "worktree",
+      label: git.isWorktree ? "Isolated worktree" : "Main workspace",
+      detail: git.worktreeCount || git.isolatedCount
+        ? `${git.worktreeCount ?? 0} worktrees, ${git.isolatedCount ?? 0} isolated`
+        : nonGitWorkspace
+          ? git.currentPath || "Local folder"
+          : git.error || git.currentPath,
+      kind: "worktree",
+      path: git.currentPath,
+      status: git.error && !nonGitWorkspace ? "failed" : git.isWorktree ? "running" : "info",
+    });
+  } else if (input.workingDirectory) {
+    items.push({
+      id: "workspace",
+      label: basename(input.workingDirectory),
+      detail: input.workingDirectory,
+      kind: "workspace",
+      path: input.workingDirectory,
+      status: "info",
+    });
+  }
+
+  return items;
 }
 
 function buildProgress(input: ActivitySidebarStateInput): ActivityProgressItem[] {
   const progress: ActivityProgressItem[] = [];
 
   if (input.todos.length > 0) {
-    for (const todo of input.todos) {
+    const currentTodo =
+      input.todos.find((todo) => todo.status === "blocked") ||
+      input.todos.find((todo) => todo.status === "in_progress") ||
+      input.todos.find((todo) => todo.status === "pending");
+    if (currentTodo) {
       progress.push({
-        id: todo.id,
-        label: todo.status === "in_progress" && todo.activeForm ? todo.activeForm : todo.content,
-        status: todoStatus(todo.status),
+        id: currentTodo.id,
+        label: currentTodo.status === "in_progress" && currentTodo.activeForm ? currentTodo.activeForm : currentTodo.content,
+        detail: currentTodo.status === "blocked" ? "Needs attention" : undefined,
+        status: todoStatus(currentTodo.status, Boolean(input.isStreaming)),
       });
     }
-  } else if (input.plan?.steps.length) {
-    for (const [index, step] of input.plan.steps.entries()) {
+  } else if (shouldSurfacePlanProgress(input.plan)) {
+    const currentStep = input.plan.steps.find((step) => step.status === "running")
+      || input.plan.steps.find((step) => step.status === "failed")
+      || input.plan.steps.find((step) => step.status === "pending");
+    if (currentStep) {
       progress.push({
-        id: step.id || `plan-step-${index}`,
-        label: step.title,
-        detail: step.detail,
-        status: planStepStatus(step.status),
+        id: currentStep.id || "plan-step-current",
+        label: currentStep.title,
+        detail: currentStep.detail,
+        status: planStepProgressStatus(input.plan, currentStep, Boolean(input.isStreaming)),
       });
     }
   }
@@ -133,8 +327,10 @@ function buildProgress(input: ActivitySidebarStateInput): ActivityProgressItem[]
     .filter((entry) =>
       (entry.conversationId === conversationKey || entry.conversationId === "__active__" || !entry.conversationId) &&
       entry.visibility !== "debug" &&
+      !isDelegatedAgentProgress(entry) &&
+      !isInternalAgentPhaseProgress(entry) &&
       shouldShowInActivity(entry) &&
-      (entry.stage === "planning" || entry.stage === "verification" || entry.stage === "final"),
+      (entry.stage === "planning" || entry.stage === "verification" || entry.stage === "final" || entry.stage === "approval" || entry.stage === "tool"),
     );
   const phaseRunIds = new Set(
     scopedProgress
@@ -147,7 +343,7 @@ function buildProgress(input: ActivitySidebarStateInput): ActivityProgressItem[]
         const runId = agentRunId(entry.id);
         return !runId || !phaseRunIds.has(runId);
       })
-      .slice(-6),
+      .slice(-8),
   ).slice(-4);
 
   for (const entry of compactProgress) {
@@ -157,11 +353,19 @@ function buildProgress(input: ActivitySidebarStateInput): ActivityProgressItem[]
       id: entry.id,
       label,
       detail: entry.detail,
-      status: progressStatus(entry.status),
+      status: progressStatus(entry.status, Boolean(input.isStreaming)),
     });
   }
 
   return dedupeBy(progress, (item) => item.id);
+}
+
+function isDelegatedAgentProgress(entry: AgentProgressEntry): boolean {
+  if (isAgentControlToolName(entry.toolName || "")) return true;
+  const text = [entry.id, entry.label, entry.message, entry.summary]
+    .filter(Boolean)
+    .join(" ");
+  return /(?:subagent|delegated task|子代理|子任务)/i.test(text);
 }
 
 function agentRunId(id: string): string {
@@ -170,6 +374,20 @@ function agentRunId(id: string): string {
 
 function agentPhaseRunId(id: string): string {
   return id.match(/^agent-phase:([^:]+)/)?.[1] ?? "";
+}
+
+function isInternalAgentPhaseProgress(entry: AgentProgressEntry): boolean {
+  if (entry.requiresAttention) return false;
+  if (entry.visibility === "compact") return false;
+  const id = String(entry.id || "");
+  const label = String(entry.summary || entry.message || entry.label || "").trim().toLowerCase();
+  if (/^agent-run:/.test(id) || /^agent-phase:/.test(id)) return true;
+  return [
+    "agent run started",
+    "agent run completed",
+    "preparing agent context",
+    "model deciding next action",
+  ].includes(label);
 }
 
 function serializeMainAgentProgress(entries: AgentProgressEntry[]): AgentProgressEntry[] {
@@ -201,7 +419,7 @@ function buildOutput(messages: ChatMessage[], previewArtifact: ArtifactContentSt
     seen.add(previewArtifact.artifactId);
     items.unshift({
       id: previewArtifact.artifactId,
-      label: previewArtifact.name || previewArtifact.artifactId,
+      label: previewArtifact.name || artifactFallbackLabel(undefined, previewArtifact.mediaType),
       kind: kindFromMediaType(previewArtifact.mediaType) || "artifact",
       detail: previewArtifact.mediaType,
       artifactId: previewArtifact.artifactId,
@@ -242,6 +460,44 @@ function buildBrowser(input: ActivitySidebarStateInput): ActivityBrowserItem[] {
   }];
 }
 
+function buildBrowserAnnotations(input: ActivitySidebarStateInput): ActivityBrowserAnnotationItem[] {
+  return (input.browserAnnotations ?? [])
+    .slice(0, 10)
+    .map((annotation) => {
+      const coordinateLabel = browserAnnotationCoordinateLabel(annotation);
+      const screenshotDetail = annotation.screenshotCapturedAt
+        ? [
+            `screenshot ${new Date(annotation.screenshotCapturedAt).toLocaleTimeString()}`,
+            annotation.screenshotWidth && annotation.screenshotHeight
+              ? `${annotation.screenshotWidth}x${annotation.screenshotHeight}`
+              : "",
+            coordinateLabel,
+          ].filter(Boolean).join(" - ")
+        : undefined;
+      return {
+        id: annotation.id,
+        label: annotation.selector || coordinateLabel || annotation.title || "Page note",
+        url: annotation.url,
+        host: hostLabel(annotation.url),
+        note: annotation.note,
+        selector: annotation.selector,
+        xPercent: annotation.xPercent,
+        yPercent: annotation.yPercent,
+        title: annotation.title,
+        detail: annotation.title || annotation.url,
+        createdAt: annotation.createdAt,
+        screenshotDetail,
+      };
+    });
+}
+
+function browserAnnotationCoordinateLabel(annotation: Pick<BrowserAnnotation, "xPercent" | "yPercent">): string | undefined {
+  const { xPercent, yPercent } = annotation;
+  if (typeof xPercent !== "number" || typeof yPercent !== "number") return undefined;
+  if (!Number.isFinite(xPercent) || !Number.isFinite(yPercent)) return undefined;
+  return `Point ${Math.round(xPercent)}%, ${Math.round(yPercent)}%`;
+}
+
 function buildSources(messages: ChatMessage[]): ActivitySourceItem[] {
   const items: ActivitySourceItem[] = [];
   const seen = new Set<string>();
@@ -263,17 +519,6 @@ function buildSources(messages: ChatMessage[]): ActivitySourceItem[] {
         });
       }
 
-      const filePath = toolSourcePath(record);
-      if (filePath && !seen.has(`file:${filePath}`)) {
-        seen.add(`file:${filePath}`);
-        items.push({
-          id: `file:${filePath}`,
-          kind: "file",
-          label: basename(filePath),
-          title: dirname(filePath),
-          path: filePath,
-        });
-      }
     }
 
     const citedIndexes = extractInlineCitationIndexes(message.content || "");
@@ -299,6 +544,113 @@ function buildSources(messages: ChatMessage[]): ActivitySourceItem[] {
   return items.slice(-8);
 }
 
+function buildAttachments(messages: ChatMessage[]): ActivityAttachmentItem[] {
+  const items: ActivityAttachmentItem[] = [];
+  const seen = new Set<string>();
+
+  for (const message of messages) {
+    for (const attachment of message.attachmentRefs ?? []) {
+      const id = attachment.artifactId || attachment.docId || attachment.id || `${message.id}:${attachment.name}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      items.push(attachmentFromRef(message.id, attachment));
+    }
+    for (const attachment of message.replyAttachments ?? []) {
+      const id = attachment.path || `${message.id}:reply:${items.length}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      items.push(attachmentFromReply(message.id, id, attachment));
+    }
+  }
+
+  return items.slice(-12).reverse();
+}
+
+function buildRuns(input: ActivitySidebarStateInput): ActivityRunItem[] {
+  const items: ActivityRunItem[] = [];
+  if ((input.terminalSessions ?? []).length === 0 && input.activeTerminalSessionId) {
+    const snapshot = input.terminalSnapshots?.[input.activeTerminalSessionId];
+    if (snapshot) items.push({
+      id: `terminal:${snapshot.id}`,
+      terminalId: snapshot.id,
+      kind: "terminal",
+      label: snapshot.shell || "Terminal",
+      detail: terminalDetail(snapshot),
+      status: snapshot.status === "exited" ? "completed" : "running",
+    });
+  }
+  for (const session of input.terminalSessions ?? []) {
+    const snapshot = input.terminalSnapshots?.[session.id];
+    items.push({
+      id: `terminal:${session.id}`,
+      terminalId: session.id,
+      kind: "terminal",
+      label: session.shell || "Terminal",
+      detail: snapshot ? terminalDetail(snapshot) : session.cwd,
+      status: session.status === "exited" ? (session.exitCode && session.exitCode !== 0 ? "failed" : "completed") : "running",
+      startedAt: session.createdAt,
+      attention: session.status === "exited" && Boolean(session.exitCode),
+    });
+  }
+
+  for (const task of input.backgroundTasks ?? []) {
+    items.push({
+      id: `background:${task.id}`,
+      kind: "background-command",
+      label: cleanDisplayText(task.command) || "Background command",
+      detail: task.exitCode == null ? undefined : `exit ${task.exitCode}`,
+      status: task.status,
+      startedAt: task.timestamp,
+      attention: task.status === "failed",
+    });
+  }
+
+  for (const process of input.previewLaunchProcesses ?? []) {
+    const running = ["starting", "running", "ready"].includes(process.status);
+    items.push({
+      id: `preview:${process.id}`,
+      previewId: process.id,
+      kind: "preview",
+      label: process.name || "Preview",
+      detail: process.url || process.command,
+      status: running ? "running" : process.status === "exited" ? "completed" : "failed",
+      attention: process.status === "crashed" || process.status === "unhealthy",
+    });
+  }
+
+  for (const agent of input.subagents ?? []) {
+    const running = ["pending", "running", "blocked"].includes(agent.status);
+    items.push({
+      id: `agent:${agent.id}`,
+      agentId: agent.id,
+      kind: "agent",
+      label: cleanDisplayText(agent.objective || agent.summary || agent.role) || "Subagent",
+      detail: agent.currentActivity || agent.detail,
+      status: running ? "running" : agent.status === "done" ? "completed" : "failed",
+      startedAt: agent.lastProgressAt || agent.lastEventAt,
+      attention: agent.status === "blocked" || agent.status === "partial" || agent.status === "error",
+    });
+  }
+
+  for (const task of input.scheduledTasks ?? []) {
+    items.push({
+      id: `automation:${task.id}`,
+      automationId: task.id,
+      kind: "automation",
+      label: cleanDisplayText(task.name) || "Automation",
+      detail: task.schedule || task.prompt,
+      status: task.enabled ? "idle" : "completed",
+    });
+  }
+
+  return items
+    .sort((a, b) => Number(b.status === "running") - Number(a.status === "running") || Number(b.attention) - Number(a.attention) || runtimeKindOrder(a.kind) - runtimeKindOrder(b.kind) || (b.startedAt ?? 0) - (a.startedAt ?? 0))
+    .slice(0, 16);
+}
+
+const runtimeKindOrder = (kind: ActivityRunItem["kind"]): number =>
+  ({ terminal: 0, agent: 1, preview: 2, "background-command": 3, automation: 4 })[kind];
+
 function toolSourceUrl(record: ReturnType<typeof getToolCallsFromMessage>[number]): string {
   if (String(record.extractionStatus || "").toLowerCase() === "failed") return "";
   const candidate = record.sourceUrl || stringArg(record.args.url) || stringArg(record.args.source_url);
@@ -311,61 +663,125 @@ function toolSourceUrl(record: ReturnType<typeof getToolCallsFromMessage>[number
 }
 
 function toolSourcePath(record: ReturnType<typeof getToolCallsFromMessage>[number]): string {
-  const candidate = stringArg(record.args.file_path ?? record.args.path ?? record.args.target ?? record.args.filename);
+  const candidate = pathArg(record.args.file_path ?? record.args.path ?? record.args.target ?? record.args.filename);
   if (!candidate || /^https?:\/\//i.test(candidate)) return "";
-  if (
-    /read|grep|glob|search|list|write|edit|patch|delete|remove|create|move|rename|save/i.test(record.name) ||
-    /file|edit|command/i.test(String(record.resultKind || ""))
-  ) {
-    return candidate;
+  if (!isFileEvidenceTool(record)) return "";
+  return candidate;
+}
+
+function isFileEvidenceTool(record: ReturnType<typeof getToolCallsFromMessage>[number]): boolean {
+  const name = String(record.name || "");
+  if (/(?:write|edit|patch|delete|remove|create|move|rename|save|apply_patch|run_command|terminal|shell|bash|powershell|cmd)/i.test(name)) {
+    return false;
   }
-  return "";
+  if (/(?:read|grep|glob|search|list|find|scan|inspect|cat|select-string)/i.test(name)) {
+    return true;
+  }
+  const kind = String(record.resultKind || record.activityKind || "");
+  if (/(?:edit|command|terminal|process)/i.test(kind)) return false;
+  return /(?:file|source|search)/i.test(kind);
+}
+
+function isNonGitWorkspaceError(error?: string): boolean {
+  if (!error) return false;
+  return /not\s+(?:a\s+)?git\s+(?:repository|repo)|outside\s+(?:a\s+)?git\s+(?:repository|repo)/i.test(error);
 }
 
 function stringArg(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  return isPlaceholderText(trimmed) ? "" : trimmed;
+}
+
+function pathArg(value: unknown): string {
+  const candidate = stringArg(value);
+  if (!candidate) return "";
+  if (/^(?:\$?null|undefined|none|nil)$/i.test(candidate)) return "";
+  return candidate;
+}
+
+function attachmentFromRef(messageId: string, attachment: MessageAttachmentRef): ActivityAttachmentItem {
+  const fallback = "附件";
+  return {
+    id: attachment.artifactId || attachment.docId || attachment.id || `${messageId}:${cleanDisplayText(attachment.name) || fallback}`,
+    messageId,
+    label: cleanDisplayText(attachment.name) || fallback,
+    kind: attachment.kind,
+    detail: attachment.mediaType || sizeLabel(attachment.sizeBytes),
+    artifactId: attachment.artifactId,
+    docId: attachment.docId,
+    mediaType: attachment.mediaType,
+  };
+}
+
+function attachmentFromReply(
+  messageId: string,
+  id: string,
+  attachment: ReplyAttachmentMeta,
+): ActivityAttachmentItem {
+  return {
+    id,
+    messageId,
+    label: cleanDisplayText(basename(attachment.path)) || "Attachment",
+    kind: attachment.isImage ? "image" : "file",
+    detail: sizeLabel(attachment.size),
+    path: attachment.path,
+    mediaType: attachment.isImage ? "image/*" : undefined,
+  };
+}
+
+function terminalDetail(snapshot: TerminalSnapshotInfo): string {
+  const output = snapshot.truncated ? "truncated" : `${snapshot.outputChars ?? snapshot.output.length} chars`;
+  return [snapshot.cwd, snapshot.status || "running", output].filter(Boolean).join(" - ");
 }
 
 function basename(path: string): string {
   return path.replace(/\\/g, "/").split("/").pop() || path;
 }
 
-function dirname(path: string): string {
-  const normalized = path.replace(/\\/g, "/");
-  const index = normalized.lastIndexOf("/");
-  return index > 0 ? normalized.slice(0, index) : "";
-}
-
 function outputFromArtifact(artifact: ArtifactPreview): ActivityOutputItem {
+  const label = cleanDisplayText(artifact.summary) || artifactFallbackLabel(artifact.kind, artifact.mediaType);
+  const path = artifact.kind === "file" ? pathArg(artifact.summary) : "";
   return {
     id: artifact.artifactId,
-    label: artifact.summary || artifact.artifactId,
+    label,
     kind: artifact.kind,
     detail: artifact.mediaType || sizeLabel(artifact.bytes),
     artifactId: artifact.artifactId,
     url: artifact.url,
     mediaType: artifact.mediaType,
-    path: artifact.kind === "file" ? artifact.summary : undefined,
+    path: path || undefined,
   };
 }
 
-function todoStatus(status: TodoItem["status"]): ActivityProgressStatus {
+function artifactFallbackLabel(kind?: string, mediaType?: string): string {
+  const normalized = `${kind || ""} ${mediaType || ""}`.toLowerCase();
+  if (normalized.includes("image")) return "生成图片";
+  if (normalized.includes("pdf")) return "生成的 PDF";
+  if (normalized.includes("file") || normalized.includes("text")) return "生成文件";
+  return "未命名产物";
+}
+
+function cleanDisplayText(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  return isPlaceholderText(trimmed) ? "" : trimmed;
+}
+
+function isPlaceholderText(value: string): boolean {
+  return /^(?:\$?null|undefined|none|nil)$/i.test(value.trim());
+}
+
+function todoStatus(status: TodoItem["status"], isLive: boolean): ActivityProgressStatus {
   if (status === "completed") return "completed";
-  if (status === "in_progress") return "running";
+  if (status === "in_progress") return isLive ? "running" : "pending";
   if (status === "blocked") return "failed";
   return "pending";
 }
 
-function planStepStatus(status: PlanState["steps"][number]["status"]): ActivityProgressStatus {
-  if (status === "done") return "completed";
-  if (status === "running") return "running";
-  if (status === "failed") return "failed";
-  return "pending";
-}
-
-function progressStatus(status: AgentProgressEntry["status"]): ActivityProgressStatus {
+function progressStatus(status: AgentProgressEntry["status"], isLive: boolean): ActivityProgressStatus {
   if (status === "completed" || status === "info") return "completed";
-  if (status === "running") return "running";
+  if (status === "running") return isLive ? "running" : "pending";
   return "failed";
 }
 
@@ -399,6 +815,10 @@ function sizeLabel(bytes?: number): string | undefined {
   if (!bytes) return undefined;
   if (bytes < 1024) return `${bytes} B`;
   return `${(bytes / 1024).toFixed(1)} KB`;
+}
+
+function formatNumber(value: number): string {
+  return Number.isFinite(value) ? value.toLocaleString() : "0";
 }
 
 function dedupeBy<T>(items: T[], keyForItem: (item: T) => string): T[] {

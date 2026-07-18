@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ExternalLink, Code2, ShieldCheck } from "lucide-react";
 import { useAppStore } from "../stores";
 import { getWebSocket } from "../hooks/useWebSocket";
@@ -7,6 +7,7 @@ import { pendingPromptTargetsConversation } from "../lib/pending-prompts";
 import { MonacoDiffView } from "../components/MonacoDiffView";
 import { guessLanguageFromPath } from "../lib/monaco-colorize";
 import { sendClientCommand } from "../protocol/ws-outbox";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 
 export const DiffReviewModal = () => {
   const pendingDiffReview = useAppStore((s) => s.pendingDiffReview);
@@ -14,7 +15,7 @@ export const DiffReviewModal = () => {
   const visibleDiffReview = pendingPromptTargetsConversation(pendingDiffReview, activeConversationId, activeConversationId)
     ? pendingDiffReview
     : null;
-  const containerRef = useRef<HTMLDivElement>(null);
+  const containerRef = useFocusTrap(Boolean(visibleDiffReview));
   const [useMonaco, setUseMonaco] = useState(false);
 
   const respond = useCallback((accepted: boolean) => {
@@ -56,12 +57,6 @@ export const DiffReviewModal = () => {
 
   useEffect(() => {
     if (!visibleDiffReview) return;
-    const previousActive = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const focusFirst = () => {
-      const focusable = getFocusable(containerRef.current);
-      (focusable[0] ?? containerRef.current)?.focus();
-    };
-    window.setTimeout(focusFirst, 0);
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Enter" && (e.metaKey || e.ctrlKey || !isTextEditingTarget(e.target))) {
         e.preventDefault();
@@ -69,30 +64,24 @@ export const DiffReviewModal = () => {
       } else if (e.key === "Escape") {
         e.preventDefault();
         respond(false);
-      } else if (e.key === "Tab") {
-        const focusable = getFocusable(containerRef.current);
-        if (focusable.length === 0) {
-          e.preventDefault();
-          containerRef.current?.focus();
-          return;
-        }
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        if (e.shiftKey && document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
       }
     };
     window.addEventListener("keydown", handler);
     return () => {
       window.removeEventListener("keydown", handler);
-      previousActive?.focus();
     };
   }, [visibleDiffReview, respond]);
+
+  const { lines, stats } = useMemo(() => {
+    const raw = visibleDiffReview?.diff ?? "";
+    const ls = raw.split("\n");
+    let plus = 0, minus = 0;
+    for (const l of ls) {
+      if (l.startsWith("+") && !l.startsWith("+++")) plus++;
+      else if (l.startsWith("-") && !l.startsWith("---")) minus++;
+    }
+    return { lines: ls, stats: { plus, minus } };
+  }, [visibleDiffReview?.diff]);
 
   if (!visibleDiffReview) return null;
 
@@ -103,17 +92,6 @@ export const DiffReviewModal = () => {
       label: "Diff Review",
     });
   };
-
-  const { lines, stats } = useMemo(() => {
-    const raw = visibleDiffReview.diff;
-    const ls = raw.split("\n");
-    let plus = 0, minus = 0;
-    for (const l of ls) {
-      if (l.startsWith("+") && !l.startsWith("+++")) plus++;
-      else if (l.startsWith("-") && !l.startsWith("---")) minus++;
-    }
-    return { lines: ls, stats: { plus, minus } };
-  }, [visibleDiffReview.diff]);
 
   return (
     <div
@@ -249,15 +227,6 @@ export const DiffReviewModal = () => {
       </div>
     </div>
   );
-};
-
-const getFocusable = (root: HTMLElement | null): HTMLElement[] => {
-  if (!root) return [];
-  return Array.from(
-    root.querySelectorAll<HTMLElement>(
-      'button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
-    ),
-  ).filter((element) => !element.hasAttribute("disabled") && element.offsetParent !== null);
 };
 
 const isTextEditingTarget = (target: EventTarget | null): boolean => {

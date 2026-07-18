@@ -12,6 +12,7 @@ import type {
   ErrorCellState,
   StatusNoticeCellState,
 } from "../cells/cellTypes";
+import { isControlPlaneNotice } from "../controlPlaneNotices";
 
 let _counter = 0;
 function nextId(prefix: string): string {
@@ -35,15 +36,20 @@ export function mapEventToCells(
         kind?: string;
         title?: string;
         message?: string;
+        content?: string;
         tone?: StatusNoticeCellState["tone"];
       };
+      const text = String(ev.message ?? ev.content ?? ev.title ?? "").trim();
+      if (isControlPlaneNotice(text)) return [];
+      const title = String(ev.title ?? ev.message ?? ev.content ?? "System notice").trim() || "System notice";
+      const message = ev.message ? String(ev.message) : ev.title && ev.content ? String(ev.content) : undefined;
       return [
         {
           kind: "status_notice",
           id: nextId("notice"),
           tone: ev.tone ?? "info",
-          title: ev.title ?? ev.message ?? "System notice",
-          message: ev.message,
+          title,
+          message,
           createdAt: now,
         },
       ];
@@ -105,7 +111,7 @@ export function mapEventToCells(
           id: nextId("busy"),
           tone: "warning",
           title: "Agent 正忙",
-          message: "上一个任务仍在进行中，请等待完成后再发送新消息。",
+          message: "此对话上一条回复仍在运行。等待完成或停止后再在这里发送；新建对话可以继续，不会打断当前任务。",
           createdAt: now,
         });
         return cells;

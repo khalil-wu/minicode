@@ -4,6 +4,7 @@ import {
   ExternalLink,
   FileDiff,
   MessageSquare,
+  ShieldAlert,
   ShieldCheck,
   X,
 } from "lucide-react";
@@ -13,6 +14,7 @@ import { sendClientCommand } from "../protocol/ws-outbox";
 import type { PendingApproval, PendingAskUser, PendingDiffReview } from "../stores/types";
 import { pendingPromptTargetsConversation } from "../lib/pending-prompts";
 import { ToolGlyph, toolDisplayName, summarizeArgs, humanizeKey } from "./toolUtils";
+import { deriveCommandPrefix } from "./commandPrefix";
 
 export const InlineAgentPrompt = () => {
   const pendingApproval = useAppStore((s) => s.pendingApproval);
@@ -50,18 +52,29 @@ export const InlineAgentPrompt = () => {
 
 const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue: PendingApproval[] }) => {
   const [responding, setResponding] = useState(false);
-  const summary = useMemo(() => summarizeArgs(request.args), [request.args]);
+  const [amending, setAmending] = useState(false);
+  const [feedback, setFeedback] = useState("");
+  const summary = useMemo(() => summarizeApprovalArgs(request.toolName, request.args), [request.toolName, request.args]);
   const total = 1 + queue.length;
   const displayName = toolDisplayName(request.toolName);
+  // Codex escalate-on-failure: a command retried with escalated permissions
+  // carries with_escalated_permissions + a justification in its args. Surface it
+  // prominently so the user understands they are approving full (unsandboxed)
+  // access, not an ordinary command.
+  const escalated = isEscalatedApproval(request);
+  const escalationJustification = String(request.args?.justification ?? "").trim();
+  const sourceLabel = approvalSourceLabel(request);
 
   useEffect(() => {
     setResponding(false);
+    setAmending(false);
+    setFeedback("");
   }, [request.requestId]);
 
-  const respond = (allowed: boolean) => {
+  const respond = (allowed: boolean, fb?: string) => {
     if (responding) return;
     setResponding(true);
-    const sent = sendClientCommand(buildApprovalResponseCommand(request.requestId, allowed ? "approve" : "reject", request.protocol));
+    const sent = sendClientCommand(buildApprovalResponseCommand(request.requestId, allowed ? "approve" : "reject", request.protocol, undefined, fb));
     if (sent) {
       useAppStore.getState().clearApproval(request.requestId);
     } else {
@@ -72,7 +85,10 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
 
   const allowAll = () => {
     const store = useAppStore.getState();
-    const all = [request, ...queue];
+    // "Allow all" is a bulk convenience — it must NOT silently approve elevated
+    // (unsandboxed / escalated) requests. Those stay queued for an explicit,
+    // individually-reviewed decision so the user always sees the sandbox warning.
+    const all = [request, ...queue].filter((item) => !isEscalatedApproval(item));
     const submitted: string[] = [];
     for (const item of all) {
       const sent = sendClientCommand(buildApprovalResponseCommand(item.requestId, "approve", item.protocol));
@@ -81,6 +97,8 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
     }
     if (submitted.length > 0) store.clearApprovals(submitted);
   };
+  // Escalated items are excluded from bulk approval; surface that in the label.
+  const escalatedQueueCount = [request, ...queue].filter(isEscalatedApproval).length;
 
   // "Always allow <prefix>": persist a Bash(prefix:*) content rule so future
   // commands with the same prefix skip prompting, then approve this one.
@@ -109,7 +127,22 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
           <span style={titleStyle}>Allow {displayName}?</span>
           {total > 1 && <span style={pendingPillStyle}>{total} pending</span>}
         </div>
-        <div style={subtitleStyle}>Permission required before this tool can run.</div>
+        <div style={subtitleStyle}>
+          {escalated
+            ? "Elevated access requested — this will run outside the sandbox (full filesystem + network)."
+            : "Permission required before this tool can run."}
+          {sourceLabel ? ` Source: ${sourceLabel}.` : ""}
+        </div>
+
+        {escalated && (
+          <div style={escalationBannerStyle}>
+            <ShieldAlert size={13} style={{ flexShrink: 0, marginTop: 1 }} />
+            <span>
+              <strong>Run outside sandbox.</strong>
+              {escalationJustification ? ` ${escalationJustification}` : " The agent says a sandboxed run failed and needs full access."}
+            </span>
+          </div>
+        )}
 
         <div style={compactSummaryRowStyle}>
           {summary.slice(0, 2).map((item) => (
@@ -119,6 +152,42 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
             </span>
           ))}
         </div>
+
+        {/* Show the full command verbatim — never let the exact text the user is
+            approving get lost behind a single-line ellipsis (approved ≠ shown). */}
+        {commandText && (
+          <pre style={fullCommandStyle} aria-label="Command to run">{commandText}</pre>
+        )}
+
+        {amending && (
+          <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+            <textarea
+              value={feedback}
+              onChange={(e) => setFeedback(e.target.value)}
+              placeholder="Add guidance for the agent (e.g. why you're denying, or what to change)…"
+              rows={2}
+              style={{
+                width: "100%",
+                padding: "6px 8px",
+                borderRadius: 6,
+                border: "1px solid var(--border-subtle)",
+                background: "var(--surface-base)",
+                color: "var(--text-primary)",
+                fontSize: 12,
+                fontFamily: "inherit",
+                resize: "vertical",
+              }}
+            />
+            <div style={{ display: "flex", gap: 6 }}>
+              <button type="button" onClick={() => respond(false, feedback)} disabled={responding || !feedback.trim()} style={primaryButtonStyle}>
+                Deny with note
+              </button>
+              <button type="button" onClick={() => setAmending(false)} disabled={responding} style={secondaryButtonStyle}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
 
         {queue.length > 0 && (
           <div style={queueStyle}>
@@ -139,6 +208,10 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
           <Check size={13} />
           Allow
         </button>
+        <button type="button" onClick={() => setAmending((v) => !v)} disabled={responding} style={secondaryButtonStyle} aria-label="Amend with feedback" title="Add guidance to your decision (cc Tab-to-amend)">
+          <MessageSquare size={13} />
+          Amend
+        </button>
         {alwaysPrefix && (
           <button
             type="button"
@@ -153,14 +226,37 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
           </button>
         )}
         {queue.length > 0 && (
-          <button type="button" onClick={allowAll} disabled={responding} style={accentButtonStyle} aria-label="Allow all pending tool requests">
-            Allow all
+          <button
+            type="button"
+            onClick={allowAll}
+            disabled={responding}
+            style={accentButtonStyle}
+            aria-label="Allow all non-elevated pending tool requests"
+            title={escalatedQueueCount > 0
+              ? `Approves queued requests; ${escalatedQueueCount} elevated request(s) still need individual review`
+              : "Allow all pending tool requests"}
+          >
+            {escalatedQueueCount > 0 ? "Allow non-elevated" : "Allow all"}
           </button>
         )}
       </div>
     </section>
   );
 };
+
+function approvalSourceLabel(request: PendingApproval): string {
+  const agent = String(request.sourceAgent || "").trim();
+  const thread = String(request.sourceThread || "").trim();
+  if (agent && thread) return `${agent} in ${thread}`;
+  return agent || thread;
+}
+
+// A request retried with escalated permissions runs OUTSIDE the sandbox
+// (full filesystem + network). These must always be reviewed individually.
+function isEscalatedApproval(request: PendingApproval): boolean {
+  return request.args?.with_escalated_permissions === true
+    || request.args?.with_escalated_permissions === "true";
+}
 
 const DiffApprovalCard = ({ request }: { request: PendingDiffReview }) => {
   const diffReview = useAppStore((s) => s.diffReview);
@@ -254,10 +350,10 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
 
       {hasOptions && (
         <div style={choiceGridStyle}>
-          {request.options?.map((option) => (
+          {request.options?.map((option, index) => (
             <button key={option} type="button" onClick={() => respond(option)} style={choiceCardStyle}>
+              <span style={choiceLetterStyle}>{optionLetter(index)}</span>
               <span style={choiceCardTitleStyle}>{option}</span>
-              <span style={choiceCardHintStyle}>Click to answer</span>
             </button>
           ))}
         </div>
@@ -271,14 +367,19 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
         style={askInputRowStyle}
       >
         <div style={askInputWrapStyle}>
-          {hasOptions && <div style={askInputLabelStyle}>Other answer</div>}
-        <input
-          ref={inputRef}
-          value={answer}
-          onChange={(event) => setAnswer(event.target.value)}
-          placeholder={hasOptions ? "Type a custom answer..." : "Type your answer..."}
-          style={inputStyle}
-        />
+          {hasOptions && (
+            <div style={askInputLabelStyle}>
+              <span style={choiceLetterStyle}>{optionLetter(request.options?.length ?? 0)}</span>
+              自定义回答
+            </div>
+          )}
+          <input
+            ref={inputRef}
+            value={answer}
+            onChange={(event) => setAnswer(event.target.value)}
+            placeholder={hasOptions ? "Type a custom answer..." : "Type your answer..."}
+            style={inputStyle}
+          />
         </div>
         <button type="submit" disabled={!answer.trim()} style={{ ...primaryButtonStyle, opacity: answer.trim() ? 1 : 0.55 }}>
           Send
@@ -303,23 +404,46 @@ const diffStats = (diff: string) => {
   return { plus, minus, preview };
 };
 
-/**
- * Derive a sensible "always allow" prefix from a shell command, so approving
- * `npm run build` suggests `npm run:*`. Two-token prefix for tools with
- * meaningful subcommands (npm/git/cargo/...), otherwise the binary alone.
- */
-const TWO_TOKEN_BINS = new Set([
-  "npm", "pnpm", "yarn", "git", "cargo", "go", "python", "python3",
-  "pip", "pip3", "npx", "docker", "kubectl", "make", "rustup", "uv",
-]);
+type ApprovalArgSummary = { label: string; value: string };
+type ApprovalArgDescriptor = { label: string; keys: string[] };
 
-export const deriveCommandPrefix = (command: string): string => {
-  const trimmed = String(command || "").trim().replace(/^\$\s*/, "");
-  const tokens = trimmed.split(/\s+/).filter(Boolean);
-  if (tokens.length === 0) return "";
-  const bin = tokens[0];
-  if (tokens.length >= 2 && TWO_TOKEN_BINS.has(bin)) return `${bin} ${tokens[1]}`;
-  return bin;
+const TOOL_ARG_DESCRIPTORS: Array<{ pattern: RegExp; fields: ApprovalArgDescriptor[] }> = [
+  { pattern: /(?:run_)?command|bash|shell|terminal/i, fields: [
+    { label: "command", keys: ["command", "cmd", "script"] },
+    { label: "cwd", keys: ["cwd", "workdir", "working_directory"] },
+  ] },
+  { pattern: /(?:web_)?fetch|browser|url/i, fields: [
+    { label: "url", keys: ["url", "uri", "href"] },
+    { label: "query", keys: ["query", "q"] },
+  ] },
+  { pattern: /(?:web_)?search|grep|glob|find/i, fields: [
+    { label: "query", keys: ["query", "q", "pattern", "regex"] },
+    { label: "path", keys: ["path", "file_path", "dir", "directory", "cwd"] },
+  ] },
+  { pattern: /read|write|edit|patch|file|diff/i, fields: [
+    { label: "path", keys: ["path", "file_path", "filePath", "filename", "target"] },
+    { label: "command", keys: ["command", "cmd"] },
+  ] },
+];
+
+const summarizeApprovalArgs = (toolName: string, args: Record<string, unknown>): ApprovalArgSummary[] => {
+  const match = TOOL_ARG_DESCRIPTORS.find((descriptor) => descriptor.pattern.test(toolName));
+  if (!match) return summarizeArgs(args);
+
+  const rows = match.fields.flatMap((field) => {
+    const value = firstConciseValue(args, field.keys);
+    return value ? [{ label: field.label, value }] : [];
+  });
+  return rows.length > 0 ? rows : summarizeArgs(args);
+};
+
+const firstConciseValue = (args: Record<string, unknown>, keys: string[]): string | null => {
+  for (const key of keys) {
+    const value = args[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+  }
+  return null;
 };
 
 const shellStyle: React.CSSProperties = {
@@ -417,6 +541,23 @@ const compactButtonRowStyle: React.CSSProperties = {
   minWidth: "max-content",
 };
 
+const fullCommandStyle: React.CSSProperties = {
+  margin: "2px 0 0",
+  padding: "6px 8px",
+  gridColumn: "1 / -1",
+  maxHeight: 132,
+  overflow: "auto",
+  borderRadius: "var(--radius-sm, 6px)",
+  border: "1px solid var(--border-subtle)",
+  background: "var(--surface-base)",
+  color: "var(--text-secondary)",
+  fontFamily: "var(--font-mono)",
+  fontSize: "var(--text-xs)",
+  lineHeight: 1.5,
+  whiteSpace: "pre-wrap",
+  wordBreak: "break-word",
+};
+
 const cardStyle: React.CSSProperties = {
   border: "1px solid color-mix(in oklch, var(--state-warning) 45%, var(--border-subtle))",
   background: "color-mix(in oklch, var(--state-warning) 8%, var(--surface-page))",
@@ -448,6 +589,20 @@ const subtitleStyle: React.CSSProperties = {
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
+};
+
+const escalationBannerStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "flex-start",
+  gap: 6,
+  marginTop: 6,
+  padding: "6px 7px",
+  borderRadius: "var(--radius-sm, 6px)",
+  border: "1px solid color-mix(in oklch, var(--state-danger) 34%, var(--border-subtle))",
+  background: "color-mix(in oklch, var(--state-danger) 9%, var(--surface-page))",
+  color: "var(--text-secondary)",
+  fontSize: "var(--text-xs)",
+  lineHeight: 1.45,
 };
 
 const queueStyle: React.CSSProperties = {
@@ -523,13 +678,13 @@ const choiceGridStyle: React.CSSProperties = {
 };
 
 const choiceCardStyle: React.CSSProperties = {
-  minHeight: 62,
+  minHeight: 42,
   display: "grid",
-  gap: 4,
-  alignContent: "center",
-  justifyItems: "start",
+  gridTemplateColumns: "24px minmax(0, 1fr)",
+  alignItems: "center",
+  gap: 9,
   textAlign: "left",
-  padding: "10px 12px",
+  padding: "8px 10px",
   border: "1px solid var(--border-subtle)",
   borderRadius: "var(--radius-sm, 6px)",
   background: "var(--surface-base)",
@@ -537,15 +692,26 @@ const choiceCardStyle: React.CSSProperties = {
   cursor: "pointer",
 };
 
+const choiceLetterStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: 22,
+  height: 22,
+  borderRadius: "var(--radius-sm, 5px)",
+  background: "var(--surface-soft)",
+  border: "1px solid var(--border-subtle)",
+  color: "var(--text-muted)",
+  fontSize: "var(--text-xs)",
+  fontWeight: 750,
+  lineHeight: 1,
+  flexShrink: 0,
+};
+
 const choiceCardTitleStyle: React.CSSProperties = {
   fontSize: "var(--text-sm)",
   fontWeight: 650,
   lineHeight: 1.35,
-};
-
-const choiceCardHintStyle: React.CSSProperties = {
-  fontSize: "var(--text-xs)",
-  color: "var(--text-muted)",
 };
 
 const askInputRowStyle: React.CSSProperties = {
@@ -563,10 +729,12 @@ const askInputWrapStyle: React.CSSProperties = {
 };
 
 const askInputLabelStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 7,
   color: "var(--text-muted)",
   fontSize: "var(--text-xs)",
   fontWeight: 700,
-  textTransform: "uppercase",
 };
 
 const inputStyle: React.CSSProperties = {
@@ -605,3 +773,7 @@ const diffLineStyle = (line: string): React.CSSProperties => ({
         : "var(--text-secondary)",
   whiteSpace: "pre",
 });
+
+function optionLetter(index: number): string {
+  return String.fromCharCode(65 + Math.max(0, index));
+}

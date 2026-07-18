@@ -1,5 +1,6 @@
 import type { GoalInfo, PlanStep, RuntimeSessionSnapshot } from "../protocol/events";
 import type { AgentCapabilitiesPayload } from "../protocol/capabilities";
+import type { AgentProgressPhase } from "../protocol/streaming-types";
 import type { ToolCallRecord } from "../lib/tool-call-reducer";
 
 // ── UI Slice ──────────────────────────────────────────────────────
@@ -9,17 +10,33 @@ export type ViewMode = "normal" | "verbose" | "summary";
 export type AppMode = "chat" | "code" | "cowork";
 export type SessionFilter = "all" | "running" | "waiting" | "idle" | "archived";
 export type SessionGroupBy = "none" | "project" | "branch";
-export type RightStackTab = "preview" | "browser" | "terminal" | "tasks" | "diff" | "plan" | "subagents" | "inspector" | "diagnostics";
-export type EffortLevel = "low" | "medium" | "high" | "max";
+export type RightStackTab = "preview" | "browser" | "terminal" | "tasks" | "diff" | "plan" | "subagents" | "artifacts" | "inspector" | "diagnostics";
+export type EffortLevel = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface SkillInfo {
   name: string;
   description: string;
+  display_name?: string;
+  icon?: string;
   version?: string;
   triggers?: string[];
   tools_required?: string[];
+  mcp_required?: string[];
+  mcp_dependencies?: string[];
+  allow_implicit_invocation?: boolean;
+  default_prompt?: string;
   source_level?: string;
   active?: boolean;
+  usage?: SkillUsageStats;
+}
+
+export interface SkillUsageStats {
+  load_count?: number;
+  reuse_count?: number;
+  failure_count?: number;
+  unload_count?: number;
+  last_event?: string;
+  last_invoked_at?: string;
 }
 
 export interface MarketplaceSkill {
@@ -40,7 +57,9 @@ export interface SlashCommand {
   command: string;
   label: string;
   description: string;
-  type: "local" | "template" | "protocol";
+  type: "local" | "template" | "protocol" | "local-jsx";
+  /** For local-jsx commands: the overlay/panel id this command opens. */
+  panel?: string;
   /** Structured argument options for local commands (second-stage menu). */
   args?: SlashCommandArg[];
 }
@@ -142,6 +161,12 @@ export interface WorkspaceGitState {
   error?: string;
 }
 
+export interface FileTreeRevealRequest {
+  id: string;
+  path: string;
+  kind: "folder";
+}
+
 export interface DiffReviewFile {
   path: string;
   patch?: string | null;
@@ -157,6 +182,9 @@ export interface DiffReviewState {
   protocol?: "legacy" | "control";
   conversationId?: string;
   toolName?: string;
+  sourceAgent?: string;
+  sourceThread?: string;
+  sourceTool?: string;
   diff: string;
   files: DiffReviewFile[];
   selectedPath?: string;
@@ -181,7 +209,15 @@ export interface ConversationWorkbenchState {
   rightStackTab: RightStackTab;
   rightPanelOpen: boolean;
   rightStackTabLocked: boolean;
+  draft: string;
+  attachments: ComposerAttachment[];
+  quotedMessage: ComposerQuote | null;
+  selectedMentions: ComposerSlice["selectedMentions"];
+  selectedSkills: SkillContextRef[];
+  allowedRemoteImageDomains: string[];
 }
+
+export type RemoteImagePolicy = "ask" | "allow" | "block";
 
 export interface GitChangeFile {
   path: string;
@@ -196,16 +232,14 @@ export interface GitChangesState {
   staged: GitChangeFile[];
   untracked: string[];
   loading: boolean;
-  /** Streaming per-turn edits surfaced before the working tree diff refresh. */
   live?: {
     files: GitChangeFile[];
     toolCallId?: string;
     progress?: number;
-    updatedAt?: number;
+    updatedAt: number;
   } | null;
 }
 
-// Frontend mirror of backend/agent/context_ledger.py
 export type ContextLedgerCategory =
   | "system_runtime"
   | "guidelines"
@@ -226,12 +260,12 @@ export interface ContextLedgerEntry {
 }
 
 export interface ContextLedger {
-  schema_version?: number;
+  schema_version: 1;
   estimated_tokens: number;
   actual_tokens: number;
   compaction_count: number;
-  native_attachment_tokens?: number;
-  native_attachment_count?: number;
+  native_attachment_tokens: number;
+  native_attachment_count: number;
   entries: ContextLedgerEntry[];
 }
 
@@ -243,6 +277,23 @@ export interface ContextUsage {
   ledger?: ContextLedger;
 }
 
+export interface PluginCommandPanelPayload {
+  component: string;
+  command?: string;
+  plugin_name?: string;
+  pluginName?: string;
+  source?: string;
+  arg?: string;
+  title?: string;
+  description?: string;
+  fields?: unknown[];
+  prompt_template?: string;
+  promptTemplate?: string;
+  submit_label?: string;
+  submitLabel?: string;
+  [key: string]: unknown;
+}
+
 export interface UISlice {
   themeMode: ThemeMode;
   textScale: number;
@@ -250,16 +301,24 @@ export interface UISlice {
   appMode: AppMode;
   rightStackTab: RightStackTab;
   rightStackTabLocked: boolean;
+  focusedSubagentId: string | null;
   contextUsage: ContextUsage | null;
+  remoteImagePolicy: RemoteImagePolicy;
+  allowedRemoteImageDomains: string[];
   commandPaletteOpen: boolean;
   settingsOpen: boolean;
+  automationsOpen: boolean;
   shortcutsHelpOpen: boolean;
   quickOpenVisible: boolean;
   quickOpenResults: QuickOpenResult[];
   quickOpenLoading: boolean;
   currentModel: string;
   currentProvider: string;
+  currentProviderId: string;
+  currentProviderBaseUrl: string;
+  currentWireApi: string;
   availableModels: string[];
+  modelsSource: string;
   availableSkills: SkillInfo[];
   marketplaceSkills: MarketplaceSkill[];
   slashCommands: SlashCommand[];
@@ -275,14 +334,15 @@ export interface UISlice {
   previewVerification: PreviewVerificationInfo | null;
   fileChanges: { path: string; event: string; timestamp: number }[];
   fileTreeVersion: number;
+  fileTreeRevealRequests: FileTreeRevealRequest[];
   mcpServers: McpServerStatus[];
   envVars: { name: string; description: string; scope: string }[];
   gitChanges: GitChangesState;
   skillsMarketplaceOpen: boolean;
   liveArtifactsOpen: boolean;
-  /** Agent-driven editor surface; force-closed when the agent_editor feature flag is off. */
   agentEditorOpen: boolean;
-  setAgentEditorOpen: (open: boolean) => void;
+  pluginCommandPanelOpen: boolean;
+  pluginCommandPanelPayload: PluginCommandPanelPayload | null;
   setThemeMode: (m: ThemeMode) => void;
   setTextScale: (s: number) => void;
   setViewMode: (m: ViewMode) => void;
@@ -290,16 +350,26 @@ export interface UISlice {
   ensureCodeLayout: () => void;
   setRightStackTab: (t: RightStackTab, options?: { automatic?: boolean }) => void;
   setRightStackTabLocked: (locked: boolean) => void;
+  setFocusedSubagentId: (id: string | null) => void;
   setContextUsage: (u: ContextUsage | null) => void;
+  setRemoteImagePolicy: (policy: RemoteImagePolicy) => void;
+  allowRemoteImageDomain: (domain: string) => void;
+  clearAllowedRemoteImageDomains: () => void;
   toggleCommandPalette: () => void;
   toggleSettings: () => void;
+  toggleAutomations: () => void;
   toggleShortcutsHelp: () => void;
   toggleQuickOpen: () => void;
   toggleSkillsMarketplace: () => void;
   toggleLiveArtifacts: () => void;
+  toggleAgentEditor: () => void;
+  openPluginCommandPanel: (payload: PluginCommandPanelPayload) => void;
+  closePluginCommandPanel: () => void;
   setCurrentModel: (m: string) => void;
   setCurrentProvider: (p: string) => void;
+  setCurrentProviderMeta: (meta: { providerId?: string; baseUrl?: string; wireApi?: string }) => void;
   setAvailableModels: (models: string[]) => void;
+  setModelsSource: (source: string) => void;
   setAvailableSkills: (skills: SkillInfo[]) => void;
   setMarketplaceSkills: (skills: MarketplaceSkill[]) => void;
   setSlashCommands: (cmds: SlashCommand[]) => void;
@@ -331,6 +401,8 @@ export interface UISlice {
   setQuickOpenLoading: (loading: boolean) => void;
   addFileChange: (change: { path: string; event: string; timestamp: number }) => void;
   bumpFileTreeVersion: () => void;
+  requestFileTreeReveal: (path: string, kind?: FileTreeRevealRequest["kind"]) => void;
+  consumeFileTreeRevealRequest: (id: string) => void;
   setMcpServers: (servers: McpServerStatus[]) => void;
   setEnvVars: (entries: { name: string; description: string; scope: string }[]) => void;
   setGitChanges: (changes: Partial<GitChangesState>) => void;
@@ -349,6 +421,7 @@ export type PanelKind =
   | "plan"
   | "tasks"
   | "subagents"
+  | "artifacts"
   | "inspector";
 
 export type LegacyPanelKind = "subagent";
@@ -369,6 +442,8 @@ export interface TerminalSessionInfo {
   cwd: string;
   status?: "running" | "exited";
   createdAt?: number;
+  exitCode?: number;
+  exitedAt?: number;
 }
 
 export interface TerminalSnapshotInfo {
@@ -401,6 +476,21 @@ export interface BackgroundTaskEntry {
   timestamp: number;
 }
 
+export interface BrowserAnnotation {
+  id: string;
+  targetId?: string;
+  url: string;
+  title?: string;
+  selector?: string;
+  xPercent?: number;
+  yPercent?: number;
+  note: string;
+  createdAt: number;
+  screenshotCapturedAt?: number;
+  screenshotWidth?: number;
+  screenshotHeight?: number;
+}
+
 export interface PrStatus {
   number: number;
   title: string;
@@ -423,6 +513,7 @@ export interface ScheduledTaskEntry {
   permission_mode: string;
   enabled: boolean;
   last_run_at?: string | null;
+  next_run_at?: string | null;
   created_at?: string;
 }
 
@@ -456,6 +547,7 @@ export interface WorkspaceSlice {
   terminalSessions: TerminalSessionInfo[];
   terminalSnapshots: Record<string, TerminalSnapshotInfo>;
   backgroundTasks: BackgroundTaskEntry[];
+  browserAnnotations: BrowserAnnotation[];
   activeTerminalSessionId: string | null;
   editorOpenRequests: EditorOpenRequest[];
   activeEditorPath: string | null;
@@ -482,6 +574,9 @@ export interface WorkspaceSlice {
   consumeEditorOpenRequest: (path: string) => void;
   toggleSideChat: () => void;
   addBackgroundTask: (task: BackgroundTaskEntry) => void;
+  addBrowserAnnotation: (annotation: BrowserAnnotation) => void;
+  removeBrowserAnnotation: (id: string) => void;
+  clearBrowserAnnotations: (target?: { targetId?: string; url?: string }) => void;
   prStatus: PrStatus | null;
   ciChecks: CiCheck[];
   setPrStatus: (pr: PrStatus | null, checks: CiCheck[]) => void;
@@ -517,6 +612,9 @@ export interface MessageUsage {
   output: number;
   cacheRead?: number;
   cacheWrite?: number;
+  promptCacheTotal?: number;
+  promptCacheHitRate?: number;
+  reasoning?: number;
 }
 
 export interface FileContextRef {
@@ -543,6 +641,9 @@ export interface MessageAttachmentRef {
   artifactId?: string;
   docId?: string;
   indexedChunks?: number;
+  dataUrl?: string;
+  inputSource?: "pasted_text" | "upload";
+  sourceCharCount?: number;
 }
 
 export interface ThinkingContentBlock {
@@ -551,14 +652,236 @@ export interface ThinkingContentBlock {
   source?: "provider" | "model_preamble" | "post_tool" | "runtime" | string;
   visibility?: "debug" | "timeline" | "compact" | string;
   is_raw_provider_reasoning?: boolean;
+  provider_reasoning_type?: string;
 }
+/** Provider-native citation extracted from LLM response annotations. */
+export interface ProviderRawCitation {
+  url: string;
+  title: string;
+  range?: [number, number];
+}
+
+export interface ProviderRawOutputItem {
+  type: string;
+  index: number;
+  id?: string;
+  status?: string;
+  call_id?: string;
+  name?: string;
+  role?: string;
+  phase?: string;
+  content_types?: string[];
+  arguments_chars?: number;
+  summary_count?: number;
+  has_encrypted_content?: boolean;
+  action_type?: string;
+}
+
+export interface ProviderTimelineEvent {
+  event: string;
+  response_id_hash?: string;
+  item_type?: string;
+  item_id?: string;
+  call_id?: string;
+  name?: string;
+  status?: string;
+  finish_reason?: string;
+  output_index?: number;
+  content_index?: number;
+  sequence_number?: number;
+  delta_chars?: number;
+  text_chars?: number;
+  arguments_chars?: number;
+  annotation_count?: number;
+  output_items_len?: number;
+  usage_present?: boolean;
+  omitted?: number;
+  [key: string]: unknown;
+}
+
+export interface ToolSchemaSizeSummaryRow {
+  name?: string;
+  chars?: number;
+}
+
+export interface ProviderInputSizeSummaryRow {
+  index?: number;
+  type?: string;
+  role?: string;
+  name?: string;
+  chars?: number;
+  content_hash?: string;
+}
+
+export interface ProviderDuplicateInputContentRow {
+  type?: string;
+  role?: string;
+  content_hash?: string;
+  count?: number;
+  chars?: number;
+}
+
+export interface ProviderRequestSummary {
+  model?: string;
+  wire_api?: string;
+  instructions_len?: number;
+  instructions_sent_len?: number;
+  instructions_omitted_by_continuation?: boolean;
+  instructions_hash?: string;
+  instructions_full_hash?: string;
+  tools_len?: number;
+  tools_chars?: number;
+  tools_hash?: string;
+  tool_names?: string[];
+  tool_schema_hashes?: Record<string, string>;
+  largest_tools?: ToolSchemaSizeSummaryRow[];
+  metadata_keys?: string[];
+  prompt_cache_key_present?: boolean;
+  prompt_cache_key_hash?: string;
+  previous_response_id_present?: boolean;
+  previous_response_id_hash?: string;
+  request_params?: Record<string, unknown>;
+  request_param_keys?: string[];
+  turn_aborted_marker_present?: boolean;
+  input_items_len?: number;
+  input_items_sent_len?: number;
+  input_items_omitted_by_continuation?: number;
+  input_items_logical_len?: number;
+  input_chars?: number;
+  input_item_counts?: Record<string, number>;
+  largest_input_items?: ProviderInputSizeSummaryRow[];
+  duplicate_input_content?: ProviderDuplicateInputContentRow[];
+  prompt_section_summary?: PromptSectionSummary;
+}
+
+export interface ProviderTraceSafety {
+  redacted_prompt?: boolean;
+  has_encrypted_reasoning?: boolean;
+  synthetic_trace?: boolean;
+}
+
+export interface ProviderStatefulContinuationSummary {
+  configured?: boolean;
+  enabled?: boolean;
+  used?: boolean;
+  input_items_omitted?: number;
+  disabled_reason?: string;
+  reset_reason?: string;
+  stored_response_id_hash?: string;
+  covered_items?: number;
+  response_output_items_covered?: number;
+}
+
+export interface ProviderLoopMetrics {
+  provider_call_count?: number;
+  iteration?: number;
+  iteration_limit?: number;
+  iteration_hard_limit?: number;
+  tool_batch_count?: number;
+  tool_call_count?: number;
+  completed_tool_call_count?: number;
+  pending_tool_call_count?: number;
+  elapsed_ms?: number;
+  dynamic_iteration_budget_enabled?: boolean;
+}
+
+export interface PromptSectionSummaryRow {
+  index?: number;
+  name?: string;
+  layer?: "stable" | "context" | "volatile" | string;
+  chars?: number;
+  lines?: number;
+  cache_break?: boolean;
+  content_hash?: string;
+}
+
+export interface PromptSectionLayerSummary {
+  chars?: number;
+  sections?: number;
+  cache_break_sections?: number;
+}
+
+export interface PromptSectionSummaryLargest {
+  name?: string;
+  layer?: "stable" | "context" | "volatile" | string;
+  chars?: number;
+}
+
+export interface PromptSectionSummary {
+  section_count?: number;
+  total_chars?: number;
+  layers?: Record<string, PromptSectionLayerSummary>;
+  sections?: PromptSectionSummaryRow[];
+  largest_sections?: PromptSectionSummaryLargest[];
+}
+
+export interface PromptSectionDeltaRow {
+  name?: string;
+  changes?: string[];
+  before_layer?: string;
+  after_layer?: string;
+  chars_delta?: number;
+}
+
+export interface PromptSectionDelta {
+  status?: "unchanged" | "changed" | string;
+  added?: string[];
+  removed?: string[];
+  changed_sections?: PromptSectionDeltaRow[];
+  section_count_delta?: number;
+  total_chars_delta?: number;
+  layer_char_deltas?: Record<string, number>;
+}
+
+export interface PromptCacheDiagnostic {
+  status?: string;
+  reason?: string;
+  tracking_key_hash?: string;
+  previous_cache_read_tokens?: number;
+  cache_read_tokens?: number;
+  cache_creation_tokens?: number;
+  token_drop?: number;
+  changes?: string[];
+  tool_delta?: Record<string, unknown>;
+  prompt_section_delta?: PromptSectionDelta;
+  seconds_since_previous_observation?: number;
+  instructions_len_delta?: number;
+}
+
+/** Provider-native metadata forwarded on the DONE event (citations, usage, finish_reason). */
+export interface ProviderRawMetadata {
+  provider?: string;
+  model?: string;
+  citations?: ProviderRawCitation[];
+  usage?: Record<string, unknown>;
+  finish_reason?: string;
+  event_type?: string;
+  trace_id?: string;
+  output_items?: ProviderRawOutputItem[];
+  provider_timeline?: ProviderTimelineEvent[];
+  request_summary?: ProviderRequestSummary;
+  stateful_continuation?: ProviderStatefulContinuationSummary;
+  loop_metrics?: ProviderLoopMetrics;
+  safety?: ProviderTraceSafety;
+  prompt_cache_diagnostic?: PromptCacheDiagnostic;
+}
+
 export interface TextContentBlock {
   type: "text";
   content: string;
-  source?: "stream" | "send_message" | string;
-  visibility?: "final" | "timeline" | "debug" | string;
+  source?: "stream" | "reply" | string;
+  visibility?: "final" | "timeline" | "unsealed" | "draft" | "debug" | string;
   role?: "assistant" | "runtime" | string;
   phase?: "final" | "model" | "tool" | "recover" | string;
+  segmentId?: string;
+  iterationIndex?: number;
+  streamAttempt?: number;
+  sealReason?: string;
+  sealed?: boolean;
+  isStreaming?: boolean;
+  promoteAllUnsealedNarration?: boolean;
+  providerRaw?: ProviderRawMetadata;
+  finishReason?: string;
 }
 export interface ProcessContentBlock {
   type: "process";
@@ -581,6 +904,11 @@ export interface ProcessContentBlock {
   displayScope?: string;
   panelHint?: RightStackTab | string;
   requiresAttention?: boolean;
+  skillName?: string;
+  triggerMode?: "explicit" | "implicit" | "model" | string;
+  sourceLevel?: string;
+  reason?: string;
+  tokenEstimate?: number;
   seq?: number;
   order?: number;
   timestamp: number;
@@ -590,7 +918,7 @@ export interface ProgressContentBlock {
   type: "progress";
   id: string;
   stage: "status" | "planning" | "tool" | "approval" | "verification" | "final";
-  phase?: "orienting" | "planning" | "model" | "tool" | "approval" | "verify" | "final" | "recover" | "status" | "iteration" | "subagent" | "workflow" | "cache";
+  phase?: AgentProgressPhase;
   status: "running" | "completed" | "failed" | "info";
   message: string;
   label?: string;
@@ -606,7 +934,6 @@ export interface ProgressContentBlock {
   displayScope?: string;
   panelHint?: RightStackTab | string;
   requiresAttention?: boolean;
-  /** Ephemeral progress replaces the previous entry with the same groupId. */
   ephemeral?: boolean;
   timestamp: number;
 }
@@ -617,6 +944,7 @@ export type ContentBlock = ThinkingContentBlock | TextContentBlock | ProcessCont
 
 export interface ChatMessage {
   id: string;
+  turnId?: string;
   role: MessageRole;
   content: string;
   contextRefs?: MessageContextRef[];
@@ -630,7 +958,11 @@ export interface ChatMessage {
   isStreaming?: boolean;
   isThinkingStreaming?: boolean;
   resumeState?: "resumed";
-  terminalStatus?: "completed" | "failed" | "interrupted";
+  terminalStatus?: "completed" | "partial" | "failed" | "interrupted";
+  failureMessage?: string;
+  queueState?: "queued" | "cancelled";
+  queuePosition?: number;
+  queueMessageId?: string;
   /** Attachments carried by a BriefTool (send_message) reply on this message.
    * Rendered as the focused assistant reply. */
   replyAttachments?: ReplyAttachmentMeta[];
@@ -710,17 +1042,19 @@ export interface ChatSlice {
   messages: ChatMessage[];
   conversationMessages: Record<string, ChatMessage[]>;
   conversationStreaming: Record<string, boolean>;
+  conversationRecallTruncations: Record<string, { removedIds: string[]; retainedIds: string[]; updatedAt: number }>;
   isStreaming: boolean;
   isPaused: boolean;
   isConnected: boolean;
-  lastUsage: { input: number; output: number; cacheRead: number; cacheWrite: number } | null;
+  lastUsage: { input: number; output: number; cacheRead: number; cacheWrite: number; promptCacheTotal?: number; promptCacheHitRate?: number; reasoning?: number } | null;
+  usageTotals: { input: number; output: number; cacheRead: number; cacheWrite: number; promptCacheTotal?: number; reasoning?: number; turns: number };
   sideChats: Record<string, SideChatThread>;
   toolCallCount: number;
   sendMessage: (content: string, options?: { assistant?: boolean; contextRefs?: MessageContextRef[]; attachmentRefs?: MessageAttachmentRef[] }) => void;
   deleteMessage: (id: string) => void;
   upsertSystemMessage: (id: string, content: string, options?: { conversationId?: string; replacePrefix?: string }) => void;
   recallMessage: (id: string) => void;
-  removeEmptyStreamingAssistant: (conversationId?: string) => void;
+  removeEmptyStreamingAssistant: (conversationId?: string, messageId?: string) => void;
   interrupt: () => void;
   pauseStreaming: () => void;
   requestConversationSwitch: (id: string) => void;
@@ -731,22 +1065,26 @@ export interface ChatSlice {
   getVisibleMessages: (conversationId?: string | null) => ChatMessage[];
   setActiveGoal: (goal: ConversationGoal | null, conversationId?: string) => void;
   hydrateConversationMessages: (id: string, messages: ChatMessage[], options?: { activate?: boolean; isStreaming?: boolean }) => void;
+  bindStreamingTurn: (conversationId: string | undefined, messageId: string | undefined, turnId: string | undefined) => void;
   appendTextChunk: (
     content: string,
     conversationId?: string,
     source?: string,
     metadata?: Partial<Omit<TextContentBlock, "type" | "content" | "source">>,
+    messageId?: string,
   ) => void;
-  setFinalAnswerAttachments: (conversationId: string | undefined, attachments: ReplyAttachmentMeta[]) => void;
+  setFinalAnswerAttachments: (conversationId: string | undefined, attachments: ReplyAttachmentMeta[], messageId?: string) => void;
   finalizeStreamingText: (
     conversationId: string | undefined,
     source?: string,
     metadata?: Partial<Omit<TextContentBlock, "type" | "content" | "source">>,
+    messageId?: string,
   ) => void;
   appendThinkingChunk: (
     content: string,
     conversationId?: string,
     metadata?: Partial<Omit<ThinkingContentBlock, "type" | "content">>,
+    messageId?: string,
   ) => void;
   appendProcessItem: (
     item: Omit<ProcessContentBlock, "type" | "timestamp"> & { timestamp?: number },
@@ -754,22 +1092,28 @@ export interface ChatSlice {
     messageId?: string,
   ) => void;
   appendProgress: (progress: Omit<ProgressContentBlock, "type" | "timestamp">, conversationId?: string, messageId?: string) => void;
-  /** Replace the previous ephemeral progress block sharing the same groupId. */
   replaceEphemeralProgress: (progress: Omit<ProgressContentBlock, "type" | "timestamp">, conversationId?: string, messageId?: string) => void;
-  appendToolCallBlock: (tc: ToolCallRecord, conversationId?: string) => void;
+  appendToolCallBlock: (tc: ToolCallRecord, conversationId?: string, messageId?: string) => void;
   updateToolCall: (
     id: string,
     patch: Partial<ToolCallRecord>,
     conversationId?: string,
-    scope?: { iterationId?: string; stepId?: string },
+    scope?: { turnId?: string; iterationId?: string; stepId?: string },
   ) => void;
-  finishStreaming: (conversationId?: string, usage?: MessageUsage, terminalStatus?: "completed" | "failed" | "interrupted") => void;
-  resumeStreaming: (conversationId?: string, toolCallsPending?: PendingToolCallResume[]) => void;
+  finishStreaming: (
+    conversationId?: string,
+    usage?: MessageUsage,
+    terminalStatus?: "completed" | "partial" | "failed" | "interrupted",
+    messageId?: string,
+    failureMessage?: string,
+  ) => void;
+  resumeStreaming: (conversationId?: string, toolCallsPending?: PendingToolCallResume[], messageId?: string, turnId?: string) => void;
   replaceStreamingText: (
     conversationId: string,
     fullText: string,
     source?: string,
     metadata?: Partial<Omit<TextContentBlock, "type" | "content" | "source">>,
+    messageId?: string,
   ) => void;
   setConnected: (c: boolean) => void;
   setLastUsage: (u: ChatSlice["lastUsage"]) => void;
@@ -790,6 +1134,8 @@ export type PendingToolCallResume = {
   displayHint?: string;
   input_summary?: string;
   inputSummary?: string;
+  turn_id?: string;
+  turnId?: string;
   iteration_id?: string;
   iterationId?: string;
   phase?: string;
@@ -798,9 +1144,8 @@ export type PendingToolCallResume = {
 // ── Composer Slice ────────────────────────────────────────────────
 
 export type PermissionMode = "ask_permissions" | "plan" | "auto" | "bypass";
-
-/** System prompt identity (backend settings `prompt_persona`). */
 export type PromptPersona = "minicode" | "codex";
+export type AgentMode = "build" | "plan" | "review" | "explore";
 
 export interface ComposerAttachment {
   id: string;
@@ -814,12 +1159,24 @@ export interface ComposerAttachment {
   attachment?: Record<string, unknown>;
   dataUrl?: string;
   error?: string;
+  inputSource?: "pasted_text" | "upload";
+  sourceCharCount?: number;
+  localFile?: File;
+}
+
+export interface ComposerQuote {
+  id: string;
+  role: MessageRole;
+  content: string;
 }
 
 export interface ComposerSlice {
   draft: string;
   attachments: ComposerAttachment[];
+  quotedMessage: ComposerQuote | null;
   permissionMode: PermissionMode;
+  agentMode: AgentMode;
+  promptPersona: PromptPersona;
   effortLevel: EffortLevel;
   prMonitor: PRMonitorState | null;
   actionChip: { label: string; description?: string } | null;
@@ -829,11 +1186,15 @@ export interface ComposerSlice {
   slashPanelOpen: boolean;
   mentionPanelOpen: boolean;
   setDraft: (d: string) => void;
+  setQuotedMessage: (message: ComposerQuote) => void;
+  clearQuotedMessage: () => void;
   addAttachment: (a: ComposerAttachment) => void;
   updateAttachment: (id: string, patch: Partial<ComposerAttachment>) => void;
   removeAttachment: (id: string) => void;
   clearAttachments: () => void;
   setPermissionMode: (m: PermissionMode) => void;
+  setAgentMode: (m: AgentMode) => void;
+  setPromptPersona: (persona: PromptPersona) => void;
   setEffortLevel: (e: EffortLevel) => void;
   setPRMonitor: (pr: PRMonitorState | null) => void;
   setActionChip: (c: ComposerSlice["actionChip"]) => void;
@@ -866,50 +1227,57 @@ export interface PlanState {
   currentStep: number;
 }
 
+export interface SubagentMessageState {
+  messageId: string;
+  senderId: string;
+  recipientId: string;
+  content: string;
+  createdAt: number;
+  seq?: number;
+  deliveryStatus?: "sending" | "sent" | "failed";
+}
+
 export interface SubagentState {
   id: string;
   role: string;
   status: "pending" | "running" | "blocked" | "done" | "partial" | "cancelled" | "error";
   summary?: string;
   parentRunId?: string;
+  turnId?: string;
+  workflowId?: string;
+  workflowName?: string;
+  workflowMode?: string;
+  nodeId?: string;
+  taskId?: string;
+  dependsOn?: string[];
+  blockedBy?: string[];
+  objective?: string;
+  currentActivity?: string;
+  waitingOn?: string;
+  blocksFinalReply?: boolean;
+  lastProgressAt?: number;
+  requiredForFinal?: boolean;
+  needsInput?: boolean;
+  resultAvailable?: boolean;
+  readOnly?: boolean;
+  writeScope?: string[];
+  order?: number;
+  lastEventAt?: number;
   iteration?: number;
   maxIterations?: number;
   currentTool?: string;
   currentToolCallId?: string;
   progressSource?: string;
   detail?: string;
-  /** User-facing description of what the delegated task is trying to achieve. */
-  objective?: string;
-  /** Latest user-visible activity line (already noise-filtered). */
-  currentActivity?: string;
-  /** What the agent is waiting on when blocked (e.g. "tool", dependency label). */
-  waitingOn?: string;
-  needsInput?: boolean;
-  // Workflow / swarm metadata
-  workflowId?: string;
-  workflowName?: string;
-  workflowMode?: string;
-  nodeId?: string;
-  taskId?: string;
-  order?: number;
-  dependsOn?: string[];
-  blockedBy?: string[];
-  writeScope?: string[];
-  requiredForFinal?: boolean;
-  blocksFinalReply?: boolean;
-  readOnly?: boolean;
-  // Result / termination
+  activityLog?: string[];
+  messages?: SubagentMessageState[];
   resultContent?: string;
   resultError?: string;
-  resultAvailable?: boolean;
-  terminationReason?: string;
-  terminationInitiator?: string;
-  checkpointId?: string;
   durationMs?: number;
   toolCallCount?: number;
-  // Timestamps (epoch ms)
-  lastEventAt?: number;
-  lastProgressAt?: number;
+  terminationReason?: string;
+  terminationInitiator?: "user" | "parent" | "runtime" | "provider" | "tool" | string;
+  checkpointId?: string;
 }
 
 export interface BudgetBucket {
@@ -929,8 +1297,6 @@ export interface AgentSlice {
   plan: PlanState | null;
   todos: TodoItem[];
   subagents: SubagentState[];
-  /** Subagent currently opened in the SubagentsTab detail view. */
-  focusedSubagentId: string | null;
   agentProgress: AgentProgressEntry[];
   conversationAgentStates: Record<string, ConversationAgentState>;
   runtimeSession: RuntimeSessionSnapshot | null;
@@ -946,7 +1312,6 @@ export interface AgentSlice {
   addSubagent: (s: SubagentState, conversationId?: string) => void;
   updateSubagent: (id: string, patch: Partial<SubagentState>, conversationId?: string) => void;
   removeSubagent: (id: string, conversationId?: string) => void;
-  setFocusedSubagentId: (id: string | null) => void;
   setRuntimeSession: (session: RuntimeSessionSnapshot | null) => void;
   setRuntimeCapabilities: (capabilities: AgentCapabilitiesPayload | null) => void;
   appendAgentProgress: (progress: Omit<ProgressContentBlock, "type" | "timestamp">, conversationId?: string) => void;
@@ -966,6 +1331,9 @@ export interface PendingApproval {
   conversationId?: string;
   toolName: string;
   args: Record<string, unknown>;
+  sourceAgent?: string;
+  sourceThread?: string;
+  sourceTool?: string;
   status?: "pending" | "submitted" | "error";
   error?: string;
 }
@@ -976,6 +1344,9 @@ export interface PendingDiffReview {
   conversationId?: string;
   diff: string;
   filePath?: string;
+  sourceAgent?: string;
+  sourceThread?: string;
+  sourceTool?: string;
 }
 
 export interface PendingAskUser {
@@ -1004,8 +1375,10 @@ export interface ApprovalSlice {
 
 // ── Inspector Slice ──────────────────────────────────────────────
 
+export type InspectorTargetKind = "message" | "tool_call" | "artifact" | "file" | "diff" | "subagent" | "budget" | "provider" | "cache";
+
 export interface InspectorEntry {
-  targetKind: "message" | "tool_call" | "artifact" | "file" | "diff" | "subagent" | "budget" | "provider" | "cache";
+  targetKind: InspectorTargetKind;
   targetId: string;
   payload: Record<string, unknown>;
   timestamp: number;

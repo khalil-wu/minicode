@@ -1,8 +1,9 @@
-import { memo, useCallback, useMemo } from "react";
-import { Copy, FileDown, RotateCcw, Search } from "lucide-react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { Copy, FileDown, RotateCcw, Search, X } from "lucide-react";
 import type {
   AssistantMarkdownCellState,
   ChatTurnState,
+  DiffCellState,
   ExecCellState,
   HistoryCellState,
   StreamingAssistantTailCellState,
@@ -11,7 +12,6 @@ import type {
 import { AgentTurn } from "../../agent-loop/components/AgentTurn";
 import type { RenderAgentCellArgs } from "../../agent-loop/components/AgentTurn";
 import { projectChatTurnToAgentLoop, isTestCommand } from "../../agent-loop/projection/project-turn";
-import { activityGroupMembershipKey, activityGroupStatus } from "../cells/activityGrouping";
 import {
   ActivityCell,
   ActivityGroupCell,
@@ -30,6 +30,7 @@ import { MarkdownRenderer } from "../messages/MarkdownRenderer";
 import { useContextMenu } from "../../components/useContextMenu";
 import type { ContextMenuItem } from "../../components/ContextMenu";
 import { useAppStore } from "../../stores";
+import type { GitChangesState } from "../../stores/types";
 import { sendClientCommand } from "../../protocol/ws-outbox";
 
 // ── ChatTurn ────────────────────────────────────────────────────────
@@ -45,6 +46,11 @@ export const ChatTurn = memo(function ChatTurn({
     () => groupActivityCells(turn.committedCells),
     [turn.committedCells],
   );
+  const liveGitChanges = useAppStore((s) => s.gitChanges.live);
+  const committedCellsWithLiveDiff = useMemo(
+    () => appendLiveDiffCell(committedCells, liveGitChanges, turn),
+    [committedCells, liveGitChanges, turn],
+  );
   const stopActiveRun = useCallback(() => {
     const state = useAppStore.getState();
     const conversationId = state.conversationId || undefined;
@@ -55,8 +61,8 @@ export const ChatTurn = memo(function ChatTurn({
     });
   }, []);
   const agentTurn = useMemo(
-    () => projectChatTurnToAgentLoop(turn, committedCells),
-    [turn, committedCells],
+    () => projectChatTurnToAgentLoop(turn, committedCellsWithLiveDiff),
+    [turn, committedCellsWithLiveDiff],
   );
   const renderCell = useCallback(
     ({ key, cell, isActive = false, className }: RenderAgentCellArgs) => (
@@ -76,6 +82,52 @@ export const ChatTurn = memo(function ChatTurn({
   );
 });
 
+function appendLiveDiffCell(
+  cells: ChatTurnState["committedCells"],
+  live: GitChangesState["live"] | undefined,
+  turn: ChatTurnState,
+): ChatTurnState["committedCells"] {
+  if (turn.status !== "streaming" || !live?.files?.length) return cells;
+  const liveCell = liveDiffCell(live, turn.id);
+  if (!liveCell) return cells;
+  if (cells.some((cell) => cell.kind === "diff")) return cells;
+  return [...cells, liveCell];
+}
+
+function liveDiffCell(live: NonNullable<GitChangesState["live"]>, turnId: string): DiffCellState | null {
+  const files = mergeLiveDiffFiles(live.files);
+  if (files.length === 0) return null;
+  return {
+    kind: "diff",
+    id: `live-diff-${turnId}`,
+    status: "updated",
+    files,
+    summary: {
+      added: files.reduce((sum, file) => sum + file.additions, 0),
+      deleted: files.reduce((sum, file) => sum + file.deletions, 0),
+      modifiedFiles: files.length,
+    },
+    collapsed: true,
+    createdAt: live.updatedAt,
+  };
+}
+
+function mergeLiveDiffFiles(files: NonNullable<GitChangesState["live"]>["files"]): DiffCellState["files"] {
+  const byPath = new Map<string, DiffCellState["files"][number]>();
+  for (const file of files) {
+    if (!file.path) continue;
+    byPath.set(file.path, {
+      path: file.path,
+      patch: file.patch,
+      additions: file.additions,
+      deletions: file.deletions,
+      isLarge: file.additions + file.deletions > 200,
+      isTruncated: file.isBinary,
+    });
+  }
+  return [...byPath.values()];
+}
+
 function groupActivityCells(cells: ChatTurnState["committedCells"]): ChatTurnState["committedCells"] {
   const grouped: ChatTurnState["committedCells"] = [];
   let buffer: Extract<HistoryCellState, { kind: "activity" }>[] = [];
@@ -87,10 +139,10 @@ function groupActivityCells(cells: ChatTurnState["committedCells"]): ChatTurnSta
     if (!shouldGroupActivityBuffer(buffer)) {
       buffer.forEach(cell => grouped.push(cell));
     } else {
-      const status = activityGroupStatus(buffer);
+      const status = groupStatus(buffer);
       grouped.push({
         kind: "activity_group",
-        id: `activity-group-${activityGroupMembershipKey(buffer)}-${buffer[0]?.id ?? grouped.length}`,
+        id: `activity-group-${activityGroupKey(buffer)}-${buffer[0]?.id ?? grouped.length}`,
         cells: buffer,
         status,
         collapsed: status === "done",
@@ -125,8 +177,8 @@ function groupActivityCells(cells: ChatTurnState["committedCells"]): ChatTurnSta
         grouped.push(cell);
         continue;
       }
-      const nextKey = activityGroupMembershipKey([cell]);
-      const currentKey = buffer.length ? activityGroupMembershipKey(buffer) : nextKey;
+      const nextKey = activityGroupKey([cell]);
+      const currentKey = buffer.length ? activityGroupKey(buffer) : nextKey;
       if (buffer.length > 0 && nextKey !== currentKey) flush();
       buffer.push(cell);
       continue;
@@ -169,12 +221,29 @@ function latestExecCompletedAt(cells: ExecCellState[]): number | undefined {
 
 function canGroupActivityCell(cell: Extract<HistoryCellState, { kind: "activity" }>): boolean {
   if (cell.status === "failed" || cell.status === "interrupted") return false;
-  return activityGroupMembershipKey([cell]) !== "solo";
+  return activityGroupKey([cell]) !== "solo";
 }
 
 function shouldGroupActivityBuffer(cells: Extract<HistoryCellState, { kind: "activity" }>[]): boolean {
   if (cells.some((cell) => cell.status === "failed" || cell.status === "interrupted")) return false;
-  return activityGroupMembershipKey(cells) !== "solo";
+  return activityGroupKey(cells) !== "solo";
+}
+
+function activityGroupKey(cells: Extract<HistoryCellState, { kind: "activity" }>[]): "context" | "command" | "change" | "tool" | "solo" {
+  const kinds = new Set(cells.map((cell) => cell.activityKind));
+  if ([...kinds].every((kind) => kind === "fileRead" || kind === "workspaceSearch" || kind === "webSearch" || kind === "mcpToolCall")) {
+    return "context";
+  }
+  if (kinds.size === 1 && kinds.has("commandExecution")) return "command";
+  if (kinds.size === 1 && kinds.has("fileChange")) return "change";
+  if (kinds.size === 1 && kinds.has("genericTool")) return "tool";
+  return "solo";
+}
+
+function groupStatus(cells: Extract<HistoryCellState, { kind: "activity" }>[]) {
+  if (cells.some((cell) => cell.status === "failed" || cell.status === "interrupted")) return "failed";
+  if (cells.some((cell) => cell.status === "running")) return "running";
+  return "done";
 }
 
 function latestCompletedAt(cells: Extract<HistoryCellState, { kind: "activity" }>[]): number | undefined {
@@ -235,16 +304,39 @@ function buildCellMenuItems(cell: HistoryCellState): ContextMenuItem[] {
 
   // Recall is available for user messages and assistant messages with a messageId
   if (cell.kind === "user_message") {
-    items.push({
-      label: "Recall and edit",
-      icon: <RotateCcw size={13} />,
-      onClick: () => { useAppStore.getState().recallMessage(cell.id); },
-    });
+    if (cell.queueState === "queued" && cell.queueMessageId) {
+      items.push({
+        label: "Cancel queued message",
+        icon: <X size={13} />,
+        onClick: () => {
+          sendClientCommand({
+            type: "user_message.queue.cancel",
+            conversation_id: useAppStore.getState().conversationId || "",
+            message_id: cell.queueMessageId!,
+            user_message_id: cell.id,
+          });
+        },
+      });
+    } else {
+      items.push({
+        label: "Recall and edit",
+        icon: <RotateCcw size={13} />,
+        onClick: () => {
+          interruptActiveRunBeforeLocalRecall();
+          useAppStore.getState().recallMessage(cell.id);
+          queueMicrotask(() => window.dispatchEvent(new Event("composer:focus")));
+        },
+      });
+    }
   } else if (cell.kind === "assistant_markdown" && cell.messageId) {
     items.push({
       label: "Recall and edit",
       icon: <RotateCcw size={13} />,
-      onClick: () => { useAppStore.getState().recallMessage(cell.messageId!); },
+      onClick: () => {
+        interruptActiveRunBeforeLocalRecall();
+        useAppStore.getState().recallMessage(cell.messageId!);
+        queueMicrotask(() => window.dispatchEvent(new Event("composer:focus")));
+      },
     });
   }
 
@@ -259,6 +351,16 @@ function buildCellMenuItems(cell: HistoryCellState): ContextMenuItem[] {
   });
 
   return items;
+}
+
+function interruptActiveRunBeforeLocalRecall(): void {
+  const state = useAppStore.getState();
+  if (!state.isStreaming) return;
+  state.interrupt();
+  sendClientCommand({
+    type: "interrupt",
+    conversation_id: state.conversationId || undefined,
+  });
 }
 
 function getCellText(cell: HistoryCellState): string | null {
@@ -342,15 +444,58 @@ export function HistoryCellRenderer({
 
 // ── Streaming Tail (Phase 1 thin component) ─────────────────────────
 
-function StreamingAssistantTailCell({
+/**
+ * Truncate streaming text to the last complete line (ends with \n).
+ * This mirrors cc's visibleStreamingText approach: hide the incomplete
+ * last line to avoid re-parsing/re-rendering it on every token, which
+ * causes visual jitter — especially when the incomplete line contains
+ * markdown syntax (e.g. an unclosed ``` code fence).
+ *
+ * If there's no newline at all, show the full text (short single-line
+ * replies shouldn't be hidden).
+ *
+ * When the user prefers reduced motion, skip truncation entirely —
+ * they want to see content as it arrives without the "typing" effect.
+ */
+function truncateToLastCompleteLine(text: string, reducedMotion: boolean): string {
+  if (reducedMotion || text.length <= 80) return text;
+  const lastNewline = text.lastIndexOf("\n");
+  if (lastNewline < 0) return text;
+  // Keep everything up to and including the last newline.
+  return text.substring(0, lastNewline + 1);
+}
+
+/**
+ * Detects the user's prefers-reduced-motion setting. When true, the
+ * streaming cursor is hidden and text is not truncated to the last
+ * complete line. Mirrors cc's reducedMotion check (REPL.tsx:1494).
+ */
+function usePrefersReducedMotion(): boolean {
+  const [reduced, setReduced] = useState(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return false;
+    return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  });
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const handler = (e: MediaQueryListEvent) => setReduced(e.matches);
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, []);
+  return reduced;
+}
+
+const StreamingAssistantTailCell = memo(function StreamingAssistantTailCell({
   cell,
 }: {
   cell: StreamingAssistantTailCellState;
 }) {
+  const reducedMotion = usePrefersReducedMotion();
+  const visibleContent = truncateToLastCompleteLine(cell.partialMarkdown, reducedMotion);
   return (
     <div className="streaming-tail-cell md-prose">
-      <MarkdownRenderer content={cell.partialMarkdown} isStreaming />
-      <span className="streaming-cursor" />
+      <MarkdownRenderer content={visibleContent} isStreaming />
+      {!reducedMotion && <span className="streaming-cursor" />}
     </div>
   );
-}
+});

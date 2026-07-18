@@ -4,7 +4,7 @@ import {
   userFacingCoordinatorNoticeForSubagent,
   type CoordinatorNoticeKind,
 } from "./collaborationDisplay";
-import type { SubagentState } from "../stores/types";
+import type { ChatMessage, SubagentState } from "../stores/types";
 
 export type AgentDisplayStatus = "attention" | "running" | "waiting" | "completed";
 export type { CoordinatorNoticeKind } from "./collaborationDisplay";
@@ -28,18 +28,58 @@ export interface AgentView {
   hasResult: boolean;
   needsResult: boolean;
   canStop: boolean;
+  canResume: boolean;
+  handledByParent: boolean;
+  executionMode: "blocking" | "background";
+  activityLog: string[];
   resultContent?: string;
   resultError?: string;
 }
 
+export const hasCompletedAssistantReply = (messages: ChatMessage[]): boolean => {
+  const latest = [...messages].reverse().find(
+    (message) => message.role === "user" || message.role === "assistant",
+  );
+  if (!latest || latest.role !== "assistant" || latest.isStreaming) return false;
+  if (latest.terminalStatus === "failed" || latest.terminalStatus === "interrupted") return false;
+  const hasExplicitFinalBlock = latest.blocks?.some((block) => (
+    block.type === "text"
+    && Boolean(block.content.trim())
+    && (
+      block.visibility === "final"
+      || block.phase === "final"
+      || block.sealed === true
+      || block.source === "model_final"
+    )
+  ));
+  if (hasExplicitFinalBlock) return true;
+  return Boolean(!latest.blocks?.length && latest.content.trim());
+};
+
 const isWorkflow = (agent: SubagentState): boolean =>
   agent.role === "workflow" || agent.id.startsWith("workflow-");
 
-const firstLine = (value?: string): string => String(value || "").trim().split(/\r?\n/).find(Boolean)?.trim() || "";
+const plainTextLine = (value: string): string => value
+  .replace(/^#{1,6}\s+/, "")
+  .replace(/^>\s*/, "")
+  .replace(/^[-*+]\s+/, "")
+  .replace(/^\d+[.)]\s+/, "")
+  .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+  .replace(/(?:\*\*|__|`)/g, "")
+  .trim();
+
+const INTERNAL_REPORT_HEADING_RE =
+  /^#{1,6}\s*(?:result|evidence(?:\s+claims)?|changes|verification|risks?\s+or\s+blockers?)\s*$/i;
+
+const stripInternalReminderBlocks = (value?: string): string => String(value || "")
+  .replace(/<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/gi, "")
+  .replace(/<system-reminder\b[^>]*>[\s\S]*$/gi, "")
+  .trim();
 
 const isLowValueDetail = (value: string): boolean => {
   const normalized = value.trim().toLowerCase();
   return !normalized
+    || INTERNAL_REPORT_HEADING_RE.test(normalized)
     || /^(?:running task|task running|working|processing|in progress)[.!…]*$/.test(normalized)
     || /^iteration \d+(?:\/\d+)?/.test(normalized)
     || /\bcall_[a-z0-9_-]{8,}\b/i.test(normalized)
@@ -62,8 +102,13 @@ const isLowValueDetail = (value: string): boolean => {
 };
 
 const userVisibleLine = (value?: string): string => {
-  const line = firstLine(value);
-  return line && !isLowValueDetail(line) ? line : "";
+  for (const rawLine of stripInternalReminderBlocks(value).split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || /^#{1,6}\s+/.test(line) || isLowValueDetail(line)) continue;
+    const plain = plainTextLine(line);
+    if (plain && !isLowValueDetail(plain)) return plain;
+  }
+  return "";
 };
 
 const cleanTitle = (value: string): string => value
@@ -175,7 +220,9 @@ const summaryFor = (agent: SubagentState): string => {
 const isLowValueResultLine = (line: string): boolean => {
   if (!line) return false;
   return (
-    /\bcall_[a-z0-9_-]{8,}\b/i.test(line)
+    INTERNAL_REPORT_HEADING_RE.test(line)
+    || /^[-*]\s*(?:none|n\/a)\.?$/i.test(line)
+    || /\bcall_[a-z0-9_-]{8,}\b/i.test(line)
     || /\bart_[a-z0-9_-]{6,}\b/i.test(line)
     || /\bmcp__[a-z0-9_.-]+/i.test(line)
     || /^\d+(?:\.\d+)?s elapsed$/i.test(line)
@@ -203,7 +250,7 @@ const isLowValueResultLine = (line: string): boolean => {
  * Inspector and replay still receive the original SubagentState payload.
  */
 export const sanitizeAgentResultContent = (content?: string): string => {
-  const text = String(content || "").trim();
+  const text = stripInternalReminderBlocks(content);
   if (!text) return "";
   const lines = text.split(/\r?\n/);
   const kept = lines.filter((line) => !isLowValueResultLine(line.trim()));
@@ -211,10 +258,39 @@ export const sanitizeAgentResultContent = (content?: string): string => {
   return cleaned || "";
 };
 
+// Errors are actionable content: only drop pure noise lines (call ids,
+// elapsed/iteration counters), never a line carrying real error text.
+const isPureNoiseErrorLine = (line: string): boolean => {
+  if (!line) return false;
+  return (
+    /^call_[a-z0-9_-]{8,}$/i.test(line)
+    || /^\d+(?:\.\d+)?s elapsed$/i.test(line)
+    || /^stats:\s*\d+\s+iteration/i.test(line)
+    || /^tools used \(\d+ total\):$/i.test(line)
+    || /^iteration \d+(?:\/\d+)?$/i.test(line)
+  );
+};
+
+/**
+ * Conservative sanitizer for error text: strips runtime counters but keeps
+ * every line with substantive content (even if it mentions a subagent id),
+ * and falls back to the original text rather than an empty string.
+ */
+export const sanitizeAgentResultError = (content?: string): string => {
+  const text = stripInternalReminderBlocks(content);
+  if (!text) return "";
+  const kept = text
+    .split(/\r?\n/)
+    .filter((line) => !isPureNoiseErrorLine(line.trim()));
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim() || text;
+};
+
 const projectedResult = (agent: SubagentState, field: "resultContent" | "resultError"): string | undefined => {
   const coordinatorNotice = userFacingCoordinatorNoticeForSubagent(agent);
   if (coordinatorNotice && agent[field]) return coordinatorNotice;
-  const value = sanitizeAgentResultContent(agent[field]);
+  const value = field === "resultError"
+    ? sanitizeAgentResultError(agent[field])
+    : sanitizeAgentResultContent(agent[field]);
   return value || undefined;
 };
 
@@ -228,21 +304,29 @@ const rank: Record<AgentDisplayStatus, number> = {
 export function projectAgentViews(
   agents: SubagentState[],
   _now = Date.now(),
-  options: { includeWorkflows?: boolean } = {},
+  options: { includeWorkflows?: boolean; parentCompleted?: boolean } = {},
 ): AgentView[] {
   return agents
     .filter((agent) => agent.role !== "message" && (options.includeWorkflows || !isWorkflow(agent)))
-    .sort((left, right) =>
-      rank[displayStatus(left)] - rank[displayStatus(right)]
-      || (right.lastProgressAt || right.lastEventAt || 0) - (left.lastProgressAt || left.lastEventAt || 0),
-    )
+    // Keep the creation order stable within each status group so progress
+    // events update a row in place instead of making the list jump around.
+    .sort((left, right) => rank[displayStatus(left)] - rank[displayStatus(right)])
     .map((source) => {
-      const status = displayStatus(source);
       const effectiveStatus = effectiveSubagentStatus(source);
-      const resultContent = projectedResult(source, "resultContent");
-      const resultError = projectedResult(source, "resultError");
+      const handledByParent = Boolean(
+        options.parentCompleted
+        && ["partial", "cancelled", "error"].includes(effectiveStatus),
+      );
+      const status = handledByParent ? "completed" : displayStatus(source);
+      const projectedContent = handledByParent ? undefined : projectedResult(source, "resultContent");
+      const resultError = handledByParent ? undefined : projectedResult(source, "resultError");
+      const resultContent = projectedContent && projectedContent !== resultError
+        ? projectedContent
+        : undefined;
       const terminalWithoutResult = ["done", "partial", "cancelled", "error"].includes(effectiveStatus);
       const needsResult = Boolean(
+        !handledByParent
+        &&
         !resultContent
         && !resultError
         && !source.resultContent
@@ -252,14 +336,24 @@ export function projectAgentViews(
       return {
         id: source.id,
         title: titleFor(source),
-        summary: summaryFor(source),
+        summary: handledByParent ? "" : summaryFor(source),
         status,
-        statusLabel: statusLabelFor(source, status),
+        statusLabel: handledByParent ? "已由主任务接管" : statusLabelFor(source, status),
         effectiveStatus,
         isWorkflow: isWorkflow(source),
-        hasResult: Boolean(resultError || resultContent || source.resultAvailable),
+        hasResult: Boolean(!handledByParent && (resultError || resultContent || source.resultAvailable)),
         needsResult,
         canStop: effectiveStatus === "running" && source.id.startsWith("subagent-"),
+        canResume: !handledByParent
+          && ["partial", "cancelled", "error"].includes(effectiveStatus)
+          && source.id.startsWith("subagent-"),
+        handledByParent,
+        executionMode: source.blocksFinalReply === false || source.requiredForFinal === false
+          ? "background"
+          : "blocking",
+        activityLog: handledByParent
+          ? []
+          : (source.activityLog ?? []).map(userVisibleLine).filter(Boolean),
         resultContent,
         resultError,
       };

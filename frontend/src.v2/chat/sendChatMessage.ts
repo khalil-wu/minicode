@@ -67,6 +67,11 @@ const attachmentRefFromPayload = (payload: Record<string, unknown>): MessageAtta
     artifactId,
     docId: String(payload.doc_id ?? payload.docId ?? ""),
     indexedChunks: Number(payload.indexed_chunks ?? payload.indexedChunks ?? 0),
+    dataUrl: typeof payload.dataUrl === "string" ? payload.dataUrl : undefined,
+    inputSource: payload.input_source === "pasted_text" || payload.inputSource === "pasted_text"
+      ? "pasted_text"
+      : "upload",
+    sourceCharCount: Number(payload.source_char_count ?? payload.sourceCharCount ?? 0) || undefined,
   };
 };
 
@@ -75,42 +80,58 @@ const appendLocalUserTurn = ({
   conversationId,
   contextRefs,
   attachmentRefs,
+  assistantMessageId,
+  userMessageId,
+  queued,
 }: {
   content: string;
   conversationId?: string;
   contextRefs: MessageContextRef[];
   attachmentRefs: MessageAttachmentRef[];
+  assistantMessageId: string;
+  userMessageId: string;
+  queued: boolean;
 }) => {
   useAppStore.setState((state) => {
     const targetId = conversationId || state.conversationId || undefined;
     const timestamp = Date.now();
+    const resetRunState = {
+      plan: null,
+      todos: [],
+      subagents: [],
+      agentProgress: [],
+    };
     const userMessage: ChatMessage = {
-      id: localMessageId("u"),
+      id: userMessageId,
       role: "user",
       content,
       contextRefs,
       attachmentRefs,
       artifacts: [],
       timestamp,
+      ...(queued ? { queueState: "queued" as const, queueMessageId: assistantMessageId } : {}),
     };
     const assistantMessage: ChatMessage = {
-      id: localMessageId("a"),
+      id: assistantMessageId,
       role: "assistant",
       content: "",
       blocks: [],
       artifacts: [],
       timestamp,
-      isStreaming: true,
+      isStreaming: !queued,
+      ...(queued ? { queueState: "queued" as const, queueMessageId: assistantMessageId } : {}),
     };
 
     if (targetId && state.sideChats[targetId]) {
       const thread = state.sideChats[targetId];
       return {
+        ...(queued ? {} : resetRunState),
+        ...(queued ? {} : { gitChanges: { ...state.gitChanges, live: null } }),
         sideChats: {
           ...state.sideChats,
           [targetId]: {
             ...thread,
-            isStreaming: true,
+            isStreaming: queued ? thread.isStreaming : true,
             messages: [...thread.messages, userMessage, assistantMessage],
           },
         },
@@ -120,17 +141,25 @@ const appendLocalUserTurn = ({
     if (!targetId || targetId === state.conversationId) {
       const nextMessages = [...state.messages, userMessage, assistantMessage];
       return {
+        ...(queued ? {} : resetRunState),
         messages: nextMessages,
-        isStreaming: true,
+        isStreaming: queued ? state.isStreaming : true,
+        ...(queued ? {} : { gitChanges: { ...state.gitChanges, live: null } }),
         ...(state.conversationId
           ? {
+              conversationAgentStates: {
+                ...(state.conversationAgentStates ?? {}),
+                [state.conversationId]: queued
+                  ? state.conversationAgentStates[state.conversationId] ?? resetRunState
+                  : resetRunState,
+              },
               conversationMessages: {
                 ...state.conversationMessages,
                 [state.conversationId]: nextMessages,
               },
               conversationStreaming: {
                 ...state.conversationStreaming,
-                [state.conversationId]: true,
+                [state.conversationId]: queued ? state.conversationStreaming[state.conversationId] ?? state.isStreaming : true,
               },
             }
           : {}),
@@ -149,8 +178,15 @@ const appendLocalUserTurn = ({
       },
       conversationStreaming: {
         ...state.conversationStreaming,
-        [targetId]: true,
+        [targetId]: queued ? state.conversationStreaming[targetId] ?? false : true,
       },
+      ...(queued ? {} : { gitChanges: { ...state.gitChanges, live: null } }),
+      ...(queued ? {} : {
+        conversationAgentStates: {
+          ...(state.conversationAgentStates ?? {}),
+          [targetId]: resetRunState,
+        },
+      }),
     };
   });
 };
@@ -179,10 +215,7 @@ export const getChatSendBlockReason = (conversationId?: string): string | null =
       : state.sideChats[conversationId]?.isStreaming ?? state.conversationStreaming[conversationId] ?? false
     : state.isStreaming;
   if (targetStreaming) {
-    return "A response is already running. Stop it before sending another message.";
-  }
-  if (!state.isConnected) {
-    return "Backend is reconnecting. Wait for the connection before sending.";
+    return "This conversation is still running. Wait or stop it before sending here; a new conversation can continue separately.";
   }
   return null;
 };
@@ -219,18 +252,17 @@ export const sendChatMessage = ({
   if (!contentForBackend && attachments.length === 0) return false;
 
   const state = useAppStore.getState();
+  const targetStreaming = conversationId
+    ? conversationId === state.conversationId
+      ? state.isStreaming
+      : state.sideChats[conversationId]?.isStreaming ?? state.conversationStreaming[conversationId] ?? false
+    : state.isStreaming;
+  const queued = allowWhileStreaming && targetStreaming;
   const displayAttachmentRefs = attachmentRefs.length > 0
     ? attachmentRefs
     : attachments
         .map(attachmentRefFromPayload)
         .filter((item): item is MessageAttachmentRef => item != null && isAttachmentRef(item));
-  if (!state.isConnected) {
-    const reason = "Backend is reconnecting. Wait for the connection before sending.";
-    addSystemNotice(reason);
-    pushToast(reason, "warning");
-    return false;
-  }
-
   if (!allowWhileStreaming) {
     if (recoverStaleStreamingState(conversationId)) {
       return sendChatMessage({
@@ -277,6 +309,13 @@ export const sendChatMessage = ({
     pushToast("Duplicate send ignored.", "warning");
     return false;
   }
+  const assistantMessageId = skipLocalAppend ? "" : localMessageId("a");
+  const userMessageId = skipLocalAppend ? "" : localMessageId("u");
+
+  // A manual right-panel tab selection locks auto-routing for the rest of the
+  // current interaction. A new user turn should re-enable auto-routing (so the
+  // next diff/preview can open) instead of staying locked forever.
+  useAppStore.getState().setRightStackTabLocked(false);
 
   const command: UserMessageCommand = {
     type: "user_message",
@@ -284,8 +323,12 @@ export const sendChatMessage = ({
     ...(targetWorkspaceRoot ? { workspace_root: targetWorkspaceRoot } : {}),
     ...(targetWorkspaceRoot && state.activeTabPath ? { primaryFile: state.activeTabPath, activeTabPath: state.activeTabPath } : {}),
     permission_mode: toBackendPermissionMode(state.permissionMode),
+    agent_mode: state.agentMode,
     ...(targetConversationId ? { conversation_id: targetConversationId } : {}),
     ...(attachments.length > 0 ? { attachments } : {}),
+    ...(assistantMessageId ? { assistant_message_id: assistantMessageId } : {}),
+    ...(userMessageId ? { user_message_id: userMessageId } : {}),
+    ...(allowWhileStreaming ? { queue_if_busy: true } : {}),
   };
 
   if (!skipLocalAppend) {
@@ -294,17 +337,24 @@ export const sendChatMessage = ({
       conversationId,
       contextRefs,
       attachmentRefs: displayAttachmentRefs,
+      assistantMessageId,
+      userMessageId,
+      queued,
     });
   }
 
   try {
-    ws.send(command);
+    if (!ws.send(command)) {
+      throw new Error("Backend connection is not ready yet.");
+    }
     lastSendSignature = sendSignature;
     lastSendAt = now;
     return true;
   } catch (err) {
-    useAppStore.getState().removeEmptyStreamingAssistant(conversationId);
-    useAppStore.getState().finishStreaming(conversationId);
+    useAppStore.getState().removeEmptyStreamingAssistant(conversationId, assistantMessageId);
+    if (!queued) {
+      useAppStore.getState().finishStreaming(conversationId, undefined, "failed");
+    }
     const message = normalizeAgentErrorMessage(err instanceof Error ? err.message : "Failed to send message.");
     addSystemNotice(`Error: ${message}`);
     pushToast(message, "error");

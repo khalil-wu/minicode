@@ -1,19 +1,7 @@
-import type React from "react";
+import { CircleAlert, Lightbulb, ShieldAlert } from "lucide-react";
 import type { ErrorCellState } from "./cellTypes";
+import { purifyToolErrorText } from "../errorMessages";
 import "./cells.css";
-
-/**
- * Model-facing markup tags that wrap tool/sandbox errors. These are
- * instructions for the model, not text for the user to read, so strip them
- * from the displayed message (mirrors cc's FallbackToolUseErrorMessage).
- */
-const ERROR_MARKUP_TAG_RE = /<\/?(?:tool_use_error|error|sandbox_violation)[^>]*>/gi;
-
-function purifyErrorText(text: string | undefined): string {
-  if (!text) return text ?? "";
-  const stripped = text.replace(ERROR_MARKUP_TAG_RE, "");
-  return stripped === text ? text : stripped.trim();
-}
 
 /**
  * ErrorCell — dedicated error display.
@@ -34,13 +22,14 @@ export function ErrorCell({ cell }: { cell: ErrorCellState }) {
           : cell.source === "network"
             ? "网络"
             : "Agent";
-  const displayMessage = purifyErrorText(cell.message);
+  const displayMessage = purifyToolErrorText(cell.message);
+  const ErrorIcon = isPermissionNotice ? ShieldAlert : CircleAlert;
 
   return (
     <div className={`error-cell error-cell-${tone}`}>
       <div className="error-cell-header">
-        <span className={`error-cell-icon error-cell-icon-${tone}`}>
-          {isPermissionNotice ? "!" : "✕"}
+        <span className={`error-cell-icon error-cell-icon-${tone}`} aria-hidden="true">
+          <ErrorIcon size={16} strokeWidth={1.75} />
         </span>
         <span className={`error-cell-title error-cell-title-${tone}`}>{cell.title}</span>
         <span className="error-cell-source-badge">{sourceLabel}</span>
@@ -55,14 +44,15 @@ export function ErrorCell({ cell }: { cell: ErrorCellState }) {
 
       {cell.rawError && (
         <details className="error-cell-details">
-          <summary className="error-cell-details-summary">Developer detail</summary>
+          <summary className="error-cell-details-summary">技术详情</summary>
           <pre className="error-cell-raw-error">{cell.rawError}</pre>
         </details>
       )}
 
       {cell.suggestedAction && (
         <div className="error-cell-suggestion">
-          💡 {cell.suggestedAction}
+          <Lightbulb size={14} strokeWidth={1.75} aria-hidden="true" />
+          <span>{cell.suggestedAction}</span>
         </div>
       )}
     </div>

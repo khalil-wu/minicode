@@ -2,6 +2,8 @@ import { useEffect, useRef } from "react";
 import { useAppStore } from "../stores";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { pushToast } from "../overlays/ToastContainer";
+import { openSettings } from "../lib/settings-navigation";
+import { capabilityFeatureEnabled } from "../protocol/capabilities";
 
 let lastZoomToastAt = 0;
 
@@ -28,6 +30,10 @@ const isInteractiveTarget = (target: EventTarget | null): boolean => {
   );
 };
 
+const isModalTarget = (target: EventTarget | null): boolean =>
+  target instanceof HTMLElement
+  && Boolean(target.closest("[role='dialog'], .modal-content, .overlay-backdrop"));
+
 export const useKeyboardShortcuts = () => {
   const sidebarWidthRef = useRef(280);
   useEffect(() => {
@@ -37,6 +43,11 @@ export const useKeyboardShortcuts = () => {
       const createConversationInCurrentMode = () => {
         s.createConversation({ appMode: s.appMode, bindWorkspace: Boolean(s.workingDirectory) });
       };
+
+      // The topmost dialog owns its keyboard context. Individual dialogs
+      // handle Enter/Escape and navigation locally; global application
+      // shortcuts must not mutate conversations or panels through them.
+      if (isModalTarget(e.target) && e.key !== "Escape") return;
 
       // Alt+1/2/3 for mode switching (no Ctrl required)
       if (e.altKey && !mod) {
@@ -70,6 +81,13 @@ export const useKeyboardShortcuts = () => {
       }
 
       switch (e.key) {
+        case "r":
+        case "R":
+          if (!e.shiftKey && !e.altKey) {
+            e.preventDefault();
+            window.dispatchEvent(new Event("composer:history-search"));
+          }
+          break;
         case "l":
           if (e.shiftKey) {
             e.preventDefault();
@@ -111,7 +129,9 @@ export const useKeyboardShortcuts = () => {
             s.setRightStackTab("preview");
           } else {
             e.preventDefault();
-            s.toggleQuickOpen();
+            if (capabilityFeatureEnabled(s.runtimeCapabilities, "global_search", true)) {
+              s.toggleQuickOpen();
+            }
           }
           break;
         case "m":
@@ -132,11 +152,11 @@ export const useKeyboardShortcuts = () => {
         case "E":
           if (e.shiftKey) {
             e.preventDefault();
-            s.toggleSettings();
-            window.dispatchEvent(new CustomEvent("minicode:settings-tab", { detail: "general" }));
+            openSettings("general");
           }
           break;
         case "k":
+        case "K":
           if (!e.shiftKey) {
             e.preventDefault();
             s.toggleCommandPalette();

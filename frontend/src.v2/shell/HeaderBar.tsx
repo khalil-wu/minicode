@@ -1,27 +1,56 @@
-import { Menu, Minus, Moon, PanelLeft, PanelRight, Plus, Search, Square, Sun, X } from "lucide-react";
-import type { CSSProperties, ReactNode } from "react";
+import {
+  Minus,
+  Moon,
+  PanelLeft,
+  PanelRight,
+  Plus,
+  Search,
+  Settings2,
+  Square,
+  Sun,
+  Wifi,
+  WifiOff,
+  X,
+} from "lucide-react";
+import type { ReactNode, Ref } from "react";
 import { desktop, isDesktop } from "../desktop/runtime";
 import { useAppStore } from "../stores";
 import { ContextBudgetIndicator } from "../chat/components/ContextBudgetIndicator";
+import { BrandMark } from "../components/icons";
 import "../chat/components/context-budget.css";
 
-export const HeaderBar = () => {
+interface HeaderBarProps {
+  leftPanelControls?: string;
+  leftPanelAvailable: boolean;
+  leftPanelOpen: boolean;
+  rightPanelControls?: string;
+  rightPanelAvailable: boolean;
+  sideChatFallbackButtonRef?: Ref<HTMLButtonElement>;
+  rightPanelOpen: boolean;
+  onToggleLeftPanel: () => void;
+  onToggleRightPanel: () => void;
+}
+
+export const HeaderBar = ({
+  leftPanelControls,
+  leftPanelAvailable,
+  leftPanelOpen,
+  rightPanelControls,
+  rightPanelAvailable,
+  sideChatFallbackButtonRef,
+  rightPanelOpen,
+  onToggleLeftPanel,
+  onToggleRightPanel,
+}: HeaderBarProps) => {
   const isConnected = useAppStore((s) => s.isConnected);
   const appMode = useAppStore((s) => s.appMode);
-  const rightPanelOpen = useAppStore((s) => s.rightPanelOpen);
   const themeMode = useAppStore((s) => s.themeMode);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const toggleCommandPalette = useAppStore((s) => s.toggleCommandPalette);
   const toggleSettings = useAppStore((s) => s.toggleSettings);
-  const toggleRightPanel = useAppStore((s) => s.toggleRightPanel);
   const setThemeMode = useAppStore((s) => s.setThemeMode);
-  const setLeftSidebarWidth = useAppStore((s) => s.setLeftSidebarWidth);
   const startNewConversation = useAppStore((s) => s.createConversation);
 
-  const toggleLeftPanel = () => {
-    const current = useAppStore.getState().leftSidebarWidth;
-    setLeftSidebarWidth(current > 0 ? 0 : 320);
-  };
   const createConversationInCurrentMode = () => {
     startNewConversation({ appMode, bindWorkspace: Boolean(workingDirectory) });
   };
@@ -29,40 +58,79 @@ export const HeaderBar = () => {
     themeMode === "dark" ||
     (themeMode === "system" && typeof window !== "undefined" && window.matchMedia?.("(prefers-color-scheme: dark)").matches);
   const nextTheme = darkThemeActive ? "light" : "dark";
+  const connectionLabel = isConnected ? "Backend connected" : "Backend disconnected";
 
   return (
-    <header className="header-bar" style={headerStyle}>
-      <div style={leftGroupStyle}>
-        <IconButton label="Settings" onClick={toggleSettings}>
-          <Menu size={18} />
+    <header className="header-bar mc-header">
+      <div className="mc-header-start">
+        <IconButton label="Settings" onClick={toggleSettings} buttonRef={sideChatFallbackButtonRef}>
+          <Settings2 />
         </IconButton>
-        <IconButton label="Toggle left sidebar" onClick={toggleLeftPanel}>
-          <PanelLeft size={17} />
-        </IconButton>
+        {leftPanelAvailable && (
+          <IconButton
+            label={leftPanelOpen ? "Close left sidebar" : "Open left sidebar"}
+            onClick={onToggleLeftPanel}
+            active={leftPanelOpen}
+            ariaControls={leftPanelControls}
+            expanded={leftPanelOpen}
+          >
+            <PanelLeft />
+          </IconButton>
+        )}
         <IconButton label="New conversation" onClick={createConversationInCurrentMode}>
-          <Plus size={17} />
+          <Plus />
         </IconButton>
       </div>
 
-      <IconButton label="Command palette" onClick={() => toggleCommandPalette()}>
-        <Search size={16} />
-      </IconButton>
-      <IconButton
-        label={darkThemeActive ? "Switch to light theme" : "Switch to dark theme"}
-        onClick={() => setThemeMode(nextTheme)}
-      >
-        {darkThemeActive ? <Sun size={16} /> : <Moon size={16} />}
-      </IconButton>
-      <ContextBudgetIndicator />
-      <IconButton label={rightPanelOpen ? "Close right panel" : "Open right panel"} onClick={toggleRightPanel} active={rightPanelOpen}>
-        <PanelRight size={17} />
-      </IconButton>
-      <span aria-label={isConnected ? "Backend connected" : "Backend disconnected"} title={isConnected ? "Backend connected" : "Backend disconnected"} style={connectionDotStyle(isConnected)} />
+      <div className="mc-header-center">
+        <div className="mc-header-brand" aria-label="MiniCode">
+          <BrandMark size={18} />
+          <span>MiniCode</span>
+        </div>
+        <div className="mc-header-drag-region" onDoubleClick={() => desktop()?.windowControls.maximize()} />
+      </div>
 
-      {isDesktop() && (
-        <>
-          <div style={windowDragStyle} onDoubleClick={() => desktop()?.windowControls.maximize()} />
-          <div style={windowControlsStyle}>
+      <div className="mc-header-end">
+        <IconButton label="Command palette" onClick={() => toggleCommandPalette()}>
+          <Search />
+        </IconButton>
+        <span className="mc-header-theme">
+          <IconButton
+            label={darkThemeActive ? "Switch to light theme" : "Switch to dark theme"}
+            onClick={() => setThemeMode(nextTheme)}
+          >
+            {darkThemeActive ? <Sun /> : <Moon />}
+          </IconButton>
+        </span>
+        {appMode !== "code" && (
+          <div className="mc-header-budget">
+            <ContextBudgetIndicator />
+          </div>
+        )}
+        {rightPanelAvailable && (
+          <IconButton
+            label={rightPanelOpen ? "Close right panel" : "Open right panel"}
+            onClick={onToggleRightPanel}
+            active={rightPanelOpen}
+            ariaControls={rightPanelControls}
+            expanded={rightPanelOpen}
+          >
+            <PanelRight />
+          </IconButton>
+        )}
+        <span
+          role="img"
+          aria-label={connectionLabel}
+          title={connectionLabel}
+          className="mc-connection-status"
+          data-connected={isConnected ? "true" : "false"}
+        >
+          {isConnected ? <Wifi aria-hidden="true" /> : <WifiOff aria-hidden="true" />}
+          {!isConnected && <span className="mc-connection-label">Offline</span>}
+        </span>
+
+        {isDesktop() && (
+          <div className="mc-window-controls">
             <WindowControlButton label="Minimize" onClick={() => desktop()?.windowControls.minimize()}>
               <Minus size={14} />
             </WindowControlButton>
@@ -73,82 +141,43 @@ export const HeaderBar = () => {
               <X size={14} />
             </WindowControlButton>
           </div>
-        </>
-      )}
+        )}
+      </div>
     </header>
   );
 };
 
 const IconButton = ({
   active,
+  ariaControls,
+  buttonRef,
   children,
+  expanded,
   label,
   onClick,
 }: {
   active?: boolean;
+  ariaControls?: string;
+  buttonRef?: Ref<HTMLButtonElement>;
   children: ReactNode;
+  expanded?: boolean;
   label: string;
   onClick: () => void;
 }) => (
   <button
     type="button"
+    ref={buttonRef}
     title={label}
     aria-label={label}
-    className="btn-ghost"
+    aria-controls={ariaControls}
+    aria-expanded={expanded}
+    className="btn-ghost mc-icon-button mc-header-icon-button"
+    data-active={active ? "true" : "false"}
     onClick={onClick}
-    style={{
-      width: 36,
-      height: 36,
-      display: "inline-flex",
-      alignItems: "center",
-      justifyContent: "center",
-      border: "1px solid transparent",
-      borderRadius: "var(--radius-sm, 7px)",
-      background: active ? "var(--surface-page)" : undefined,
-      color: active ? "var(--text-primary)" : undefined,
-      cursor: "pointer",
-      padding: 0,
-      WebkitAppRegion: "no-drag",
-    } as CSSProperties & { WebkitAppRegion?: string }}
   >
     {children}
   </button>
 );
-
-const headerStyle: CSSProperties & { WebkitAppRegion?: string } = {
-  height: "var(--header-height)",
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-  padding: "0 10px",
-  borderBottom: "1px solid color-mix(in oklch, var(--border-subtle) 35%, transparent)",
-  background: "var(--surface-base)",
-  color: "var(--text-primary)",
-  userSelect: "none",
-  WebkitAppRegion: "drag",
-};
-
-const leftGroupStyle: CSSProperties & { WebkitAppRegion?: string } = {
-  display: "flex",
-  alignItems: "center",
-  gap: 4,
-  WebkitAppRegion: "no-drag",
-};
-
-const connectionDotStyle = (connected: boolean): CSSProperties => ({
-  width: 6,
-  height: 6,
-  borderRadius: "50%",
-  background: connected ? "var(--state-success)" : "var(--state-danger)",
-  margin: "0 6px 0 2px",
-});
-
-const windowDragStyle: CSSProperties & { WebkitAppRegion?: string } = {
-  alignSelf: "stretch",
-  flex: 1,
-  minWidth: 40,
-  WebkitAppRegion: "drag",
-};
 
 const WindowControlButton = ({
   children,
@@ -166,30 +195,8 @@ const WindowControlButton = ({
     title={label}
     aria-label={label}
     onClick={onClick}
-    className={danger ? "window-control-close" : "window-control"}
-    style={{
-      width: 46,
-      height: 30,
-      display: "inline-flex",
-      alignItems: "center",
-      justifyContent: "center",
-      border: 0,
-      background: "transparent",
-      color: "var(--text-secondary)",
-      cursor: "pointer",
-      padding: 0,
-      borderRadius: 0,
-      WebkitAppRegion: "no-drag",
-    } as CSSProperties & { WebkitAppRegion?: string }}
+    className={`mc-window-control${danger ? " mc-window-control-danger" : ""}`}
   >
     {children}
   </button>
 );
-
-const windowControlsStyle: CSSProperties & { WebkitAppRegion?: string } = {
-  display: "flex",
-  alignItems: "center",
-  alignSelf: "stretch",
-  marginRight: -10,
-  WebkitAppRegion: "no-drag",
-};

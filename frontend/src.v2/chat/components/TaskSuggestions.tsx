@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Sparkles, X, Check, Plus } from "lucide-react";
+import { Check, CheckCircle2, Plus, Sparkles, X } from "lucide-react";
 import { useAppStore } from "../../stores";
 import { createTodoItem } from "../../lib/todo-utils";
 import "./task-suggestions.css";
@@ -88,7 +88,7 @@ export function TaskSuggestions({ userPrompt, onDismiss }: TaskSuggestionsProps)
         )}
         <button
           type="button"
-          className="task-suggestions-close"
+          className="task-suggestions-close mc-icon-button mc-icon-button-compact"
           onClick={onDismiss}
           title="关闭建议"
           aria-label="关闭 AI 建议"
@@ -118,10 +118,11 @@ export function TaskSuggestions({ userPrompt, onDismiss }: TaskSuggestionsProps)
               </div>
               <button
                 type="button"
-                className="task-suggestion-adopt"
+                className="task-suggestion-adopt mc-icon-button mc-icon-button-accent"
                 onClick={() => adoptSuggestion(suggestion)}
                 disabled={isAdopted}
                 title={isAdopted ? "已采纳" : "采纳建议"}
+                aria-label={isAdopted ? `已采纳：${suggestion.content}` : `采纳建议：${suggestion.content}`}
               >
                 {isAdopted ? <Check size={16} /> : <Plus size={16} />}
               </button>
@@ -132,7 +133,8 @@ export function TaskSuggestions({ userPrompt, onDismiss }: TaskSuggestionsProps)
 
       {allAdopted && (
         <div className="task-suggestions-footer">
-          ✨ 所有建议已采纳！祝你工作顺利！
+          <CheckCircle2 size={16} strokeWidth={1.75} aria-hidden="true" />
+          <span>所有建议已采纳！祝你工作顺利！</span>
         </div>
       )}
     </div>

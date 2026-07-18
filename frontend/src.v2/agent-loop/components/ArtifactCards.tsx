@@ -1,6 +1,6 @@
 import type { DiffCellState } from "../../chat/cells/cellTypes";
-import { withStableRenderKeys } from "./AgentTimeline";
 import { FileChangesCard } from "./FileChangesCard";
+import { withStableRenderKeys } from "./renderKeys";
 
 export function ArtifactCards({
   cells,

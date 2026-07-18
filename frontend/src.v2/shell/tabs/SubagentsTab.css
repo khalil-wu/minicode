@@ -75,6 +75,15 @@
   background: color-mix(in oklch, var(--state-info) 4%, transparent);
 }
 
+html[data-theme="light"] .subagents-row {
+  background: var(--surface-base);
+}
+
+html[data-theme="light"] .subagents-row:hover,
+html[data-theme="light"] .subagents-row[data-status="running"] {
+  background: color-mix(in oklch, var(--state-info) 6%, var(--surface-base));
+}
+
 .subagents-row-copy {
   display: grid;
   min-width: 0;
@@ -248,7 +257,9 @@
 }
 
 .subagents-detail-progress,
-.subagents-detail-result {
+.subagents-detail-result,
+.subagents-detail-timeline,
+.subagents-detail-messages {
   min-width: 0;
   color: var(--text-secondary);
   font-size: var(--text-sm);
@@ -256,15 +267,68 @@
 }
 
 .subagents-detail-progress h3,
-.subagents-detail-result h3 {
+.subagents-detail-result h3,
+.subagents-detail-timeline h3,
+.subagents-detail-messages h3 {
   margin: 0 0 8px;
   color: var(--text-primary);
   font-size: var(--text-sm);
   font-weight: 650;
 }
 
+.subagents-detail-messages {
+  display: grid;
+  gap: 10px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.subagents-detail-messages ol { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.subagents-detail-messages li { max-width: 92%; padding: 8px 10px; border-radius: 9px; background: var(--surface-soft); }
+.subagents-detail-messages li[data-sender="user"] { justify-self: end; background: color-mix(in oklch, var(--accent-primary) 10%, var(--surface-soft)); }
+.subagents-detail-messages li > span { color: var(--text-muted); font-size: var(--text-xs); }
+.subagents-detail-messages li > p { margin: 3px 0 0; color: var(--text-primary); white-space: pre-wrap; }
+.subagents-detail-messages li > small { color: var(--text-muted); }
+
+.subagents-message-composer { display: grid; grid-template-columns: minmax(0, 1fr) 32px; gap: 7px; align-items: end; }
+.subagents-message-composer textarea { resize: vertical; min-height: 48px; max-height: 120px; padding: 8px 9px; border: 1px solid var(--border-subtle); border-radius: 8px; outline: none; background: var(--surface-page); color: var(--text-primary); font: inherit; }
+.subagents-message-composer textarea:focus { border-color: color-mix(in oklch, var(--accent-primary) 55%, var(--border-subtle)); }
+.subagents-message-composer button { display: grid; width: 32px; height: 32px; place-items: center; border: 0; border-radius: 8px; background: var(--accent-primary); color: var(--text-on-accent, white); }
+.subagents-message-composer button:disabled { opacity: 0.42; }
+
 .subagents-detail-progress p {
   margin: 0;
+}
+
+.subagents-detail-timeline {
+  padding-top: 16px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.subagents-detail-timeline ol {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.subagents-detail-timeline li {
+  position: relative;
+  padding-left: 18px;
+  color: var(--text-secondary);
+}
+
+.subagents-detail-timeline li::before {
+  content: "";
+  position: absolute;
+  top: 0.7em;
+  left: 3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transform: translateY(-50%);
 }
 
 .subagents-detail-result {

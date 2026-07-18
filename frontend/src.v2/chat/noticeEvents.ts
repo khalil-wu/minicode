@@ -1,6 +1,7 @@
 import { useAppStore } from "../stores";
 import type { ServerEvent } from "../protocol/events";
 import { pushToast } from "../overlays/ToastContainer";
+import { isControlPlaneNotice } from "./controlPlaneNotices";
 
 const noticeText = (e: ServerEvent): string => {
   const ev = e as unknown as { content?: unknown; message?: unknown; summary?: unknown };
@@ -18,6 +19,10 @@ export const handleNoticeEvent = (e: ServerEvent, conversationId?: string): bool
     case "system_notice": {
       const content = noticeText(e);
       if (content) {
+        if (isControlPlaneNotice(content)) {
+          pushToast(content, "info", 3000);
+          return true;
+        }
         s.upsertSystemMessage(
           `system-notice-${Date.now().toString(36)}`,
           content,
@@ -28,13 +33,8 @@ export const handleNoticeEvent = (e: ServerEvent, conversationId?: string): bool
       return true;
     }
     case "guidelines.updated": {
-      const content = noticeText(e) || "Project guidelines have been updated.";
-      s.upsertSystemMessage(
-        "system-guidelines-updated",
-        content,
-        { conversationId: conversationIdFor(e, conversationId), replacePrefix: "Project guidelines" },
-      );
-      pushToast(content, "info", 3000);
+      // This is an internal workspace-sync event. Showing it in the transcript
+      // makes routine guideline reloads feel like model output.
       return true;
     }
     case "conversation.compaction.updated": {
@@ -74,6 +74,7 @@ export const handleNoticeEvent = (e: ServerEvent, conversationId?: string): bool
     }
     case "conversation.hydration.updated":
     case "permission.rules.updated":
+    case "checkpoint.created":
     case "checkpoint.list":
     case "checkpoint.rewound":
     case "checkpoint.run.list":

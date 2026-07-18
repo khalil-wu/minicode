@@ -15,21 +15,12 @@ export const statusColor = (status: string): string => {
   return 'var(--text-muted)'
 }
 
-export const statusMarkLabel = (status: string): string => {
-  if (status === 'completed' || status === 'done' || status === 'success') return '已完成'
-  if (status === 'running' || status === 'in_progress') return '运行中'
-  if (status === 'blocked') return '需要处理'
-  if (status === 'failed' || status === 'error') return '失败'
-  return '等待中'
-}
-
-export const StatusMark = ({ status }: { status: string }) => {
+export const StatusMark = ({ status, animated = true }: { status: string; animated?: boolean }) => {
   const size = 14
   const color = statusColor(status)
-  const label = statusMarkLabel(status)
   if (status === 'completed' || status === 'done') {
     return (
-      <svg role="img" aria-label={label} width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
+      <svg width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
         <circle cx="8" cy="8" r="7" fill={color} opacity={0.15} />
         <circle cx="8" cy="8" r="7" stroke={color} strokeWidth="1.5" fill="none" />
         <path d="M5 8.2 7 10.2 11 6" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
@@ -38,9 +29,9 @@ export const StatusMark = ({ status }: { status: string }) => {
   }
   if (status === 'running' || status === 'in_progress') {
     return (
-      <svg role="img" aria-label={label} width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
+      <svg width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
         <circle cx="8" cy="8" r="7" stroke={color} strokeWidth="1.5" fill="none" strokeDasharray="11 33" strokeLinecap="round">
-          <animateTransform attributeName="transform" type="rotate" from="0 8 8" to="360 8 8" dur="0.8s" repeatCount="indefinite" />
+          {animated && <animateTransform attributeName="transform" type="rotate" from="0 8 8" to="360 8 8" dur="0.8s" repeatCount="indefinite" />}
         </circle>
         <circle cx="8" cy="8" r="3" fill={color} opacity={0.5} />
       </svg>
@@ -48,14 +39,14 @@ export const StatusMark = ({ status }: { status: string }) => {
   }
   if (status === 'failed' || status === 'error' || status === 'blocked') {
     return (
-      <svg role="img" aria-label={label} width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
+      <svg width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
         <circle cx="8" cy="8" r="7" stroke={color} strokeWidth="1.5" fill="none" />
         <path d="M6 6l4 4M10 6l-4 4" stroke={color} strokeWidth="1.5" strokeLinecap="round" />
       </svg>
     )
   }
   return (
-    <svg role="img" aria-label={label} width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
       <circle cx="8" cy="8" r="7" stroke={color} strokeWidth="1.5" fill="none" />
     </svg>
   )
@@ -89,12 +80,12 @@ export const InfoCard = ({ children }: { children: React.ReactNode }) => (
 
 export type InfoTone = 'default' | 'muted' | 'accent' | 'warning'
 
-export const InfoRow = ({ label, value, mono, tone = 'default' }: { label: string; value: string; mono?: boolean; tone?: InfoTone }) => {
+export const InfoRow = ({ label, value, mono, tone = 'default', title }: { label: string; value: string; mono?: boolean; tone?: InfoTone; title?: string }) => {
   const color = tone === 'accent' ? 'var(--accent-primary)' : tone === 'warning' ? 'var(--state-warning)' : tone === 'muted' ? 'var(--text-muted)' : 'var(--text-secondary)'
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '72px minmax(0, 1fr)', gap: 8, alignItems: 'center', minHeight: 18, fontSize: 'var(--text-xs)' }}>
       <span style={{ color: 'var(--text-muted)' }}>{label}</span>
-      <span title={value} style={{ color, fontFamily: mono ? 'var(--font-mono)' : undefined, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{value}</span>
+      <span title={title ?? value} style={{ color, fontFamily: mono ? 'var(--font-mono)' : undefined, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{value}</span>
     </div>
   )
 }
@@ -161,7 +152,7 @@ export const ActivitySection = ({
       <button
         type="button"
         className="activity-sidebar-section-header"
-        style={activitySectionHeaderStyle}
+        style={activitySectionHeaderStyle(canExpand)}
         aria-expanded={canExpand ? expanded : undefined}
         disabled={!canExpand}
         onClick={() => { if (canExpand) setExpanded((value) => !value) }}
@@ -189,16 +180,25 @@ export const ActivitySection = ({
 
 // ── Activity Button Row ──────────────────────────────────────────
 
-export const ActivityButtonRow = ({ children, onClick, title }: { children: React.ReactNode; onClick?: () => void; title?: string }) => (
-  <button
-    type="button"
-    onClick={onClick}
-    style={activityButtonRowStyle}
-    title={title}
-  >
-    {children}
-  </button>
-)
+export const ActivityButtonRow = ({ children, onClick, title }: { children: React.ReactNode; onClick?: () => void; title?: string }) => {
+  if (!onClick) {
+    return (
+      <div style={activityButtonRowStyle(false)} title={title}>
+        {children}
+      </div>
+    )
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={activityButtonRowStyle(true)}
+      title={title}
+    >
+      {children}
+    </button>
+  )
+}
 
 // ── Activity Icon ────────────────────────────────────────────────
 
@@ -255,7 +255,7 @@ const activitySectionBodyStyle: React.CSSProperties = {
   gap: 1,
 }
 
-const activitySectionHeaderStyle: React.CSSProperties = {
+const activitySectionHeaderStyle = (canExpand: boolean): React.CSSProperties => ({
   display: 'grid',
   gridTemplateColumns: '14px minmax(0, 1fr) auto',
   alignItems: 'center',
@@ -267,9 +267,9 @@ const activitySectionHeaderStyle: React.CSSProperties = {
   borderRadius: 0,
   background: 'transparent',
   color: 'var(--text-muted)',
-  cursor: 'pointer',
+  cursor: canExpand ? 'pointer' : 'default',
   textAlign: 'left',
-}
+})
 
 const activitySectionCaretStyle: React.CSSProperties = {
   width: 14,
@@ -288,7 +288,7 @@ const activitySectionTitleStyle: React.CSSProperties = {
   fontWeight: 700,
   letterSpacing: 0,
   textOverflow: 'ellipsis',
-  textTransform: 'uppercase',
+  textTransform: 'none',
   whiteSpace: 'nowrap',
 }
 
@@ -318,7 +318,7 @@ const activitySectionMoreStyle: React.CSSProperties = {
   fontSize: 10,
 }
 
-const activityButtonRowStyle: React.CSSProperties = {
+const activityButtonRowStyle = (interactive: boolean): React.CSSProperties => ({
   display: 'flex',
   alignItems: 'center',
   gap: 8,
@@ -331,10 +331,10 @@ const activityButtonRowStyle: React.CSSProperties = {
   borderRadius: 0,
   background: 'transparent',
   color: 'var(--text-primary)',
-  cursor: 'pointer',
+  cursor: interactive ? 'pointer' : 'default',
   textAlign: 'left',
   textDecoration: 'none',
-}
+})
 
 const activityIconStyle: React.CSSProperties = {
   width: 18,

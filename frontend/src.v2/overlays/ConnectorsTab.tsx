@@ -58,7 +58,7 @@ export const ConnectorsTab = () => {
 
       {mode === "servers" && (
         <>
-          <Section title="MCP Servers" description="Connectors stay here; prompts and tools should not flood the slash menu.">
+          <Section title="MCP Servers">
             {mcpServers.length === 0 && <div style={emptyInlineStyle}>No MCP servers configured.</div>}
             {mcpServers.map((server) => (
               <div key={server.name} style={mcpServerRowStyle}>
@@ -66,11 +66,12 @@ export const ConnectorsTab = () => {
                   <div className="flex items-center gap-2 min-w-0">
                     <span style={mcpDotStyle(server.phase ?? server.status)} />
                     <span style={mcpNameStyle}>{server.name}</span>
-                    <span style={statusChipStyle(server.phase ?? server.status)}>{(server.phase ?? server.status).replace(/_/g, " ")}</span>
+                    {(server.phase ?? server.status) !== "connected" && (
+                      <span style={statusChipStyle(server.phase ?? server.status)}>{(server.phase ?? server.status).replace(/_/g, " ")}</span>
+                    )}
                     {server.requiresUserAction && (
                       <span style={{ ...miniMetaStyle, color: "var(--state-warning)" }}>action required</span>
                     )}
-                    <span style={miniMetaStyle}>{server.transport || "stdio"}</span>
                     <span style={miniMetaStyle}>{server.tools ?? 0} tools</span>
                   </div>
                   {server.lastError && <div style={mcpErrorStyle}>{server.lastError}</div>}
@@ -138,7 +139,7 @@ export const ConnectorsTab = () => {
       )}
 
       {mode === "marketplace" && (
-        <Section title="Marketplace" description="Curated MCP connectors install into the server list.">
+        <Section title="Marketplace">
           {marketplaceConnectors.length === 0 && <div style={emptyInlineStyle}>No marketplace entries loaded yet.</div>}
           {marketplaceConnectors.length > 0 && (
             <div style={marketplaceListStyle}>

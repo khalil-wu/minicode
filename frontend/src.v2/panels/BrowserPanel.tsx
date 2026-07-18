@@ -1,5 +1,5 @@
-import { AlertCircle, Camera, Check, ChevronDown, ChevronRight, Copy, ExternalLink, Globe, RefreshCw } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { AlertCircle, Camera, Check, ChevronDown, ChevronRight, Copy, ExternalLink, Globe, MapPin, MessageSquare, RefreshCw, Trash2, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import {
   browserCaptureScreenshot,
   browserClick,
@@ -39,9 +39,14 @@ const writeStoredValue = (key: string, value: string | null) => {
 
 export const BrowserPanel = () => {
   const permissionMode = useAppStore((s) => s.permissionMode);
+  const browserAnnotations = useAppStore((s) => s.browserAnnotations);
+  const addBrowserAnnotation = useAppStore((s) => s.addBrowserAnnotation);
+  const removeBrowserAnnotation = useAppStore((s) => s.removeBrowserAnnotation);
   const [endpoint, setEndpoint] = useState(() => readStoredValue(ENDPOINT_STORAGE_KEY) || DEFAULT_ENDPOINT);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<BrowserDiscoveryResult | null>(null);
+  const [discoveryError, setDiscoveryError] = useState("");
+  const discoverEpochRef = useRef(0);
   const [selectedTargetId, setSelectedTargetId] = useState<string | null>(() => readStoredValue(TARGET_STORAGE_KEY));
   const [screenshot, setScreenshot] = useState<BrowserScreenshotResult | null>(null);
   const [screenshotLoading, setScreenshotLoading] = useState(false);
@@ -49,6 +54,9 @@ export const BrowserPanel = () => {
   const [navigateUrl, setNavigateUrl] = useState("");
   const [selector, setSelector] = useState("");
   const [inputText, setInputText] = useState("");
+  const [noteSelector, setNoteSelector] = useState("");
+  const [noteText, setNoteText] = useState("");
+  const [noteAnchor, setNoteAnchor] = useState<{ xPercent: number; yPercent: number } | null>(null);
   const [actionLoading, setActionLoading] = useState<null | "navigate" | "click" | "type">(null);
   const [actionError, setActionError] = useState("");
   const [actionMessage, setActionMessage] = useState("");
@@ -56,12 +64,20 @@ export const BrowserPanel = () => {
 
   const refresh = async () => {
     if (!isDesktop()) return;
+    const epoch = ++discoverEpochRef.current;
+    const requestedEndpoint = endpoint;
     setLoading(true);
+    setDiscoveryError("");
     try {
-      const next = await browserDiscover(endpoint);
+      const next = await browserDiscover(requestedEndpoint);
+      if (epoch !== discoverEpochRef.current) return;
+      if (!next) {
+        setDiscoveryError(`Could not connect to Chrome at ${requestedEndpoint}.`);
+        return;
+      }
       setResult(next);
     } finally {
-      setLoading(false);
+      if (epoch === discoverEpochRef.current) setLoading(false);
     }
   };
 
@@ -88,6 +104,15 @@ export const BrowserPanel = () => {
     [allTargets, selectedTargetId],
   );
   const selectedScreenshot = screenshot?.targetId === selectedTargetId ? screenshot : null;
+  const selectedAnnotations = useMemo(
+    () =>
+      selectedTarget
+        ? browserAnnotations.filter((annotation) =>
+            annotation.targetId === selectedTarget.id || annotation.url === selectedTarget.url,
+          )
+        : [],
+    [browserAnnotations, selectedTarget],
+  );
 
   useEffect(() => {
     if (allTargets.length === 0) {
@@ -107,11 +132,44 @@ export const BrowserPanel = () => {
     setNavigateUrl(selectedTarget.url || "");
   }, [selectedTarget?.id, selectedTarget?.url]);
 
+  useEffect(() => {
+    setNoteAnchor(null);
+  }, [selectedTarget?.id, selectedScreenshot?.capturedAt]);
+
   const selectTarget = (targetId: string) => {
     setSelectedTargetId(targetId);
     writeStoredValue(TARGET_STORAGE_KEY, targetId);
     setActionError("");
     setActionMessage("");
+  };
+
+  const addPageNote = () => {
+    if (!selectedTarget || !noteText.trim()) return;
+    addBrowserAnnotation({
+      id: `browser-note-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      targetId: selectedTarget.id,
+      url: selectedTarget.url,
+      title: selectedTarget.title,
+      selector: noteSelector.trim() || undefined,
+      xPercent: noteAnchor?.xPercent,
+      yPercent: noteAnchor?.yPercent,
+      note: noteText.trim(),
+      createdAt: Date.now(),
+      screenshotCapturedAt: selectedScreenshot?.capturedAt,
+      screenshotWidth: selectedScreenshot?.width,
+      screenshotHeight: selectedScreenshot?.height,
+    });
+    setNoteText("");
+    setNoteAnchor(null);
+  };
+
+  const selectScreenshotAnchor = (event: MouseEvent<HTMLImageElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    setNoteAnchor({
+      xPercent: clampPercent(((event.clientX - rect.left) / rect.width) * 100),
+      yPercent: clampPercent(((event.clientY - rect.top) / rect.height) * 100),
+    });
   };
 
   const capture = async (target: BrowserTargetInfo | null) => {
@@ -178,9 +236,7 @@ export const BrowserPanel = () => {
           });
           if (!ok) return;
         }
-        next = await browserNavigate(endpoint, selectedTargetId, target.normalizedUrl, {
-          allowPrivateNetwork: target.requiresReview && (permissionMode === "bypass" || target.risk === "local" || target.risk === "private"),
-        });
+        next = await browserNavigate(endpoint, selectedTargetId, target.normalizedUrl);
       } else if (action === "click") {
         if (!selector.trim()) {
           throw new Error("CSS selector is required.");
@@ -210,7 +266,7 @@ export const BrowserPanel = () => {
     return (
       <div className="flex-1 grid place-items-center gap-2 text-[var(--text-muted)] text-sm">
         <Globe size={20} style={{ opacity: 0.7 }} />
-        <div>Chrome/CDP panel is desktop-only.</div>
+        <div>Browser Control is desktop-only.</div>
       </div>
     );
   }
@@ -223,6 +279,7 @@ export const BrowserPanel = () => {
           title="Refresh Chrome targets"
           aria-label="Refresh Chrome targets"
           onClick={() => void refresh()}
+          disabled={loading}
           className="w-6 h-6 inline-flex items-center justify-center rounded border border-[var(--border-subtle)] bg-[var(--surface-page)] text-[var(--text-secondary)] cursor-pointer p-0"
         >
           <RefreshCw size={13} />
@@ -238,16 +295,22 @@ export const BrowserPanel = () => {
           placeholder={DEFAULT_ENDPOINT}
           className="flex-1 min-w-0 h-[26px] px-2 rounded border border-[var(--border-subtle)] bg-[var(--surface-base)] text-[var(--text-primary)] text-xs font-mono outline-none"
         />
-        <button type="button" onClick={() => void refresh()} className="border-0 px-2.5 py-1 rounded bg-[var(--accent-primary)] text-[var(--surface-base)] text-xs font-bold cursor-pointer">
+        <button type="button" onClick={() => void refresh()} disabled={loading} className="border-0 px-2.5 py-1 rounded bg-[var(--accent-primary)] text-[var(--surface-base)] text-xs font-bold cursor-pointer disabled:opacity-60">
           {loading ? "Checking..." : "Connect"}
         </button>
       </div>
 
       <div className="flex-1 overflow-y-auto grid gap-2.5 p-3">
+        {discoveryError && (
+          <div role="alert" className="flex items-center gap-2 p-2.5 border rounded-[var(--radius-sm,6px)] text-xs" style={{ color: "var(--state-danger)", borderColor: "var(--state-danger)", background: "var(--surface-soft)" }}>
+            <AlertCircle size={15} />
+            <span>{discoveryError}</span>
+          </div>
+        )}
         <div className="grid gap-2 p-2.5 bg-[var(--surface-soft)] border border-[var(--border-subtle)] rounded-[var(--radius-sm,6px)]">
           <div className="flex items-center justify-between gap-2.5">
             <div className="min-w-0">
-              <div className="text-xs uppercase font-bold text-[var(--text-muted)]">Chrome/CDP</div>
+              <div className="text-xs uppercase font-bold text-[var(--text-muted)]">Browser Control</div>
               <div className="mt-0.5 text-[var(--text-primary)] text-sm font-semibold overflow-hidden text-ellipsis whitespace-nowrap">{result?.browser || "External Chrome"}</div>
             </div>
             <span
@@ -261,7 +324,7 @@ export const BrowserPanel = () => {
                       : "var(--text-muted)",
               }}
             >
-              {result?.status === "connected" ? "Connected" : result?.status === "error" ? "Unavailable" : "Idle"}
+              {result?.status === "connected" ? "Connected" : result?.status === "error" || discoveryError ? "Unavailable" : "Idle"}
             </span>
           </div>
           <div className="grid gap-1">
@@ -271,7 +334,7 @@ export const BrowserPanel = () => {
           </div>
         </div>
 
-        {selectedTarget ? (
+        {!discoveryError && selectedTarget ? (
           <div className="grid gap-2.5 p-2.5 bg-[var(--surface-soft)] border border-[var(--border-subtle)] rounded-[var(--radius-sm,6px)]">
             <div className="flex items-center gap-2 min-w-0">
               <Globe size={16} style={{ color: "var(--accent-primary)", flexShrink: 0 }} />
@@ -331,10 +394,100 @@ export const BrowserPanel = () => {
               </div>
             )}
           </div>
-        ) : (
+        ) : !discoveryError ? (
           <InfoCard>
             <div className="text-xs uppercase font-bold text-[var(--text-muted)]">Current Page</div>
             <div className="text-[var(--text-secondary)] text-xs leading-relaxed">No Chrome page selected.</div>
+          </InfoCard>
+        ) : null}
+
+        {selectedTarget?.type === "page" && (
+          <InfoCard>
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <div className="text-xs uppercase font-bold text-[var(--text-muted)]">Page Notes</div>
+                <div className="text-[var(--text-secondary)] text-xs leading-relaxed">Anchor comments to this browser target.</div>
+              </div>
+              <span className="shrink-0 px-1.5 py-0.5 rounded-[var(--radius-sm,4px)] bg-[var(--surface-page)] border border-[var(--border-subtle)] text-[10px] font-bold text-[var(--text-muted)]">
+                {selectedAnnotations.length}
+              </span>
+            </div>
+            <div className="grid gap-1.5 mt-1.5">
+              <input
+                type="text"
+                value={noteSelector}
+                onChange={(event) => setNoteSelector(event.target.value)}
+                spellCheck={false}
+                placeholder="Optional CSS selector, e.g. #app button.primary"
+                className="h-7 px-2 rounded-[var(--radius-sm,4px)] border border-[var(--border-subtle)] bg-[var(--surface-page)] text-[var(--text-primary)] text-xs font-mono outline-none"
+              />
+              <textarea
+                value={noteText}
+                onChange={(event) => setNoteText(event.target.value)}
+                placeholder="Comment on the current page state"
+                className="min-h-16 resize-y p-2 rounded-[var(--radius-sm,4px)] border border-[var(--border-subtle)] bg-[var(--surface-page)] text-[var(--text-primary)] text-xs outline-none"
+              />
+              <div className="flex gap-1.5 flex-wrap">
+                <TinyButton
+                  icon={<MessageSquare size={12} />}
+                  label="Add Note"
+                  onClick={addPageNote}
+                  disabled={!noteText.trim()}
+                />
+                <TinyButton
+                  icon={<Copy size={12} />}
+                  label="Use Selector"
+                  onClick={() => setNoteSelector(selector)}
+                  disabled={!selector.trim()}
+                />
+                {noteAnchor && (
+                  <TinyButton
+                    icon={<X size={12} />}
+                    label={formatCoordinateLabel(noteAnchor)}
+                    onClick={() => setNoteAnchor(null)}
+                  />
+                )}
+              </div>
+            </div>
+            {selectedAnnotations.length > 0 && (
+              <div className="grid gap-1.5 mt-1">
+                {selectedAnnotations.slice(0, 6).map((annotation) => (
+                  <div key={annotation.id} className="grid gap-1.5 p-2 rounded-[var(--radius-sm,4px)] border border-[var(--border-subtle)] bg-[var(--surface-page)]">
+                    <div className="flex items-start gap-2">
+                      <MessageSquare size={13} style={{ color: "var(--accent-primary)", flexShrink: 0, marginTop: 1 }} />
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs text-[var(--text-primary)] leading-relaxed whitespace-pre-wrap break-words">{annotation.note}</div>
+                        <div className="mt-1 text-[10px] text-[var(--text-muted)] font-mono overflow-hidden text-ellipsis whitespace-nowrap">
+                          {annotation.selector || formatCoordinateLabel(annotation) || "page"} · {new Date(annotation.createdAt).toLocaleTimeString()}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        title="Remove page note"
+                        aria-label="Remove page note"
+                        onClick={() => removeBrowserAnnotation(annotation.id)}
+                        className="w-6 h-6 inline-flex items-center justify-center rounded border border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] cursor-pointer p-0"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                    {annotation.selector && (
+                      <div className="flex gap-1.5 flex-wrap">
+                        <TinyButton
+                          icon={<Check size={12} />}
+                          label="Set Selector"
+                          onClick={() => {
+                            setSelector(annotation.selector || "");
+                            setNoteSelector(annotation.selector || "");
+                            setAdvancedOpen(true);
+                          }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </InfoCard>
         )}
 
@@ -376,13 +529,35 @@ export const BrowserPanel = () => {
             <div className="text-[var(--text-secondary)] text-xs leading-relaxed">
               {new Date(selectedScreenshot.capturedAt).toLocaleString()}
               {selectedScreenshot.width && selectedScreenshot.height ? ` · ${selectedScreenshot.width}×${selectedScreenshot.height}` : ""}
+              {noteAnchor ? ` · ${formatCoordinateLabel(noteAnchor)}` : ""}
             </div>
-            <div className="mt-1.5 rounded-[var(--radius-sm,6px)] overflow-hidden border border-[var(--border-subtle)] bg-[var(--surface-page)]">
+            <div className="relative mt-1.5 rounded-[var(--radius-sm,6px)] overflow-hidden border border-[var(--border-subtle)] bg-[var(--surface-page)]">
               <img
                 src={`data:${selectedScreenshot.mimeType};base64,${selectedScreenshot.data}`}
-                alt={selectedScreenshot.title || selectedScreenshot.url || "Chrome/CDP screenshot"}
-                className="block w-full h-auto max-h-[420px] object-contain"
+                alt={selectedScreenshot.title || selectedScreenshot.url || "Browser Control screenshot"}
+                title="Click to anchor a page note"
+                onClick={selectScreenshotAnchor}
+                className="block w-full h-auto max-h-[420px] object-contain cursor-crosshair"
               />
+              {selectedAnnotations
+                .filter((annotation) => annotation.screenshotCapturedAt === selectedScreenshot.capturedAt)
+                .filter(hasCoordinateAnchor)
+                .map((annotation) => (
+                  <ScreenshotPin
+                    key={annotation.id}
+                    xPercent={annotation.xPercent}
+                    yPercent={annotation.yPercent}
+                    title={annotation.note}
+                  />
+                ))}
+              {noteAnchor && (
+                <ScreenshotPin
+                  xPercent={noteAnchor.xPercent}
+                  yPercent={noteAnchor.yPercent}
+                  active
+                  title={formatCoordinateLabel(noteAnchor)}
+                />
+              )}
             </div>
           </InfoCard>
         )}
@@ -483,6 +658,57 @@ export const BrowserPanel = () => {
     </div>
   );
 };
+
+function clampPercent(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, Number(value.toFixed(2))));
+}
+
+function hasCoordinateAnchor<T extends { xPercent?: number; yPercent?: number }>(
+  annotation: T,
+): annotation is T & { xPercent: number; yPercent: number } {
+  return typeof annotation.xPercent === "number" &&
+    typeof annotation.yPercent === "number" &&
+    Number.isFinite(annotation.xPercent) &&
+    Number.isFinite(annotation.yPercent);
+}
+
+function formatCoordinateLabel(anchor: { xPercent?: number; yPercent?: number } | null): string {
+  if (!anchor || !hasCoordinateAnchor(anchor)) return "";
+  return `Point ${Math.round(anchor.xPercent)}%, ${Math.round(anchor.yPercent)}%`;
+}
+
+function ScreenshotPin({
+  xPercent,
+  yPercent,
+  active = false,
+  title,
+}: {
+  xPercent: number;
+  yPercent: number;
+  active?: boolean;
+  title?: string;
+}) {
+  return (
+    <span
+      title={title}
+      aria-hidden="true"
+      className="pointer-events-none absolute inline-flex items-center justify-center rounded-full border shadow-sm"
+      style={{
+        left: `${xPercent}%`,
+        top: `${yPercent}%`,
+        width: active ? 18 : 14,
+        height: active ? 18 : 14,
+        transform: "translate(-50%, -50%)",
+        color: active ? "var(--surface-base)" : "var(--accent-primary)",
+        background: active ? "var(--accent-primary)" : "var(--surface-base)",
+        borderColor: "var(--accent-primary)",
+      }}
+    >
+      <MapPin size={active ? 12 : 10} />
+    </span>
+  );
+}
 
 const TargetSection = ({
   title,

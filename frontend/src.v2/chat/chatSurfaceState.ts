@@ -7,17 +7,35 @@
  * ActivityCells, ExecCells, DiffCells, ErrorCells, and the final answer.
  */
 
-import type { ChatMessage } from "../stores/types";
+import type { ChatMessage, ContentBlock } from "../stores/types";
 import { useAppStore } from "../stores";
 import { getContentBlocks } from "../lib/content-blocks";
 import { normalizeAgentErrorMessage } from "./errorMessages";
 import { mergeCitationsWithWebSearchFallback } from "./citationProjection";
 import {
-  projectTurn,
-  type TurnActivityItem,
-  type TurnActivityStatus,
+  isGenericProcessPlaceholder,
+  isInternalCollaborationNarration,
 } from "../lib/turn-projection";
-import { getToolDiffStats, type ToolCallRecord } from "../lib/tool-call-reducer";
+import {
+  projectChatTurn,
+  refreshChatActivityItem,
+  type ChatActivityItem as TurnActivityItem,
+  type ChatActivityStatus as TurnActivityStatus,
+} from "./chatActivityProjection";
+import {
+  coordinatorNoticeKind,
+  isInternalCoordinatorNotice,
+  userFacingCoordinatorNotice,
+} from "../lib/collaborationDisplay";
+import {
+  getToolDiffStats,
+  isFileChangeToolRecord,
+  isFileReadToolRecord,
+  isWebFetchToolRecord,
+  isWebSearchToolRecord,
+  isWorkspaceSearchToolRecord,
+  type ToolCallRecord,
+} from "../lib/tool-call-reducer";
 import type {
   ActivityCellState,
   AssistantMarkdownCellState,
@@ -59,24 +77,6 @@ function t(lang: Lang, zh: string, en: string): string {
   return lang === "zh" ? zh : en;
 }
 
-// ── Status Mapping ──────────────────────────────────────────────────
-
-function mapActivityStatus(
-  status: TurnActivityStatus,
-): ActivityCellState["status"] {
-  switch (status) {
-    case "running":
-    case "pending":
-      return "running";
-    case "failed":
-    case "blocked":
-      return "failed";
-    case "partial":
-    default:
-      return "done";
-  }
-}
-
 // ── Activity Title Helpers ──────────────────────────────────────────
 
 function getActivityTitle(item: TurnActivityItem, lang: Lang = "zh"): string {
@@ -84,7 +84,7 @@ function getActivityTitle(item: TurnActivityItem, lang: Lang = "zh"): string {
   const first = records[0];
   const isRunning = item.status === "running" || item.status === "pending";
   const hasFailure =
-    item.status === "failed" || item.status === "blocked" || item.hasFailure;
+    item.status === "failed" || item.status === "blocked" || item.status === "timeout" || item.hasFailure;
   const hasPartial = item.status === "partial" || records.some((r) => r.status === "partial");
   const hasSuccess = records.some((r) => r.status === "success");
   const partialFailure = hasFailure && hasSuccess;
@@ -94,9 +94,19 @@ function getActivityTitle(item: TurnActivityItem, lang: Lang = "zh"): string {
     case "planning":
     case "processNote":
     case "providerReasoning":
-      return isRunning ? t(lang, "正在思考", "Thinking") : t(lang, "思考过程", "Reasoning");
+      return "";
     case "agentMessage":
-      return t(lang, "过程", "Working");
+      return "";
+    case "skill": {
+      const name = item.skillName || "unknown";
+      if (hasFailure) return t(lang, `能力加载失败：${name}`, `Skill failed: ${name}`);
+      if (isRunning) {
+        return item.triggerMode === "implicit"
+          ? t(lang, `自动匹配能力：${name}`, `Matched skill: ${name}`)
+          : t(lang, `准备使用能力：${name}`, `Using skill: ${name}`);
+      }
+      return humanizeSkillTitle(item.title, name, lang) || t(lang, `已加载能力：${name}`, `Using skill: ${name}`);
+    }
     case "webSearch": {
       const queries = item.queryCount ?? records.filter(isWebSearchRecord).length;
       const hasLimitedWebEvidence = records.some(isNonFatalWebFailureRecord);
@@ -117,8 +127,8 @@ function getActivityTitle(item: TurnActivityItem, lang: Lang = "zh"): string {
       }
       if (isRunning) {
         return queries
-          ? t(lang, "正在搜索实时信息", "Searching the web")
-          : t(lang, "正在读取网页资料", "Reading web pages");
+          ? t(lang, "正在搜索网页", "Searching the web")
+          : t(lang, "正在读取网页", "Reading web pages");
       }
       if (queries) return t(lang, "已搜索实时信息", "Searched the web");
       return t(lang, "已读取网页资料", "Read web pages");
@@ -135,7 +145,7 @@ function getActivityTitle(item: TurnActivityItem, lang: Lang = "zh"): string {
       if (hasPartial) return t(lang, "已读取部分文件内容", "Read partial file contents");
       if (partialFailure) return t(lang, `已读取 ${count} 个文件`, `Read ${count} files`);
       if (hasFailure) return t(lang, `读取 ${count} 个文件失败`, `Reading ${count} files failed`);
-      if (isRunning) return t(lang, "正在读取相关文件", "Reading files");
+      if (isRunning) return t(lang, "正在读取文件", "Reading files");
       return t(lang, `已读取 ${count} 个文件`, `Read ${count} files`);
     }
     case "commandExecution": {
@@ -149,12 +159,24 @@ function getActivityTitle(item: TurnActivityItem, lang: Lang = "zh"): string {
     }
     case "fileChange": {
       const count = uniqueFileCount(records);
-      if (isRunning) return t(lang, "正在修改文件", "Editing files");
-      if (count === 1) {
-        const target = extractToolTarget(first);
-        return target ? t(lang, `已修改 ${target}`, `Edited ${target}`) : t(lang, "已修改文件", "Edited file");
+      const target = extractToolTarget(first);
+      const verbZh = "修改";
+      const verbEn = "Editing";
+      const pastEn = "Edited";
+      if (isRunning) {
+        return target
+          ? t(lang, `正在${verbZh} ${target}`, `${verbEn} ${target}`)
+          : t(lang, `正在${verbZh}文件`, `${verbEn} files`);
       }
-      return t(lang, `已修改 ${count} 个文件`, `Edited ${count} files`);
+      if (hasFailure && !hasSuccess) {
+        return target
+          ? t(lang, `${verbZh}${target}失败`, `${verbEn} ${target} failed`)
+          : t(lang, `${verbZh}文件失败`, `${verbEn} files failed`);
+      }
+      if (count === 1) {
+        return target ? t(lang, `已${verbZh} ${target}`, `${pastEn} ${target}`) : t(lang, `已${verbZh}文件`, `${pastEn} file`);
+      }
+      return t(lang, `已${verbZh} ${count} 个文件`, `${pastEn} ${count} files`);
     }
     case "mcpToolCall": {
       const label = first?.name.startsWith("mcp__")
@@ -164,14 +186,18 @@ function getActivityTitle(item: TurnActivityItem, lang: Lang = "zh"): string {
       return label ? t(lang, `已调用 MCP ${label}`, `Called MCP ${label}`) : t(lang, "已调用 MCP", "Called MCP");
     }
     case "progress":
-      return item.progress?.at(-1)?.label || t(lang, "进度", "Progress");
+      return item.progress?.at(-1)?.label || t(lang, "状态", "Status");
     default:
       if (records.length > 0 && records.every((record) => record.name === "todo_write")) {
         if (isRunning) return t(lang, "正在更新任务清单", "Updating task list");
         return t(lang, "已更新任务清单", "Updated task list");
       }
-      if (isRunning) return first ? t(lang, `正在调用 ${first.name}`, `Calling ${first.name}`) : t(lang, "正在调用工具", "Calling tool");
-      return first ? t(lang, `已调用 ${first.name}`, `Called ${first.name}`) : t(lang, "已调用工具", "Called tool");
+      if (first?.name === "task") return isRunning ? t(lang, "正在启动子代理", "Starting subagent") : t(lang, "已启动子代理", "Started subagent");
+      if (first?.name === "workflow") return isRunning ? t(lang, "正在启动工作流", "Starting workflow") : t(lang, "已启动工作流", "Started workflow");
+      if (first?.displayHint) return first.displayHint;
+      const fallbackName = first ? userFacingGenericToolName(first.name, lang) : "";
+      if (isRunning) return fallbackName ? t(lang, `正在调用 ${fallbackName}`, `Calling ${fallbackName}`) : t(lang, "正在调用工具", "Calling tool");
+      return fallbackName ? t(lang, `已调用 ${fallbackName}`, `Called ${fallbackName}`) : t(lang, "已调用工具", "Called tool");
   }
 }
 
@@ -199,20 +225,66 @@ function getActivitySubtitle(item: TurnActivityItem, lang: Lang = "zh"): string 
   if (item.kind === "webSearch") {
     const searches = item.queryCount ?? records.filter(isWebSearchRecord).length;
     const pages = item.pageCount ?? records.filter(isWebFetchRecord).length;
+    const sources = webSourceCount(records);
     if (isRunning) {
-      if (searches) return t(lang, `已完成 ${searches} 次搜索`, `${searches} searches done`);
+      if (searches) return sources
+        ? t(lang, `已完成 ${searches} 次搜索 · ${sources} 个来源`, `${searches} searches · ${sources} sources`)
+        : t(lang, `已完成 ${searches} 次搜索`, `${searches} searches done`);
       if (pages) return t(lang, `已读取 ${pages} 个页面`, `${pages} pages read`);
       return records.length ? t(lang, `${records.length} 个来源`, `${records.length} sources`) : "";
     }
-    if (searches) return t(lang, `${searches} 次搜索`, `${searches} searches`);
+    if (searches) return sources
+      ? t(lang, `${searches} 次搜索 · ${sources} 个来源`, `${searches} searches · ${sources} sources`)
+      : t(lang, `${searches} 次搜索`, `${searches} searches`);
     if (pages) return t(lang, `${pages} 个页面`, `${pages} pages`);
     return records.length ? t(lang, `${records.length} 个来源`, `${records.length} sources`) : "";
+  }
+  if (item.kind === "skill") {
+    if (item.reason) return item.reason.replace(/\bskill\b/gi, "能力");
+    if (item.triggerMode === "implicit") return t(lang, "自动匹配", "implicit");
+    if (item.triggerMode === "model") return t(lang, "模型调用", "model");
+    if (item.triggerMode === "explicit") return t(lang, "显式调用", "explicit");
+    return "";
   }
   return "";
 }
 
+function humanizeSkillTitle(title: string | undefined, skillName: string, lang: Lang): string {
+  const raw = String(title || "").trim();
+  if (!raw) return "";
+  if (lang !== "zh" && !CJK_RE.test(raw)) return raw;
+  return raw
+    .replace(/^准备使用\s+Skill[:：]\s*/i, "准备使用能力：")
+    .replace(/^使用\s+Skill[:：]\s*/i, "已加载能力：")
+    .replace(/^已加载\s+Skill[:：]\s*/i, "已加载能力：")
+    .replace(/^自动匹配\s+Skill[:：]\s*/i, "自动匹配能力：")
+    .replace(/^跳过\s+Skill[:：]\s*/i, "跳过能力：")
+    .replace(/^Skill[:：]\s*/i, `能力：${skillName}`);
+}
+
 function successfulRecords(records: ToolCallRecord[]): ToolCallRecord[] {
   return records.filter((record) => record.status === "success");
+}
+
+function webSourceCount(records: ToolCallRecord[]): number {
+  const sources = new Set<string>();
+  for (const record of records) {
+    if (record.sourceUrl) sources.add(record.sourceUrl);
+    const preview = String(record.contentPreview || record.outputPreview || "").trim();
+    if (!preview.startsWith("[") && !preview.startsWith("{")) continue;
+    try {
+      const parsed = JSON.parse(preview) as unknown;
+      const items = Array.isArray(parsed) ? parsed : [parsed];
+      for (const item of items) {
+        if (!item || typeof item !== "object") continue;
+        const url = String((item as Record<string, unknown>).url || "").trim();
+        if (url) sources.add(url);
+      }
+    } catch {
+      // Search previews from custom providers may be plain text.
+    }
+  }
+  return sources.size;
 }
 
 function shortFileName(path: string): string {
@@ -230,9 +302,14 @@ function shortCommand(command: string): string {
 
 function extractToolTarget(record?: ToolCallRecord): string {
   if (!record) return "";
+  if (record.inputSummary) return record.inputSummary;
+  if (record.displayHint) return record.displayHint;
+  if (record.displaySummary) return record.displaySummary;
   const args = record.args ?? {};
   const path = args.file_path ?? args.path ?? args.target ?? args.filename;
   if (typeof path === "string") return path;
+  const description = args.description ?? args.title ?? args.objective ?? args.task_id ?? args.workflow_id ?? args.name;
+  if (typeof description === "string") return description.length > 80 ? `${description.slice(0, 77)}...` : description;
   const command = args.command;
   if (typeof command === "string") {
     return command.length > 80 ? `${command.slice(0, 77)}...` : command;
@@ -240,16 +317,26 @@ function extractToolTarget(record?: ToolCallRecord): string {
   return "";
 }
 
+function userFacingGenericToolName(name: string, lang: Lang): string {
+  const normalized = name.toLowerCase();
+  if (normalized === "task") return t(lang, "子代理", "subagent");
+  if (normalized === "workflow") return t(lang, "工作流", "workflow");
+  if (normalized.startsWith("task_")) return t(lang, "协作任务", "workflow task");
+  if (normalized.startsWith("team_")) return t(lang, "代理团队", "agent team");
+  if (normalized === "send_message" || normalized === "message_list") return t(lang, "代理消息", "agent message");
+  return name.replace(/^mcp__[^_]+__/i, "").replace(/_/g, " ");
+}
+
 function isWebSearchRecord(record: ToolCallRecord): boolean {
-  return /(?:web_search|search)$/i.test(record.name);
+  return isWebSearchToolRecord(record);
 }
 
 function isWebFetchRecord(record: ToolCallRecord): boolean {
-  return /(?:web_fetch|fetch_page|fetch)$/i.test(record.name);
+  return isWebFetchToolRecord(record);
 }
 
 function isLocalExplorationTool(record: ToolCallRecord): boolean {
-  return /^(?:read_file|read_artifact|list_files|glob_files|grep|grep_files|fuzzy_search)$/i.test(record.name);
+  return isFileReadToolRecord(record) || isWorkspaceSearchToolRecord(record);
 }
 
 function isWebLookupRecord(record: ToolCallRecord): boolean {
@@ -263,28 +350,24 @@ function isWebLookupRecord(record: ToolCallRecord): boolean {
 }
 
 function isNetworkLikeToolFailure(record: ToolCallRecord): boolean {
-  const text = `${record.summary ?? ""} ${record.displaySummary ?? ""} ${record.developerDetail ?? ""}`;
-  if (record.providerErrorType === "network") return true;
-  return /407|proxy authentication required|代理鉴权失败|代理认证失败|connection|timeout|timed out|network/i.test(text);
+  return record.providerErrorType === "network";
 }
 
 function isPermissionBlockedRecord(record: ToolCallRecord): boolean {
-  const text = [
-    record.errorKind,
-    record.userSummary,
-    record.errorInfo?.user_message,
-    record.summary,
-    record.developerDetail,
-  ].filter(Boolean).join(" ");
-  return /permission_required|权限策略|不在允许范围|允许的路径|禁止的路径|outside (?:the )?(?:allowed|trusted) workspace|outside allowed|forbidden path/i.test(text);
+  return record.errorKind === "permission_required" || record.projection === "approval";
 }
 
 function isMissingRequiredArgumentRecord(record: ToolCallRecord): boolean {
-  return /Invalid tool call|missing required argument/i.test(String(record.summary ?? ""));
+  return record.errorKind === "validation_error";
 }
 
 function isRepeatGuardRecord(record: ToolCallRecord): boolean {
-  return /Skipped repeated failed tool call|repeated failed tool call|反复尝试|重复/i.test(String(record.summary ?? ""));
+  return record.errorKind === "repeat_guard";
+}
+
+function isGenericToolFailureCopy(value: string | undefined | null): boolean {
+  const text = String(value ?? "").trim();
+  return /^(?:工具执行失败。?|Tool execution failed\.?)$/i.test(text);
 }
 
 function isRecoverableLocalProbeFailureRecord(record: ToolCallRecord): boolean {
@@ -293,14 +376,7 @@ function isRecoverableLocalProbeFailureRecord(record: ToolCallRecord): boolean {
   if (isNetworkLikeToolFailure(record)) return false;
   if (isPermissionBlockedRecord(record)) return false;
   if (isMissingRequiredArgumentRecord(record)) return false;
-  const text = [
-    record.summary,
-    record.displaySummary,
-    record.userSummary,
-    record.errorInfo?.user_message,
-    record.developerDetail,
-  ].filter(Boolean).join(" ");
-  return /File does not exist|does not exist:|No such file or directory|ENOENT|Path not found|Not a file|Is a directory|EISDIR|Directory does not exist|cannot read binary|non-UTF-?8/i.test(text);
+  return record.errorKind === "not_found" || record.projection === "status";
 }
 
 function isNonFatalWebFailureRecord(record: ToolCallRecord): boolean {
@@ -324,7 +400,7 @@ function isNonFatalToolRecord(record: ToolCallRecord): boolean {
 }
 
 function isFailedToolRecord(record: ToolCallRecord): boolean {
-  return (record.status === "failed" || record.status === "blocked") && !isNonFatalToolRecord(record);
+  return (record.status === "failed" || record.status === "blocked" || record.status === "timeout") && !isNonFatalToolRecord(record);
 }
 
 function timingFromRecords(records: ToolCallRecord[]) {
@@ -346,7 +422,7 @@ function statusFromRecords(records: ToolCallRecord[]): TurnActivityStatus {
     if (records.some((r) => r.status === "pending")) return "pending";
     return "completed";
   }
-  if (records.some((record) => record.status === "failed" && isFailedToolRecord(record))) return "failed";
+  if (records.some((record) => (record.status === "failed" || record.status === "timeout") && isFailedToolRecord(record))) return "failed";
   if (records.some((record) => record.status === "blocked" && isFailedToolRecord(record))) return "blocked";
   if (records.some((record) => record.status === "running")) return "running";
   if (records.some((record) => record.status === "pending")) return "pending";
@@ -431,14 +507,34 @@ function isInternalProcessActivity(item: TurnActivityItem): boolean {
       return true;
     }
   }
-  return (
-    item.kind === "providerReasoning" ||
-    item.kind === "reasoning"
-  );
+  return false;
 }
 
 function isRuntimeActionSummary(item: TurnActivityItem): boolean {
   return item.kind === "processNote" && item.source === "runtime" && item.itemKind === "action_summary";
+}
+
+function isLowValueToolPrepareStatusActivity(item: TurnActivityItem): boolean {
+  if (item.kind !== "processNote" && item.kind !== "progress") return false;
+  return item.blocks.some((block) => {
+    if (block.type !== "process" && block.type !== "progress") return false;
+    const id = String(block.id ?? "");
+    const stepId = "stepId" in block ? String(block.stepId ?? "") : "";
+    const panelHint = "panelHint" in block ? String(block.panelHint ?? "").toLowerCase() : "";
+    const status = "status" in block ? String(block.status ?? "") : "";
+    const title = "title" in block ? String(block.title ?? "") : "";
+    const label = "label" in block ? String(block.label ?? "") : "";
+    const text = `${title} ${label} ${"content" in block ? block.content : block.message ?? ""}`;
+    const isToolPrepare = id.includes(":tool-prepare:") || stepId.includes("tool-prepare");
+    if (!isToolPrepare) return false;
+    if (panelHint === "terminal" && /准备命令|命令已开始/i.test(text)) {
+      return status === "completed";
+    }
+    return (
+      panelHint === "diff" &&
+      /生成文件内容|生成修改内容|准备写入|准备修改/i.test(text)
+    );
+  });
 }
 
 function isVisibleRuntimeActionSummary(item: TurnActivityItem): boolean {
@@ -462,41 +558,34 @@ function isVisibleAgentMessageActivity(
   _index: number,
   _items: TurnActivityItem[],
 ): boolean {
-  if (item.kind !== "agentMessage" || !item.content?.trim()) return false;
-  // Claude Code-style transcript: model-authored prose between tool calls is
-  // part of the visible process narrative. The final answer is still selected
-  // separately by turn projection, so this only affects non-final text blocks.
-  return true;
+  return item.kind === "agentMessage" &&
+    Boolean(item.content?.trim()) &&
+    !isGenericProcessPlaceholder(item.content);
+}
+
+function isVisibleProcessNoteActivity(item: TurnActivityItem, _items: TurnActivityItem[]): boolean {
+  if (item.kind !== "processNote" || item.itemKind !== "process_text") return false;
+  const source = thinkingSourceForItem(item);
+  if (source !== "model_preamble" && source !== "post_tool") return false;
+  const content = visibleProcessContent(item).trim();
+  return Boolean(content) &&
+    !isGenericProcessPlaceholder(content);
 }
 
 function isVisibleThinkingActivity(item: TurnActivityItem): boolean {
-  const processBlocks = item.blocks.filter((block) => block.type === "process");
-  if (
-    item.kind === "processNote" &&
-    processBlocks.some((block) =>
-      block.itemKind === "process_text" &&
-      Boolean(block.content?.trim()) &&
-      block.visibility !== "debug",
-    )
-  ) {
-    return true;
-  }
-
-  const isThinkingKind =
-    item.kind === "processNote" ||
-    item.kind === "providerReasoning" ||
-    item.kind === "reasoning";
-  if (!isThinkingKind || !item.content?.trim()) return false;
-  if (isRuntimeActionSummary(item) && !isVisibleRuntimeActionSummary(item)) return false;
+  if ((item.kind !== "providerReasoning" && item.kind !== "reasoning") || !item.content?.trim()) return false;
+  if (isGenericProcessPlaceholder(item.content)) return false;
 
   const thinkingBlocks = item.blocks.filter((block) => block.type === "thinking");
-  if (thinkingBlocks.length === 0) return item.kind !== "providerReasoning";
+  if (thinkingBlocks.length === 0) return true;
+  if (thinkingBlocks.some((block) => block.is_raw_provider_reasoning || block.visibility === "debug")) {
+    return false;
+  }
 
   return (
     thinkingBlocks.some((block) =>
       Boolean(block.content?.trim()) &&
-      block.visibility !== "debug" &&
-      !block.is_raw_provider_reasoning,
+      !isGenericProcessPlaceholder(block.content),
     )
   );
 }
@@ -530,15 +619,33 @@ function isGenericIterationProgress(item: TurnActivityItem): boolean {
   );
 }
 
+function isGenericStatusProgress(item: TurnActivityItem): boolean {
+  if (item.kind !== "progress") return false;
+  const progress = item.progress ?? [];
+  if (progress.length === 0) return false;
+  return progress.every((entry) => {
+    if (entry.stage !== "status") return false;
+    const visibleParts = [
+      entry.label,
+      entry.message,
+      entry.summary,
+      entry.detail,
+    ].map((part) => part?.trim()).filter(Boolean) as string[];
+    return visibleParts.length > 0 && visibleParts.every(isGenericProcessPlaceholder);
+  });
+}
+
 function isSchemaOrRepeatGuardRecord(record: ToolCallRecord): boolean {
-  const raw = String(record.summary ?? "");
+  const raw = `${record.summary ?? ""} ${record.displaySummary ?? ""}`;
   if (["silent", "status", "warning"].includes(String(record.projection || ""))) return true;
   if (["missing_generated_content", "routing_error", "stale_evidence", "repeat_guard", "tool_disabled"].includes(String(record.errorKind || ""))) return true;
-  return /Invalid tool call|missing required argument|Skipped repeated failed tool call|repeated failed tool call/i.test(raw);
+  return isInternalCoordinatorNotice(raw) ||
+    /Invalid tool call|missing required argument|Skipped repeated failed tool call|repeated failed tool call/i.test(raw);
 }
 
 function isWebGuardGuidanceRecord(record: ToolCallRecord): boolean {
   const raw = `${record.summary ?? ""} ${record.displaySummary ?? ""}`;
+  if (isInternalCoordinatorNotice(raw)) return true;
   return /You already have both search results|do not search or fetch more|Search budget reached|Web budget reached|Enough candidate web evidence|Skipped another similar web search|Use the available results|answer with uncertainty|Web budget exhausted|Search guard guidance|already searched with these exact keywords|already have enough results|returned the same result.*times|already gathered|many_web_operations|Guardrail:.*repeated_call|Guardrail:.*no_progress|搜索策略调整|相同关键词|高度相似|相似网页搜索未返回结果|停止重复搜索/i.test(raw);
 }
 
@@ -665,8 +772,10 @@ function aggregateActivityItems(
   const visibleItems = items.flatMap((item, index) => {
     const withoutGuard = removeInternalGuardRecords(item, developerMode);
     if (!withoutGuard) return [];
+    if (!developerMode && withoutGuard.canonical?.visibility === "developer") return [];
     if (!developerMode && shouldHideRecoverableLocalProbeActivity(withoutGuard, options)) return [];
-    const isFinalAnswerDraftProgress = isFinalAnswerDraftIterationProgress(withoutGuard, {
+    if (!developerMode && isLowValueToolPrepareStatusActivity(withoutGuard)) return [];
+    const isFinalAnswerSealingProgress = isFinalAnswerSealingIterationProgress(withoutGuard, {
       hasFinalAnswer: options.hasFinalAnswer,
       isStreaming: options.isStreaming,
     });
@@ -674,8 +783,12 @@ function aggregateActivityItems(
     const visibleAgentMessage = isVisibleAgentMessageActivity(withoutGuard, index, items);
     const hiddenGenericIteration = !developerMode &&
       isGenericIterationProgress(withoutGuard) &&
-      !isFinalAnswerDraftProgress;
+      !isFinalAnswerSealingProgress;
+    const hiddenGenericStatusProgress = !developerMode && isGenericStatusProgress(withoutGuard);
+    const hiddenFinalAnswerSealingProgress = !developerMode && isFinalAnswerSealingProgress;
     return !hiddenGenericIteration &&
+      !hiddenGenericStatusProgress &&
+      !hiddenFinalAnswerSealingProgress &&
       (!isInternalProcessActivity(withoutGuard) || visibleThinkingActivity || visibleAgentMessage) &&
       (developerMode || !isHiddenSchemaFailureActivity(withoutGuard))
       ? [withoutGuard]
@@ -687,7 +800,7 @@ function aggregateActivityItems(
   return webAggregated;
 }
 
-function isFinalAnswerDraftIterationProgress(
+function isFinalAnswerSealingIterationProgress(
   item: TurnActivityItem,
   options: {
     hasFinalAnswer?: boolean;
@@ -710,19 +823,6 @@ function uniqueFileCount(records: ToolCallRecord[]): number {
   return paths.size + fallback;
 }
 
-function diffTotals(records: ToolCallRecord[]) {
-  return records.reduce(
-    (acc, r) => {
-      const stats = r.diff ? getToolDiffStats(r.diff) : { plus: 0, minus: 0 };
-      return {
-        added: acc.added + stats.plus,
-        deleted: acc.deleted + stats.minus,
-      };
-    },
-    { added: 0, deleted: 0 },
-  );
-}
-
 const CREATED_PATCH_RE = /^(?:new file mode\b|---\s+\/dev\/null$)/m;
 const DELETED_PATCH_RE = /^(?:deleted file mode\b|\+\+\+\s+\/dev\/null$)/m;
 
@@ -731,12 +831,11 @@ function inferDiffChangeType(
   stats: { plus: number; minus: number },
 ): NonNullable<DiffFileChange["changeType"]> {
   const patch = record.diff?.patch ?? "";
-  if (DELETED_PATCH_RE.test(patch) || /(?:delete|remove)/i.test(record.name)) {
+  if (DELETED_PATCH_RE.test(patch)) {
     return "deleted";
   }
   if (
-    CREATED_PATCH_RE.test(patch) ||
-    (record.name === "write_file" && stats.minus === 0)
+    CREATED_PATCH_RE.test(patch)
   ) {
     return "created";
   }
@@ -744,17 +843,6 @@ function inferDiffChangeType(
 }
 
 // ── Cell Extractors ─────────────────────────────────────────────────
-
-function isCommandTool(name: string): boolean {
-  return /(?:run_command|terminal|shell|bash|powershell|cmd)/i.test(name);
-}
-
-function isFileChangeTool(name: string): boolean {
-  return (
-    name !== "todo_write" &&
-    /(?:write|edit|patch|delete|remove|create|move|rename|save)/i.test(name)
-  );
-}
 
 function nonEmptyOutputLines(text: string): string[] {
   return text
@@ -767,12 +855,19 @@ function previewOutputLines(text: string, isRunning: boolean): string[] {
   return isRunning ? lines.slice(-12) : lines.slice(0, 8);
 }
 
+function commandResultOutputText(text: string | undefined): string {
+  const raw = String(text || "").trimEnd();
+  if (!raw) return "";
+  const withoutStatus = raw.replace(/^Exit code:\s*-?\d+(?:\s+\(failed\))?\s*(?:\r?\n){0,2}/i, "");
+  return withoutStatus.trimEnd();
+}
+
 function extractCommandExitCode(record: ToolCallRecord): number | undefined {
   const text = [record.summary, record.outputPreview, record.stdoutPreview, record.stderrPreview]
     .filter((value): value is string => typeof value === "string" && value.length > 0)
     .join("\n");
   const match = /\bExit code:\s*(-?\d+)\b/i.exec(text);
-  if (!match) return record.status === "failed" || record.status === "blocked" ? 1 : 0;
+  if (!match) return record.status === "failed" || record.status === "blocked" || record.status === "timeout" ? 1 : 0;
   const parsed = Number(match[1]);
   return Number.isFinite(parsed) ? parsed : undefined;
 }
@@ -794,8 +889,7 @@ function extractExecCells(
       const hasSplitOutput =
         typeof record.stdoutPreview === "string" ||
         typeof record.stderrPreview === "string";
-      const legacyOutputText = (record.outputPreview || record.summary || "")
-        .trimEnd();
+      const legacyOutputText = commandResultOutputText(record.outputPreview || record.summary);
       const stdoutText = (
         record.stdoutPreview ??
         (hasSplitOutput ? "" : legacyOutputText)
@@ -808,7 +902,7 @@ function extractExecCells(
         status:
           isRunning
             ? "running"
-            : record.status === "failed" || record.status === "blocked"
+            : record.status === "failed" || record.status === "blocked" || record.status === "timeout"
               ? "failed"
               : "success",
         exitCode: extractCommandExitCode(record),
@@ -817,7 +911,7 @@ function extractExecCells(
         stdoutFull: stdoutText || undefined,
         stderrFull: stderrText || undefined,
         durationMs: record.durationMs,
-        collapsed: !(isRunning || record.status === "failed"),
+        collapsed: !(isRunning || record.status === "failed" || record.status === "timeout"),
         createdAt: record.startedAt,
         completedAt: record.finishedAt,
       });
@@ -837,18 +931,21 @@ function buildDiffCellForFileChangeItems(
 
   const allRecords = fileChangeItems.flatMap((i) => i.records ?? []).filter((record) => (
     record.name !== "todo_write" &&
-    (isFileChangeTool(record.name) || Boolean(record.diff)) &&
-    (Boolean(extractToolTarget(record)) || Boolean(record.diff))
+    isFileChangeToolRecord(record) &&
+    (Boolean(record.diff) || (
+      (record.status === "success" || record.status === "partial") &&
+      Boolean(extractToolTarget(record))
+    ))
   ));
   if (allRecords.length === 0) return null;
-  const totals = diffTotals(allRecords);
+  const recordsByPath = new Map<string, ToolCallRecord>();
+  for (const record of allRecords) {
+    const path = extractToolTarget(record) || `${record.name}:${record.id}`;
+    recordsByPath.set(path, record);
+  }
 
   const files: DiffFileChange[] = [];
-  const seen = new Set<string>();
-  for (const record of allRecords) {
-    const path = extractToolTarget(record) || `${record.name} result`;
-    if (seen.has(path)) continue;
-    seen.add(path);
+  for (const [path, record] of recordsByPath) {
     const stats = record.diff ? getToolDiffStats(record.diff) : { plus: 0, minus: 0 };
     files.push({
       path,
@@ -859,6 +956,13 @@ function buildDiffCellForFileChangeItems(
       isLarge: stats.plus + stats.minus > 200,
     });
   }
+  const totals = files.reduce(
+    (acc, file) => ({
+      added: acc.added + file.additions,
+      deleted: acc.deleted + file.deletions,
+    }),
+    { added: 0, deleted: 0 },
+  );
 
   return {
     kind: "diff",
@@ -879,22 +983,35 @@ function buildThinkingCell(
   item: TurnActivityItem,
   assistantMsg: ChatMessage,
 ): ThinkingCellState {
+  const thinkingMetadata = firstThinkingMetadata(item);
   return {
     kind: "thinking",
     id: `${assistantMsg.id}-thinking-${item.id}`,
     content: visibleProcessContent(item),
     source: thinkingSourceForItem(item),
+    isRawProviderReasoning: thinkingMetadata?.is_raw_provider_reasoning,
+    providerReasoningType: thinkingMetadata?.provider_reasoning_type,
     createdAt: item.startedAt ?? assistantMsg.timestamp,
   };
 }
 
+function firstThinkingMetadata(
+  item: TurnActivityItem,
+): Pick<Extract<ContentBlock, { type: "thinking" }>, "is_raw_provider_reasoning" | "provider_reasoning_type"> | null {
+  const block = item.blocks.find((candidate): candidate is Extract<ContentBlock, { type: "thinking" }> =>
+    candidate.type === "thinking",
+  );
+  return block ?? null;
+}
+
 function visibleProcessContent(item: TurnActivityItem): string {
-  if (item.content?.trim()) return item.content;
+  if (item.content?.trim() && !isGenericProcessPlaceholder(item.content)) return item.content;
   return item.blocks
     .flatMap((block) => {
       if (
         (block.type === "process" || block.type === "thinking" || block.type === "text") &&
-        block.content?.trim()
+        block.content?.trim() &&
+        !isGenericProcessPlaceholder(block.content)
       ) {
         return [block.content];
       }
@@ -907,11 +1024,15 @@ function buildProcessNoteCell(
   item: TurnActivityItem,
   assistantMsg: ChatMessage,
 ): ThinkingCellState {
+  const source = thinkingSourceForItem(item);
   return {
     kind: "thinking",
     id: `${assistantMsg.id}-process-${item.id}`,
     content: visibleProcessContent(item),
-    source: thinkingSourceForItem(item),
+    source,
+    phase: item.kind === "agentMessage" || source === "model_preamble" || source === "post_tool"
+      ? "public_output"
+      : undefined,
     createdAt: item.startedAt ?? assistantMsg.timestamp,
   };
 }
@@ -926,21 +1047,18 @@ function buildActivityCell(
   },
 ): ActivityCellState {
   const { lang, assistantMsg, hasFinalAnswer, isStreaming } = options;
+  const canonical = item.canonical ?? refreshChatActivityItem(item, assistantMsg.id).canonical!;
   const records = item.records ?? [];
   const isRunning = item.status === "running" || item.status === "pending";
-  const isFinalAnswerDraftIteration = isFinalAnswerDraftIterationProgress(item, {
-    hasFinalAnswer,
-    isStreaming,
-  });
   // Populate progress with real-time count for aggregatable activities.
   let progress: ActivityCellState["progress"];
   if (item.progress?.length) {
-    progress = { text: isFinalAnswerDraftIteration ? undefined : item.progress.at(-1)?.summary };
+    progress = { text: item.progress.at(-1)?.summary };
   } else if (isRunning && records.length > 0) {
     const doneCount = records.filter((r) => r.status === "success").length;
     progress = { current: doneCount, total: undefined, text: t(lang, `已完成 ${doneCount} 个`, `${doneCount} done`) };
   }
-  const hasItemFailure = item.hasFailure || item.status === "failed" || item.status === "blocked";
+  const hasItemFailure = canonical.hasFailure || canonical.status === "failed" || canonical.status === "blocked";
   const hasItemSuccess = records.some((r) => r.status === "success");
   const hasPartial = item.status === "partial" || records.some((r) => r.status === "partial");
   const isPartialFailure = hasItemFailure && hasItemSuccess;
@@ -949,11 +1067,9 @@ function buildActivityCell(
     kind: "activity",
     id: item.id,
     activityKind: item.kind,
-    title: isFinalAnswerDraftIteration
-      ? t(lang, "正在输出最终回答", "Writing final answer")
-      : getActivityTitle(item, lang),
-    subtitle: getActivitySubtitle(item, lang),
-    status: isPartialFailure ? "done" : mapActivityStatus(item.status),
+    title: getActivityTitle(item, lang) || canonical.title,
+    subtitle: getActivitySubtitle(item, lang) || canonical.summary,
+    status: isPartialFailure ? "done" : mapCanonicalActivityStatus(canonical.status),
     collapsed:
       !hasPartial &&
       (!item.hasFailure || isPartialFailure) &&
@@ -961,9 +1077,27 @@ function buildActivityCell(
       item.status !== "pending",
     toolCallRecords: visibleToolRecords,
     progress,
-    startedAt: item.startedAt ?? assistantMsg.timestamp,
-    completedAt: item.finishedAt,
+    skill: item.kind === "skill"
+      ? {
+          name: item.skillName,
+          triggerMode: item.triggerMode,
+          sourceLevel: item.sourceLevel,
+          reason: item.reason || item.summary,
+          tokenEstimate: item.tokenEstimate,
+          content: item.content,
+        }
+      : undefined,
+    startedAt: canonical.startedAt ?? assistantMsg.timestamp,
+    completedAt: canonical.finishedAt,
+    canonical,
   };
+}
+
+function mapCanonicalActivityStatus(status: NonNullable<TurnActivityItem["canonical"]>["status"]): ActivityCellState["status"] {
+  if (status === "queued" || status === "running") return "running";
+  if (status === "failed" || status === "blocked") return "failed";
+  if (status === "cancelled") return "interrupted";
+  return "done";
 }
 
 function buildOrderedProcessCells(
@@ -985,10 +1119,28 @@ function buildOrderedProcessCells(
   const activityCells: ActivityCellState[] = [];
   const execCells: ExecCellState[] = [];
   const diffCells: DiffCellState[] = [];
+  let fileChangeItems: TurnActivityItem[] = [];
+  let fileChangeErrorCells: ErrorCellState[] = [];
   let emittedAnyErrors = false;
 
+  const flushFileChangeItems = () => {
+    if (fileChangeItems.length === 0) return;
+    const aggregatedDiffCell = buildDiffCellForFileChangeItems(fileChangeItems);
+    if (aggregatedDiffCell) {
+      orderedCells.push(aggregatedDiffCell);
+      diffCells.push(aggregatedDiffCell);
+    }
+    if (fileChangeErrorCells.length > 0) {
+      orderedCells.push(...fileChangeErrorCells);
+      emittedAnyErrors = true;
+    }
+    fileChangeItems = [];
+    fileChangeErrorCells = [];
+  };
+
   for (const [index, item] of items.entries()) {
-    if (isVisibleAgentMessageActivity(item, index, items)) {
+    if (isVisibleAgentMessageActivity(item, index, items) || isVisibleProcessNoteActivity(item, items)) {
+      flushFileChangeItems();
       const cell = buildProcessNoteCell(item, options.assistantMsg);
       orderedCells.push(cell);
       const errorCells = buildErrorCellsForItem(item, options.assistantMsg, options.hasFinalAnswer);
@@ -1000,6 +1152,7 @@ function buildOrderedProcessCells(
     }
 
     if (isVisibleThinkingActivity(item)) {
+      flushFileChangeItems();
       const cell = buildThinkingCell(item, options.assistantMsg);
       orderedCells.push(cell);
       const errorCells = buildErrorCellsForItem(item, options.assistantMsg, options.hasFinalAnswer);
@@ -1010,7 +1163,18 @@ function buildOrderedProcessCells(
       continue;
     }
 
+    if (item.kind === "processNote" || item.kind === "agentMessage") {
+      const errorCells = buildErrorCellsForItem(item, options.assistantMsg, options.hasFinalAnswer);
+      if (errorCells.length > 0) {
+        flushFileChangeItems();
+        orderedCells.push(...errorCells);
+        emittedAnyErrors = true;
+      }
+      continue;
+    }
+
     if (item.kind === "commandExecution") {
+      flushFileChangeItems();
       const cells = buildExecCellsForItem(item);
       orderedCells.push(...cells);
       execCells.push(...cells);
@@ -1025,17 +1189,16 @@ function buildOrderedProcessCells(
     if (item.kind === "fileChange") {
       const diffCell = buildDiffCellForFileChangeItems([item]);
       if (diffCell) {
-        orderedCells.push(diffCell);
-        diffCells.push(diffCell);
+        fileChangeItems.push(item);
         const errorCells = buildErrorCellsForItem(item, options.assistantMsg, options.hasFinalAnswer);
         if (errorCells.length > 0) {
-          orderedCells.push(...errorCells);
-          emittedAnyErrors = true;
+          fileChangeErrorCells.push(...errorCells);
         }
         continue;
       }
     }
 
+    flushFileChangeItems();
     const activityCell = buildActivityCell(item, options);
     orderedCells.push(activityCell);
     activityCells.push(activityCell);
@@ -1046,17 +1209,22 @@ function buildOrderedProcessCells(
     }
   }
 
+  flushFileChangeItems();
+
   if (!emittedAnyErrors && options.fallbackErrorCells?.length) {
     orderedCells.push(...options.fallbackErrorCells);
     emittedAnyErrors = true;
   }
 
-  if (!emittedAnyErrors && options.assistantMsg.terminalStatus === "failed") {
+  const failureAlreadyVisible = orderedCells.some((cell) =>
+    cell.kind === "exec" && cell.status === "failed",
+  );
+  if (!emittedAnyErrors && options.assistantMsg.terminalStatus === "failed" && !failureAlreadyVisible) {
     orderedCells.push({
       kind: "error",
       id: `err-${options.assistantMsg.id}`,
       title: "处理失败",
-      message: options.assistantMsg.content || "Agent 处理过程中发生错误",
+      message: options.assistantMsg.failureMessage || options.assistantMsg.content || "Agent 处理时发生错误",
       source: "agent",
       recoverable: true,
       createdAt: options.assistantMsg.timestamp,
@@ -1077,12 +1245,17 @@ function extractErrorCells(
   hasFinalAnswer = false,
 ): ErrorCellState[] {
   const cells = items.flatMap((item) => buildErrorCellsForItem(item, assistantMsg, hasFinalAnswer));
-  if (cells.length === 0 && assistantMsg.terminalStatus === "failed") {
+  const failureAlreadyVisible = items.some((item) =>
+    item.kind === "commandExecution" &&
+    (item.status === "failed" || item.status === "blocked" || item.status === "timeout" || item.hasFailure) &&
+    (item.records ?? []).some((record) => isFailedToolRecord(record)),
+  );
+  if (cells.length === 0 && assistantMsg.terminalStatus === "failed" && !failureAlreadyVisible) {
     cells.push({
       kind: "error",
       id: `err-${assistantMsg.id}`,
       title: "处理失败",
-      message: assistantMsg.content || "Agent 处理过程中发生错误",
+      message: assistantMsg.failureMessage || assistantMsg.content || "Agent 处理时发生错误",
       source: "agent",
       recoverable: true,
       createdAt: assistantMsg.timestamp,
@@ -1100,51 +1273,49 @@ function buildErrorCellsForItem(
   const developerMode = useAppStore.getState().viewMode === "verbose";
   const userFacingToolError = (record: ToolCallRecord): string => {
     const raw = String(record.summary ?? "");
-    if (!developerMode && record.userSummary) {
+    const coordinatorNotice = coordinatorNoticeKind(`${record.summary ?? ""} ${record.displaySummary ?? ""}`);
+    if (!developerMode && coordinatorNotice) {
+      return userFacingCoordinatorNotice(coordinatorNotice);
+    }
+    if (!developerMode && record.userSummary && !isGenericToolFailureCopy(record.userSummary)) {
       return record.userSummary.slice(0, 300);
     }
-    if (!developerMode && record.errorInfo?.user_message) {
+    if (!developerMode && record.errorInfo?.user_message && !isGenericToolFailureCopy(record.errorInfo.user_message)) {
       return record.errorInfo.user_message.slice(0, 300);
     }
     if (developerMode) return raw.slice(0, 300);
-    if (record.name === "read_artifact" && /missing required (?:argument\(s\): )?(?:\['artifact_id'\]|artifact_id)/i.test(raw)) {
-      return "读取文件内容失败：缺少产物 ID。";
+    if (record.errorKind === "missing_generated_content") {
+      return "写入文件失败：模型没有提供文件路径或完整内容，已停止重复调用。";
     }
-    if (record.name === "read_file" && /missing required (?:argument\(s\): )?(?:\['file_path'\]|file_path|path)/i.test(raw)) {
-      return "读取文件失败：缺少文件路径。";
-    }
-    if (/missing required (?:argument\(s\): )?(?:\['url'\]|url)/i.test(raw)) {
-      return "读取网页失败：缺少 URL。";
-    }
-    if (/missing required (?:argument\(s\): )?(?:\['query'\]|query)/i.test(raw)) {
-      return "搜索失败：缺少搜索关键词。";
-    }
-    if (/Skipped repeated failed tool call|repeated failed tool call|反复尝试|重复/i.test(raw)) {
+    if (record.errorKind === "validation_error") return "工具调用缺少必要参数。";
+    if (record.errorKind === "repeat_guard") {
       return "工具调用已停止：模型连续尝试了相同的无效调用。";
     }
     if (!developerMode && isPermissionBlockedRecord(record)) {
-      return record.name === "read_file"
+      return isFileReadToolRecord(record)
         ? "读取文件被阻止：目标路径不在允许范围。"
         : "工具调用被权限策略阻止。";
     }
     return normalizeAgentErrorMessage(raw).slice(0, 300);
   };
   const userFacingToolTitle = (record: ToolCallRecord): string => {
-    if (!developerMode && isPermissionBlockedRecord(record)) {
-      return record.name === "read_file" ? "读取文件被权限策略阻止" : "工具调用被权限策略阻止";
+    if (!developerMode && coordinatorNoticeKind(`${record.summary ?? ""} ${record.displaySummary ?? ""}`)) {
+      return "分工已收敛";
     }
-    if (!developerMode && record.name === "read_artifact") return "读取文件内容失败";
-    if (!developerMode && record.name === "read_file") return "读取文件失败";
-    return `工具 ${record.name} 执行失败`;
+    if (!developerMode && isPermissionBlockedRecord(record)) {
+      return isFileReadToolRecord(record) ? "读取文件被权限策略阻止" : "工具调用被权限策略阻止";
+    }
+    return "工具调用未完成";
   };
   const isUserFacingToolFailure = (record: ToolCallRecord): boolean =>
-    Boolean(record.userSummary || record.errorInfo?.user_message) ||
+    Boolean(
+      (record.userSummary && !isGenericToolFailureCopy(record.userSummary)) ||
+      (record.errorInfo?.user_message && !isGenericToolFailureCopy(record.errorInfo.user_message)),
+    ) ||
     isPermissionBlockedRecord(record) ||
     isMissingRequiredArgumentRecord(record);
   const isProxyOrNetworkFailure = (record: ToolCallRecord): boolean => {
-    const text = `${record.summary ?? ""} ${record.displaySummary ?? ""}`;
-    if (record.providerErrorType === "network") return true;
-    return /407|proxy authentication required|代理鉴权失败|代理认证失败/i.test(text);
+    return record.providerErrorType === "network";
   };
 
   // Tool failures — hermes-style: individual tool errors are internal
@@ -1156,10 +1327,13 @@ function buildErrorCellsForItem(
   const hasNetworkFailure = (item.records ?? []).some((record) =>
     isFailedToolRecord(record) && isProxyOrNetworkFailure(record),
   );
-  if (!item.hasFailure && item.status !== "failed" && item.status !== "blocked" && !hasNetworkFailure)
+  if (!developerMode && item.kind === "commandExecution" && !hasNetworkFailure) {
+    return cells;
+  }
+  if (!item.hasFailure && item.status !== "failed" && item.status !== "blocked" && item.status !== "timeout" && !hasNetworkFailure)
     return cells;
   for (const record of item.records ?? []) {
-    const rawFailure = record.status === "failed" || record.status === "blocked";
+    const rawFailure = record.status === "failed" || record.status === "blocked" || record.status === "timeout";
     if (developerMode ? !rawFailure : !isFailedToolRecord(record))
       continue;
     if (!developerMode && isRepeatGuardRecord(record)) continue;
@@ -1196,13 +1370,11 @@ function buildErrorCellsForItem(
 }
 
 function extractPlanCell(
-  items: TurnActivityItem[],
   assistantMsg: ChatMessage,
+  includeGlobalPlan: boolean,
 ): Exclude<HistoryCellState, UserMessageCellState | StreamingAssistantTailCellState>[] {
-  const hasPlanningActivity = items.some((i) => i.kind === "planning");
-  if (!hasPlanningActivity) return [];
-
   const globalPlan = useAppStore.getState().plan;
+  if (!includeGlobalPlan) return [];
   if (!globalPlan) return [];
 
   // Map backend status ("draft" | "accepted" | "executing" | "completed" | "cancelled")
@@ -1255,24 +1427,21 @@ function buildTurnSummaryCell(
     diffCells: DiffCellState[];
     errorCells: ErrorCellState[];
   },
+  lang: Lang = "zh",
 ): TurnSummaryCellState | null {
   const items: TurnSummaryCellState["items"] = [];
   const categories = new Set<string>();
   const runningExec = cells.execCells.find((cell) => cell.status === "running");
   if (runningExec) {
-    categories.add("command");
-    items.push({
-      kind: "command",
-      label: "Running",
-      detail: shortCommand(runningExec.command),
-      tone: "neutral",
-    });
+    return null;
   } else if (cells.execCells.length > 0) {
     categories.add("command");
     const failed = cells.execCells.filter((cell) => cell.status === "failed").length;
+    const n = cells.execCells.length;
+    const commandCount = t(lang, `${n} 条命令`, `${n} command${n === 1 ? "" : "s"}`);
     items.push({
       kind: "command",
-      label: failed ? `${failed}/${cells.execCells.length} commands failed` : `${cells.execCells.length} command${cells.execCells.length === 1 ? "" : "s"}`,
+      label: commandCount,
       tone: failed ? "danger" : "success",
     });
   }
@@ -1280,9 +1449,10 @@ function buildTurnSummaryCell(
   const diff = cells.diffCells[0];
   if (diff) {
     categories.add("diff");
+    const n = diff.summary.modifiedFiles;
     items.push({
       kind: "diff",
-      label: `${diff.summary.modifiedFiles} file${diff.summary.modifiedFiles === 1 ? "" : "s"}`,
+      label: t(lang, `${n} 个文件`, `${n} file${n === 1 ? "" : "s"}`),
       detail: `+${diff.summary.added} -${diff.summary.deleted}`,
       tone: "neutral",
     });
@@ -1295,27 +1465,17 @@ function buildTurnSummaryCell(
     categories.add("source");
     items.push({
       kind: "source",
-      label: `${sourceCount} source${sourceCount === 1 ? "" : "s"}`,
-      tone: "neutral",
-    });
-  }
-
-  const runningActivity = cells.activityCells.find((cell) => cell.status === "running");
-  if (runningActivity && !runningExec && !isSourceSummaryActivity(runningActivity)) {
-    categories.add("activity");
-    items.push({
-      kind: "activity",
-      label: "Working",
-      detail: runningActivity.title,
+      label: t(lang, `${sourceCount} 个来源`, `${sourceCount} source${sourceCount === 1 ? "" : "s"}`),
       tone: "neutral",
     });
   }
 
   if (cells.errorCells.length > 0) {
     categories.add("error");
+    const n = cells.errorCells.length;
     items.push({
       kind: "error",
-      label: `${cells.errorCells.length} issue${cells.errorCells.length === 1 ? "" : "s"}`,
+      label: t(lang, `${n} 个问题`, `${n} issue${n === 1 ? "" : "s"}`),
       detail: cells.errorCells[0]?.title,
       tone: "danger",
     });
@@ -1378,11 +1538,60 @@ function buildStatusNoticeCell(
   };
 }
 
+function latestLiveTextBlock(blocks: ContentBlock[]): Extract<ContentBlock, { type: "text" }> | null {
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const block = blocks[index];
+    if (block.type !== "text") continue;
+    if (!isLiveAnswerTextBlock(block)) continue;
+    const activityAfterBlocks = blocks.slice(index + 1).filter((candidate) =>
+      candidate.type === "tool_call" ||
+      candidate.type === "progress" ||
+      candidate.type === "thinking" ||
+      candidate.type === "process"
+    );
+    const hasActivityAfter = activityAfterBlocks.length > 0;
+    const content = block.content.trim();
+    const phase = String(block.phase ?? "").toLowerCase();
+    const onlyGenericIterationAfter = activityAfterBlocks.length > 0 && activityAfterBlocks.every((candidate) => {
+      if (candidate.type !== "progress") return false;
+      const text = [candidate.phase, candidate.label, candidate.message, candidate.summary].filter(Boolean).join(" ");
+      return String(candidate.phase ?? "") === "iteration" || /Agent working|Iteration\s+\d+\s*\/\s*\d+|agent:iter/i.test(text);
+    });
+    // A draft text block that has real tool activity after it is preamble
+    // (e.g. "我先检查一下" before a tool call), not the live answer — don't keep
+    // it in the result area just because the provider tagged it final_answer,
+    // or it will jump result→process when the tool event lands. Only "stream +
+    // generic iteration progress after" is still treated as the live answer.
+    if (hasActivityAfter && phase !== "final" && !(block.source === "stream" && onlyGenericIterationAfter)) continue;
+    if (
+      !content ||
+      isGenericProcessPlaceholder(content) ||
+      isInternalCollaborationNarration(content) ||
+      isBareMarkdownMarker(content)
+    ) continue;
+    return block;
+  }
+  return null;
+}
+
+function isLiveAnswerTextBlock(block: Extract<ContentBlock, { type: "text" }>): boolean {
+    if (block.sealed === true) return false;
+    if (block.visibility !== "unsealed" && block.visibility !== "draft") return false;
+    if (String(block.phase ?? "").toLowerCase() === "commentary") return false;
+  if (block.role === "runtime") return false;
+  return block.source !== "model_preamble" && block.source !== "post_tool" && block.source !== "runtime";
+}
+
+function isBareMarkdownMarker(content: string): boolean {
+  return /^[\s•·*\-–—]+$/.test(content.trim());
+}
+
 // ── Turn Builder ────────────────────────────────────────────────────
 
 function buildTurn(
   userMsg: ChatMessage | null,
   assistantMsg: ChatMessage | null,
+  options: { dismissTransientRunErrors?: boolean; includeGlobalPlan?: boolean } = {},
 ): ChatTurnState {
   const userCell: UserMessageCellState | null = userMsg
     ? {
@@ -1390,11 +1599,18 @@ function buildTurn(
         id: userMsg.id,
         content: userMsg.content,
         attachments: userMsg.attachmentRefs?.map((a) => ({
+          id: a.id,
+          artifactId: a.artifactId,
+          docId: a.docId,
           name: a.name,
           type: a.mediaType,
           size: a.sizeBytes,
+          dataUrl: a.dataUrl,
         })),
         createdAt: userMsg.timestamp,
+        queueState: userMsg.queueState,
+        queuePosition: userMsg.queuePosition,
+        queueMessageId: userMsg.queueMessageId,
       }
     : null;
 
@@ -1415,17 +1631,24 @@ function buildTurn(
   // assistant-only turns) so an English chat doesn't show Chinese labels.
   const lang = detectLang(userMsg?.content || assistantMsg.content);
   const blocks = getContentBlocks(assistantMsg);
-  const projection = projectTurn(blocks, {
+  const projection = projectChatTurn(blocks, {
     isStreaming: assistantMsg.isStreaming,
     isThinkingStreaming: assistantMsg.isThinkingStreaming,
     terminalStatus:
       assistantMsg.terminalStatus === "failed" ? "failed" : undefined,
     artifactCount: assistantMsg.artifacts?.length,
-  });
+  }, assistantMsg.id);
+  const finalTextBlock = blocks.find(
+    (b): b is Extract<ContentBlock, { type: "text" }> =>
+      b.type === "text" && b.visibility === "final",
+  );
+  const hasCommittedFinalAnswerBlock = Boolean(finalTextBlock);
+  const providerCitations = finalTextBlock?.providerRaw?.citations;
   const effectiveCitations = mergeCitationsWithWebSearchFallback(
     assistantMsg.citations,
     blocks,
     projection.finalAnswer,
+    providerCitations,
   );
 
   const hasFinalAnswer = Boolean(projection.finalAnswer.trim());
@@ -1438,7 +1661,7 @@ function buildTurn(
     hasFinalAnswer,
     isStreaming: Boolean(assistantMsg.isStreaming),
     terminalFailed: assistantMsg.terminalStatus === "failed",
-  });
+  }).map((item) => refreshChatActivityItem(item, assistantMsg.id));
   const {
     orderedCells: processCells,
     activityCells,
@@ -1452,13 +1675,13 @@ function buildTurn(
     fallbackErrorCells: errorCells,
   });
 
-  const planCells = extractPlanCell(projectedActivityItems, assistantMsg);
+  const planCells = extractPlanCell(assistantMsg, Boolean(options.includeGlobalPlan));
   const summaryCell = buildTurnSummaryCell(assistantMsg, {
     activityCells,
     execCells,
     diffCells,
     errorCells,
-  });
+  }, lang);
 
   // Final answer
   const finalAnswerCell: AssistantMarkdownCellState | null = projection
@@ -1472,9 +1695,9 @@ function buildTurn(
         phase: "final",
         copyable: true,
         createdAt: assistantMsg.timestamp,
-        isStreaming: Boolean(assistantMsg.isStreaming),
+        isStreaming: Boolean(assistantMsg.isStreaming && !hasCommittedFinalAnswerBlock),
         source:
-          projection.finalAnswerSource === "send_message" ||
+          projection.finalAnswerSource === "reply" ||
           projection.finalAnswerSource === "fallback" ||
           projection.finalAnswerSource === "partial"
             ? projection.finalAnswerSource
@@ -1492,32 +1715,26 @@ function buildTurn(
   // Determine active cell during streaming
   let activeCell: HistoryCellState | null = null;
   const committedCells: CommittedCellState[] = [];
+  const liveTextBlock = assistantMsg.isStreaming ? latestLiveTextBlock(blocks) : null;
+  // Draft text is answer-only. It never creates process cells, and it is hidden
+  // once real activity appears after it in the turn.
+  if (
+    liveTextBlock &&
+    !hasFinalAnswer &&
+    (liveTextBlock.visibility === "draft" || liveTextBlock.visibility === "unsealed")
+  ) {
+    activeCell = {
+      kind: "streaming_assistant_tail",
+      id: liveTextBlock.segmentId || `${assistantMsg.id}-live-answer`,
+      partialMarkdown: liveTextBlock.content,
+      updatedAt: Date.now(),
+    };
+  }
 
   if (assistantMsg.isStreaming) {
-    const hasActivityRunning = projectedActivityItems.some(
-      (i) => i.status === "running" || i.status === "pending",
-    );
-
-    // Check if text is being streamed as final answer (no tool activity running)
-    const streamingText =
-      assistantMsg.content.trim() ||
-      blocks.some((b) => b.type === "text" && b.content.trim());
-
-    if (streamingText && !hasActivityRunning && !projection.finalAnswer) {
-      // Pure text streaming — show StreamingAssistantTailCell as active
-      activeCell = {
-        kind: "streaming_assistant_tail",
-        id: `${assistantMsg.id}-tail`,
-        partialMarkdown: assistantMsg.content,
-        updatedAt: Date.now(),
-      };
-      if (summaryCell) committedCells.push(summaryCell);
-      committedCells.push(...processCells, ...planCells);
-    } else {
-      if (summaryCell) committedCells.push(summaryCell);
-      committedCells.push(...processCells);
-      committedCells.push(...planCells);
-    }
+    if (summaryCell) committedCells.push(summaryCell);
+    committedCells.push(...processCells);
+    committedCells.push(...planCells);
   } else {
     // Not streaming — all cells are committed
     if (summaryCell) committedCells.push(summaryCell);
@@ -1525,13 +1742,20 @@ function buildTurn(
     committedCells.push(...planCells);
   }
 
+  const dismissTransientRunError = Boolean(
+    options.dismissTransientRunErrors &&
+    shouldDismissAssistantRunError(assistantMsg, finalAnswerCell),
+  );
+
   return {
     id: assistantMsg.id,
     userCell,
-    committedCells,
-    activeCell,
-    finalAnswerCell,
-    status: assistantMsg.isStreaming
+    committedCells: dismissTransientRunError ? [] : committedCells,
+    activeCell: dismissTransientRunError ? null : activeCell,
+    finalAnswerCell: dismissTransientRunError ? null : finalAnswerCell,
+    status: dismissTransientRunError
+      ? "completed"
+      : assistantMsg.isStreaming
       ? "streaming"
       : assistantMsg.terminalStatus === "failed"
         ? "failed"
@@ -1553,13 +1777,16 @@ function buildTurn(
  * per event. Keeps MessageList's per-event work O(active turn), not O(history).
  */
 interface CachedTurnEntry {
+  assistantMsg: ChatMessage;
   userMsg: ChatMessage | null;
   isStreaming: boolean;
   viewMode: string;
   plan: unknown;
+  includeGlobalPlan: boolean;
+  dismissTransientRunErrors: boolean;
   turn: ChatTurnState;
 }
-const turnProjectionCache = new WeakMap<ChatMessage, CachedTurnEntry>();
+const turnProjectionCache = new Map<string, CachedTurnEntry>();
 
 function projectAssistantTurnCached(
   assistantMsg: ChatMessage,
@@ -1567,25 +1794,34 @@ function projectAssistantTurnCached(
   isStreaming: boolean,
   viewMode: string,
   plan: unknown,
+  includeGlobalPlan: boolean,
   applyStreamingOverride: boolean,
+  dismissTransientRunErrors = false,
 ): ChatTurnState {
-  const cached = turnProjectionCache.get(assistantMsg);
+  const cached = turnProjectionCache.get(assistantMsg.id);
   if (
     cached &&
+    cached.assistantMsg === assistantMsg &&
     cached.userMsg === userMsg &&
     cached.isStreaming === isStreaming &&
     cached.viewMode === viewMode &&
-    cached.plan === plan
+    cached.plan === plan &&
+    cached.includeGlobalPlan === includeGlobalPlan &&
+    cached.dismissTransientRunErrors === dismissTransientRunErrors
   ) {
     return cached.turn;
   }
-  const turn = buildTurn(userMsg, assistantMsg);
+  const turn = buildTurn(userMsg, assistantMsg, { dismissTransientRunErrors, includeGlobalPlan });
   // Override streaming status with global flag (only for user-led turns, to
   // preserve the original per-branch behaviour).
   if (applyStreamingOverride && turn.status === "streaming" && !isStreaming) {
     turn.status = "completed";
   }
-  turnProjectionCache.set(assistantMsg, { userMsg, isStreaming, viewMode, plan, turn });
+  // Only cache complete turns. Streaming turns are constantly changing
+  // (incoming text chunks, tool calls) and must be re-projected every time.
+  if (!assistantMsg.isStreaming) {
+    turnProjectionCache.set(assistantMsg.id, { assistantMsg, userMsg, isStreaming, viewMode, plan, includeGlobalPlan, dismissTransientRunErrors, turn });
+  }
   return turn;
 }
 
@@ -1593,17 +1829,65 @@ const isTransientCommandBacklogSystemMessage = (msg: ChatMessage): boolean =>
   msg.role === "system" &&
   /^Error:\s*Too many pending commands; please wait for current work to finish\.?$/i.test(msg.content.trim());
 
+const isQuietSystemNoticeMessage = (msg: ChatMessage): boolean =>
+  msg.role === "system" &&
+  (
+    msg.id === "system-guidelines-updated" ||
+    /^Project guidelines have been updated\.?$/i.test(msg.content.trim())
+  );
+
+function runErrorText(text: string | undefined): string {
+  return String(text || "").replace(/^Error:\s*/i, "").replace(/\s+/g, " ").trim();
+}
+
+function isTransientRunErrorText(text: string | undefined): boolean {
+  const normalized = runErrorText(text);
+  return (
+    /the user interrupted the current run/i.test(normalized) ||
+    /tool calls failed before the assistant produced a reply/i.test(normalized) ||
+    /tool calls failed and the model did not produce a final reply/i.test(normalized)
+  );
+}
+
+function hasLaterUserMessage(messages: ChatMessage[], index: number): boolean {
+  return messages.slice(index + 1).some((message) => message.role === "user");
+}
+
+function shouldDismissSystemRunError(msg: ChatMessage, hasLaterUser: boolean): boolean {
+  return hasLaterUser && msg.role === "system" && isTransientRunErrorText(msg.content);
+}
+
+function shouldDismissAssistantRunError(
+  assistantMsg: ChatMessage,
+  finalAnswerCell: AssistantMarkdownCellState | null,
+): boolean {
+  if (finalAnswerCell?.markdownSource.trim()) return false;
+  if (assistantMsg.terminalStatus === "interrupted") return true;
+  if (assistantMsg.terminalStatus !== "failed") return false;
+  return isTransientRunErrorText([assistantMsg.failureMessage, assistantMsg.content].filter(Boolean).join(" "));
+}
+
 export function projectMessagesToTurns(
   messages: ChatMessage[],
   isStreaming: boolean,
 ): ChatTurnState[] {
   const { viewMode, plan } = useAppStore.getState();
+  const latestAssistantId = [...messages].reverse().find((message) => message.role === "assistant")?.id;
   const turns: ChatTurnState[] = [];
   let i = 0;
 
   while (i < messages.length) {
     const msg = messages[i];
+    if (isQuietSystemNoticeMessage(msg)) {
+      i += 1;
+      continue;
+    }
     if (isTransientCommandBacklogSystemMessage(msg)) {
+      i += 1;
+      continue;
+    }
+    const hasLaterUser = hasLaterUserMessage(messages, i);
+    if (shouldDismissSystemRunError(msg, hasLaterUser)) {
       i += 1;
       continue;
     }
@@ -1615,7 +1899,16 @@ export function projectMessagesToTurns(
           ? messages[i + 1]
           : null;
       const turn = assistantMsg
-        ? projectAssistantTurnCached(assistantMsg, userMsg, isStreaming, viewMode, plan, true)
+        ? projectAssistantTurnCached(
+            assistantMsg,
+            userMsg,
+            isStreaming,
+            viewMode,
+            plan,
+            assistantMsg.id === latestAssistantId,
+            true,
+            hasLaterUserMessage(messages, i + 1),
+          )
         : buildTurn(userMsg, null);
       turns.push(turn);
       i += assistantMsg ? 2 : 1;
@@ -1636,7 +1929,16 @@ export function projectMessagesToTurns(
       });
       i += 1;
     } else if (msg.role === "assistant") {
-      turns.push(projectAssistantTurnCached(msg, null, isStreaming, viewMode, plan, false));
+      turns.push(projectAssistantTurnCached(
+        msg,
+        null,
+        isStreaming,
+        viewMode,
+        plan,
+        msg.id === latestAssistantId,
+        false,
+        hasLaterUser,
+      ));
       i += 1;
     } else {
       // Unknown role: skip it rather than breaking the transcript.
@@ -1653,7 +1955,15 @@ function findProjectedTurnStartIndexes(messages: ChatMessage[]): number[] {
 
   while (i < messages.length) {
     const msg = messages[i];
+    if (isQuietSystemNoticeMessage(msg)) {
+      i += 1;
+      continue;
+    }
     if (isTransientCommandBacklogSystemMessage(msg)) {
+      i += 1;
+      continue;
+    }
+    if (shouldDismissSystemRunError(msg, hasLaterUserMessage(messages, i))) {
       i += 1;
       continue;
     }

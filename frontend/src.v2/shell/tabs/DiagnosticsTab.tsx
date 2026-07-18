@@ -74,44 +74,44 @@ export const DiagnosticsTab = () => {
 
   return (
     <div style={{ display: 'grid', gap: 10 }}>
-      <PanelHeader title="Diagnostics" meta={loading ? 'checking' : 'ready'} action={<SmallButton icon={<RefreshCw size={12} />} label="Refresh" onClick={refresh} />} />
+      <PanelHeader title="运行诊断" meta={loading ? '检查中' : '正常'} action={<SmallButton icon={<RefreshCw size={12} />} label="刷新" onClick={refresh} />} />
 
       {doctor?.error && <div style={errorStyle}>{doctor.error}</div>}
 
       <InfoCard>
-        <InfoRow label="Backend" value={String(doctor?.backend?.status ?? 'unknown')} tone={doctor?.backend?.status === 'ok' ? 'accent' : 'warning'} />
-        <InfoRow label="Sessions" value={String(doctor?.backend?.active_sessions ?? local.activeSessions)} />
-        <InfoRow label="Provider" value={String(doctor?.llm?.provider ?? 'unknown')} />
-        <InfoRow label="Model" value={String(doctor?.llm?.active_model ?? doctor?.llm?.current_model ?? local.model)} mono />
+        <InfoRow label="后端" value={doctor?.backend?.status === 'ok' ? '正常' : String(doctor?.backend?.status ?? '未知')} tone={doctor?.backend?.status === 'ok' ? 'accent' : 'warning'} />
+        <InfoRow label="会话" value={String(doctor?.backend?.active_sessions ?? local.activeSessions)} />
+        <InfoRow label="服务商" value={String(doctor?.llm?.provider ?? '未知')} />
+        <InfoRow label="模型" value={String(doctor?.llm?.active_model ?? doctor?.llm?.current_model ?? local.model)} mono />
       </InfoCard>
 
       <InfoCard>
-        <InfoRow label="Workspace" value={workspaceDisplayName(String((doctor?.workspace?.root ?? local.workspace) || ''), 'Computer')} mono />
-        <InfoRow label="Branch" value={branchDisplayName(String(doctor?.git?.branch ?? local.branch ?? '')) || '--'} />
-        <InfoRow label="Preview Pane" value={String(doctor?.preview?.url ?? local.preview ?? '--')} mono />
-        <InfoRow label="Terminal" value={`${local.terminals} sessions`} />
+        <InfoRow label="工作区" value={workspaceDisplayName(String((doctor?.workspace?.root ?? local.workspace) || ''), '本机')} mono />
+        <InfoRow label="分支" value={branchDisplayName(String(doctor?.git?.branch ?? local.branch ?? '')) || '--'} />
+        <InfoRow label="预览" value={String(doctor?.preview?.url ?? local.preview ?? '--')} mono />
+        <InfoRow label="终端" value={`${local.terminals} 个会话`} />
       </InfoCard>
 
       <InfoCard>
-        <InfoRow label="MCP" value={`${Array.isArray(doctor?.mcp) ? doctor?.mcp.length : local.mcpServers} servers`} tone={local.mcpErrors ? 'warning' : 'muted'} />
-        <InfoRow label="MCP errors" value={String(local.mcpErrors)} tone={local.mcpErrors ? 'warning' : 'muted'} />
-        <InfoRow label="Runtime" value={isDesktop() ? 'Electron desktop' : 'Web fallback'} />
+        <InfoRow label="MCP" value={`${Array.isArray(doctor?.mcp) ? doctor?.mcp.length : local.mcpServers} 个服务`} tone={local.mcpErrors ? 'warning' : 'muted'} />
+        <InfoRow label="MCP 错误" value={String(local.mcpErrors)} tone={local.mcpErrors ? 'warning' : 'muted'} />
+        <InfoRow label="运行环境" value={isDesktop() ? '桌面端' : '网页兼容模式'} />
       </InfoCard>
 
-      <SectionLabel label="Agent" />
+      <SectionLabel label="智能体能力" />
       <InfoCard>
-        <InfoRow label="Tools" value={formatAgentToolCounts(capabilities)} tone={capabilities ? 'accent' : 'muted'} />
+        <InfoRow label="工具" value={formatAgentToolCounts(capabilities)} tone={capabilities ? 'accent' : 'muted'} />
         <InfoRow label="MCP resources" value={capabilityFlagLabel(capabilities?.mcp_resource_bridge)} tone={capabilityFlagTone(capabilities?.mcp_resource_bridge)} />
         <InfoRow label="Deferred" value={formatDeferredCapability(capabilities)} tone={capabilityFlagTone(capabilities?.deferred_bridge)} />
-        <InfoRow label="Skills" value={formatSkillCapability(capabilities)} tone={capabilityFlagTone(capabilities?.skill_bridge)} />
+        <InfoRow label="技能" value={formatSkillCapability(capabilities)} tone={capabilityFlagTone(capabilities?.skill_bridge)} />
         <InfoRow label="MCP proxies" value={formatMcpProxyCount(capabilities)} tone={capabilities ? 'muted' : 'warning'} />
       </InfoCard>
 
-      <SectionLabel label="Inventory" />
+      <SectionLabel label="能力清单" />
       <InfoCard>
-        <InfoRow label="Source" value={formatCapabilitySource(capabilitySource)} tone={capabilitySourceTone(capabilitySource)} />
+        <InfoRow label="来源" value={formatCapabilitySource(capabilitySource)} tone={capabilitySourceTone(capabilitySource)} />
         <InfoRow label="Exposure" value={formatExposureBreakdown(capabilities)} tone={capabilities ? 'muted' : 'warning'} />
-        <InfoRow label="Commands" value={formatInventoryCount(effectiveCapabilities?.commands, capabilities?.commands, 'command', 'commands')} />
+        <InfoRow label="命令" value={formatInventoryCount(effectiveCapabilities?.commands, capabilities?.commands, 'command', 'commands')} />
         <InfoRow label="Tool sample" value={formatCapabilityPreview(capabilityToolNames(effectiveCapabilities?.tools))} mono />
         <InfoRow label="Command" value={formatCapabilityPreview(capabilityItemNames(effectiveCapabilities?.commands))} mono />
         <InfoRow label="Skill sample" value={formatCapabilityPreview(capabilityItemNames(effectiveCapabilities?.skills))} mono />
@@ -164,11 +164,11 @@ const ToolExposureCard = ({ toolViews }: { toolViews: AgentCapabilityToolView[] 
   if (exposure.total == null) return null
   return (
     <>
-      <SectionLabel label="Tool Exposure" />
+      <SectionLabel label="工具范围" />
       <InfoCard>
-        <InfoRow label="Direct tools" value={formatCapabilityPreview(exposure.direct)} tone={exposure.direct.length ? 'accent' : 'muted'} mono />
-        <InfoRow label="Deferred tools" value={formatCapabilityPreview(exposure.deferred)} tone={exposure.deferred.length ? 'muted' : 'default'} mono />
-        <InfoRow label="Hidden tools" value={formatCapabilityPreview(exposure.hidden)} tone={exposure.hidden.length ? 'warning' : 'muted'} mono />
+        <InfoRow label="直接可用" value={formatCapabilityPreview(exposure.direct)} tone={exposure.direct.length ? 'accent' : 'muted'} mono />
+        <InfoRow label="按需加载" value={formatCapabilityPreview(exposure.deferred)} tone={exposure.deferred.length ? 'muted' : 'default'} mono />
+        <InfoRow label="未开放" value={formatCapabilityPreview(exposure.hidden)} tone={exposure.hidden.length ? 'warning' : 'muted'} mono />
       </InfoCard>
     </>
   )

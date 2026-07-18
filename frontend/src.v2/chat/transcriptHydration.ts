@@ -1,4 +1,5 @@
 import { normalizeToolDiff, type ToolCallRecord } from "../lib/tool-call-reducer";
+import { isAgentProgressPhase } from "../protocol/streaming-types";
 import type {
   ArtifactPreview,
   ChatMessage,
@@ -24,6 +25,12 @@ export type BackendTranscriptMessage = {
   timestamp?: unknown;
   completedAt?: unknown;
   completed_at?: unknown;
+  terminalStatus?: unknown;
+  terminal_status?: unknown;
+  terminationReason?: unknown;
+  termination_reason?: unknown;
+  failureMessage?: unknown;
+  failure_message?: unknown;
 };
 
 const toTimestamp = (value: unknown): number => {
@@ -40,6 +47,14 @@ const toRole = (value: unknown): ChatMessage["role"] => {
   return "user";
 };
 
+const normalizeTerminalStatus = (value: unknown): ChatMessage["terminalStatus"] => {
+  if (value === "completed" || value === "partial" || value === "failed" || value === "interrupted") {
+    return value;
+  }
+  if (value === "cancelled") return "interrupted";
+  return undefined;
+};
+
 const toUsage = (value: unknown): MessageUsage | undefined => {
   if (!value || typeof value !== "object") return undefined;
   const usage = value as {
@@ -47,17 +62,29 @@ const toUsage = (value: unknown): MessageUsage | undefined => {
     output?: unknown;
     cacheRead?: unknown;
     cacheWrite?: unknown;
+    promptCacheTotal?: unknown;
+    promptCacheHitRate?: unknown;
+    reasoning?: unknown;
     input_tokens?: unknown;
     output_tokens?: unknown;
     cache_read_input_tokens?: unknown;
     cache_creation_input_tokens?: unknown;
+    prompt_cache_total_tokens?: unknown;
+    prompt_cache_hit_rate?: unknown;
+    reasoning_output_tokens?: unknown;
   };
   const input = Number(usage.input ?? usage.input_tokens ?? 0);
   const output = Number(usage.output ?? usage.output_tokens ?? 0);
   const cacheRead = Number(usage.cacheRead ?? usage.cache_read_input_tokens ?? 0);
   const cacheWrite = Number(usage.cacheWrite ?? usage.cache_creation_input_tokens ?? 0);
-  if (!input && !output && !cacheRead && !cacheWrite) return undefined;
-  return { input, output, cacheRead, cacheWrite };
+  const promptCacheTotal = Number(usage.promptCacheTotal ?? usage.prompt_cache_total_tokens);
+  const promptCacheHitRate = Number(usage.promptCacheHitRate ?? usage.prompt_cache_hit_rate);
+  const reasoning = Number(usage.reasoning ?? usage.reasoning_output_tokens ?? 0);
+  if (!input && !output && !cacheRead && !cacheWrite && !reasoning) return undefined;
+  const normalized: MessageUsage = { input, output, cacheRead, cacheWrite, reasoning };
+  if (Number.isFinite(promptCacheTotal)) normalized.promptCacheTotal = promptCacheTotal;
+  if (Number.isFinite(promptCacheHitRate)) normalized.promptCacheHitRate = promptCacheHitRate;
+  return normalized;
 };
 
 const toArray = <T,>(value: unknown): T[] => Array.isArray(value) ? value as T[] : [];
@@ -67,18 +94,6 @@ const isProgressStage = (value: unknown): value is "status" | "planning" | "tool
 
 const isProgressStatus = (value: unknown): value is "running" | "completed" | "failed" | "info" =>
   value === "running" || value === "completed" || value === "failed" || value === "info";
-
-const isProgressPhase = (value: unknown): value is "orienting" | "planning" | "model" | "tool" | "approval" | "verify" | "final" | "recover" | "status" | "iteration" =>
-  value === "orienting"
-  || value === "planning"
-  || value === "model"
-  || value === "tool"
-  || value === "approval"
-  || value === "verify"
-  || value === "final"
-  || value === "recover"
-  || value === "status"
-  || value === "iteration";
 
 const isProgressVisibility = (value: unknown): value is "timeline" | "compact" | "debug" =>
   value === "timeline" || value === "compact" || value === "debug";
@@ -91,6 +106,29 @@ const booleanValue = (value: unknown): boolean | undefined =>
 
 const numberValue = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isFinite(value) ? value : undefined;
+
+const legacyProjectionForToolName = (name: string): { resultKind: string; activityKind: string } => {
+  const normalized = name.toLowerCase();
+  if (/(?:command|terminal|shell|bash|powershell|cmd)/.test(normalized)) {
+    return { resultKind: "command", activityKind: "commandExecution" };
+  }
+  if (/(?:write|edit|patch|delete|remove|create|move|rename|save)/.test(normalized) && normalized !== "todo_write") {
+    return { resultKind: "edit", activityKind: "fileChange" };
+  }
+  if (/(?:web_search|search_web)/.test(normalized)) {
+    return { resultKind: "search", activityKind: "webSearch" };
+  }
+  if (/(?:web_fetch|fetch_page)/.test(normalized)) {
+    return { resultKind: "web", activityKind: "webSearch" };
+  }
+  if (normalized === "read_file" || normalized === "read_artifact") {
+    return { resultKind: "file", activityKind: "fileRead" };
+  }
+  if (/(?:list|grep|glob|search)/.test(normalized)) {
+    return { resultKind: "file", activityKind: "workspaceSearch" };
+  }
+  return { resultKind: "generic", activityKind: "genericTool" };
+};
 
 const stringArrayValue = (value: unknown): string[] | undefined => {
   if (!Array.isArray(value)) return undefined;
@@ -106,11 +144,12 @@ const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
   if (!id || !name) return null;
   const args = tool.args && typeof tool.args === "object" ? tool.args as Record<string, unknown> : {};
   const status = String(tool.status ?? "running");
+  const legacyProjection = legacyProjectionForToolName(name);
   return {
     id,
     name,
     args,
-    status: (status === "pending" || status === "running" || status === "success" || status === "failed" || status === "blocked" || status === "partial")
+    status: (status === "pending" || status === "running" || status === "success" || status === "failed" || status === "blocked" || status === "partial" || status === "timeout")
       ? status
       : "running",
     summary: typeof tool.summary === "string" ? tool.summary : undefined,
@@ -148,12 +187,12 @@ const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
       ? tool.resultKind
       : typeof tool.result_kind === "string"
         ? tool.result_kind
-        : undefined,
+        : legacyProjection.resultKind,
     activityKind: typeof tool.activityKind === "string"
       ? tool.activityKind
       : typeof tool.activity_kind === "string"
         ? tool.activity_kind
-        : undefined,
+        : legacyProjection.activityKind,
     limitation: typeof tool.limitation === "string" ? tool.limitation : undefined,
     provider: typeof tool.provider === "string" ? tool.provider : undefined,
     providerErrorType: typeof tool.providerErrorType === "string"
@@ -198,6 +237,17 @@ const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
       : typeof tool.input_summary === "string"
         ? tool.input_summary
         : undefined,
+    turnId: typeof tool.turnId === "string"
+      ? tool.turnId
+      : typeof tool.turn_id === "string"
+        ? tool.turn_id
+        : undefined,
+    taskId: typeof tool.taskId === "string"
+      ? tool.taskId
+      : typeof tool.task_id === "string"
+        ? tool.task_id
+        : undefined,
+    seq: numberValue(tool.seq),
     iterationId: typeof tool.iterationId === "string"
       ? tool.iterationId
       : typeof tool.iteration_id === "string"
@@ -255,6 +305,7 @@ const toBlocks = (value: unknown): ContentBlock[] | undefined => {
         source: stringValue(item.source),
         visibility: stringValue(item.visibility),
         is_raw_provider_reasoning: booleanValue(item.is_raw_provider_reasoning),
+        provider_reasoning_type: stringValue(item.provider_reasoning_type),
       });
       continue;
     }
@@ -294,6 +345,11 @@ const toBlocks = (value: unknown): ContentBlock[] | undefined => {
         displayScope: stringValue(item.displayScope ?? item.display_scope),
         panelHint: stringValue(item.panelHint ?? item.panel_hint),
         requiresAttention: booleanValue(item.requiresAttention ?? item.requires_attention),
+        skillName: stringValue(item.skillName ?? item.skill_name),
+        triggerMode: stringValue(item.triggerMode ?? item.trigger_mode),
+        sourceLevel: stringValue(item.sourceLevel ?? item.source_level),
+        reason: stringValue(item.reason),
+        tokenEstimate: numberValue(item.tokenEstimate ?? item.token_estimate),
         seq: numberValue(item.seq),
         order: numberValue(item.order),
         timestamp: toTimestamp(item.timestamp),
@@ -313,7 +369,7 @@ const toBlocks = (value: unknown): ContentBlock[] | undefined => {
         type: "progress",
         id,
         stage: isProgressStage(item.stage) ? item.stage : "status",
-        phase: isProgressPhase(item.phase) ? item.phase : undefined,
+        phase: isAgentProgressPhase(item.phase) ? item.phase : undefined,
         status: isProgressStatus(item.status) ? item.status : "info",
         message,
         label: typeof item.label === "string" ? item.label : undefined,
@@ -365,6 +421,69 @@ const legacyBlocksFor = (
   return blocks.length ? blocks : undefined;
 };
 
+const normalizeText = (value: string): string => value.trim().replace(/\s+/g, " ");
+
+const normalizeFinalTextForRepair = (value: string): string =>
+  value.replace(/\r\n?/g, "\n").trim();
+
+const isTimelineTextBlock = (block: ContentBlock): boolean =>
+  block.type === "text" &&
+  (
+    block.visibility === "timeline" ||
+    block.visibility === "debug" ||
+    block.visibility === "unsealed" ||
+    block.visibility === "draft" ||
+    block.role === "runtime" ||
+    block.source === "model_preamble" ||
+    block.source === "post_tool" ||
+    block.source === "runtime"
+  );
+
+const isRepairableUnsealedFinalBlock = (block: ContentBlock): boolean =>
+  block.type === "text" &&
+  block.visibility === "unsealed" &&
+  (!block.source || block.source === "stream");
+
+const isExplicitFinalTextBlock = (block: ContentBlock): block is Extract<ContentBlock, { type: "text" }> =>
+  block.type === "text" &&
+  Boolean(block.content.trim()) &&
+  (
+    block.visibility === "final" ||
+    block.phase === "final" ||
+    block.source === "model_final" ||
+    block.source === "reply" ||
+    block.source === "fallback" ||
+    block.source === "partial"
+  );
+
+const repairHydratedFinalTextBlock = (
+  message: BackendTranscriptMessage,
+  role: ChatMessage["role"],
+  blocks: ContentBlock[] | undefined,
+): ContentBlock[] | undefined => {
+  if (role !== "assistant" || !blocks?.length) return blocks;
+  if (blocks.some(isExplicitFinalTextBlock)) return blocks;
+  const finalContent = typeof message.content === "string" ? normalizeFinalTextForRepair(message.content) : "";
+  if (!finalContent) return blocks;
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const block = blocks[index];
+    if (block.type !== "text") continue;
+    if (isTimelineTextBlock(block) && !isRepairableUnsealedFinalBlock(block)) continue;
+    if (normalizeFinalTextForRepair(block.content) !== finalContent) continue;
+    return blocks.map((item, itemIndex) => (
+      itemIndex === index && item.type === "text"
+        ? {
+            ...item,
+            source: item.source && item.source !== "stream" ? item.source : "model_final",
+            visibility: "final",
+            phase: "final",
+          }
+        : item
+    ));
+  }
+  return blocks;
+};
+
 const toAttachmentRefs = (value: unknown): MessageAttachmentRef[] => {
   const items = toArray<Record<string, unknown>>(value);
   return items.flatMap((item) => {
@@ -381,6 +500,11 @@ const toAttachmentRefs = (value: unknown): MessageAttachmentRef[] => {
       artifactId,
       docId: String(item.doc_id ?? item.docId ?? ""),
       indexedChunks: Number(item.indexed_chunks ?? item.indexedChunks ?? 0),
+      dataUrl: typeof item.dataUrl === "string" ? item.dataUrl : undefined,
+      inputSource: item.input_source === "pasted_text" || item.inputSource === "pasted_text"
+        ? "pasted_text"
+        : "upload",
+      sourceCharCount: Number(item.source_char_count ?? item.sourceCharCount ?? 0) || undefined,
     }];
   });
 };
@@ -392,9 +516,7 @@ const dedupeHydratedMessages = (messages: ChatMessage[]): ChatMessage[] => {
     const isDuplicateUserEcho = previous
       && previous.role === "user"
       && message.role === "user"
-      && previous.content.trim() === message.content.trim()
-      && !previous.attachmentRefs?.length
-      && !message.attachmentRefs?.length;
+      && previous.id === message.id;
     if (isDuplicateUserEcho) continue;
     result.push(message);
   }
@@ -403,15 +525,20 @@ const dedupeHydratedMessages = (messages: ChatMessage[]): ChatMessage[] => {
 
 export const hydrateMessages = (messages: BackendTranscriptMessage[] | undefined): ChatMessage[] =>
   dedupeHydratedMessages((messages ?? []).map((message, index) => {
+    const role = toRole(message.role);
     const parsedBlocks = toBlocks(message.blocks);
     const fallbackToolCalls = toArray<unknown>(message.tool_calls ?? message.toolCalls).flatMap((item) => {
       const record = toToolCallRecord(item);
       return record ? [record] : [];
     });
-    const blocks = parsedBlocks ?? legacyBlocksFor(message, fallbackToolCalls);
+    const blocks = repairHydratedFinalTextBlock(
+      message,
+      role,
+      parsedBlocks ?? legacyBlocksFor(message, fallbackToolCalls),
+    );
     return {
       id: typeof message.id === "string" && message.id ? message.id : `m-${index}-${Date.now().toString(36)}`,
-      role: toRole(message.role),
+      role,
       content: typeof message.content === "string" ? message.content : "",
       blocks,
       artifacts: toArray<ArtifactPreview>(message.artifacts),
@@ -421,6 +548,10 @@ export const hydrateMessages = (messages: BackendTranscriptMessage[] | undefined
       timestamp: toTimestamp(message.timestamp),
       completedAt: message.completedAt != null || message.completed_at != null
         ? toTimestamp(message.completedAt ?? message.completed_at)
+        : undefined,
+      terminalStatus: normalizeTerminalStatus(message.terminalStatus ?? message.terminal_status),
+      failureMessage: typeof (message.failureMessage ?? message.failure_message) === "string"
+        ? String(message.failureMessage ?? message.failure_message)
         : undefined,
     };
   }));

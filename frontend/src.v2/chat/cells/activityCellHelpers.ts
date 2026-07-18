@@ -1,4 +1,9 @@
 import type { ActivityCellState } from "./cellTypes";
+import {
+  getToolActivityDetail,
+  registerToolActivityDetail,
+  type ToolActivityDetail,
+} from "../tool-calls/toolRendererRegistry";
 
 // ── Activity detail types ──────────────────────────────────
 
@@ -6,9 +11,12 @@ export interface ActivityDetail {
   label: string;
   target: string;
   targetKind: "file" | "url" | "text";
+  lineInfo?: string;
   count: number;
   durationMs: number | null;
 }
+
+type ActivityToolRecord = NonNullable<ActivityCellState["toolCallRecords"]>[number];
 
 // ── Text formatting ────────────────────────────────────────
 
@@ -44,10 +52,7 @@ function isMojibake(value: string): boolean {
 export function readableTimelineTitle(cell: ActivityCellState): string {
   const title = readableFallback(cell.title || "").trim();
   if (cell.activityKind === "reasoning" || cell.activityKind === "planning" || cell.activityKind === "providerReasoning") {
-    if (!title || title === "Thinking" || title === "Reasoning") {
-      return cell.status === "running" ? "正在思考" : "思考过程";
-    }
-    return title;
+    return title === "Thinking" || title === "Reasoning" ? "" : title;
   }
   if (title) return title;
   return readableToolName(cell);
@@ -76,7 +81,7 @@ export function readableToolName(cell: ActivityCellState): string {
     case "reasoning":
     case "planning":
     case "providerReasoning":
-      return "正在思考";
+      return "";
     case "genericTool":
       return first?.name === "todo_write" ? "已更新计划" : (first?.name ?? "已调用工具");
     default:
@@ -142,6 +147,68 @@ function detailTargetKind(target: string, preferred: ActivityDetail["targetKind"
   return target ? preferred : "text";
 }
 
+// ── Read-file line metadata ───────────────────────────────
+
+export function readFileLineInfoLabel(record: ActivityToolRecord): string {
+  const range = readFileLineRangeLabel(record);
+  if (range) return range;
+  const totalLines = readFileTotalLineCount(record);
+  return totalLines ? `L1-L${totalLines}` : "";
+}
+
+function readFileLineRangeLabel(record: ActivityToolRecord): string {
+  if (!/^read_file$/i.test(record.name)) return "";
+  const args = record.args ?? {};
+  const start = positiveIntArg(args.start_line ?? args.startLine ?? args.line);
+  const end = positiveIntArg(args.end_line ?? args.endLine);
+  if (start && end) return `L${start}-L${end}`;
+  if (start) return `L${start}+`;
+  if (end) return `L1-L${end}`;
+  return "";
+}
+
+function readFileTotalLineCount(record: ActivityToolRecord): number | null {
+  if (!/^read_file$/i.test(record.name)) return null;
+  for (const text of [record.summary, record.contentPreview]) {
+    const count = readFileTotalLineCountFromText(text);
+    if (count) return count;
+  }
+  return null;
+}
+
+function readFileTotalLineCountFromText(text: string | undefined): number | null {
+  if (!text) return null;
+
+  const artifactHeader = text.match(/^File .+ \((\d+) lines, approx [^)]+\) was saved as an artifact\./m);
+  const artifactLines = positiveIntArg(artifactHeader?.[1]);
+  if (artifactLines) return artifactLines;
+
+  let maxLineNumber = 0;
+  for (const match of text.matchAll(/^\s*(\d+)→/gm)) {
+    const lineNumber = positiveIntArg(match[1]);
+    if (lineNumber && lineNumber > maxLineNumber) maxLineNumber = lineNumber;
+  }
+  if (maxLineNumber > 0) return maxLineNumber;
+
+  const inlineContent = text.match(/^([\s\S]*?)\n\n\[(?:content_hash|range_hash):[^\]]+\](?:\n\[range only;[^\]]+\])?\s*$/);
+  if (inlineContent?.[1] != null) {
+    return inlineContent[1].split(/\r?\n/).length;
+  }
+  return null;
+}
+
+function positiveIntArg(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const intValue = Math.trunc(value);
+    return intValue > 0 ? intValue : null;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number.parseInt(value.trim(), 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+  return null;
+}
+
 // ── Record details ─────────────────────────────────────────
 
 function describeTodos(value: unknown): string {
@@ -161,23 +228,97 @@ function describeTodos(value: unknown): string {
   return parts.join("，");
 }
 
+function registerActivityDetailProvider(
+  names: string[],
+  provider: (record: ActivityToolRecord, args: Record<string, unknown>, name: string) => ToolActivityDetail,
+): void {
+  for (const toolName of names) {
+    registerToolActivityDetail(toolName, ({ record, args, name }) => provider(record, args, name));
+  }
+}
+
+function registerBuiltInActivityDetailProviders(): void {
+  registerActivityDetailProvider(["todo_write"], (_record, args) => ({
+    label: "任务",
+    target: describeTodos(args.todos),
+    targetKind: "text",
+  }));
+
+  registerActivityDetailProvider(["read_artifact"], (_record, args) => ({
+    label: "读取",
+    target: "完整内容",
+    targetKind: "text",
+  }));
+
+  registerActivityDetailProvider(["read_file"], (record, args) => {
+    const target = stringArg(args.file_path ?? args.path ?? args.target ?? "");
+    return {
+      label: "读取",
+      target,
+      targetKind: detailTargetKind(target, "file"),
+      lineInfo: readFileLineInfoLabel(record),
+    };
+  });
+
+  registerActivityDetailProvider(["write_file"], (_record, args) => {
+    const target = stringArg(args.file_path ?? args.path ?? args.target ?? "");
+    return { label: "写入", target, targetKind: detailTargetKind(target, "file") };
+  });
+
+  registerActivityDetailProvider(["edit_file", "apply_patch"], (_record, args) => {
+    const target = stringArg(args.file_path ?? args.path ?? args.target ?? "");
+    return { label: "编辑", target, targetKind: detailTargetKind(target, "file") };
+  });
+
+  registerActivityDetailProvider(["grep", "grep_files", "glob", "glob_files", "list_files", "fuzzy_search"], (_record, args) => ({
+    label: "搜索",
+    target: stringArg(args.pattern ?? args.query ?? args.path ?? args.directory ?? ""),
+    targetKind: "text",
+  }));
+
+  registerActivityDetailProvider(["run_command", "shell_command", "bash", "powershell", "terminal"], (_record, args) => ({
+    label: "运行",
+    target: stringArg(args.command ?? args.cmd ?? args.script ?? ""),
+    targetKind: "text",
+  }));
+
+  registerActivityDetailProvider(["web_search", "search_web"], (_record, args) => ({
+    label: "搜索",
+    target: stringArg(args.query ?? args.q ?? ""),
+    targetKind: "text",
+  }));
+
+  registerActivityDetailProvider(["web_fetch"], (record) => {
+    const target = webTarget(record);
+    return { label: "读取", target, targetKind: detailTargetKind(target, "url") };
+  });
+}
+
+registerBuiltInActivityDetailProviders();
+
 function describeRecordDetail(
-  record: NonNullable<ActivityCellState["toolCallRecords"]>[number],
-  _developerMode = false,
-): Pick<ActivityDetail, "label" | "target" | "targetKind"> {
+  record: ActivityToolRecord,
+  developerMode = false,
+): Pick<ActivityDetail, "label" | "target" | "targetKind" | "lineInfo"> {
   const args = record.args ?? {};
   const name = record.name.toLowerCase();
+  const registered = getToolActivityDetail(record.name)?.({ record, args, name, developerMode });
+  if (registered) return registered;
 
   if (name === "todo_write") {
     return { label: "任务", target: describeTodos(args.todos), targetKind: "text" };
   }
   if (/read_artifact/i.test(name)) {
-    const target = stringArg(args.artifact_id ?? args.artifact_ref ?? "");
-    return { label: "读取", target, targetKind: "text" };
+    return { label: "读取", target: "完整内容", targetKind: "text" };
   }
   if (/read_file/i.test(name)) {
     const target = stringArg(args.file_path ?? args.path ?? args.target ?? "");
-    return { label: "读取", target, targetKind: detailTargetKind(target, "file") };
+    return {
+      label: "读取",
+      target,
+      targetKind: detailTargetKind(target, "file"),
+      lineInfo: readFileLineInfoLabel(record),
+    };
   }
   if (/write_file/i.test(name)) {
     const target = stringArg(args.file_path ?? args.path ?? args.target ?? "");
@@ -212,15 +353,15 @@ export function describeRecordDetails(
 ): ActivityDetail[] {
   const details = new Map<string, ActivityDetail>();
   for (const record of records) {
-    const { label, target, targetKind } = describeRecordDetail(record, developerMode);
-    const key = `${label}\n${targetKind}\n${canonicalActivityTarget(target, targetKind)}`;
+    const { label, target, targetKind, lineInfo } = describeRecordDetail(record, developerMode);
+    const key = `${label}\n${targetKind}\n${canonicalActivityTarget(target, targetKind)}\n${lineInfo ?? ""}`;
     const existing = details.get(key);
     if (existing) {
       existing.count += 1;
       existing.durationMs = (existing.durationMs ?? 0) + (record.durationMs ?? 0);
       continue;
     }
-    details.set(key, { label, target, targetKind, count: 1, durationMs: record.durationMs ?? null });
+    details.set(key, { label, target, targetKind, lineInfo, count: 1, durationMs: record.durationMs ?? null });
   }
   return [...details.values()];
 }
@@ -244,8 +385,17 @@ export function getOutputPreview(records?: NonNullable<ActivityCellState["toolCa
 function recordOutputText(record: NonNullable<ActivityCellState["toolCallRecords"]>[number]): string {
   const direct = record.outputPreview?.trim() || record.contentPreview?.trim();
   if (direct) return direct;
+  const summaryOutput = commandResultOutputText(record.summary);
+  if (summaryOutput) return summaryOutput;
   if (/^read_artifact$/i.test(record.name)) return record.summary?.trim() || "";
   return "";
+}
+
+function commandResultOutputText(text: string | undefined): string {
+  const raw = String(text || "").trimEnd();
+  if (!raw) return "";
+  const withoutStatus = raw.replace(/^Exit code:\s*-?\d+(?:\s+\(failed\))?\s*(?:\r?\n){0,2}/i, "");
+  return withoutStatus.trimEnd();
 }
 
 // ── Long running ───────────────────────────────────────────

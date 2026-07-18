@@ -28,6 +28,7 @@ export interface FsFileResponse {
   size_bytes?: number;
   modifiedAt?: string;
   modified_at?: string;
+  encoding?: "utf-8" | "utf-8-bom" | "utf-16le" | "utf-16be" | "gb18030" | string;
 }
 
 export type FsCompareWriteResult =
@@ -40,6 +41,15 @@ export interface PtySession {
   pid?: number;
   shell: string;
   cwd: string;
+  output?: string;
+  outputChars?: number;
+  totalOutputChars?: number;
+  outputStartCursor?: number;
+  outputEndCursor?: number;
+  truncated?: boolean;
+  isAlive?: boolean;
+  exitCode?: number;
+  exitedAt?: number;
 }
 
 export interface DesktopEnvInfo {
@@ -94,10 +104,6 @@ export interface BrowserActionResult {
   screenshot: BrowserScreenshotResult;
 }
 
-export interface BrowserNavigateOptions {
-  allowPrivateNetwork?: boolean;
-}
-
 interface MiniCodeDesktop {
   platformInfo: { isDesktop: boolean; platform: string; arch: string };
   windowControls: {
@@ -105,10 +111,26 @@ interface MiniCodeDesktop {
     maximize(): Promise<void>;
     close(): Promise<void>;
   };
-  notify(payload: { title: string; body: string }): Promise<void>;
+  notify(payload: {
+    title: string;
+    body: string;
+    target?: { kind: "conversation"; conversationId: string };
+  }): Promise<void>;
+  onDeepLink(callback: (payload: {
+    id: string;
+    target: { kind: "conversation"; conversationId: string } | { kind: "url"; url: string };
+  }) => void): (() => void) | void;
+  ackDeepLink(id: string): Promise<boolean>;
+  updates: {
+    check(): Promise<boolean>;
+    download(): Promise<boolean>;
+    install(): Promise<boolean>;
+    onStatus(callback: (payload: { status: string; version?: string; percent?: number; message?: string }) => void): (() => void) | void;
+  };
   pickDirectory(): Promise<string | null>;
   trustWorkspace(path: string): Promise<string | null>;
-  openExternal(target: string): Promise<void>;
+  openExternal(target: string): Promise<boolean>;
+  openPath(target: string): Promise<boolean>;
   revealPath(target: string): Promise<void>;
   diagnostics: { export(): Promise<unknown> };
   fs: {
@@ -133,9 +155,11 @@ interface MiniCodeDesktop {
     write(sessionId: string, data: string): Promise<void>;
     resize(sessionId: string, cols: number, rows: number): Promise<void>;
     kill(sessionId: string): Promise<void>;
-    list(): Promise<{ sessionId?: string; session_id?: string; pid?: number; shell?: string; cwd?: string }[]>;
-    onData(cb: (data: { sessionId: string; data: string }) => void): void;
-    onExit(cb: (data: { sessionId: string; exitCode: number }) => void): void;
+    list(): Promise<Record<string, unknown>[]>;
+    snapshot(sessionId: string, maxChars?: number): Promise<Record<string, unknown> | null>;
+    ackExit(sessionId: string): Promise<boolean>;
+    onData(cb: (data: { sessionId: string; data: string; startCursor?: number; endCursor?: number }) => void): (() => void) | void;
+    onExit(cb: (data: { sessionId: string; exitCode: number }) => void): (() => void) | void;
   };
   env: {
     detect(): Promise<Partial<DesktopEnvInfo>>;
@@ -143,7 +167,7 @@ interface MiniCodeDesktop {
   browser: {
     discover(endpoint?: string): Promise<BrowserDiscoveryResult>;
     captureScreenshot(endpoint: string | undefined, targetId: string): Promise<BrowserScreenshotResult>;
-    navigate(endpoint: string | undefined, targetId: string, url: string, options?: BrowserNavigateOptions): Promise<BrowserActionResult>;
+    navigate(endpoint: string | undefined, targetId: string, url: string): Promise<BrowserActionResult>;
     click(endpoint: string | undefined, targetId: string, selector: string): Promise<BrowserActionResult>;
     type(endpoint: string | undefined, targetId: string, selector: string, text: string): Promise<BrowserActionResult>;
   };
@@ -160,7 +184,8 @@ declare global {
   }
 }
 
-export const runtime = () => window.__MINICODE_RUNTIME__;
+export const runtime = () =>
+  typeof window !== "undefined" ? window.__MINICODE_RUNTIME__ : undefined;
 
 export const desktop = (): MiniCodeDesktop | undefined => runtime()?.desktop;
 
@@ -357,11 +382,56 @@ const normalizePtySession = (session: unknown, fallbackCwd = ""): PtySession | n
       ? value.session_id
       : "";
   if (!sessionId) return null;
+  const output = typeof value.output === "string" ? value.output : undefined;
+  const outputChars = typeof value.outputChars === "number"
+    ? value.outputChars
+    : typeof value.output_chars === "number"
+      ? value.output_chars
+      : undefined;
+  const totalOutputChars = typeof value.totalOutputChars === "number"
+    ? value.totalOutputChars
+    : typeof value.total_output_chars === "number"
+      ? value.total_output_chars
+      : undefined;
+  const outputStartCursor = typeof value.outputStartCursor === "number"
+    ? value.outputStartCursor
+    : typeof value.output_start_cursor === "number"
+      ? value.output_start_cursor
+      : undefined;
+  const outputEndCursor = typeof value.outputEndCursor === "number"
+    ? value.outputEndCursor
+    : typeof value.output_end_cursor === "number"
+      ? value.output_end_cursor
+      : undefined;
+  const isAlive = typeof value.isAlive === "boolean"
+    ? value.isAlive
+    : typeof value.is_alive === "boolean"
+      ? value.is_alive
+      : undefined;
+  const exitCode = typeof value.exitCode === "number"
+    ? value.exitCode
+    : typeof value.exit_code === "number"
+      ? value.exit_code
+      : undefined;
+  const exitedAt = typeof value.exitedAt === "number"
+    ? value.exitedAt
+    : typeof value.exited_at === "number"
+      ? value.exited_at
+      : undefined;
   return {
     sessionId,
     pid: typeof value.pid === "number" ? value.pid : undefined,
     shell: typeof value.shell === "string" ? value.shell : "shell",
     cwd: typeof value.cwd === "string" ? value.cwd : fallbackCwd,
+    ...(output !== undefined ? { output } : {}),
+    ...(outputChars !== undefined ? { outputChars } : {}),
+    ...(totalOutputChars !== undefined ? { totalOutputChars } : {}),
+    ...(outputStartCursor !== undefined ? { outputStartCursor } : {}),
+    ...(outputEndCursor !== undefined ? { outputEndCursor } : {}),
+    ...(typeof value.truncated === "boolean" ? { truncated: value.truncated } : {}),
+    ...(isAlive !== undefined ? { isAlive } : {}),
+    ...(exitCode !== undefined ? { exitCode } : {}),
+    ...(exitedAt !== undefined ? { exitedAt } : {}),
   };
 };
 
@@ -375,6 +445,7 @@ export const ptySpawn = async (cwd?: string): Promise<PtySession | null> => {
 export const ptyWrite = (sessionId: string, data: string) => desktop()?.pty.write(sessionId, data);
 export const ptyResize = (sessionId: string, cols: number, rows: number) => desktop()?.pty.resize(sessionId, cols, rows);
 export const ptyKill = (sessionId: string) => desktop()?.pty.kill(sessionId);
+export const ptyAckExit = (sessionId: string) => desktop()?.pty.ackExit(sessionId);
 export const ptyList = async (): Promise<PtySession[]> => {
   try {
     const sessions = await desktop()?.pty.list();
@@ -385,10 +456,18 @@ export const ptyList = async (): Promise<PtySession[]> => {
     return [];
   }
 };
+export const ptySnapshot = async (sessionId: string, maxChars = 80_000): Promise<PtySession | null> => {
+  try {
+    return normalizePtySession(await desktop()?.pty.snapshot(sessionId, maxChars));
+  } catch {
+    return null;
+  }
+};
 
 // --- Shell / OS ---
 
 export const openExternal = (target: string) => desktop()?.openExternal(target);
+export const openPath = (target: string) => desktop()?.openPath(target);
 export const revealPath = (target: string) => desktop()?.revealPath(target);
 export const exportDiagnostics = () => desktop()?.diagnostics.export();
 export const browserDiscover = async (endpoint?: string): Promise<BrowserDiscoveryResult | null> => {
@@ -413,10 +492,9 @@ export const browserNavigate = async (
   endpoint: string | undefined,
   targetId: string,
   url: string,
-  options?: BrowserNavigateOptions,
 ): Promise<BrowserActionResult | null> => {
   try {
-    return (await desktop()?.browser.navigate(endpoint, targetId, url, options)) ?? null;
+    return (await desktop()?.browser.navigate(endpoint, targetId, url)) ?? null;
   } catch {
     return null;
   }

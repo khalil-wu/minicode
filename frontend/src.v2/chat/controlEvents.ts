@@ -40,6 +40,9 @@ const applyApprovalRequest = (
     conversationId?: string;
     toolName: string;
     args: Record<string, unknown>;
+    sourceAgent?: string;
+    sourceThread?: string;
+    sourceTool?: string;
     diff?: unknown;
   },
 ) => {
@@ -52,6 +55,9 @@ const applyApprovalRequest = (
       conversationId: request.conversationId,
       toolName: request.toolName,
       args: request.args,
+      sourceAgent: request.sourceAgent,
+      sourceThread: request.sourceThread,
+      sourceTool: request.sourceTool,
     });
     return;
   }
@@ -95,6 +101,9 @@ const applyApprovalRequest = (
     protocol: request.protocol,
     conversationId: request.conversationId,
     toolName: request.toolName,
+    sourceAgent: request.sourceAgent,
+    sourceThread: request.sourceThread,
+    sourceTool: request.sourceTool,
     diff: patch || (typeof request.diff === "string" ? request.diff : JSON.stringify(request.diff, null, 2)),
     files,
     selectedPath: files[0]?.path,
@@ -103,12 +112,15 @@ const applyApprovalRequest = (
     fileDecisions: {},
     lineComments: [],
   });
-  s.addPanel({ id: "approval-diff", kind: "diff", label: "Diff Review" });
   s.setDiffReview({
     requestId: request.requestId,
     protocol: request.protocol,
     conversationId: request.conversationId,
-    diff: typeof request.diff === "string" ? request.diff : JSON.stringify(request.diff, null, 2),
+    sourceAgent: request.sourceAgent,
+    sourceThread: request.sourceThread,
+    sourceTool: request.sourceTool,
+    diff: patch || (typeof request.diff === "string" ? request.diff : JSON.stringify(request.diff, null, 2)),
+    filePath: files.length === 1 ? files[0]?.path : files.length > 1 ? `${files.length} files` : undefined,
   });
 };
 
@@ -129,6 +141,9 @@ export const handleControlEvent = (e: ServerEvent): boolean => {
           options?: unknown;
           choices?: unknown;
           allowed_values?: unknown;
+          source_agent?: string;
+          source_thread?: string;
+          source_tool?: string;
         };
       };
       const request = ev.request ?? {};
@@ -141,6 +156,9 @@ export const handleControlEvent = (e: ServerEvent): boolean => {
           conversationId,
           toolName: request.tool_name || "tool",
           args: request.input ?? {},
+          sourceAgent: request.source_agent,
+          sourceThread: request.source_thread,
+          sourceTool: request.source_tool,
           diff: request.diff,
         });
         return true;
@@ -164,6 +182,9 @@ export const handleControlEvent = (e: ServerEvent): boolean => {
         conversationId: eventConversationId(e),
         toolName: e.tool_name,
         args: e.args ?? {},
+        sourceAgent: (e as unknown as { source_agent?: string }).source_agent,
+        sourceThread: (e as unknown as { source_thread?: string }).source_thread,
+        sourceTool: (e as unknown as { source_tool?: string }).source_tool,
         diff: e.diff,
       });
       return true;

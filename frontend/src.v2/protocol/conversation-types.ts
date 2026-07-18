@@ -19,6 +19,9 @@ export type ConversationServerEventType =
   // Context lifecycle
   | "context_usage"
   | "context_compacted"
+  | "context_forked"
+  | "context_ledger"
+  | "context_side_query_result"
   | "budget_update"
   | "budget.warning"
   // Conversation runtime
@@ -28,6 +31,7 @@ export type ConversationServerEventType =
   | "goal.updated"
   | "conversation.list"
   | "conversation.switched"
+  | "user_message.queue.updated"
   // LLM settings
   | "llm.model.updated";
 
@@ -38,6 +42,8 @@ export type ConversationServerEventType =
 export type ConversationClientCommandType =
   // Chat
   | "user_message"
+  | "user_message.queue.cancel"
+  | "user_message.queue.steer"
   | "answer"
   | "interrupt"
   | "ping"
@@ -51,6 +57,7 @@ export type ConversationClientCommandType =
   | "conversation.switch"
   | "conversation.list"
   | "conversation.clear"
+  | "conversation.truncate"
   | "conversation.delete"
   | "conversation.archive"
   | "conversation.unarchive"
@@ -59,10 +66,16 @@ export type ConversationClientCommandType =
   | "conversation.permission_mode.set"
   | "conversation.goal.set"
   | "conversation.worktree.cleanup"
+  | "conversation.worktree.handoff.preflight"
+  | "conversation.worktree.handoff.execute"
   | "conversation.permission.rules.list"
   | "conversation.permission.rules.add"
   | "conversation.permission.rules.remove"
   | "permissions.content_rule.add"
+  | "context.compact"
+  | "context.fork"
+  | "context.ledger"
+  | "context.side_query"
   // LLM
   | "llm.model.set"
   | "llm.config.set";
@@ -188,8 +201,22 @@ export interface LlmModelUpdatedEvent {
   model?: string | null;
   current_model?: string | null;
   provider?: string | null;
+  provider_id?: string | null;
+  base_url?: string | null;
+  wire_api?: string | null;
   available_models?: string[];
+  models_source?: string;
   working_directory?: string | null;
+}
+
+export interface UserMessageQueueUpdatedEvent {
+  type: "user_message.queue.updated";
+  status: "queued" | "dequeued" | "cancelled";
+  conversation_id: string;
+  message_id: string;
+  user_message_id?: string;
+  position?: number;
+  reason?: string;
 }
 
 export interface UserMessageCommand {
@@ -200,7 +227,25 @@ export interface UserMessageCommand {
   primaryFile?: string;
   activeTabPath?: string;
   permission_mode?: "default" | "plan" | "confirm" | "bypass" | "auto" | "accept_edits";
+  agent_mode?: "build" | "plan" | "review" | "explore" | "coordinator" | "subagent" | string;
   attachments?: Record<string, unknown>[];
+  assistant_message_id?: string;
+  user_message_id?: string;
+  queue_if_busy?: boolean;
+}
+
+export interface UserMessageQueueCancelCommand {
+  type: "user_message.queue.cancel";
+  conversation_id: string;
+  message_id: string;
+  user_message_id?: string;
+}
+
+export interface UserMessageQueueSteerCommand {
+  type: "user_message.queue.steer";
+  conversation_id: string;
+  message_id: string;
+  user_message_id?: string;
 }
 
 export interface ApprovalCommand {
@@ -228,6 +273,7 @@ export interface PingCommand {
 export interface ReadArtifactCommand {
   type: "read_artifact";
   artifact_id: string;
+  purpose?: "preview" | "image_preview" | "attachment";
 }
 
 export interface ConversationCreateCommand {
@@ -250,6 +296,13 @@ export interface ConversationClearCommand {
   conversation_id?: string;
 }
 
+export interface ConversationTruncateCommand {
+  type: "conversation.truncate";
+  conversation_id: string;
+  truncate_before_message_id: string;
+  retained_message_ids?: string[];
+}
+
 export interface ConversationDeleteCommand {
   type: "conversation.delete";
   conversation_id: string;
@@ -261,6 +314,19 @@ export interface ConversationWorktreeCleanupCommand {
   type: "conversation.worktree.cleanup";
   conversation_id: string;
   force?: boolean;
+}
+
+export interface ConversationWorktreeHandoffPreflightCommand {
+  type: "conversation.worktree.handoff.preflight";
+  conversation_id: string;
+  target: "local" | "worktree";
+}
+
+export interface ConversationWorktreeHandoffExecuteCommand {
+  type: "conversation.worktree.handoff.execute";
+  conversation_id: string;
+  target: "local" | "worktree";
+  fingerprint: string;
 }
 
 export interface ConversationArchiveCommand {

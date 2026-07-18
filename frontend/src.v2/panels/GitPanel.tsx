@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ExternalLink, GitBranch, GitCompare, RefreshCw, Trash2 } from "lucide-react";
 import { useAppStore } from "../stores";
 import {
@@ -37,24 +37,33 @@ export const GitPanel = () => {
   const [selectedFile, setSelectedFile] = useState("");
   const [diff, setDiff] = useState("");
   const [loading, setLoading] = useState(false);
+  const [repoError, setRepoError] = useState("");
+  const [diffError, setDiffError] = useState("");
+  const repoEpochRef = useRef(0);
+  const diffEpochRef = useRef(0);
   const [worktreeAction, setWorktreeAction] = useState("");
 
   const refresh = useCallback(async () => {
+    const epoch = ++repoEpochRef.current;
+    const directory = workingDirectory;
     setLoading(true);
+    setRepoError("");
     try {
       const [nextStatus, nextWorktree] = await Promise.all([
         fetchWorkspaceGitStatus(workingDirectory),
         fetchWorkspaceGitWorktree(workingDirectory),
       ]);
+      if (epoch !== repoEpochRef.current || directory !== useAppStore.getState().workingDirectory) return;
+      if (!nextStatus || !nextWorktree) {
+        setRepoError("Could not load Git repository status.");
+        return;
+      }
       setStatus(nextStatus);
       setWorktree(nextWorktree);
-      const target = selectedFile || "";
-      const nextDiff = await fetchWorkspaceGitDiff(target, workingDirectory);
-      setDiff(nextDiff?.diff ?? "");
     } finally {
-      setLoading(false);
+      if (epoch === repoEpochRef.current) setLoading(false);
     }
-  }, [selectedFile, workingDirectory]);
+  }, [workingDirectory]);
 
   useEffect(() => {
     void refresh();
@@ -65,8 +74,18 @@ export const GitPanel = () => {
   }, [activeBottomTab, refresh]);
 
   useEffect(() => {
-    if (!selectedFile) return;
-    fetchWorkspaceGitDiff(selectedFile, workingDirectory).then((result) => setDiff(result?.diff ?? ""));
+    const epoch = ++diffEpochRef.current;
+    const file = selectedFile;
+    const directory = workingDirectory;
+    setDiffError("");
+    void fetchWorkspaceGitDiff(file, directory).then((result) => {
+      if (epoch !== diffEpochRef.current || file !== selectedFile || directory !== useAppStore.getState().workingDirectory) return;
+      if (!result) {
+        setDiffError("Could not load Git diff.");
+        return;
+      }
+      setDiff(result.diff ?? "");
+    });
   }, [selectedFile, workingDirectory]);
 
   const fileRows = useMemo(() => toFileRows(status), [status]);
@@ -79,6 +98,9 @@ export const GitPanel = () => {
       if (result?.success) {
         useAppStore.getState().setWorkingDirectory(result.project?.root_path || path);
         await refresh();
+      } else {
+        const { showAlert } = await import("../overlays/DialogService");
+        await showAlert({ title: "Switch failed", message: result?.error || "Could not switch workspace." });
       }
     } finally {
       setWorktreeAction("");
@@ -124,11 +146,12 @@ export const GitPanel = () => {
             {status.error}
           </div>
         )}
+        {repoError && <div role="alert" className="mb-2.5" style={{ color: "var(--state-danger)", fontSize: "var(--text-xs)" }}>{repoError}</div>}
 
         <SectionTitle label="Changes" count={fileRows.length} />
         {fileRows.length === 0 ? (
           <div className="py-1 pb-3" style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>
-            {loading ? "Loading..." : "Working tree clean"}
+            {loading ? "Loading..." : repoError ? "Git status unavailable" : "Working tree clean"}
           </div>
         ) : (
           <div className="flex flex-col gap-0.5 mb-3.5">
@@ -158,7 +181,7 @@ export const GitPanel = () => {
             {worktree.error}
           </div>
         )}
-        {worktree?.worktrees?.length ? (
+        {!repoError && worktree?.worktrees?.length ? (
           <div className="flex flex-col gap-1">
             {worktree.worktrees.map((item) => (
               <div
@@ -216,7 +239,7 @@ export const GitPanel = () => {
           </div>
         ) : (
           <div style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>
-            No linked workspaces detected.
+            {repoError ? "Workspace list unavailable." : "No linked workspaces detected."}
           </div>
         )}
       </aside>
@@ -261,7 +284,7 @@ export const GitPanel = () => {
             lineHeight: 1.55,
           }}
         >
-          {diff || (loading ? "Loading diff..." : "No diff for this selection.")}
+          {diffError || diff || (loading ? "Loading diff..." : "No diff for this selection.")}
         </pre>
       </main>
     </div>

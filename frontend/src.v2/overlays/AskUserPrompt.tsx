@@ -3,6 +3,7 @@ import { useAppStore } from "../stores";
 import { getWebSocket } from "../hooks/useWebSocket";
 import { buildAskUserResponseCommand } from "../protocol/prompt-responses";
 import { pendingPromptTargetsConversation } from "../lib/pending-prompts";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 
 export const AskUserPrompt = () => {
   const pendingAskUser = useAppStore((s) => s.pendingAskUser);
@@ -12,7 +13,7 @@ export const AskUserPrompt = () => {
     : null;
   const [answer, setAnswer] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
-  const dialogRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useFocusTrap(Boolean(visibleAskUser));
   const hasOptions = Boolean(visibleAskUser?.options && visibleAskUser.options.length > 0);
 
   const respond = useCallback((text: string) => {
@@ -38,12 +39,6 @@ export const AskUserPrompt = () => {
 
   useEffect(() => {
     if (!visibleAskUser) return;
-    const previousActive = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const focusFirst = () => {
-      const focusable = getFocusable(dialogRef.current);
-      (focusable[0] ?? dialogRef.current)?.focus();
-    };
-    window.setTimeout(focusFirst, 0);
     const handler = (e: KeyboardEvent) => {
       if (e.isComposing) return;
       if (e.key === "Enter" && !e.shiftKey && answer.trim()) {
@@ -52,28 +47,11 @@ export const AskUserPrompt = () => {
       } else if (e.key === "Escape") {
         e.preventDefault();
         cancel();
-      } else if (e.key === "Tab") {
-        const focusable = getFocusable(dialogRef.current);
-        if (focusable.length === 0) {
-          e.preventDefault();
-          dialogRef.current?.focus();
-          return;
-        }
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        if (e.shiftKey && document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
       }
     };
     window.addEventListener("keydown", handler);
     return () => {
       window.removeEventListener("keydown", handler);
-      previousActive?.focus();
     };
   }, [answer, visibleAskUser, respond, cancel]);
 
@@ -121,23 +99,30 @@ export const AskUserPrompt = () => {
         </p>
         {hasOptions && (
           <div style={optionGridStyle}>
-            {visibleAskUser.options?.map((opt) => (
+            {visibleAskUser.options?.map((opt, index) => (
               <button
                 key={opt}
+                className="ask-user-option-card"
                 onClick={() => respond(opt)}
                 style={optionCardStyle}
               >
+                <span className="ask-user-option-letter" style={optionLetterStyle}>{optionLetter(index)}</span>
                 <span style={optionCardTitleStyle}>{opt}</span>
-                <span style={optionCardHintStyle}>Click to answer</span>
               </button>
             ))}
           </div>
         )}
         <div style={customAnswerRowStyle}>
           <div style={customAnswerWrapStyle}>
-            {hasOptions && <div style={customAnswerLabelStyle}>Other answer</div>}
+            {hasOptions && (
+              <div style={customAnswerLabelStyle}>
+                <span className="ask-user-option-letter" style={optionLetterStyle}>{optionLetter(visibleAskUser.options?.length ?? 0)}</span>
+                自定义回答
+              </div>
+            )}
           <input
             ref={inputRef}
+            className="ask-user-input"
             type="text"
             value={answer}
             onChange={(e) => setAnswer(e.target.value)}
@@ -149,12 +134,12 @@ export const AskUserPrompt = () => {
               borderRadius: "var(--radius-sm, 6px)",
               color: "var(--text-primary)",
               fontSize: "var(--text-sm)",
-              outline: "none",
               width: "100%",
             }}
           />
           </div>
           <button
+            className="ask-user-send"
             onClick={() => answer.trim() && respond(answer.trim())}
             disabled={!answer.trim()}
             style={{
@@ -189,15 +174,6 @@ export const AskUserPrompt = () => {
   );
 };
 
-const getFocusable = (root: HTMLElement | null): HTMLElement[] => {
-  if (!root) return [];
-  return Array.from(
-    root.querySelectorAll<HTMLElement>(
-      'button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
-    ),
-  ).filter((element) => !element.hasAttribute("disabled") && element.offsetParent !== null);
-};
-
 const optionGridStyle: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
@@ -205,29 +181,42 @@ const optionGridStyle: React.CSSProperties = {
 };
 
 const optionCardStyle: React.CSSProperties = {
-  minHeight: 72,
+  minHeight: 42,
   display: "grid",
-  gap: 4,
-  alignContent: "center",
-  justifyItems: "start",
+  gridTemplateColumns: "24px minmax(0, 1fr)",
+  alignItems: "center",
+  gap: 9,
   textAlign: "left",
   background: "var(--surface-soft)",
   color: "var(--text-primary)",
   border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 8px)",
-  padding: "10px 14px",
+  borderRadius: "var(--radius-sm, 6px)",
+  padding: "8px 10px",
   cursor: "pointer",
   fontSize: "var(--text-sm)",
+};
+
+const optionLetterStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: 22,
+  height: 22,
+  borderRadius: "var(--radius-sm, 5px)",
+  background: "var(--surface-base)",
+  border: "1px solid var(--border-subtle)",
+  color: "var(--text-muted)",
+  fontSize: "var(--text-xs)",
+  fontWeight: 750,
+  lineHeight: 1,
+  flexShrink: 0,
 };
 
 const optionCardTitleStyle: React.CSSProperties = {
   fontSize: "var(--text-sm)",
   fontWeight: 650,
-};
-
-const optionCardHintStyle: React.CSSProperties = {
-  fontSize: "var(--text-xs)",
-  color: "var(--text-muted)",
+  minWidth: 0,
+  overflowWrap: "anywhere",
 };
 
 const customAnswerRowStyle: React.CSSProperties = {
@@ -245,18 +234,24 @@ const customAnswerWrapStyle: React.CSSProperties = {
 };
 
 const customAnswerLabelStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 7,
   color: "var(--text-muted)",
   fontSize: "var(--text-xs)",
   fontWeight: 700,
-  textTransform: "uppercase",
 };
 
 const sendBtn: React.CSSProperties = {
   background: "var(--accent-primary)",
-  color: "var(--text-primary)",
+  color: "var(--text-on-accent)",
   border: 0,
   borderRadius: "var(--radius-sm, 6px)",
   padding: "8px 16px",
   fontWeight: 600,
   fontSize: "var(--text-sm)",
 };
+
+function optionLetter(index: number): string {
+  return String.fromCharCode(65 + Math.max(0, index));
+}

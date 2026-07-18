@@ -1,40 +1,43 @@
-/**
- * Canonical activity-item projection shared by the Agents panel, the Activity
- * feed and future replay views. Currently produced only by
- * projection/project-subagent-activity-items.ts.
- */
+export type ActivityItemKind =
+  | "reasoning"
+  | "tool"
+  | "command"
+  | "file_change"
+  | "approval"
+  | "agent"
+  | "plan"
+  | "system";
 
 export type ActivityItemStatus =
   | "queued"
   | "running"
-  | "blocked"
   | "completed"
+  | "failed"
   | "cancelled"
-  | "failed";
+  | "blocked"
+  | "info";
 
-export type ActivityItemPhase =
-  | "researching"
-  | "implementing"
-  | "verifying"
-  | "finalizing";
+export type ActivityItemVisibility = "main" | "activity" | "developer";
 
-/** Where an item may be rendered: `activity` = user-facing feed, `developer` = Inspector only. */
-export type ActivityItemVisibility = "activity" | "developer";
-
+/** Stable UI contract. Legacy ContentBlock and ToolCallRecord shapes stop at the adapter. */
 export interface ActivityItem {
   id: string;
   taskId?: string;
+  turnId?: string;
+  seq?: number;
+  messageId?: string;
   agentId?: string;
   parentId?: string;
-  kind: "agent" | string;
+  kind: ActivityItemKind;
   status: ActivityItemStatus;
-  phase?: ActivityItemPhase;
+  phase?: "orienting" | "planning" | "researching" | "implementing" | "verifying" | "finalizing";
   title: string;
   summary?: string;
+  startedAt?: number;
   finishedAt?: number;
+  durationMs?: number;
   visibility: ActivityItemVisibility;
-  /** Items with the same groupKey render as one lifecycle group. */
-  groupKey: string;
+  groupKey?: string;
   hasFailure: boolean;
   hasPendingUserAction: boolean;
 }

@@ -1,16 +1,16 @@
-/*
- * fonts.css — Web font strategy.
- *
- * Inter and JetBrains Mono are loaded as real multi-weight families via the
- * Google Fonts <link> in index.html. We deliberately do NOT declare local
- * @font-face entries for "Inter Variable" / "JetBrains Mono Variable":
- * the bundled /fonts/*.woff2 files were single-weight slices whose variable
- * weight axis did not work, so every 600/700 weight rendered as a blurry
- * synthesized faux-bold. Dropping those declarations lets the font stacks
- * fall through "Inter Variable" (now an unknown family) to "Inter" from the
- * CDN, which carries genuine 400/500/600/700 masters.
- *
- * If you later want offline/self-hosted variable fonts, add VALID variable
- * woff2 files (full 100–900 axis, ~300KB+ for Inter) and reintroduce the
- * @font-face blocks here.
- */
+/* Local-first typography: no runtime font CDN dependency. */
+@font-face {
+  font-family: "Manrope";
+  src: url("/fonts/manrope-variable.ttf") format("truetype-variations");
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Noto Sans SC";
+  src: local("Noto Sans SC"), url("/fonts/noto-sans-sc-variable.ttf") format("truetype-variations");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}

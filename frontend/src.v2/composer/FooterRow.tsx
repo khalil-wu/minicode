@@ -1,4 +1,4 @@
-import { ArrowUp, Check, ChevronDown, FolderOpen, Plus, ShieldCheck, Square } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, Plus, ShieldCheck, Square } from "lucide-react";
 import { memo, useEffect, useId, useRef, useState } from "react";
 import type { SendButtonState } from "../lib/send-state";
 import { useAppStore } from "../stores";
@@ -8,11 +8,14 @@ import { uploadComposerFiles } from "./uploads";
 import type { EffortLevel, PermissionMode } from "../stores/types";
 import { formatModelLabel } from "../lib/model-label";
 import { UsageRing } from "../shell/UsageRing";
-import { branchDisplayName, workspaceDisplayName } from "../lib/workspace-display";
+import { openSettings } from "../lib/settings-navigation";
+import { selectableModelsForProvider } from "../lib/provider-models";
+import { ModelProviderIcon } from "../components/ModelProviderIcon";
 
 interface Props {
   sendState: SendButtonState;
   onSend: () => void | Promise<void>;
+  onStop?: () => void;
   compact?: boolean;
   /**
    * Minimal mode keeps the full-size textarea but hides the secondary control
@@ -22,30 +25,35 @@ interface Props {
   minimal?: boolean;
 }
 
-// Codex-style picker: three choices only. Plan mode is still supported by the
-// backend and surfaced via the current-mode label when the agent enters it
-// (EnterPlanMode tool), but it is not a user-selectable picker option.
-const PERMISSION_MODES: { id: PermissionMode; label: string; desc: string }[] = [
-  { id: "ask_permissions", label: "Ask", desc: "Ask before file and network actions" },
-  { id: "auto", label: "Auto", desc: "Auto read, search, and edit workspace files" },
-  { id: "bypass", label: "Full access", desc: "Use files, network, edits, and commands without prompts" },
+const PERMISSION_MODES: { id: PermissionMode; label: string }[] = [
+  { id: "ask_permissions", label: "Ask" },
+  { id: "auto", label: "Auto" },
+  { id: "bypass", label: "Full access" },
 ];
 
 const EFFORT_OPTIONS: { id: EffortLevel; label: string; desc: string }[] = [
-  { id: "low", label: "Low", desc: "Fastest pass" },
-  { id: "medium", label: "Med", desc: "Balanced reasoning" },
-  { id: "high", label: "High", desc: "Default coding depth" },
-  { id: "max", label: "Max", desc: "Deepest reasoning" },
+  { id: "none", label: "none", desc: "Provider effort: none" },
+  { id: "minimal", label: "minimal", desc: "Provider effort: minimal" },
+  { id: "low", label: "low", desc: "Provider effort: low" },
+  { id: "medium", label: "medium", desc: "Provider effort: medium" },
+  { id: "high", label: "high", desc: "Provider effort: high" },
+  { id: "xhigh", label: "xhigh", desc: "Provider effort: xhigh" },
+  { id: "max", label: "max", desc: "Provider effort: max" },
 ];
 
+const EFFORT_OPTION_BY_ID = new Map<EffortLevel, { id: EffortLevel; label: string; desc: string }>(
+  EFFORT_OPTIONS.map((option) => [option.id, option]),
+);
 
-export const FooterRow = memo(({ sendState, onSend, compact = false, minimal = false }: Props) => {
+export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, minimal = false }: Props) => {
   const permissionMode = useAppStore((s) => s.permissionMode);
   const effortLevel = useAppStore((s) => s.effortLevel);
   const currentModel = useAppStore((s) => s.currentModel);
+  const currentProvider = useAppStore((s) => s.currentProvider);
+  const currentProviderBaseUrl = useAppStore((s) => s.currentProviderBaseUrl);
   const availableModels = useAppStore((s) => s.availableModels);
-  const workingDirectory = useAppStore((s) => s.workingDirectory);
-  const workspaceGit = useAppStore((s) => s.workspaceGit);
+  const modelsSource = useAppStore((s) => s.modelsSource);
+  const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities);
   const prMonitor = useAppStore((s) => s.prMonitor);
   const setPermissionMode = useAppStore((s) => s.setPermissionMode);
   const setEffortLevel = useAppStore((s) => s.setEffortLevel);
@@ -110,7 +118,24 @@ export const FooterRow = memo(({ sendState, onSend, compact = false, minimal = f
     setEffortOpen(false);
   };
 
-  const switchPermissionMode = (mode: PermissionMode) => {
+  const switchPermissionMode = async (mode: PermissionMode) => {
+    // Gate Full access (bypass) behind an explicit accept-responsibility
+    // confirm, mirroring cc's BypassPermissionsModeDialog. Other modes switch
+    // instantly. The dialog fires on every entry into bypass (no persisted
+    // skip-flag) — a deliberate extra confirmation step for a destructive mode.
+    if (mode === "bypass" && permissionMode !== "bypass") {
+      setPermissionOpen(false);
+      const { showConfirm } = await import("../overlays/DialogService");
+      const ok = await showConfirm({
+        title: "Turn on Full access?",
+        message:
+          "Full access (bypass) lets the agent run commands, edit files, and use the network without asking. Only enable this in a workspace you trust.",
+        confirmLabel: "Turn on Full access",
+        cancelLabel: "Cancel",
+        danger: true,
+      });
+      if (!ok) return;
+    }
     setPermissionMode(mode);
     setPermissionOpen(false);
   };
@@ -132,21 +157,35 @@ export const FooterRow = memo(({ sendState, onSend, compact = false, minimal = f
   };
 
   const modelLabel = formatModelLabel(currentModel, "Select model");
+  const selectableModels = selectableModelsForProvider(
+    availableModels,
+    currentModel,
+    currentProvider,
+    currentProviderBaseUrl,
+    modelsSource,
+  );
   const disabledReason = !currentModel.trim() ? "Select a model before sending" : undefined;
 
   const permLabel = permissionLabel(permissionMode);
-  const effortLabel = effortOption(effortLevel).label;
-  const workspaceLabel = workspaceDisplayName(workingDirectory, "Work in a project");
-  const branchLabel = branchDisplayName(workspaceGit?.branch);
-  const workspaceTitle = [workingDirectory || workspaceLabel, branchLabel ? `branch: ${branchLabel}` : ""]
-    .filter(Boolean)
-    .join("\n");
+  const providerCapabilities = runtimeCapabilities?.provider_capabilities;
+  const capabilityEffortLevels = normalizeCapabilityEffortLevels(providerCapabilities?.reasoning_effort_levels);
+  const supportsReasoningEffort = capabilityBool(providerCapabilities?.reasoning_effort) && capabilityEffortLevels.length > 0;
+  const availableEffortLevels = capabilityEffortLevels;
+  const effortOptions = supportsReasoningEffort
+    ? availableEffortLevels.map((level) => EFFORT_OPTION_BY_ID.get(level)).filter(Boolean) as typeof EFFORT_OPTIONS
+    : [];
+  const selectedEffort = effortOptions.find((option) => option.id === effortLevel)
+    ?? (effortLevel === "max" ? effortOptions.find((option) => option.id === "xhigh") : undefined)
+    ?? effortOptions[0]
+    ?? effortOption(effortLevel);
+  const effortLabel = selectedEffort.label;
+  const effortTitle = `Reasoning effort: ${selectedEffort.desc}`;
 
   return (
     <div className="flex flex-col gap-0">
       {prMonitor && (
         <div style={prMonitorStyle(prMonitor.ciStatus)}>
-          <span style={prDotStyle(prMonitor.ciStatus)} />
+          <span className={prMonitor.ciStatus === "running" ? "thinking-pulse-dot" : undefined} style={prDotStyle(prMonitor.ciStatus)} />
           <span className="font-semibold" style={{ color: "var(--text-primary)" }}>PR #{prMonitor.prNumber}</span>
           <span style={{ color: "var(--text-muted)" }}>CI: {prMonitor.ciStatus}</span>
           {prMonitor.failedChecks && prMonitor.failedChecks.length > 0 && (
@@ -166,7 +205,12 @@ export const FooterRow = memo(({ sendState, onSend, compact = false, minimal = f
         </div>
       )}
 
-      <div className="composer-footer" style={footerStyle(compact, minimal)}>
+      <div
+        className="composer-footer"
+        data-compact={compact ? "true" : "false"}
+        data-minimal={minimal ? "true" : "false"}
+        style={footerStyle(compact)}
+      >
         <input
           id={fileInputId}
           ref={fileRef}
@@ -178,7 +222,7 @@ export const FooterRow = memo(({ sendState, onSend, compact = false, minimal = f
           aria-hidden="true"
           onChange={handleFileChange}
         />
-        <div style={footerLeftStyle}>
+        <div className="composer-footer-primary" style={footerLeftStyle}>
           <button
             type="button"
             title="Attach file"
@@ -206,7 +250,6 @@ export const FooterRow = memo(({ sendState, onSend, compact = false, minimal = f
             }}
             label={permLabel}
             title={`Permission: ${permLabel}`}
-            tone={permissionTone(permissionMode)}
             icon={<ShieldCheck size={12} />}
           >
             {PERMISSION_MODES.map((mode) => (
@@ -214,7 +257,6 @@ export const FooterRow = memo(({ sendState, onSend, compact = false, minimal = f
                 key={mode.id}
                 active={permissionMode === mode.id}
                 label={mode.label}
-                desc={mode.desc}
                 onClick={() => {
                   switchPermissionMode(mode.id);
                 }}
@@ -222,46 +264,40 @@ export const FooterRow = memo(({ sendState, onSend, compact = false, minimal = f
             ))}
           </Picker>
 
-          {!minimal && (
-            <span style={workspacePillStyle} title={workspaceTitle}>
-              <FolderOpen size={13} />
-              <span style={workspaceNameStyle}>{workspaceLabel}</span>
-              {branchLabel && <span style={branchLabelStyle}>{branchLabel}</span>}
-            </span>
-          )}
         </div>
 
-        <span className="flex-1 min-w-0" />
+        <span className="composer-footer-spacer" aria-hidden="true" />
 
         {!minimal && <ContextUsageRing />}
 
-        <Picker
-          refEl={effortRef}
-          open={effortOpen}
-          align="right"
-          setOpen={(open) => {
-            if (open) {
-              setModelOpen(false);
-              setPermissionOpen(false);
-            }
-            setEffortOpen(open);
-          }}
-          label={effortLabel}
-          title={`Reasoning effort: ${effortOption(effortLevel).desc}`}
-          tone={effortLevel === "max" ? "warning" : "normal"}
-        >
-          {EFFORT_OPTIONS.map((option) => (
-            <MenuChoice
-              key={option.id}
-              active={effortLevel === option.id}
-              label={option.label}
-              desc={option.desc}
-              onClick={() => switchEffort(option.id)}
-            />
-          ))}
-        </Picker>
+        {supportsReasoningEffort && (
+          <Picker
+            refEl={effortRef}
+            open={effortOpen}
+            className="composer-effort-picker"
+            align="right"
+            setOpen={(open) => {
+              if (open) {
+                setModelOpen(false);
+                setPermissionOpen(false);
+              }
+              setEffortOpen(open);
+            }}
+            label={effortLabel}
+            title={effortTitle}
+          >
+            {effortOptions.map((option) => (
+              <MenuChoice
+                key={option.id}
+                active={effortLevel === option.id}
+                label={option.label}
+                onClick={() => switchEffort(option.id)}
+              />
+            ))}
+          </Picker>
+        )}
 
-        <div ref={dropdownRef} className="relative">
+        <div ref={dropdownRef} className="composer-model-picker relative">
           <button
             onClick={() => {
               setPermissionOpen(false);
@@ -274,22 +310,24 @@ export const FooterRow = memo(({ sendState, onSend, compact = false, minimal = f
             style={{ ...pill, background: modelOpen ? "var(--surface-page)" : "var(--surface-soft)", borderColor: modelOpen ? "var(--border-subtle)" : "transparent" }}
             title={currentModel || "Select model"}
           >
+            <ModelProviderIcon model={currentModel} size={15} />
             <span className="max-w-[180px] overflow-hidden text-ellipsis whitespace-nowrap">{modelLabel}</span>
             <ChevronDown size={11} className="opacity-55 ml-0.5 flex-shrink-0" />
           </button>
-          {modelOpen && availableModels.length > 0 && (
+          {modelOpen && selectableModels.length > 0 && (
             <div style={dropdownStyle("right")}>
-              {availableModels.map((m) => (
+              {selectableModels.map((m) => (
                 <button key={m} onClick={() => switchModel(m)} style={{ ...dropdownItem, background: m === currentModel ? dropdownActiveBg : "transparent" }}>
-                  {m === currentModel && <Check size={13} className="mr-1.5" style={{ color: "var(--accent-primary)" }} />}
+                  <ModelProviderIcon model={m} size={16} />
                   <span className="flex-1">{m}</span>
+                  {m === currentModel && <Check size={13} style={{ color: "var(--accent-primary)" }} />}
                 </button>
               ))}
               <div className="mt-1 pt-1" style={{ borderTop: "1px solid var(--border-subtle)" }}>
                 <button
                   onClick={() => {
                     setModelOpen(false);
-                    useAppStore.getState().toggleSettings();
+                    openSettings("provider");
                   }}
                   style={{ ...dropdownItem, color: "var(--accent-primary)" }}
                 >
@@ -300,6 +338,17 @@ export const FooterRow = memo(({ sendState, onSend, compact = false, minimal = f
           )}
         </div>
 
+        {sendState === "queue" && onStop ? (
+          <button
+            type="button"
+            onClick={onStop}
+            title="Stop current response"
+            aria-label="Stop current response"
+            className="composer-stop-current-btn w-7 h-7 border-0 inline-flex items-center justify-center"
+          >
+            <Square size={11} fill="currentColor" />
+          </button>
+        ) : null}
         <SendIconBtn sendState={sendState} onSend={onSend} disabledReason={disabledReason} />
       </div>
     </div>
@@ -313,8 +362,8 @@ const Picker = ({
   setOpen,
   label,
   title,
-  tone = "normal",
   align = "left",
+  className,
   icon,
   children,
 }: {
@@ -323,12 +372,12 @@ const Picker = ({
   setOpen: (open: boolean) => void;
   label: string;
   title: string;
-  tone?: "normal" | "danger" | "info" | "warning";
   align?: "left" | "right";
+  className?: string;
   icon?: React.ReactNode;
   children: React.ReactNode;
 }) => (
-  <div ref={refEl} className="relative">
+  <div ref={refEl} className={className ? `${className} relative` : "relative"}>
     <button
       type="button"
       onClick={() => {
@@ -337,7 +386,7 @@ const Picker = ({
       className="composer-permission-btn"
       aria-expanded={open}
       aria-haspopup="listbox"
-      style={{ ...pill, background: open ? "var(--surface-page)" : "var(--surface-soft)", borderColor: open ? "var(--border-subtle)" : "transparent", color: toneColor(tone) }}
+      style={{ ...pill, background: open ? "var(--surface-page)" : "var(--surface-soft)", borderColor: open ? "var(--border-subtle)" : "transparent" }}
       title={title}
     >
       {icon}
@@ -351,12 +400,10 @@ const Picker = ({
 const MenuChoice = ({
   active,
   label,
-  desc,
   onClick,
 }: {
   active: boolean;
   label: string;
-  desc: string;
   onClick: () => void;
 }) => (
   <button
@@ -367,18 +414,15 @@ const MenuChoice = ({
       display: "grid",
       gridTemplateColumns: "18px 1fr",
       columnGap: 8,
-      alignItems: "start",
+      alignItems: "center",
       background: active ? dropdownActiveBg : "transparent",
-      padding: "8px 9px",
+      padding: "7px 9px",
     }}
   >
-    <span style={{ display: "inline-flex", justifyContent: "center", paddingTop: 2, color: active ? "var(--accent-primary)" : "transparent" }}>
+    <span style={{ display: "inline-flex", justifyContent: "center", color: active ? "var(--accent-primary)" : "transparent" }}>
       <Check size={13} />
     </span>
-    <span style={{ display: "grid", gap: 2, minWidth: 0 }}>
-      <span style={{ color: "var(--text-primary)", fontWeight: active ? 600 : 500 }}>{label}</span>
-      <span style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)", lineHeight: 1.35 }}>{desc}</span>
-    </span>
+    <span style={{ minWidth: 0, color: "var(--text-primary)", fontWeight: active ? 600 : 500 }}>{label}</span>
   </button>
 );
 
@@ -386,14 +430,27 @@ const ContextUsageRing = memo(() => {
   const contextUsage = useAppStore((s) => s.contextUsage);
   const budgetBuckets = useAppStore((s) => s.budgetBuckets);
   const totalBudgetPercent = useAppStore((s) => s.totalBudgetPercent);
-  // Nothing measured yet (fresh session, no turn): stay out of the way.
-  if (!contextUsage && totalBudgetPercent <= 0) return null;
+  const conversationId = useAppStore((s) => s.conversationId);
+  const currentModel = useAppStore((s) => s.currentModel);
+  const appMode = useAppStore((s) => s.appMode);
+
+  useEffect(() => {
+    if (!conversationId) return;
+    sendClientCommand({
+      type: "session.usage.inspect",
+      conversation_id: conversationId,
+      source: "usage_ring_auto",
+      silent: true,
+    });
+  }, [appMode, conversationId, currentModel]);
+
   return (
     <button
       type="button"
       onClick={() => getWebSocket()?.send({ type: "session.usage.inspect", source: "usage_ring" })}
       title="Context usage — click for details (/usage)"
       aria-label="Show context and token usage"
+      className="composer-context-usage"
       style={{ background: "transparent", border: 0, padding: 0, cursor: "pointer" }}
     >
       <UsageRing buckets={budgetBuckets} contextUsage={contextUsage} totalBudgetPercent={totalBudgetPercent} />
@@ -418,16 +475,6 @@ const ToggleChip = ({ label, active, onClick }: { label: string; active: boolean
   </button>
 );
 
-const toneColor = (tone: "normal" | "danger" | "info" | "warning") => {
-  if (tone === "danger") return "var(--state-danger)";
-  if (tone === "info") return "var(--state-info)";
-  if (tone === "warning") return "var(--state-warning)";
-  return "var(--text-secondary)";
-};
-
-const permissionTone = (mode: PermissionMode): "normal" | "danger" | "info" | "warning" =>
-  mode === "auto" ? "info" : mode === "plan" ? "warning" : "normal";
-
 const permissionLabel = (mode: PermissionMode): string => {
   if (mode === "ask_permissions") return "Ask";
   if (mode === "plan") return "Plan";
@@ -438,6 +485,24 @@ const permissionLabel = (mode: PermissionMode): string => {
 
 const effortOption = (level: EffortLevel) =>
   EFFORT_OPTIONS.find((option) => option.id === level) ?? EFFORT_OPTIONS[2];
+
+const capabilityBool = (value: unknown): boolean =>
+  value === true || (typeof value === "string" && value.trim().toLowerCase() === "true");
+
+const normalizeCapabilityEffortLevels = (value: unknown): EffortLevel[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => String(item || "").trim().toLowerCase())
+    .filter((item): item is EffortLevel =>
+      item === "none" ||
+      item === "minimal" ||
+      item === "low" ||
+      item === "medium" ||
+      item === "high" ||
+      item === "xhigh" ||
+      item === "max"
+    );
+};
 
 const prMonitorStyle = (status: string): React.CSSProperties => ({
   display: "flex",
@@ -455,16 +520,10 @@ const prDotStyle = (status: string): React.CSSProperties => ({
   height: 6,
   borderRadius: "50%",
   background: status === "failed" ? "var(--state-danger)" : status === "passed" ? "var(--state-success)" : status === "running" ? "var(--state-info)" : "var(--text-muted)",
-  animation: status === "running" ? "thinking-pulse 1.5s ease-in-out infinite" : "none",
 });
 
-const footerStyle = (compact: boolean, minimal: boolean): React.CSSProperties => ({
-  display: "flex",
-  alignItems: "center",
-  gap: 7,
+const footerStyle = (compact: boolean): React.CSSProperties => ({
   marginTop: compact ? 4 : 0,
-  padding: compact ? "0 12px 8px" : minimal ? "4px 6px 0" : "2px 2px 0",
-  borderTop: 0,
   fontSize: "var(--text-xs)",
 });
 
@@ -499,37 +558,7 @@ const pill: React.CSSProperties = {
   fontSize: "var(--text-xs)",
   display: "inline-flex",
   alignItems: "center",
-};
-
-const workspacePillStyle: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 6,
-  minWidth: 0,
-  maxWidth: 260,
-  height: 28,
-  padding: "0 8px",
-  border: "1px solid transparent",
-  borderRadius: "var(--radius-full)",
-  color: "var(--text-secondary)",
-  background: "transparent",
-};
-
-const workspaceNameStyle: React.CSSProperties = {
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  fontSize: "var(--text-xs)",
-};
-
-const branchLabelStyle: React.CSSProperties = {
-  overflow: "hidden",
-  maxWidth: 88,
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  color: "var(--text-muted)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 10,
+  gap: 7,
 };
 
 const dropdownStyle = (align: "left" | "right" = "left"): React.CSSProperties => ({
@@ -553,6 +582,7 @@ const dropdownActiveBg = "color-mix(in oklch, var(--accent-primary) 7%, var(--su
 const dropdownItem: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
+  gap: 9,
   width: "100%",
   textAlign: "left",
   padding: "7px 9px",
@@ -566,8 +596,15 @@ const dropdownItem: React.CSSProperties = {
 
 const SendIconBtn = memo(({ sendState, onSend, disabledReason }: { sendState: SendButtonState; onSend: () => void; disabledReason?: string }) => {
   const disabled = sendState === "disabled";
+  const label = sendState === "stop"
+    ? "Stop"
+    : sendState === "queue"
+      ? "Queue message"
+      : sendState === "offline-queue"
+        ? "Send when reconnected"
+        : "Send";
   return (
-    <button onClick={onSend} disabled={disabled} title={disabledReason || (sendState === "stop" ? "Stop" : "Send")} aria-label={sendState === "stop" ? "Stop" : "Send"} className="btn-send composer-send-btn w-7 h-7 border-0 inline-flex items-center justify-center" style={sendIconButtonStyle(sendState, disabled)}>
+    <button onClick={onSend} disabled={disabled} title={disabledReason || label} aria-label={label} className="btn-send composer-send-btn w-7 h-7 border-0 inline-flex items-center justify-center" style={sendIconButtonStyle(sendState, disabled)}>
       {sendState === "stop" ? <Square size={12} fill="currentColor" /> : <ArrowUp size={16} strokeWidth={2.3} />}
     </button>
   );

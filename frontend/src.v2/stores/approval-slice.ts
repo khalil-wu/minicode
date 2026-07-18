@@ -17,7 +17,9 @@ export const createApprovalSlice: StateCreator<AppStore, [], [], ApprovalSlice> 
       if (!s.pendingApproval) {
         return { pendingApproval: a };
       }
-      return { approvalQueue: [...s.approvalQueue, a].slice(-20) };
+      // Never silently drop a pending approval: dropping one leaves the backend
+      // tool blocked forever waiting on a response the user can no longer give.
+      return { approvalQueue: [...s.approvalQueue, a] };
     }),
   markApprovalSubmitted: (requestId) =>
     set((s) => ({

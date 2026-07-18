@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from "react";
 import type React from "react";
-import { ChevronDown, ChevronRight, FileCode2, FileSearch, RotateCcw } from "lucide-react";
+import { ChevronDown, ChevronRight, FileDiff, FileSearch, RotateCcw } from "lucide-react";
+import { fileIcon } from "../../shell/fileTreeHelpers";
 import type { DiffCellState } from "./cellTypes";
 import {
   diffCellTitle,
@@ -10,18 +11,12 @@ import {
 } from "./diffCellLabels";
 import { useAppStore } from "../../stores";
 import { sendClientCommand } from "../../protocol/ws-outbox";
+import { RollingNumber } from "../../components/RollingNumber";
+import { initialDiffReviewPatch } from "../diffReviewState";
+import { workspaceRelativeDiffPath } from "../diffPaths";
 import "./cells.css";
 
 const COLLAPSED_FILE_LIMIT = 3;
-
-// Stable, monotonically increasing id source for diff-review requests.
-// Date.now() collides on fast/concurrent clicks (same millisecond), which lets
-// a stale review response overwrite a newer one. A counter is always unique.
-let diffReviewRequestSeq = 0;
-const nextDiffReviewRequestId = (): string => {
-  diffReviewRequestSeq += 1;
-  return `diff-cell-${diffReviewRequestSeq}`;
-};
 
 /**
  * DiffCell file modification summary.
@@ -32,6 +27,14 @@ const nextDiffReviewRequestId = (): string => {
 export function DiffCell({ cell }: { cell: DiffCellState }) {
   const [expanded, setExpanded] = useState(!cell.collapsed);
   const [showAllFiles, setShowAllFiles] = useState(false);
+  const workingDirectory = useAppStore((state) => state.workingDirectory);
+  const files = useMemo(
+    () => cell.files.map((file) => ({
+      ...file,
+      path: workspaceRelativeDiffPath(file.path, workingDirectory) || file.path,
+    })),
+    [cell.files, workingDirectory],
+  );
 
   const shortPath = useCallback((fullPath: string): string => {
     const parts = fullPath.replace(/\\/g, "/").split("/").filter(Boolean);
@@ -41,24 +44,26 @@ export function DiffCell({ cell }: { cell: DiffCellState }) {
   }, []);
 
   const reviewableFiles = useMemo(
-    () => cell.files.filter((f) => f.patch),
-    [cell.files],
+    () => files.filter((f) => f.patch),
+    [files],
   );
 
   const openReview = () => {
     if (reviewableFiles.length === 0) return;
     const store = useAppStore.getState();
+    const reviewFiles = reviewableFiles.map((f) => ({
+      path: f.path,
+      patch: f.patch ?? "",
+      additions: f.additions,
+      deletions: f.deletions,
+    }));
+    const selectedPath = reviewFiles[0]?.path;
     store.setDiffReviewState({
       requestId: `diff-cell-${cell.id}`,
       toolName: "助手修改",
-      diff: reviewableFiles.map((f) => f.patch).filter(Boolean).join("\n\n"),
-      files: reviewableFiles.map((f) => ({
-        path: f.path,
-        patch: f.patch ?? "",
-        additions: f.additions,
-        deletions: f.deletions,
-      })),
-      selectedPath: reviewableFiles[0]?.path,
+      diff: initialDiffReviewPatch(reviewFiles, selectedPath),
+      files: reviewFiles,
+      selectedPath,
       status: "viewing",
       mode: "view",
       fileDecisions: {},
@@ -68,7 +73,7 @@ export function DiffCell({ cell }: { cell: DiffCellState }) {
   };
 
   const revertAll = async () => {
-    const revertable = cell.files.filter((f) => f.path);
+    const revertable = files.filter((f) => f.path);
     if (revertable.length === 0) return;
     const { showConfirm } = await import("../../overlays/DialogService");
     const ok = await showConfirm({
@@ -87,11 +92,18 @@ export function DiffCell({ cell }: { cell: DiffCellState }) {
   };
 
   const visibleFiles = showAllFiles
-    ? cell.files
-    : cell.files.slice(0, COLLAPSED_FILE_LIMIT);
-  const hiddenCount = cell.files.length - visibleFiles.length;
+    ? files
+    : files.slice(0, COLLAPSED_FILE_LIMIT);
+  const hiddenCount = files.length - visibleFiles.length;
   const title = diffCellTitle(cell);
-  const breakdownLabel = diffChangeBreakdownLabel(cell.files);
+  const breakdownLabel = diffChangeBreakdownLabel(files);
+  const fileSummary = useMemo(() => {
+    const firstPath = files[0]?.path;
+    if (!firstPath) return "";
+    const first = shortPath(firstPath);
+    if (files.length <= 1) return first;
+    return `${first} +${files.length - 1}`;
+  }, [files, shortPath]);
 
   return (
     <div className="diff-cell">
@@ -105,18 +117,19 @@ export function DiffCell({ cell }: { cell: DiffCellState }) {
         >
           {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
           <span className="diff-cell-icon-tile" aria-hidden="true">
-            <FileCode2 size={15} />
+            <FileDiff size={15} />
           </span>
           <span className="diff-cell-title-block">
             <span className="diff-cell-title">{title}</span>
             <span className="diff-cell-meta-row">
-              <span className="diff-cell-stats diff-cell-header-stats">
-                <span className="diff-cell-added">
-                  +{cell.summary.added}
-                </span>{" "}
-                <span className="diff-cell-removed">
-                  -{cell.summary.deleted}
+              {fileSummary && (
+                <span className="diff-cell-file-summary" title={cell.files.map((file) => file.path).join("\n")}>
+                  {fileSummary}
                 </span>
+              )}
+              <span className="diff-cell-stats diff-cell-header-stats">
+                <RollingNumber value={cell.summary.added} prefix="+" className="diff-cell-added" />
+                <RollingNumber value={cell.summary.deleted} prefix="-" className="diff-cell-removed" />
               </span>
               {breakdownLabel && (
                 <span className="diff-cell-breakdown">{breakdownLabel}</span>
@@ -189,7 +202,7 @@ function DiffFileRow({
     if (!file.patch) return;
     const store = useAppStore.getState();
     store.setDiffReviewState({
-      requestId: nextDiffReviewRequestId(),
+      requestId: `diff-cell-${Date.now()}`,
       toolName: "差异预览",
       diff: file.patch,
       files: [{
@@ -216,19 +229,15 @@ function DiffFileRow({
         aria-label={`打开 ${file.path}`}
         title={`打开 ${file.path}`}
       >
-        <FileCode2 size={12} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
+        <span style={{ color: "var(--text-muted)", flexShrink: 0, display: "inline-flex" }}>{fileIcon(file.path, { size: 12, className: "diff-cell-file-icon" })}</span>
         <span className="diff-cell-file-path">{shortPath(file.path)}</span>
       </button>
       <span className={`diff-cell-file-kind diff-cell-file-kind-${changeType}`}>
         {changeLabel}
       </span>
       <span className="diff-cell-stats">
-        <span className="diff-cell-added">
-          +{file.additions}
-        </span>{" "}
-        <span className="diff-cell-removed">
-          -{file.deletions}
-        </span>
+        <RollingNumber value={file.additions} prefix="+" className="diff-cell-added" />
+        <RollingNumber value={file.deletions} prefix="-" className="diff-cell-removed" />
       </span>
       {file.patch ? (
         <button

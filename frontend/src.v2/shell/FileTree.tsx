@@ -15,6 +15,7 @@ import {
   type WorkspaceTreeNode,
 } from "../protocol/workspace";
 import { useAppStore } from "../stores";
+import type { FileTreeRevealRequest } from "../stores/types";
 import { isDesktop, fsListTree, fsSearchFiles, desktop, trustWorkspace } from "../desktop/runtime";
 import { openWorkspaceFolder } from "../workspace/openWorkspaceFolder";
 import {
@@ -27,7 +28,6 @@ import {
   fileTreeListStyle,
   fileTreeSearchStyle,
   fileTreeSearchInputStyle,
-  fileTreeIconButtonStyle,
   toolbarMenuWrapStyle,
   toolbarMenuStyle,
   toolbarMenuItemStyle,
@@ -48,18 +48,28 @@ import {
   replaceNodeChildren,
   workspaceLabel,
   joinWorkspacePath,
+  isPathInsideTreeRoot,
+  isSameTreePath,
   normalizeDesktopExpandedPaths,
   normalizeChangePath,
   parentTreePath,
   countVisibleNodes,
+  hasLoadedDirectoryNode,
 } from "./fileTreeHelpers";
 import { TreeNode } from "./FileTreeNode";
 import { FileContextMenu } from "./FileTreeContextMenu";
 import { SearchResultRow } from "./FileTreeSearchResult";
 
-export const FileTree = () => {
+export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   const [tree, setTree] = useState<WorkspaceTreeNode | null>(null);
+  const [isListScrolling, setIsListScrolling] = useState(false);
+  const scrollFadeTimerRef = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (scrollFadeTimerRef.current !== null) window.clearTimeout(scrollFadeTimerRef.current);
+  }, []);
   const [loading, setLoading] = useState(false);
+  const [slowLoading, setSlowLoading] = useState(false);
   const [loadingPaths, setLoadingPaths] = useState<Set<string>>(new Set());
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
@@ -70,7 +80,12 @@ export const FileTree = () => {
   const density = "compact" as const;
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const fileTreeVersion = useAppStore((s) => s.fileTreeVersion);
+  const fileTreeRevealRequests = useAppStore((s) => s.fileTreeRevealRequests);
+  const consumeFileTreeRevealRequest = useAppStore((s) => s.consumeFileTreeRevealRequest);
   const activeEditorPath = useAppStore((s) => s.activeEditorPath);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const restoredScrollKeyRef = useRef<string | null>(null);
+  const scrollKey = `minicode.file-tree.scroll:${workingDirectory || "."}`;
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => {
     const stored = readExpandedPaths(workingDirectory || ".");
     return isDesktop() && workingDirectory ? normalizeDesktopExpandedPaths(workingDirectory, stored) : stored;
@@ -79,6 +94,8 @@ export const FileTree = () => {
   const gitChanges = useAppStore((s) => s.gitChanges);
   const requestGitChanges = useAppStore((s) => s.requestGitChanges);
   const lastChangeCount = useRef(0);
+  const refreshEpochRef = useRef(0);
+  const searchEpochRef = useRef(0);
   const gitMap = useMemo(() => {
     const next = new Map<string, GitStatus>();
     for (const file of gitChanges.workingTree) {
@@ -91,6 +108,9 @@ export const FileTree = () => {
   }, [gitChanges]);
 
   const refresh = useCallback(async () => {
+    const epoch = ++refreshEpochRef.current;
+    const directory = workingDirectory;
+    const isCurrent = () => epoch === refreshEpochRef.current && directory === useAppStore.getState().workingDirectory;
     if (!workingDirectory) {
       setTree(null);
       setError("");
@@ -98,6 +118,7 @@ export const FileTree = () => {
       return;
     }
     setLoading(true);
+    setSlowLoading(false);
     setError("");
     try {
       if (isDesktop()) {
@@ -108,14 +129,21 @@ export const FileTree = () => {
         const persistedExpanded = Array.from(normalizeDesktopExpandedPaths(rootPath, readExpandedPaths(rootPath)))
           .filter((path) => path !== rootPath)
           .sort((a, b) => a.split(/[/\\]/).length - b.split(/[/\\]/).length);
+        const retainedExpanded = new Set<string>();
         for (const path of persistedExpanded) {
+          if (!hasLoadedDirectoryNode(nextTree, path)) continue;
           try {
             nextTree = replaceNodeChildren(nextTree, path, nodesFromEntries(await fsListTree(path)));
+            retainedExpanded.add(path);
           } catch {
             /* Ignore folders that disappeared since the last session. */
           }
         }
-        setTree(nextTree);
+        if (retainedExpanded.size !== persistedExpanded.length) {
+          writeExpandedPaths(rootPath, retainedExpanded);
+          setExpandedPaths(retainedExpanded);
+        }
+        if (isCurrent()) setTree(nextTree);
       } else {
         const result = await listWorkspaceTree(".");
         if (result) {
@@ -131,12 +159,13 @@ export const FileTree = () => {
               /* Ignore folders that disappeared since the last session. */
             }
           }
-          setTree(nextTree);
+          if (isCurrent()) setTree(nextTree);
         } else {
-          setError("Could not load file tree");
+          if (isCurrent()) setError("Could not load file tree");
         }
       }
     } catch (err) {
+      if (!isCurrent()) return;
       if (workingDirectory && isMissingWorkspaceError(err)) {
         setTree(null);
         setError(`Workspace folder is missing: ${workingDirectory}`);
@@ -144,9 +173,18 @@ export const FileTree = () => {
         setError(err instanceof Error ? err.message : "Could not load file tree");
       }
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   }, [workingDirectory]);
+
+  useEffect(() => {
+    if (!loading) {
+      setSlowLoading(false);
+      return;
+    }
+    const id = window.setTimeout(() => setSlowLoading(true), 3500);
+    return () => window.clearTimeout(id);
+  }, [loading]);
 
   const loadDirectory = useCallback(async (path: string) => {
     setLoadingPaths((current) => new Set(current).add(path));
@@ -186,6 +224,19 @@ export const FileTree = () => {
     setExpandedPaths(isDesktop() && workingDirectory ? normalizeDesktopExpandedPaths(workingDirectory, stored) : stored);
   }, [workingDirectory]);
 
+  useEffect(() => {
+    if (!tree || loading || !listRef.current || restoredScrollKeyRef.current === scrollKey) return;
+    restoredScrollKeyRef.current = scrollKey;
+    let savedScrollTop = 0;
+    try {
+      savedScrollTop = Number(localStorage.getItem(scrollKey) || 0);
+    } catch { /* noop */ }
+    const frame = window.requestAnimationFrame(() => {
+      if (listRef.current) listRef.current.scrollTop = Number.isFinite(savedScrollTop) ? savedScrollTop : 0;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [loading, scrollKey, tree]);
+
   const toggleExpanded = useCallback((path: string, shouldLoad = false) => {
     setExpandedPaths((current) => {
       const next = new Set(current);
@@ -197,7 +248,91 @@ export const FileTree = () => {
     if (shouldLoad) void loadDirectory(path);
   }, [loadDirectory, workingDirectory]);
 
+  const normalizeRevealFolderPath = useCallback((rawPath: string): string | null => {
+    const normalized = normalizeChangePath(rawPath).replace(/^\.\/+/, "");
+    if (!normalized || !workingDirectory) return null;
+    if (isDesktop()) {
+      const target = joinWorkspacePath(workingDirectory, normalized);
+      return isPathInsideTreeRoot(workingDirectory, target) ? target : null;
+    }
+    if (/^[A-Za-z]:\//.test(normalized) || normalized.startsWith("/")) return null;
+    return normalized;
+  }, [workingDirectory]);
+
+  const folderRevealChain = useCallback((target: string): string[] => {
+    if (isDesktop()) {
+      const root = normalizeChangePath(workingDirectory);
+      const normalizedTarget = normalizeChangePath(target);
+      if (!root || !isPathInsideTreeRoot(root, normalizedTarget) || isSameTreePath(root, normalizedTarget)) return [];
+      const relative = normalizedTarget.slice(root.length).replace(/^\/+/, "");
+      const parts = relative.split("/").filter(Boolean);
+      const chain: string[] = [];
+      let current = root;
+      for (const part of parts) {
+        current = `${current.replace(/\/+$/, "")}/${part}`;
+        chain.push(current);
+      }
+      return chain;
+    }
+    const parts = normalizeChangePath(target).replace(/^\.\/+/, "").split("/").filter(Boolean);
+    const chain: string[] = [];
+    let current = "";
+    for (const part of parts) {
+      current = current ? `${current}/${part}` : part;
+      chain.push(current);
+    }
+    return chain;
+  }, [workingDirectory]);
+
+  const scrollToTreePath = useCallback((path: string) => {
+    const rows = Array.from(listRef.current?.querySelectorAll<HTMLElement>("[data-tree-path]") ?? []);
+    const row = rows.find((item) => isSameTreePath(item.dataset.treePath, path));
+    if (!row) return;
+    row.scrollIntoView({ block: "center" });
+    row.focus({ preventScroll: true });
+  }, []);
+
+  const revealFolderRequest = useCallback(async (request: FileTreeRevealRequest): Promise<boolean> => {
+    const target = normalizeRevealFolderPath(request.path);
+    if (!target) return true;
+    setQuery("");
+    const chain = folderRevealChain(target);
+    const foldersToExpand = chain.length ? chain : [target];
+    setExpandedPaths((current) => {
+      const next = new Set(current);
+      for (const folder of foldersToExpand) next.add(folder);
+      writeExpandedPaths(workingDirectory || ".", next);
+      return next;
+    });
+    for (const folder of foldersToExpand) {
+      if (!isSameTreePath(folder, workingDirectory)) {
+        await loadDirectory(folder);
+      }
+    }
+    window.setTimeout(() => scrollToTreePath(target), 80);
+    return true;
+  }, [folderRevealChain, loadDirectory, normalizeRevealFolderPath, scrollToTreePath, workingDirectory]);
+
   const pendingChangesRef = useRef<{ path: string; event: string; timestamp: number }[]>([]);
+
+  useEffect(() => {
+    if (!tree || loading || fileTreeRevealRequests.length === 0) return;
+    let cancelled = false;
+    const run = async () => {
+      for (const request of fileTreeRevealRequests) {
+        const consumed = await revealFolderRequest(request);
+        if (!cancelled && consumed) consumeFileTreeRevealRequest(request.id);
+      }
+    };
+    void run();
+    return () => { cancelled = true; };
+  }, [
+    consumeFileTreeRevealRequest,
+    fileTreeRevealRequests,
+    loading,
+    revealFolderRequest,
+    tree,
+  ]);
 
   useEffect(() => {
     if (fileChanges.length > lastChangeCount.current) {
@@ -218,13 +353,18 @@ export const FileTree = () => {
   useEffect(() => {
     if (!toolbarMenuOpen) return;
     const close = () => setToolbarMenuOpen(false);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
     window.addEventListener("click", close);
-    window.addEventListener("keydown", close);
-    return () => { window.removeEventListener("click", close); window.removeEventListener("keydown", close); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => { window.removeEventListener("click", close); window.removeEventListener("keydown", closeOnEscape); };
   }, [toolbarMenuOpen]);
 
   useEffect(() => {
     const trimmed = query.trim();
+    const epoch = ++searchEpochRef.current;
+    const directory = workingDirectory;
     if (!trimmed) { setSearchResults([]); setSearchLoading(false); return; }
     setSearchLoading(true);
     const timer = window.setTimeout(() => {
@@ -232,9 +372,17 @@ export const FileTree = () => {
         ? fsSearchFiles(workingDirectory || "", trimmed, 60, "all")
         : searchWorkspaceFiles(trimmed, 60, "all");
       search
-        .then((results) => setSearchResults(results.filter((result) => !isHiddenSearchResult(result))))
-        .catch(() => setSearchResults([]))
-        .finally(() => setSearchLoading(false));
+        .then((results) => {
+          if (epoch === searchEpochRef.current && directory === useAppStore.getState().workingDirectory) {
+            setSearchResults(results.filter((result) => !isHiddenSearchResult(result)));
+          }
+        })
+        .catch(() => {
+          if (epoch === searchEpochRef.current) setSearchResults([]);
+        })
+        .finally(() => {
+          if (epoch === searchEpochRef.current) setSearchLoading(false);
+        });
     }, 160);
     return () => { window.clearTimeout(timer); };
   }, [query, workingDirectory]);
@@ -246,7 +394,10 @@ export const FileTree = () => {
     const targetPath = isDesktop() ? joinWorkspacePath(workingDirectory, path) : path;
     try {
       if (isDesktop()) await desktop()?.fs.writeFile(targetPath, "");
-      else if (!(await writeWorkspaceFile(targetPath, ""))) return;
+      else if (!(await writeWorkspaceFile(targetPath, ""))) {
+        await showAlert({ title: "Error", message: `Could not create ${path}` });
+        return;
+      }
       void refresh();
     } catch { await showAlert({ title: "Error", message: `Could not create ${path}` }); }
   };
@@ -258,13 +409,31 @@ export const FileTree = () => {
     const targetPath = isDesktop() ? joinWorkspacePath(workingDirectory, path) : path;
     try {
       if (isDesktop()) await desktop()?.fs.createDirectory(targetPath);
-      else if (!(await createWorkspaceDirectory(targetPath))) return;
+      else if (!(await createWorkspaceDirectory(targetPath))) {
+        await showAlert({ title: "Error", message: `Could not create ${path}` });
+        return;
+      }
       void refresh();
     } catch { await showAlert({ title: "Error", message: `Could not create ${path}` }); }
   };
 
   if (loading && !tree) {
-    return <div style={{ padding: 12, color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>Loading...</div>;
+    return (
+      <div style={{ padding: 12, color: "var(--text-muted)", fontSize: "var(--text-sm)", display: "grid", gap: 8 }}>
+        <div>{slowLoading ? "Still loading file tree..." : "Loading file tree..."}</div>
+        {slowLoading && (
+          <>
+            <div style={{ fontSize: "var(--text-xs)", lineHeight: 1.45 }}>
+              Large workspaces can take longer on the first scan. You can wait, retry, or switch to a smaller folder.
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button onClick={refresh} style={refreshBtn}>Retry</button>
+              {isDesktop() && <button onClick={() => void openWorkspaceFolder()} style={refreshBtn}>Switch folder</button>}
+            </div>
+          </>
+        )}
+      </div>
+    );
   }
 
   if (error && !tree) {
@@ -281,14 +450,7 @@ export const FileTree = () => {
   }
 
   if (!tree) {
-    return (
-      <div style={fileTreeEmptyStyle}>
-        No workspace folder is open.
-        {isDesktop() && (
-          <button type="button" onClick={() => void openWorkspaceFolder()} style={openWorkspaceButtonStyle}>Open code folder</button>
-        )}
-      </div>
-    );
+    return null;
   }
 
   const hasQuery = query.trim().length > 0;
@@ -298,17 +460,23 @@ export const FileTree = () => {
   const renderToolbarMenu = () => (
     <div style={toolbarMenuWrapStyle}>
       <button type="button" title="More file actions" aria-label="More file actions"
+        aria-controls="file-tree-actions-menu" aria-expanded={toolbarMenuOpen}
         onClick={(event) => { event.stopPropagation(); setToolbarMenuOpen((open) => !open); }}
-        style={fileTreeIconButtonStyle}>
-        <MoreHorizontal size={13} />
+        className="mc-icon-button mc-icon-button-compact file-tree-action">
+        <MoreHorizontal size={14} />
       </button>
       {toolbarMenuOpen && (
-        <div style={toolbarMenuStyle} onClick={(event) => event.stopPropagation()}>
-          <button type="button" onClick={() => { setToolbarMenuOpen(false); void createFile(); }} style={toolbarMenuItemStyle}>
-            <FilePlus2 size={13} /><span>New file</span>
+        <div id="file-tree-actions-menu" style={toolbarMenuStyle} onClick={(event) => event.stopPropagation()}>
+          {isDesktop() && (
+            <button type="button" className="btn-ghost" onClick={() => { setToolbarMenuOpen(false); void openWorkspaceFolder(); }} style={toolbarMenuItemStyle}>
+              <FolderOpen size={14} /><span>Open folder</span>
+            </button>
+          )}
+          <button type="button" className="btn-ghost" onClick={() => { setToolbarMenuOpen(false); void createFile(); }} style={toolbarMenuItemStyle}>
+            <FilePlus2 size={14} /><span>New file</span>
           </button>
-          <button type="button" onClick={() => { setToolbarMenuOpen(false); void createFolder(); }} style={toolbarMenuItemStyle}>
-            <FolderPlus size={13} /><span>New folder</span>
+          <button type="button" className="btn-ghost" onClick={() => { setToolbarMenuOpen(false); void createFolder(); }} style={toolbarMenuItemStyle}>
+            <FolderPlus size={14} /><span>New folder</span>
           </button>
         </div>
       )}
@@ -321,27 +489,32 @@ export const FileTree = () => {
         <div title={workingDirectory || tree.path} style={fileTreeRootLabelStyle}>
           {workspaceLabel(workingDirectory || tree.path)}
         </div>
-        <span style={{ flex: 1 }} />
-        {isDesktop() && (
-          <button type="button" title="Open folder" aria-label="Open folder" onClick={() => void openWorkspaceFolder()} style={fileTreeIconButtonStyle}>
-            <FolderOpen size={13} />
-          </button>
-        )}
-        <button type="button" title="Refresh files" aria-label="Refresh files" onClick={() => void refresh()} style={fileTreeIconButtonStyle}>
-          <RefreshCw size={13} />
-        </button>
       </div>
       <div style={fileTreeToolbarStyle}>
         <div style={fileTreeSearchStyle}>
-          <Search size={12} />
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search files" style={fileTreeSearchInputStyle} />
+          <Search size={14} aria-hidden="true" />
+          <input aria-label="Search workspace files" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search files" style={fileTreeSearchInputStyle} />
         </div>
-        <button type="button" title="Refresh files" aria-label="Refresh files" onClick={() => void refresh()} style={fileTreeIconButtonStyle}>
-          <RefreshCw size={13} />
+        <button type="button" title="Refresh files" aria-label="Refresh files" onClick={() => void refresh()} disabled={loading} className="mc-icon-button mc-icon-button-compact file-tree-action">
+          <RefreshCw size={14} className={loading ? "animate-spin" : undefined} />
         </button>
         {renderToolbarMenu()}
       </div>
-      <div role="tree" aria-label="File explorer" style={fileTreeListStyle}>
+      <div
+        ref={listRef}
+        role="tree"
+        aria-label="File explorer"
+        className={`file-tree-scroll${isListScrolling ? " is-scrolling" : ""}`}
+        style={fileTreeListStyle}
+        onScroll={(event) => {
+          setIsListScrolling(true);
+          if (scrollFadeTimerRef.current !== null) window.clearTimeout(scrollFadeTimerRef.current);
+          scrollFadeTimerRef.current = window.setTimeout(() => setIsListScrolling(false), 650);
+          try {
+            localStorage.setItem(scrollKey, String(event.currentTarget.scrollTop));
+          } catch { /* noop */ }
+        }}
+      >
       {hasQuery ? (
         searchLoading ? (
           <div style={fileTreeEmptyStyle}>Searching workspace...</div>
@@ -354,6 +527,7 @@ export const FileTree = () => {
               activeEditorPath={activeEditorPath}
               workingDirectory={workingDirectory}
               onContextMenu={setContextMenu}
+              onNavigate={onNavigate}
             />
           ))
         ) : (
@@ -374,6 +548,7 @@ export const FileTree = () => {
             density={density}
             onToggleExpanded={toggleExpanded}
             onContextMenu={setContextMenu}
+            onNavigate={onNavigate}
           />
         ))
       ) : !hasQuery ? (

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from "react";
-import { Boxes, CalendarClock, Code2, FolderOpen, Plus, Search, SlidersHorizontal, Sparkles } from "lucide-react";
+import { CalendarClock, Code2, FolderOpen, Layers, MessageSquareText, Plus, Search, WandSparkles } from "lucide-react";
 import { useAppStore } from "../stores";
 import { LEFT_SIDEBAR_MAX_WIDTH, LEFT_SIDEBAR_MIN_WIDTH } from "../stores/shared-helpers";
 import { FileTree } from "./FileTree";
@@ -9,10 +9,18 @@ import { ConversationsTab } from "./ConversationsTab";
 import { modeSwitchStyle, modeSwitchButtonStyle } from "./sidebarStyles";
 import { isConversationRunning } from "./sessionStatus";
 import { openWorkspaceFolder } from "../workspace/openWorkspaceFolder";
+import { openAutomations } from "../lib/automations-navigation";
+import { capabilityFeatureEnabled } from "../protocol/capabilities";
 
 type SidebarTab = "conversations" | "files";
 
-export const SidebarLeft = () => {
+export const SidebarLeft = ({
+  embedded = false,
+  onNavigate,
+}: {
+  embedded?: boolean;
+  onNavigate?: () => void;
+}) => {
   const appMode = useAppStore((s) => s.appMode);
   const conversationId = useAppStore((s) => s.conversationId);
   const leftSidebarWidth = useAppStore((s) => s.leftSidebarWidth);
@@ -23,11 +31,12 @@ export const SidebarLeft = () => {
   const toggleCommandPalette = useAppStore((s) => s.toggleCommandPalette);
   const toggleLiveArtifacts = useAppStore((s) => s.toggleLiveArtifacts);
   const toggleSkillsMarketplace = useAppStore((s) => s.toggleSkillsMarketplace);
-  const toggleSettings = useAppStore((s) => s.toggleSettings);
+  const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities);
+  const globalSearchEnabled = capabilityFeatureEnabled(runtimeCapabilities, "global_search", true);
   const [tab, setTab] = useState<SidebarTab>(appMode === "cowork" ? "conversations" : "files");
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState>(null);
   const codeMode = tab === "files";
-  const isOpen = leftSidebarWidth > 0;
+  const isOpen = embedded || leftSidebarWidth > 0;
 
   const runningCount = useAppStore((s) => {
     let count = 0;
@@ -51,9 +60,15 @@ export const SidebarLeft = () => {
   const switchSidebarTab = (nextTab: SidebarTab) => {
     setTab(nextTab);
     setAppMode(nextTab === "conversations" ? "cowork" : "code");
+    onNavigate?.();
   };
   const startSession = (mode: "cowork" | "code") => {
     createConversation({ appMode: mode, bindWorkspace: Boolean(workingDirectory) });
+    onNavigate?.();
+  };
+  const navigate = (action: () => void) => {
+    action();
+    onNavigate?.();
   };
 
   const startResize = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -92,13 +107,27 @@ export const SidebarLeft = () => {
   };
 
   const resetSidebarWidth = () => setLeftSidebarWidth(320);
+  const handleResizeKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const step = event.shiftKey ? 48 : 16;
+    let nextWidth: number | null = null;
+    if (event.key === "ArrowLeft") nextWidth = leftSidebarWidth - step;
+    else if (event.key === "ArrowRight") nextWidth = leftSidebarWidth + step;
+    else if (event.key === "Home") nextWidth = LEFT_SIDEBAR_MIN_WIDTH;
+    else if (event.key === "End") nextWidth = LEFT_SIDEBAR_MAX_WIDTH;
+    else if (event.key === "Enter") nextWidth = 320;
+    if (nextWidth == null) return;
+    event.preventDefault();
+    setLeftSidebarWidth(nextWidth);
+  };
+  const openAutomationsPanel = () => navigate(openAutomations);
 
-  const sidebarWidth = isOpen ? `${leftSidebarWidth}px` : 0;
+  const sidebarWidth = embedded ? "100%" : isOpen ? `${leftSidebarWidth}px` : 0;
 
   return (
     <aside
       className="mc-sidebar-left anim-slide-left sidebar-animate flex flex-col overflow-hidden box-border"
       data-open={isOpen ? "true" : "false"}
+      data-embedded={embedded ? "true" : "false"}
       style={{
         position: "relative",
         display: "flex",
@@ -106,7 +135,7 @@ export const SidebarLeft = () => {
         overflow: "hidden",
         padding: "14px 10px 10px",
         boxSizing: "border-box",
-        borderRight: "1px solid color-mix(in oklch, var(--border-subtle) 55%, transparent)",
+        borderRight: embedded ? 0 : "1px solid color-mix(in oklch, var(--border-subtle) 55%, transparent)",
         width: sidebarWidth,
         minWidth: sidebarWidth,
         maxWidth: sidebarWidth,
@@ -121,6 +150,7 @@ export const SidebarLeft = () => {
           <button
             key={t}
             role="tab"
+            className="mc-sidebar-mode-tab"
             aria-selected={tab === t}
             tabIndex={tab === t ? 0 : -1}
             onClick={() => switchSidebarTab(t)}
@@ -132,10 +162,15 @@ export const SidebarLeft = () => {
               fontWeight: tab === t ? 650 : 500,
             }}
           >
-            {t === "conversations" ? <SlidersHorizontal size={14} /> : <Code2 size={14} />}
+            <span className="mc-sidebar-mode-icon" aria-hidden="true">
+              {t === "conversations" ? <MessageSquareText /> : <Code2 />}
+            </span>
             {t === "conversations" ? "Cowork" : "Code"}
             {t === "conversations" && runningCount > 0 && (
-              <span style={{
+              <span
+                aria-label={`${runningCount} running tasks`}
+                title={`${runningCount} running tasks`}
+                style={{
                 fontSize: 10,
                 background: "var(--state-info)",
                 color: "var(--text-on-accent)",
@@ -154,40 +189,38 @@ export const SidebarLeft = () => {
       </div>
 
       {!codeMode && (
-        <nav aria-label="Workspace navigation" style={{ display: "grid", gap: 3, padding: "10px 4px 12px" }}>
-          <SidebarAction icon={<Plus size={15} />} label="New task" onClick={() => startSession("cowork")} />
-          <SidebarAction icon={<FolderOpen size={15} />} label="Projects" onClick={() => void openWorkspaceFolder()} />
+        <nav className="mc-sidebar-nav" aria-label="Workspace navigation" style={{ display: "grid", gap: 3, padding: "10px 4px 12px" }}>
+          <SidebarAction icon={<Plus />} label="New task" onClick={() => startSession("cowork")} />
+          <SidebarAction icon={<FolderOpen />} label="Projects" onClick={() => navigate(() => void openWorkspaceFolder())} />
           <SidebarAction
-            icon={<CalendarClock size={15} />}
-            label="Scheduled"
-            onClick={() => {
-              window.dispatchEvent(new CustomEvent("minicode:settings-tab", { detail: "scheduler" }));
-              toggleSettings();
-            }}
+            icon={<CalendarClock />}
+            label="Automations"
+            onClick={openAutomationsPanel}
           />
-          <SidebarAction icon={<Boxes size={15} />} label="Live artifacts" onClick={() => toggleLiveArtifacts()} />
-          <SidebarAction icon={<Sparkles size={15} />} label="Customize" onClick={() => toggleSkillsMarketplace()} />
+          <SidebarAction icon={<Layers />} label="Live artifacts" onClick={() => navigate(() => toggleLiveArtifacts())} />
+          <SidebarAction icon={<WandSparkles />} label="Customize" onClick={() => navigate(() => toggleSkillsMarketplace())} />
         </nav>
       )}
 
       {codeMode && (
-        <nav aria-label="Code navigation" style={{ display: "grid", gap: 3, padding: "10px 4px 12px" }}>
-          <SidebarAction icon={<Plus size={15} />} label="New session" onClick={() => startSession("code")} />
-          <SidebarAction icon={<Search size={15} />} label="Search" onClick={() => toggleCommandPalette()} />
-          <SidebarAction icon={<FolderOpen size={15} />} label={workingDirectory ? "Switch folder" : "Open folder"} onClick={() => void openWorkspaceFolder()} />
+        <nav className="mc-sidebar-nav" aria-label="Code navigation" style={{ display: "grid", gap: 3, padding: "10px 4px 12px" }}>
+          <SidebarAction icon={<Plus />} label="New session" onClick={() => startSession("code")} />
+          {globalSearchEnabled && <SidebarAction icon={<Search />} label="Search" onClick={() => navigate(() => toggleCommandPalette())} />}
+          <SidebarAction icon={<FolderOpen />} label={workingDirectory ? "Switch folder" : "Open folder"} onClick={() => navigate(() => void openWorkspaceFolder())} />
         </nav>
       )}
 
       {tab === "conversations" && (
         <ConversationsTab
           conversationId={conversationId ?? ""}
+          onNavigate={onNavigate}
           onSetConfirmDialog={(dialog) => setConfirmDialog(dialog)}
         />
       )}
 
-      {tab === "files" && <FileTree />}
+      {tab === "files" && <FileTree onNavigate={onNavigate} />}
 
-      {isOpen && (
+      {isOpen && !embedded && (
         <div
           className="mc-sidebar-left-resize-handle"
           role="separator"
@@ -195,10 +228,13 @@ export const SidebarLeft = () => {
           aria-label="Resize left sidebar"
           aria-valuemin={LEFT_SIDEBAR_MIN_WIDTH}
           aria-valuemax={LEFT_SIDEBAR_MAX_WIDTH}
-          aria-valuenow={Math.round(leftSidebarWidth)}
+           aria-valuenow={Math.round(leftSidebarWidth)}
+           aria-valuetext={`${Math.round(leftSidebarWidth)} pixels`}
+           tabIndex={0}
           title="Drag to resize left sidebar; double-click to reset"
           onPointerDown={startResize}
-          onDoubleClick={resetSidebarWidth}
+           onDoubleClick={resetSidebarWidth}
+           onKeyDown={handleResizeKeyDown}
           style={leftResizeHandleStyle}
         />
       )}
@@ -229,25 +265,10 @@ const SidebarAction = ({
 }) => (
   <button
     type="button"
-    className="btn-ghost"
+    className="btn-ghost mc-sidebar-action"
     onClick={onClick}
-    style={{
-      width: "100%",
-      minHeight: 32,
-      display: "flex",
-      alignItems: "center",
-      gap: 10,
-      border: 0,
-      borderRadius: "var(--radius-sm, 7px)",
-      color: "var(--text-secondary)",
-      cursor: "pointer",
-      padding: "5px 9px",
-      fontFamily: "var(--font-ui)",
-      fontSize: "var(--text-sm)",
-      textAlign: "left",
-    }}
   >
-    <span style={{ display: "inline-flex", color: "var(--text-muted)" }}>{icon}</span>
+    <span className="mc-sidebar-action-icon" aria-hidden="true">{icon}</span>
     <span>{label}</span>
   </button>
 );

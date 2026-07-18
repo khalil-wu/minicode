@@ -1,19 +1,41 @@
-import { Children, lazy, memo, Suspense, useState, useCallback, useMemo, useRef } from "react";
+import { Children, isValidElement, lazy, memo, Suspense, useState, useCallback, useEffect, useId, useMemo, useRef } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import { Folder } from "lucide-react";
+import { Icon } from "@iconify/react";
+import type { IconifyIcon } from "@iconify/types";
+import defaultFileIcon from "@iconify-icons/vscode-icons/default-file";
+import cssIcon from "@iconify-icons/vscode-icons/file-type-css";
+import excelIcon from "@iconify-icons/vscode-icons/file-type-excel";
+import htmlIcon from "@iconify-icons/vscode-icons/file-type-html";
+import imageIcon from "@iconify-icons/vscode-icons/file-type-image";
+import jsIcon from "@iconify-icons/vscode-icons/file-type-js-official";
+import jsonIcon from "@iconify-icons/vscode-icons/file-type-json-official";
+import markdownIcon from "@iconify-icons/vscode-icons/file-type-markdown";
+import pdfIcon from "@iconify-icons/vscode-icons/file-type-pdf2";
+import powerpointIcon from "@iconify-icons/vscode-icons/file-type-powerpoint";
+import powershellIcon from "@iconify-icons/vscode-icons/file-type-powershell";
+import pythonIcon from "@iconify-icons/vscode-icons/file-type-python";
+import reactIcon from "@iconify-icons/vscode-icons/file-type-reactjs";
+import tsIcon from "@iconify-icons/vscode-icons/file-type-typescript-official";
+import wordIcon from "@iconify-icons/vscode-icons/file-type-word";
+import "katex/dist/katex.min.css";
 import { useAppStore } from "../../stores";
+import type { Citation } from "../../stores/types";
 import { pushToast } from "../../overlays/ToastContainer";
+import { isPreviewableHttpUrl, openWebInPreview } from "../openWebInPreview";
+import { normalizeCitationText } from "./citationText";
+import { ImageLightbox } from "../../components/ImageLightbox";
+import { workspaceRawResourceUrlWithToken } from "../../protocol/api";
+import { openPath, revealPath } from "../../desktop/runtime";
+import { useContextMenu } from "../../components/useContextMenu";
 
 interface Props {
   content: string;
   isStreaming?: boolean;
-  citations?: {
-    source: string;
-    range: [number, number];
-    label?: string;
-    url?: string;
-    title?: string;
-  }[];
+  citations?: Citation[];
 }
 
 type MarkdownNode = {
@@ -26,9 +48,14 @@ type MarkdownNode = {
 type ResolvedTheme = "light" | "dark";
 type MarkdownComponents = NonNullable<React.ComponentProps<typeof ReactMarkdown>["components"]>;
 type MarkdownRemarkPlugins = NonNullable<React.ComponentProps<typeof ReactMarkdown>["remarkPlugins"]>;
+type MarkdownRehypePlugins = NonNullable<React.ComponentProps<typeof ReactMarkdown>["rehypePlugins"]>;
 type MarkdownCodeProps = React.HTMLAttributes<HTMLElement> & {
   node?: { position?: { start: { line: number }; end: { line: number } } };
 };
+type MarkdownElementProps<T> = T & { node?: unknown };
+type EditorTarget = { path: string; line?: number; column?: number };
+type FileTarget = { path: string };
+type FolderTarget = { path: string };
 
 type CodeHighlighterProps = {
   children: string;
@@ -222,8 +249,15 @@ const CODE_FILE_EXTENSIONS = [
   "yml",
 ].join("|");
 
+const GENERIC_FILE_EXTENSIONS = [
+  "7z", "avif", "bmp", "csv", "doc", "docx", "gif", "gz", "ico", "jpeg", "jpg",
+  "mov", "mp3", "mp4", "odt", "pdf", "png", "ppt", "pptx", "svg", "tar", "tif", "tiff",
+  "tsv", "wav", "webm", "webp", "xls", "xlsx", "zip",
+].join("|");
+const anyFilePathPattern = new RegExp(String.raw`\.(?:${CODE_FILE_EXTENSIONS}|${GENERIC_FILE_EXTENSIONS})$`, "i");
+
 const bareFileRefPattern = new RegExp(
-  String.raw`(^|[\s([{'"，。；：、])((?:[A-Za-z]:[\\/]|\.{1,2}[\\/]|[/\\])?(?:[^\s` + "`" + String.raw`"'<>()[\]{}|]+[\\/])*[^\s` + "`" + String.raw`"'<>()[\]{}|]+\.(?:${CODE_FILE_EXTENSIONS})):(\d+)(?::(\d+))?`,
+  String.raw`(^|[\s([{'"，。；：、])((?:[A-Za-z]:[\\/]|\.{1,2}[\\/]|[/\\])?(?:[^\s` + "`" + String.raw`"'<>()[\]{}|:]+[\\/])*[^\s` + "`" + String.raw`"'<>()[\]{}|:]+\.(?:${CODE_FILE_EXTENSIONS}))(?::(\d+)(?::(\d+))?)?(?=$|[\s,，。;；:：)）\]}])`,
   "gi",
 );
 
@@ -233,12 +267,38 @@ const editorLinkUrl = (path: string, line: string, column?: string): string => {
   return `minicode-file-ref:${params.toString()}`;
 };
 
+const codeFilePathPattern = new RegExp(String.raw`\.(?:${CODE_FILE_EXTENSIONS})(?::\d+(?::\d+)?)?$`, "i");
+const editorTargetPattern = new RegExp(String.raw`^(.+\.(?:${CODE_FILE_EXTENSIONS}))(?::(\d+)(?::(\d+))?)?$`, "i");
+
+const normalizeSlashes = (value: string): string => value.replace(/\\/g, "/").replace(/\/+/g, "/");
+
 const isWorkspaceRelativeEditorPath = (path: string): boolean => {
   const trimmed = path.trim();
   if (!trimmed || trimmed.includes("\0")) return false;
+  if (trimmed.includes("://") || trimmed.includes(":")) return false;
   if (trimmed.startsWith("/") || trimmed.startsWith("\\") || trimmed.startsWith("~")) return false;
   if (/^[A-Za-z]:[/\\]/.test(trimmed) || /^file:/i.test(trimmed)) return false;
   return !trimmed.split(/[\\/]+/).some((part) => part === "..");
+};
+
+const stripFileRefDecorations = (value: string): string => (
+  value.trim().replace(/[?#].*$/, "").replace(/[.,，。;；)）\]}]+$/, "")
+);
+
+const isCodeFilePath = (path: string): boolean => {
+  const clean = stripFileRefDecorations(path);
+  return codeFilePathPattern.test(clean);
+};
+
+const parseEditorPathTarget = (value: string): { path: string; line?: number; column?: number } | null => {
+  const clean = stripFileRefDecorations(value);
+  const match = editorTargetPattern.exec(clean);
+  if (!match) return null;
+  return {
+    path: match[1],
+    line: parsePositiveInt(match[2]),
+    column: parsePositiveInt(match[3]),
+  };
 };
 
 const splitBareFileRefs = (value: string): MarkdownNode[] | null => {
@@ -252,14 +312,15 @@ const splitBareFileRefs = (value: string): MarkdownNode[] | null => {
     const path = match[2] ?? "";
     const line = match[3] ?? "";
     const column = match[4];
-    const fullRef = `${path}:${line}${column ? `:${column}` : ""}`;
+    const fullRef = line ? `${path}:${line}${column ? `:${column}` : ""}` : path;
     const refStart = match.index + prefix.length;
+    if (!isWorkspaceRelativeEditorPath(path) && !/^[A-Za-z]:[/\\]/.test(path)) continue;
     if (refStart > lastIndex) {
       parts.push({ type: "text", value: value.slice(lastIndex, refStart) });
     }
     parts.push({
       type: "link",
-      url: editorLinkUrl(path, line, column),
+      url: line ? editorLinkUrl(path, line, column) : path,
       children: [{ type: "text", value: fullRef }],
     });
     lastIndex = refStart + fullRef.length;
@@ -291,6 +352,92 @@ const linkifyBareFileReferences = () => (tree: MarkdownNode) => {
   };
 
   visit(tree);
+};
+
+const markdownCodeSegmentPattern = /(```[\s\S]*?```|`[^`\n]*`)/g;
+const windowsAbsolutePathPattern = /^[A-Za-z]:(?:[\\/]|%5[cC])/;
+
+const isExplicitLocalImageUrl = (url: string): boolean => (
+  url.startsWith("file://")
+  || windowsAbsolutePathPattern.test(url)
+  || url.startsWith("/")
+);
+
+const isLocalImageUrl = (url: string): boolean => (
+  isExplicitLocalImageUrl(url)
+  || isWorkspaceRelativeEditorPath(url)
+);
+
+const isInlineImageDataUrl = (url: string): boolean =>
+  /^data:image\/(?:png|jpe?g|gif|webp|avif);base64,[a-z0-9+/=\s]+$/i.test(url.trim());
+
+const isSafeSvgReference = (value: string): boolean => {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.startsWith("#")) return true;
+  try {
+    const parsed = new URL(trimmed, window.location.href);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+};
+
+const isSafeMermaidCss = (css: string): boolean => {
+  if (!css.trim()) return false;
+  if (/@import|@font-face|expression\s*\(|javascript:|behavior\s*:|-moz-binding/i.test(css)) {
+    return false;
+  }
+  const withoutFragmentUrls = css.replace(/url\(\s*(['"]?)#[^)]+\1\s*\)/gi, "");
+  return !/url\s*\(/i.test(withoutFragmentUrls);
+};
+
+const sanitizeMermaidSvg = (rawSvg: string): string => {
+  if (!rawSvg.trim().startsWith("<svg")) return "";
+  try {
+    const doc = new DOMParser().parseFromString(rawSvg, "image/svg+xml");
+    if (doc.querySelector("parsererror")) return "";
+    doc.querySelectorAll("script, foreignObject, iframe, object, embed, link, meta").forEach((node) => {
+      node.remove();
+    });
+    doc.querySelectorAll("style").forEach((node) => {
+      if (!isSafeMermaidCss(node.textContent || "")) node.remove();
+    });
+    doc.querySelectorAll("*").forEach((node) => {
+      for (const attr of Array.from(node.attributes)) {
+        const name = attr.name.toLowerCase();
+        const value = attr.value || "";
+        if (name.startsWith("on") || name === "style") {
+          node.removeAttribute(attr.name);
+          continue;
+        }
+        if ((name === "href" || name === "xlink:href") && !isSafeSvgReference(value)) {
+          node.removeAttribute(attr.name);
+        }
+      }
+    });
+    return new XMLSerializer().serializeToString(doc.documentElement);
+  } catch {
+    return "";
+  }
+};
+
+const normalizeLatexDelimiters = (value: string): string => {
+  if (!value || !/[\\$]/.test(value)) return value;
+  return value
+    .split(markdownCodeSegmentPattern)
+    .map((segment) => {
+      if (!segment || segment.startsWith("`")) return segment;
+      return segment
+        .replace(/\\\[([\s\S]*?)\\\]/g, (_match, body: string) => {
+          const trimmed = String(body || "").trim();
+          return trimmed ? `\n\n$$\n${trimmed}\n$$\n\n` : "";
+        })
+        .replace(/\\\(([\s\S]*?)\\\)/g, (_match, body: string) => {
+          const trimmed = String(body || "").trim();
+          return trimmed ? `$${trimmed}$` : "";
+        });
+    })
+    .join("");
 };
 
 const CopyButton = ({ text }: { text: string }) => {
@@ -398,6 +545,74 @@ const PlainCodeBlock = ({ hasLanguage, text }: { hasLanguage: boolean; text: str
   );
 };
 
+const MermaidBlock = ({ chart, resolvedTheme }: { chart: string; resolvedTheme: ResolvedTheme }) => {
+  const reactId = useId();
+  const renderId = useMemo(
+    () => `md-mermaid-${reactId.replace(/[^a-zA-Z0-9_-]/g, "")}`,
+    [reactId],
+  );
+  const [svg, setSvg] = useState<string>("");
+  const [error, setError] = useState<string>("");
+
+  useEffect(() => {
+    let cancelled = false;
+    setSvg("");
+    setError("");
+
+    import("mermaid")
+      .then(async (module) => {
+        const mermaid = module.default;
+        mermaid.initialize({
+          startOnLoad: false,
+          securityLevel: "strict",
+          theme: resolvedTheme === "light" ? "default" : "dark",
+          flowchart: { htmlLabels: false },
+          themeVariables: {
+            textColor: resolvedTheme === "light" ? "#111827" : "#f3f4f6",
+            primaryTextColor: resolvedTheme === "light" ? "#111827" : "#f3f4f6",
+            lineColor: resolvedTheme === "light" ? "#4b5563" : "#d1d5db",
+          },
+        });
+        const rendered = await mermaid.render(renderId, chart);
+        const safeSvg = sanitizeMermaidSvg(rendered.svg);
+        if (!cancelled) {
+          if (safeSvg) setSvg(safeSvg);
+          else setError("Unable to safely render Mermaid diagram.");
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : "Unable to render Mermaid diagram.");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [chart, renderId, resolvedTheme]);
+
+  if (error) {
+    return (
+      <div className="space-y-2">
+        <div className="text-[var(--text-xs)] text-[var(--state-warning)] px-3 py-2 bg-[var(--surface-soft)] border border-[var(--border-subtle)] rounded-[var(--radius-sm,6px)]">
+          Mermaid render failed; showing source.
+        </div>
+        <PlainCodeBlock hasLanguage text={chart} />
+      </div>
+    );
+  }
+
+  if (!svg) {
+    return <PlainCodeBlock hasLanguage text={chart} />;
+  }
+
+  return (
+    <div
+      className="md-mermaid overflow-x-auto p-3 bg-[var(--surface-soft)] border border-[var(--border-subtle)] rounded-b-[var(--radius-sm,6px)] [&_svg]:max-w-full [&_svg]:h-auto [&_svg_text]:fill-[var(--text-primary)] [&_svg_text]:opacity-100"
+      data-testid="md-mermaid"
+      dangerouslySetInnerHTML={{ __html: svg }}
+    />
+  );
+};
+
 // Hoisted component overrides: stable reference, no re-creation per render.
 const useResolvedTheme = () => {
   const themeMode = useAppStore((s) => s.themeMode);
@@ -415,6 +630,146 @@ const parsePositiveInt = (value: string | null | undefined): number | undefined 
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 };
 
+const isLocalFrontendUrl = (url: URL): boolean =>
+  url.protocol === "http:" || url.protocol === "https:"
+    ? /^(?:127\.0\.0\.1|localhost|\[::1\])$/i.test(url.hostname)
+    : false;
+
+const textFromReactNode = (children: React.ReactNode): string => {
+  const pieces: string[] = [];
+  const visit = (node: React.ReactNode): void => {
+    Children.forEach(node, (child) => {
+      if (typeof child === "string" || typeof child === "number") {
+        pieces.push(String(child));
+        return;
+      }
+      if (isValidElement<{ children?: React.ReactNode }>(child)) {
+        visit(child.props.children);
+      }
+    });
+  };
+  visit(children);
+  return pieces.join("").trim();
+};
+
+const pathWithinWorkspace = (path: string, workspaceRoot: string): boolean => {
+  const root = normalizeSlashes(workspaceRoot).replace(/\/+$/, "").toLowerCase();
+  const target = normalizeSlashes(path).toLowerCase();
+  return Boolean(root) && (target === root || target.startsWith(`${root}/`));
+};
+
+const absoluteWorkspacePath = (path: string, workspaceRoot: string): string | null => {
+  const normalized = normalizeSlashes(path).replace(/^\.\/+/, "");
+  if (/^[A-Za-z]:\//.test(normalized)) return pathWithinWorkspace(normalized, workspaceRoot) ? normalized : null;
+  if (!isWorkspaceRelativeEditorPath(normalized)) return null;
+  const root = normalizeSlashes(workspaceRoot).replace(/\/+$/, "");
+  return root ? `${root}/${normalized}` : null;
+};
+
+const workspaceRelativePath = (path: string, workspaceRoot: string): string | null => {
+  const root = normalizeSlashes(workspaceRoot).replace(/\/+$/, "");
+  const target = normalizeSlashes(path);
+  if (!root || !pathWithinWorkspace(target, root)) return null;
+  if (target.toLowerCase() === root.toLowerCase()) return ".";
+  return target.slice(root.length).replace(/^\/+/, "");
+};
+
+const isWorkspaceRawResourceUrl = (url: string): boolean => {
+  try {
+    const parsed = new URL(url, window.location.href);
+    return isLocalFrontendUrl(parsed)
+      && parsed.pathname === "/api/workspace/raw"
+      && parsed.searchParams.has("path");
+  } catch {
+    return false;
+  }
+};
+
+const workspacePathFromHref = (href: string, options: { allowLineTarget?: boolean } = {}): string | null => {
+  const trimmed = href.trim();
+  if (!trimmed) return null;
+  const workingDirectory = String(useAppStore.getState().workingDirectory || "");
+  let candidate = "";
+  let fromLocalFrontend = false;
+  let encodedLocalFile = false;
+
+  if (trimmed.startsWith("minicode-local-file:")) {
+    encodedLocalFile = true;
+    try {
+      candidate = decodeURIComponent(trimmed.slice("minicode-local-file:".length));
+    } catch {
+      return null;
+    }
+  } else if (windowsAbsolutePathPattern.test(trimmed)) {
+    candidate = trimmed;
+  } else if (trimmed.startsWith("file://")) {
+    try {
+      const parsed = new URL(trimmed);
+      candidate = decodeURIComponent(parsed.pathname).replace(/^\/([A-Za-z]:\/)/, "$1");
+    } catch {
+      return null;
+    }
+  } else if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      const parsed = new URL(trimmed);
+      if (!isLocalFrontendUrl(parsed)) return null;
+      const decodedPath = decodeURIComponent(parsed.pathname).replace(/^\/([A-Za-z]:\/)/, "$1");
+      candidate = decodedPath;
+      fromLocalFrontend = true;
+    } catch {
+      return null;
+    }
+  } else if (trimmed.startsWith("/") && !trimmed.startsWith("//")) {
+    candidate = trimmed.replace(/^\/([A-Za-z]:[\/\\])/, "$1");
+    fromLocalFrontend = true;
+  } else {
+    candidate = trimmed;
+  }
+
+  candidate = normalizeSlashes(stripFileRefDecorations(candidate).replace(/%5[cC]/g, "/")).replace(/^\.\/+/, "");
+  if (fromLocalFrontend && candidate.startsWith("/") && !/^\/[A-Za-z]:\//.test(candidate)) {
+    candidate = candidate.replace(/^\/+/, "");
+  }
+  const safetyPath = options.allowLineTarget
+    ? parseEditorPathTarget(candidate)?.path ?? candidate
+    : candidate;
+  if (/^[A-Za-z]:\//.test(safetyPath)) {
+    return encodedLocalFile || pathWithinWorkspace(safetyPath, workingDirectory) ? candidate : null;
+  }
+  if (!isWorkspaceRelativeEditorPath(safetyPath)) return null;
+  return candidate;
+};
+
+const localImageUrlWithinWorkspace = (url: string): string | null => {
+  if (isWorkspaceRawResourceUrl(url)) return url;
+  if (!isLocalImageUrl(url)) return null;
+  const workingDirectory = String(useAppStore.getState().workingDirectory || "");
+  const candidate = workspacePathFromHref(url);
+  if (!candidate) return null;
+  const absolutePath = absoluteWorkspacePath(candidate, workingDirectory);
+  if (!absolutePath) return null;
+  const relativePath = workspaceRelativePath(absolutePath, workingDirectory);
+  return relativePath ? workspaceRawResourceUrlWithToken(relativePath) : null;
+};
+
+const workspaceFileTargetFromHref = (href: string): { path: string; line?: number; column?: number } | null => {
+  const candidate = workspacePathFromHref(href, { allowLineTarget: true });
+  if (!candidate) return null;
+  return parseEditorPathTarget(candidate);
+};
+
+const workspaceGenericFileTargetFromHref = (href: string): FileTarget | null => {
+  const candidate = workspacePathFromHref(href);
+  if (!candidate || isCodeFilePath(candidate) || !anyFilePathPattern.test(candidate)) return null;
+  return { path: candidate };
+};
+
+const workspaceFolderTargetFromHref = (href: string): FolderTarget | null => {
+  const candidate = workspacePathFromHref(href);
+  if (!candidate || anyFilePathPattern.test(candidate)) return null;
+  return { path: candidate.replace(/[\\/]+$/, "") };
+};
+
 const editorTargetFromHref = (href: string): { path: string; line?: number; column?: number } | null => {
   if (href.startsWith("minicode-file-ref:")) {
     const params = new URLSearchParams(href.slice("minicode-file-ref:".length));
@@ -427,6 +782,8 @@ const editorTargetFromHref = (href: string): { path: string; line?: number; colu
       column: parsePositiveInt(params.get("column")),
     };
   }
+  const workspaceTarget = workspaceFileTargetFromHref(href);
+  if (workspaceTarget) return workspaceTarget;
   if (href.startsWith("file://")) {
     return null;
   }
@@ -436,12 +793,405 @@ const editorTargetFromHref = (href: string): { path: string; line?: number; colu
   return null;
 };
 
-const mdComponents = (resolvedTheme: ResolvedTheme, citations: Props["citations"] = []): MarkdownComponents => ({
+const canUseLinkTextAsEditorTarget = (href: string): boolean => {
+  const trimmed = href.trim();
+  if (!trimmed) return true;
+  if (trimmed.startsWith("minicode-file-ref:")) return true;
+  if (/^[A-Za-z]:[/\\]/.test(trimmed)) return true;
+  if (trimmed.startsWith("/") || trimmed.startsWith("./") || trimmed.startsWith("../")) return true;
+  if (!/^[a-z][a-z\d+.-]*:/i.test(trimmed)) return true;
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === "file:" || isLocalFrontendUrl(parsed);
+  } catch {
+    return false;
+  }
+};
+
+const editorTargetFromLinkText = (href: string, text: string): EditorTarget | null => {
+  if (!canUseLinkTextAsEditorTarget(href)) return null;
+  return workspaceFileTargetFromHref(text);
+};
+
+const proseOptionListPattern = /^\s*[\p{L}\p{N}][\p{L}\p{N}\s&+.-]*(?:\s*\/\s*[\p{L}\p{N}][\p{L}\p{N}\s&+.-]*){1,}\s*$/u;
+const proseInlinePattern = /^[\p{L}\p{N}\s·,，.。:：;；!?！？'"“”‘’\-–—\/+&%℃°]+$/u;
+const codeLikeInlinePattern = /(?:[`\\{}[\]()<>=]|[_$]|&&|\|\||::|=>|->|[A-Za-z]:[\\/]|\.{1,2}[\\/]|(?:^|\s)[\\/][\w.-]+|[\w.-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|json|md|css|scss|html|tsx?|ya?ml|toml|rs|go|java|kt|swift|php|rb|sh|ps1)\b|(?:^|\s)-{1,2}[\w-]+|^\s*(?:npm|pnpm|yarn|bun|node|npx|python|py|pip|uv|pytest|git|curl|docker|kubectl|powershell|cmd|rg)\b|\b(?:const|let|var|function|return|import|export|class|async|await|def|lambda|SELECT|UPDATE|INSERT|DELETE)\b|[a-z]+[A-Z][A-Za-z]*|\w+\.\w+\()/;
+
+const isProseOptionList = (value: string): boolean => {
+  const text = value.trim();
+  if (!text || !text.includes("/")) return false;
+  if (text.length > 80 || codeLikeInlinePattern.test(text)) return false;
+  return proseOptionListPattern.test(text);
+};
+
+const shouldRenderInlineCodeAsProse = (value: string): boolean => {
+  const text = value.trim();
+  if (!text || text.length > 96) return false;
+  if (codeLikeInlinePattern.test(text)) return false;
+  return proseInlinePattern.test(text);
+};
+
+const InlineOptionList = ({ text }: { text: string }) => {
+  const parts = text.split("/").map((part) => part.trim()).filter(Boolean);
+  if (parts.length < 2) return <>{text}</>;
+  return (
+    <span className="md-inline-option-list">
+      {parts.map((part, index) => (
+        <span key={`${part}-${index}`} className="md-inline-option-fragment">
+          {index > 0 && <span className="md-inline-option-separator" aria-hidden="true">/</span>}
+          <span className="md-inline-option">{part}</span>
+        </span>
+      ))}
+    </span>
+  );
+};
+
+const fileChipClassName = [
+  "md-file-chip",
+  "inline-flex max-w-full items-center gap-1.5 align-baseline",
+  "rounded-[5px] border px-[5px] py-[1px]",
+  "font-[var(--font-mono)] text-[0.88em] leading-[1.42]",
+  "no-underline cursor-pointer",
+  "transition-[background,border-color,color,box-shadow] duration-150",
+  "focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent-primary)]",
+].join(" ");
+
+const fileTypeLabels: Record<string, string> = {
+  bash: "SH",
+  c: "C",
+  cc: "C++",
+  cpp: "C++",
+  cs: "C#",
+  css: "CSS",
+  go: "GO",
+  h: "H",
+  hpp: "H++",
+  html: "HTML",
+  java: "JAVA",
+  js: "JS",
+  jsx: "JSX",
+  json: "JSON",
+  kt: "KT",
+  md: "MD",
+  mdx: "MDX",
+  php: "PHP",
+  ps1: "PS",
+  py: "PY",
+  rb: "RB",
+  rs: "RS",
+  scss: "SCSS",
+  sh: "SH",
+  sql: "SQL",
+  svelte: "SV",
+  toml: "TOML",
+  ts: "TS",
+  tsx: "TSX",
+  vue: "VUE",
+  xml: "XML",
+  yaml: "YAML",
+  yml: "YAML",
+};
+
+const fileExtensionFromPath = (value: string): string => {
+  const clean = stripFileRefDecorations(value).replace(/[\\/]+$/, "");
+  const base = clean.split(/[\\/]/).pop() ?? "";
+  const match = /\.([^.:\s]+)(?::\d+(?::\d+)?)?$/i.exec(base);
+  return match?.[1]?.toLowerCase() ?? "";
+};
+
+const fileTypeLabel = (extension: string): string => {
+  if (!extension) return "FILE";
+  return fileTypeLabels[extension] ?? extension.slice(0, 4).toUpperCase();
+};
+
+const fileIconForExtension = (extension: string): IconifyIcon => {
+  if (extension === "pdf") return pdfIcon;
+  if (extension === "doc" || extension === "docx") return wordIcon;
+  if (extension === "xls" || extension === "xlsx" || extension === "csv") return excelIcon;
+  if (extension === "ppt" || extension === "pptx") return powerpointIcon;
+  if (extension === "py") return pythonIcon;
+  if (extension === "ts") return tsIcon;
+  if (extension === "tsx" || extension === "jsx") return reactIcon;
+  if (extension === "js") return jsIcon;
+  if (extension === "json") return jsonIcon;
+  if (extension === "md" || extension === "mdx") return markdownIcon;
+  if (extension === "html") return htmlIcon;
+  if (extension === "css" || extension === "scss") return cssIcon;
+  if (extension === "ps1") return powershellIcon;
+  if (["avif", "bmp", "gif", "ico", "jpeg", "jpg", "png", "svg", "tif", "tiff", "webp"].includes(extension)) return imageIcon;
+  return defaultFileIcon;
+};
+
+const FileTypeIcon = ({ extension }: { extension: string }) => (
+  <span className="md-official-file-icon" data-document-type={extension || "file"} aria-hidden="true">
+    <Icon icon={fileIconForExtension(extension)} width="18" height="18" />
+  </span>
+);
+
+const displayPathParts = (value: string): { directory: string; name: string } => {
+  const normalized = normalizeSlashes(value).replace(/^\.\/+/g, "");
+  const index = normalized.lastIndexOf("/");
+  if (index < 0) return { directory: "", name: normalized };
+  return {
+    directory: normalized.slice(0, index + 1),
+    name: normalized.slice(index + 1),
+  };
+};
+
+const splitFileLabelMeta = (value: string): { fileName: string; meta: string } => {
+  const trimmed = value.trim();
+  const lineLabel = /^(.+\.[^\s()]+)\s+(\(line\s+\d+(?::\d+)?\))$/i.exec(trimmed);
+  if (lineLabel) return { fileName: lineLabel[1], meta: lineLabel[2] };
+  const colonLine = /^(.+\.[^:\s]+)(:\d+(?::\d+)?)$/.exec(trimmed);
+  if (colonLine) return { fileName: colonLine[1], meta: colonLine[2] };
+  return { fileName: value, meta: "" };
+};
+
+const absoluteEditorTitlePath = (path: string, workingDirectory: string): string => {
+  const normalizedPath = normalizeSlashes(path).replace(/^\.\/+/g, "");
+  if (/^[A-Za-z]:\//.test(normalizedPath)) return normalizedPath;
+  const root = normalizeSlashes(workingDirectory).replace(/\/+$/, "");
+  return root ? `${root}/${normalizedPath.replace(/^\/+/, "")}` : normalizedPath;
+};
+
+const FileReferenceChip = ({ target, children }: { target: EditorTarget; children: React.ReactNode }) => {
+  const workingDirectory = useAppStore((s) => s.workingDirectory);
+  const label = textFromReactNode(children) || target.path;
+  const { directory, name } = displayPathParts(label);
+  const { fileName, meta } = splitFileLabelMeta(name);
+  const titlePath = absoluteEditorTitlePath(target.path, workingDirectory || "");
+  const extension = fileExtensionFromPath(target.path) || fileExtensionFromPath(label);
+  const { onContextMenu, menu } = useContextMenu(() => [
+    {
+      label: "在编辑器中打开",
+      onClick: () => useAppStore.getState().openEditorFile(target.path, undefined, { line: target.line, column: target.column }),
+    },
+    { label: "使用默认应用打开", onClick: () => { void openPath(titlePath); } },
+    { label: "在资源管理器中显示", onClick: () => { void revealPath(titlePath); } },
+    { label: "", separator: true },
+    { label: "复制路径", onClick: () => { void navigator.clipboard.writeText(titlePath); } },
+  ]);
+
+  return (
+    <span className="relative inline-flex" onContextMenu={onContextMenu}>
+      <button
+        type="button"
+        onClick={() => useAppStore.getState().openEditorFile(
+          target.path,
+          undefined,
+          { line: target.line, column: target.column },
+        )}
+        title={`Open ${titlePath}`}
+        aria-label={label}
+        className={fileChipClassName}
+        data-ext={extension || "file"}
+      >
+        <FileTypeIcon extension={extension} />
+        <span className="md-file-chip-label">
+          {directory ? <span className="md-file-chip-directory">{directory}</span> : null}
+          <span className="md-file-chip-name">{fileName}</span>
+          {meta ? <span className="md-file-chip-meta">{meta}</span> : null}
+        </span>
+      </button>
+      {menu}
+    </span>
+  );
+};
+
+const GenericFileReferenceChip = ({ target, children }: { target: FileTarget; children: React.ReactNode }) => {
+  const workingDirectory = useAppStore((s) => s.workingDirectory);
+  const label = textFromReactNode(children) || target.path;
+  const { directory, name } = displayPathParts(label);
+  const titlePath = absoluteEditorTitlePath(target.path, workingDirectory || "");
+  const extension = fileExtensionFromPath(target.path) || fileExtensionFromPath(label);
+  const { onContextMenu, menu } = useContextMenu(() => [
+    { label: "打开文件", onClick: () => { void openPath(titlePath); } },
+    { label: "在资源管理器中显示", onClick: () => { void revealPath(titlePath); } },
+    { label: "", separator: true },
+    { label: "复制路径", onClick: () => { void navigator.clipboard.writeText(titlePath); } },
+  ]);
+
+  return (
+    <span className="relative inline-flex" onContextMenu={onContextMenu}>
+      <button
+        type="button"
+        onClick={() => { void openPath(titlePath); }}
+        title={`Open ${titlePath}`}
+        aria-label={label}
+        className={fileChipClassName}
+        data-ext={extension || "file"}
+      >
+        <FileTypeIcon extension={extension} />
+        <span className="md-file-chip-label">
+          {directory ? <span className="md-file-chip-directory">{directory}</span> : null}
+          <span className="md-file-chip-name">{name}</span>
+        </span>
+      </button>
+      {menu}
+    </span>
+  );
+};
+
+const FolderReferenceChip = ({ target, children }: { target: FolderTarget; children: React.ReactNode }) => {
+  const workingDirectory = useAppStore((s) => s.workingDirectory);
+  const label = textFromReactNode(children) || target.path;
+  const { directory, name } = displayPathParts(label);
+  const titlePath = absoluteEditorTitlePath(target.path, workingDirectory || "");
+
+  return (
+    <button
+      type="button"
+      onClick={() => useAppStore.getState().requestFileTreeReveal(target.path, "folder")}
+      title={`Reveal ${titlePath}`}
+      aria-label={label}
+      className={`${fileChipClassName} md-folder-chip`}
+      data-kind="folder"
+    >
+      <Folder aria-hidden="true" size={13} strokeWidth={2} className="md-folder-chip-icon" />
+      <span className="md-file-chip-label">
+        {directory ? <span className="md-file-chip-directory">{directory}</span> : null}
+        <span className="md-file-chip-name">{name}</span>
+      </span>
+    </button>
+  );
+};
+
+const MarkdownImage = (props: React.ImgHTMLAttributes<HTMLImageElement>) => {
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [loadedRemoteUrl, setLoadedRemoteUrl] = useState<string | null>(null);
+  const rawSrc = typeof props.src === "string" ? props.src : "";
+  const alt = typeof props.alt === "string" ? props.alt : "image";
+  const workspaceLocalSrc = localImageUrlWithinWorkspace(rawSrc);
+  const blockedLocalImage = Boolean(rawSrc) && isLocalImageUrl(rawSrc) && !workspaceLocalSrc;
+  const src = workspaceLocalSrc ?? rawSrc;
+  const remoteSrc = !workspaceLocalSrc && isPreviewableHttpUrl(src) ? src : "";
+  const remoteImagePolicy = useAppStore((s) => s.remoteImagePolicy);
+  const allowedRemoteImageDomains = useAppStore((s) => s.allowedRemoteImageDomains);
+  const allowRemoteImageDomain = useAppStore((s) => s.allowRemoteImageDomain);
+  let remoteHostname = "";
+  if (remoteSrc) {
+    try {
+      remoteHostname = new URL(remoteSrc).hostname.toLowerCase();
+    } catch {
+      remoteHostname = "";
+    }
+  }
+  const remoteDomainAllowed = Boolean(remoteHostname) && allowedRemoteImageDomains.includes(remoteHostname);
+  const remoteImageAllowed = remoteImagePolicy === "allow" || remoteDomainAllowed || loadedRemoteUrl === remoteSrc;
+  const previewable = Boolean(src) && (isPreviewableHttpUrl(src) || isInlineImageDataUrl(src) || Boolean(workspaceLocalSrc));
+
+  if (blockedLocalImage || !src) {
+    return (
+      <span
+        role="img"
+        aria-label={alt}
+        className="my-2 inline-flex max-w-full items-center rounded-[var(--radius-sm,6px)] border border-[var(--border-subtle)] bg-[var(--surface-soft)] px-3 py-2 text-[var(--text-sm)] text-[var(--text-muted)]"
+        title="Local image outside the current workspace"
+      >
+        Local image unavailable
+      </span>
+    );
+  }
+
+  if (remoteSrc && (remoteImagePolicy === "block" || !remoteImageAllowed)) {
+    const hostname = remoteHostname || "remote host";
+    return (
+      <span
+        className="my-2 inline-flex max-w-full flex-col items-start gap-2 rounded-[var(--radius-sm,6px)] border border-[var(--border-subtle)] bg-[var(--surface-soft)] px-3 py-2 text-[var(--text-sm)] text-[var(--text-muted)]"
+        data-remote-image-placeholder={remoteSrc}
+      >
+        <span>{alt} · Image from {hostname}</span>
+        {remoteImagePolicy === "block" ? (
+          <span>Remote images are blocked in Settings.</span>
+        ) : (
+          <span className="inline-flex flex-wrap gap-2">
+            <button type="button" className="btn-secondary" onClick={() => setLoadedRemoteUrl(remoteSrc)}>
+              Load image
+            </button>
+            <button type="button" className="btn-ghost" onClick={() => allowRemoteImageDomain(hostname)}>
+              Allow {hostname} for this task
+            </button>
+          </span>
+        )}
+      </span>
+    );
+  }
+
+  const openPreview = () => {
+    if (workspaceLocalSrc) {
+      setPreviewOpen(true);
+      return;
+    }
+    if (isPreviewableHttpUrl(src)) {
+      openWebInPreview(src);
+      return;
+    }
+    setPreviewOpen(true);
+  };
+
+  // Remote http(s) images open in the right preview panel; local/inline images
+  // open in a lightbox. Distinguish the affordance so users don't expect a zoom
+  // lightbox when clicking a remote image.
+  const opensInPreviewPanel = !workspaceLocalSrc && isPreviewableHttpUrl(src);
+  const previewTitle = opensInPreviewPanel ? "Open in preview panel" : "Preview image";
+
+  const image = (
+    <img
+      {...props}
+      src={src}
+      className={`max-w-full max-h-[480px] rounded-[var(--radius-sm,6px)] border border-[var(--border-subtle)] my-2 block object-contain bg-[var(--surface-soft)]${previewable ? (opensInPreviewPanel ? " cursor-pointer" : " cursor-zoom-in") : ""}`}
+      loading="lazy"
+      title={previewable ? previewTitle : props.title}
+      onClick={props.onClick}
+    />
+  );
+
+  return (
+    <>
+      {previewable ? (
+        <button
+          type="button"
+          aria-label={opensInPreviewPanel ? `Open ${alt} in preview` : `Preview ${alt}`}
+          className="block max-w-full border-0 bg-transparent p-0 text-left"
+          onClick={(event) => {
+            if (!event.defaultPrevented) openPreview();
+          }}
+        >
+          {image}
+        </button>
+      ) : image}
+      {previewOpen ? (
+        <ImageLightbox
+          src={src}
+          alt={alt}
+          title={props.title || alt}
+          onClose={() => setPreviewOpen(false)}
+        />
+      ) : null}
+    </>
+  );
+};
+
+const mdComponents = (resolvedTheme: ResolvedTheme): MarkdownComponents => ({
   code({ className, children, node }: MarkdownCodeProps) {
     const text = String(children).replace(/\n$/, "");
     const match = /language-(\w+)/.exec(className ?? "");
+    const language = match?.[1]?.toLowerCase() ?? "";
     const nodePos = node?.position;
     const isBlock = nodePos && nodePos.end.line > nodePos.start.line;
+    if (language === "mermaid") {
+      return (
+        <div className="code-block-wrapper relative">
+          <div className="flex justify-between items-center px-3 py-1 bg-[var(--surface-active)] rounded-t-[var(--radius-sm,6px)] border border-[var(--border-subtle)] border-b-0">
+            <span className="text-[var(--text-xs)] text-[var(--text-muted)] font-[var(--font-mono)]">
+              mermaid
+            </span>
+          </div>
+          <CopyButton text={text} />
+          <MermaidBlock chart={text} resolvedTheme={resolvedTheme} />
+        </div>
+      );
+    }
     if (match || isBlock) {
       return (
         <div className="code-block-wrapper relative">
@@ -466,257 +1216,262 @@ const mdComponents = (resolvedTheme: ResolvedTheme, citations: Props["citations"
         </div>
       );
     }
+    const inlineEditorTarget = workspaceFileTargetFromHref(text);
+    if (inlineEditorTarget) {
+      return <FileReferenceChip target={inlineEditorTarget}>{children}</FileReferenceChip>;
+    }
+    if (isProseOptionList(text)) {
+      return <InlineOptionList text={text} />;
+    }
+    if (shouldRenderInlineCodeAsProse(text)) {
+      return <span className="md-inline-code-prose">{children}</span>;
+    }
     return (
       <code className={`${className ?? ""} bg-[var(--surface-soft)] rounded-[5px] px-[5px] py-[1.5px] font-[var(--font-mono)] text-[0.86em] text-[var(--text-primary)]`}>
         {children}
       </code>
     );
   },
-  a: (props: React.AnchorHTMLAttributes<HTMLAnchorElement>) => {
+  a: ({ node: _node, ...props }: MarkdownElementProps<React.AnchorHTMLAttributes<HTMLAnchorElement>>) => {
     const href = typeof props.href === "string" ? props.href : "";
-    const label = citations.findIndex((citation) => citationHref(citation) === href);
-    const childrenText = Children.toArray(props.children).join("");
-    const compactChildren = label >= 0 && childrenText === href ? `[${label + 1}]` : props.children;
-    const editorTarget = editorTargetFromHref(href);
+    const childrenText = textFromReactNode(props.children);
+    const editorTarget = editorTargetFromHref(href) ?? editorTargetFromLinkText(href, childrenText);
+    const fileTarget = editorTarget
+      ? null
+      : workspaceGenericFileTargetFromHref(href) ?? (
+          canUseLinkTextAsEditorTarget(href) ? workspaceGenericFileTargetFromHref(childrenText) : null
+        );
+    const folderTarget = editorTarget || fileTarget
+      ? null
+      : workspaceFolderTargetFromHref(href) ?? (
+          canUseLinkTextAsEditorTarget(href) ? workspaceFolderTargetFromHref(childrenText) : null
+        );
+    const opensInPreview = isPreviewableHttpUrl(href);
     if (href.startsWith("minicode-file-ref:") && !editorTarget) {
-      return <span className="font-[var(--font-mono)] text-[0.9em]">{compactChildren}</span>;
+      return <span className="font-[var(--font-mono)] text-[0.9em]">{props.children}</span>;
     }
     if (editorTarget) {
-      return (
-        <button type="button" onClick={() => useAppStore.getState().openEditorFile(
-          editorTarget.path,
-          undefined,
-          { line: editorTarget.line, column: editorTarget.column },
-        )}
-          className="bg-transparent border-0 p-0 cursor-pointer text-[var(--accent-primary)] underline font-[var(--font-mono)] text-[0.9em]">
-          {compactChildren}
-        </button>
-      );
+      return <FileReferenceChip target={editorTarget}>{props.children}</FileReferenceChip>;
+    }
+    if (fileTarget) {
+      return <GenericFileReferenceChip target={fileTarget}>{props.children}</GenericFileReferenceChip>;
+    }
+    if (folderTarget) {
+      return <FolderReferenceChip target={folderTarget}>{props.children}</FolderReferenceChip>;
     }
     return (
-      <a {...props} target="_blank" rel="noreferrer" className="text-[var(--accent-primary)] underline">
-        {compactChildren}
+      <a
+        {...props}
+        target={opensInPreview ? undefined : "_blank"}
+        rel="noreferrer"
+        className="text-[var(--accent-primary)] underline"
+        onClick={(event) => {
+          props.onClick?.(event);
+          if (event.defaultPrevented) return;
+          if (openWebInPreview(href)) event.preventDefault();
+        }}
+      >
+        {props.children}
       </a>
     );
   },
-  p: (props: React.HTMLAttributes<HTMLParagraphElement>) => (
+  p: ({ node: _node, ...props }: MarkdownElementProps<React.HTMLAttributes<HTMLParagraphElement>>) => (
     <p {...props} className="my-2 leading-[var(--leading-relaxed)]" />
   ),
-  ul: ({ className, ...props }: React.HTMLAttributes<HTMLUListElement>) => (
+  ul: ({ className, node: _node, ...props }: MarkdownElementProps<React.HTMLAttributes<HTMLUListElement>>) => (
     <ul {...props} className={`my-2 pl-5 list-disc marker:text-[var(--text-muted)]${className ? ` ${className}` : ""}`} />
   ),
-  ol: ({ className, ...props }: React.HTMLAttributes<HTMLOListElement>) => (
+  ol: ({ className, node: _node, ...props }: MarkdownElementProps<React.HTMLAttributes<HTMLOListElement>>) => (
     <ol {...props} className={`my-2 pl-5 list-decimal marker:text-[var(--text-muted)]${className ? ` ${className}` : ""}`} />
   ),
-  li: ({ className, ...props }: React.HTMLAttributes<HTMLLIElement>) => (
+  li: ({ className, node: _node, ...props }: MarkdownElementProps<React.HTMLAttributes<HTMLLIElement>>) => (
     <li {...props} className={`mb-1 leading-[var(--leading-normal)]${className ? ` ${className}` : ""}`} />
   ),
-  table: (props: React.HTMLAttributes<HTMLTableElement>) => (
+  table: ({ node: _node, ...props }: MarkdownElementProps<React.HTMLAttributes<HTMLTableElement>>) => (
     <div className="overflow-x-auto my-2">
       <table {...props} className="border-collapse text-[var(--text-sm)] w-full" />
     </div>
   ),
-  th: (props: React.ThHTMLAttributes<HTMLTableCellElement>) => (
+  th: ({ node: _node, ...props }: MarkdownElementProps<React.ThHTMLAttributes<HTMLTableCellElement>>) => (
     <th {...props} className="border border-[var(--border-subtle)] px-2.5 py-1.5 bg-[var(--surface-soft)] text-left font-semibold" />
   ),
-  td: (props: React.TdHTMLAttributes<HTMLTableCellElement>) => (
+  td: ({ node: _node, ...props }: MarkdownElementProps<React.TdHTMLAttributes<HTMLTableCellElement>>) => (
     <td {...props} className="border border-[var(--border-subtle)] px-2.5 py-1.5" />
   ),
-  blockquote: (props: React.BlockquoteHTMLAttributes<HTMLQuoteElement>) => (
+  blockquote: ({ node: _node, ...props }: MarkdownElementProps<React.BlockquoteHTMLAttributes<HTMLQuoteElement>>) => (
     <blockquote {...props} className="border-l-[3px] border-[var(--accent-primary)] bg-[var(--surface-soft)] px-3.5 py-2 my-2 text-[var(--text-secondary)]" />
   ),
-  h1: (props: React.HTMLAttributes<HTMLHeadingElement>) => <h1 {...props} className="text-[length:var(--text-2xl)] font-bold mt-5 mb-2.5 first:mt-0" />,
-  h2: (props: React.HTMLAttributes<HTMLHeadingElement>) => <h2 {...props} className="text-[length:var(--text-xl)] font-semibold mt-5 mb-2 first:mt-0" />,
-  h3: (props: React.HTMLAttributes<HTMLHeadingElement>) => <h3 {...props} className="text-[length:var(--text-lg)] font-semibold mt-4 mb-1.5 first:mt-0" />,
+  h1: ({ node: _node, ...props }: MarkdownElementProps<React.HTMLAttributes<HTMLHeadingElement>>) => <h1 {...props} className="text-[length:var(--text-2xl)] font-bold mt-5 mb-2.5 first:mt-0" />,
+  h2: ({ node: _node, ...props }: MarkdownElementProps<React.HTMLAttributes<HTMLHeadingElement>>) => <h2 {...props} className="text-[length:var(--text-xl)] font-semibold mt-5 mb-2 first:mt-0" />,
+  h3: ({ node: _node, ...props }: MarkdownElementProps<React.HTMLAttributes<HTMLHeadingElement>>) => <h3 {...props} className="text-[length:var(--text-lg)] font-semibold mt-4 mb-1.5 first:mt-0" />,
   hr: () => <hr className="border-0 border-t border-[var(--border-subtle)] my-3" />,
-  img: (props: React.ImgHTMLAttributes<HTMLImageElement>) => (
-    <img {...props} className="max-w-full max-h-[480px] rounded-[var(--radius-sm,6px)] border border-[var(--border-subtle)] my-2 block object-contain cursor-pointer bg-[var(--surface-soft)]" loading="lazy"
-      onClick={(e) => { const src = (e.target as HTMLImageElement).src; if (src) window.open(src, "_blank"); }} />
-  ),
+  img: ({ node: _node, ...props }: MarkdownElementProps<React.ImgHTMLAttributes<HTMLImageElement>>) => {
+    return <MarkdownImage {...props} />;
+  },
 });
 
 const remarkPlugins: MarkdownRemarkPlugins = [
   [remarkGfm, { singleTilde: false }],
+  remarkMath,
   normalizeFallbackStrongMarkers,
   linkifyBareFileReferences,
 ];
 
+const rehypePlugins: MarkdownRehypePlugins = [
+  [rehypeKatex, { strict: false, throwOnError: false }],
+];
+
 const markdownUrlTransform = (url: string) => (
-  url.startsWith("minicode-file-ref:") ? url : defaultUrlTransform(url)
+  url.startsWith("minicode-file-ref:") || url.startsWith("minicode-local-file:") || isInlineImageDataUrl(url) || isExplicitLocalImageUrl(url)
+    ? url
+    : defaultUrlTransform(url)
+);
+
+const preserveWindowsMarkdownFileLinks = (content: string): string => content.replace(
+  /(?<!!)\[([^\]\n]+)\]\(\s*([A-Za-z]:\\[^)\n]+)\s*\)/g,
+  (_match, label: string, path: string) => `[${label}](minicode-local-file:${encodeURIComponent(path.trim())})`,
 );
 
 /**
  * Find the split point for incremental rendering during streaming.
- * Returns the index after the last complete block (double newline or closed code fence).
+ * Returns the index after the last complete block boundary.
  * Content before this point is "stable" and can be memoized.
+ *
+ * This mirrors cc's StreamingMarkdown approach: find the last closed
+ * block boundary so everything before it is final and only the tail
+ * re-parses per delta. We check multiple boundary types:
+ * - Closed code fences (```...```)
+ * - Double-newline paragraph breaks
+ * - Completed list items (line starting with dash, bullet, or 1. followed by \n)
+ * - Heading boundaries (# ...\n)
  */
 function findStableSplitPoint(content: string): number {
-  // Look for the last closed code fence followed by a newline
+  let bestSplit = -1;
+
+  // Closed code fence: ```\n (the closing fence + newline)
+  // Also handle ```\n followed by content — the fence is complete.
   const fenceClose = content.lastIndexOf("\n```\n");
-  // Look for the last double-newline paragraph break
+  if (fenceClose >= 0) bestSplit = Math.max(bestSplit, fenceClose + 5);
+
+  // Also check for ``` at end (closed but no trailing newline)
+  const fenceEndClose = content.lastIndexOf("\n```");
+  if (fenceEndClose >= 0 && content.substring(fenceEndClose + 4).trim() === "") {
+    bestSplit = Math.max(bestSplit, fenceEndClose + 4);
+  }
+
+  // Double-newline paragraph break
   const paraBreak = content.lastIndexOf("\n\n");
-  // Use whichever is later (more content is stable)
-  const split = Math.max(
-    fenceClose >= 0 ? fenceClose + 5 : -1,
-    paraBreak >= 0 ? paraBreak + 2 : -1,
-  );
+  if (paraBreak >= 0) bestSplit = Math.max(bestSplit, paraBreak + 2);
+
+  // Heading boundary: line starting with # followed by newline
+  const headingEnd = content.lastIndexOf("\n# ");
+  if (headingEnd >= 0) {
+    const headingNewline = content.indexOf("\n", headingEnd + 3);
+    if (headingNewline >= 0) bestSplit = Math.max(bestSplit, headingNewline + 1);
+  }
+
+  // Completed list item: - text\n or * text\n or 1. text\n
+  const listPattern = /(?:^|\n)(?:[-*]|\d+\.)\s+.+\n/g;
+  let lastListMatch: RegExpExecArray | null = null;
+  let match: RegExpExecArray | null;
+  while ((match = listPattern.exec(content)) !== null) {
+    lastListMatch = match;
+  }
+  if (lastListMatch) {
+    bestSplit = Math.max(bestSplit, lastListMatch.index + lastListMatch[0].length);
+  }
+
   // Don't split if the stable part is too small (< 100 chars)
-  return split > 100 ? split : 0;
+  return bestSplit > 100 ? bestSplit : 0;
+}
+
+// ── Plain-text fast path ────────────────────────────────────────────
+// If content has no markdown syntax markers, skip the full react-markdown
+// pipeline and render as a simple <p>. This covers the majority of short
+// assistant replies ("Sure, let me help with that.") and saves ~2-3ms of
+// parse + render per message. Mirrors cc's hasMarkdownSyntax() check.
+const MD_SYNTAX_RE = /[#*`|[>\-_~]|\n\n|^\d+\. |\n\d+\. /;
+const FILE_REF_HINT_RE = new RegExp(
+  String.raw`\.(?:${CODE_FILE_EXTENSIONS})(?::\d+(?::\d+)?)?(?=$|[\s,，。;；:：)）\]}])`,
+  "i",
+);
+function hasMarkdownSyntax(s: string): boolean {
+  return MD_SYNTAX_RE.test(s) || FILE_REF_HINT_RE.test(s);
+}
+
+const PlainText = memo(({ content }: { content: string }) => (
+  <p className="md-paragraph" style={{ margin: 0 }}>{content}</p>
+));
+PlainText.displayName = "PlainText";
+
+// ── Cross-mount markdown render cache ───────────────────────────────
+// react-markdown's internal parsing is expensive (~2-3ms for typical
+// assistant messages). memo() only survives while the component stays
+// mounted; virtual scroll / conversation switch unmounts → re-parse.
+// This module-level cache keyed by content hash avoids re-parsing
+// previously-rendered messages. Mirrors cc's tokenCache (Markdown.tsx:22).
+const MD_RENDER_CACHE_MAX = 300;
+const mdRenderCache = new Map<string, string>();
+
+function hashContent(content: string): string {
+  // Simple FNV-1a hash — fast, good enough for cache keys
+  let hash = 2166136261;
+  for (let i = 0; i < content.length; i++) {
+    hash ^= content.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
 }
 
 /** Memoized renderer for the stable (completed) portion of streaming content. */
-const StableMarkdown = memo(({ content, components }: { content: string; components: MarkdownComponents }) => (
-  <ReactMarkdown remarkPlugins={remarkPlugins} components={components} urlTransform={markdownUrlTransform}>
-    {content}
-  </ReactMarkdown>
-));
+const StableMarkdown = memo(({ content, components }: { content: string; components: MarkdownComponents }) => {
+  // Check if this is plain text — skip react-markdown entirely
+  if (!hasMarkdownSyntax(content)) {
+    return <PlainText content={content} />;
+  }
+  return (
+    <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={components} urlTransform={markdownUrlTransform}>
+      {content}
+    </ReactMarkdown>
+  );
+});
 StableMarkdown.displayName = "StableMarkdown";
 
-const citationHref = (citation: NonNullable<Props["citations"]>[number] | undefined): string | null => {
-  const candidate = citation?.url || citation?.source || "";
-  return /^https?:\/\//i.test(candidate) ? candidate : null;
-};
-
-const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-const sourceLabelPattern = "(?:\u6765\u6e90|\u6570\u636e\u6765\u6e90|\u4fe1\u606f\u6765\u6e90|\u53c2\u8003\u6765\u6e90|\u8d44\u6599\u6765\u6e90|\u53c2\u8003|sources?|references?)";
-const sourceHeadingLabelPattern = "(?:\u6765\u6e90|\u6570\u636e\u6765\u6e90|\u4fe1\u606f\u6765\u6e90|\u53c2\u8003\u6765\u6e90|\u8d44\u6599\u6765\u6e90|\u53c2\u8003\u6765\u6e90\u5217\u8868|\u53c2\u8003\u8d44\u6599|\u53c2\u8003\u6587\u732e|\u53c2\u8003|sources?|references?)";
-const urlOrHostPattern = "(?:<?https?:\\/\\/\\S+>?|[\\w.-]+\\.[a-z]{2,}(?:\\/\\S*)?)";
-
-const sourceLinePattern = new RegExp(
-  `^\\s*${sourceLabelPattern}\\s*[:\\uFF1A]\\s*(?:\\[\\d+\\]\\s*)?.*${urlOrHostPattern}.*$`,
-  "i",
-);
-const sourceListOnlyPattern = new RegExp(
-  `^\\s*${sourceLabelPattern}\\s*[:\\uFF1A]\\s*(?:\\[\\d+\\](?:\\s*${urlOrHostPattern})?(?:\\s*[,;\\uFF0C\\u3001]\\s*)?)+\\s*$`,
-  "i",
-);
-const sourceCitationSummaryPattern = new RegExp(
-  `^\\s*${sourceLabelPattern}\\s*[:\\uFF1A]\\s*(?:\\[\\d+\\]\\s*[^\\[]+)+\\s*$`,
-  "i",
-);
-const sourceHeadingPattern = new RegExp(
-  `^\\s{0,3}(?:#{1,6}\\s*)?${sourceHeadingLabelPattern}\\s*[:\\uFF1A]?\\s*$`,
-  "i",
-);
-const sourceItemPattern = new RegExp(
-  `^\\s*(?:[-*]\\s*)?(?:\\[\\d+\\]|\\d+[.)])\\s*(?:[^\\n:\\uFF1A]{0,160}(?:[:\\uFF1A]|\\s+)\\s*)?${urlOrHostPattern}.*$`,
-  "i",
-);
-const sourceTitlePattern = new RegExp("^\\s*(?:[-*]\\s*)?(?:\\[\\d+\\]|\\d+[.)])\\s+.+[:\\uFF1A]\\s*$");
-const bareUrlPattern = /^\s*<?https?:\/\/\S+>?\s*$/i;
-const indexedCitationMarkerPattern = /(?:\[\d+\]|\[\[\\?\d+\\?\]\]\([^)]+\)|\[\\\[\d+\\\]\]\(<[^)]+>\))/g;
-const urlOrHostGlobalPattern = new RegExp(urlOrHostPattern, "gi");
-const inlineSourceLinkPattern = /\s*\[\s*(?:https?:\/\/[^\]\s]+|(?:www\.)?[\w.-]+\.[a-z]{2,}(?:\/[^\]\s]*)?)\s*\]\(\s*<?https?:\/\/[^)\s>]+>?\s*\)/gi;
-
-const isInlineIndexedSourceList = (line: string): boolean => {
-  const trimmed = line.trim();
-  if (!trimmed.startsWith("[")) return false;
-  const markers = [...trimmed.matchAll(indexedCitationMarkerPattern)];
-  if (markers.length < 2 || markers[0].index !== 0) return false;
-  return [...trimmed.matchAll(urlOrHostGlobalPattern)].length >= 2;
-};
-
-const stripInlineSourceLinks = (line: string): string => (
-  line
-    .replace(inlineSourceLinkPattern, "")
-    .replace(/\s+([。！？!?；;，,])/g, "$1")
-);
-
-export const stripModelAuthoredSources = (content: string): string => {
-  const lines = content.split(/\r?\n/);
-  const kept: string[] = [];
-  let inSourceSection = false;
-  let inFence = false;
-
-  for (const line of lines) {
-    if (/^\s*(```|~~~)/.test(line)) {
-      inFence = !inFence;
-      kept.push(line);
-      continue;
-    }
-    if (inFence) {
-      kept.push(line);
-      continue;
-    }
-    if (
-      sourceLinePattern.test(line) ||
-      sourceListOnlyPattern.test(line) ||
-      sourceCitationSummaryPattern.test(line) ||
-      isInlineIndexedSourceList(line)
-    ) {
-      continue;
-    }
-    if (sourceHeadingPattern.test(line)) {
-      inSourceSection = true;
-      continue;
-    }
-    if (inSourceSection) {
-      if (
-        line.trim() === "" ||
-        sourceItemPattern.test(line) ||
-        sourceTitlePattern.test(line) ||
-        bareUrlPattern.test(line)
-      ) {
-        continue;
-      }
-      inSourceSection = false;
-    }
-    kept.push(stripInlineSourceLinks(line));
+const StreamingTailMarkdown = ({ content, components }: { content: string; components: MarkdownComponents }) => {
+  // Plain-text fast path for the streaming tail too — short tails like
+  // a few words being typed don't need the full markdown pipeline.
+  if (!hasMarkdownSyntax(content)) {
+    return <PlainText content={content} />;
   }
-
-  return kept.join("\n").trim();
-};
-
-const removeInlineCitationMarkers = (content: string, citations: Props["citations"] = []): string => {
-  let next = content;
-  citations.forEach((citation, index) => {
-    const href = citationHref(citation);
-    if (!href) return;
-    const n = index + 1;
-    const escapedHref = escapeRegex(href);
-    next = next
-      .replace(new RegExp(`\\[${n}\\]\\(\\s*<?${escapedHref}>?\\s*\\)`, "g"), "")
-      .replace(new RegExp(`\\[\\\\?\\[${n}\\\\?\\]\\]\\(\\s*<?${escapedHref}>?\\s*\\)`, "g"), "");
-    try {
-      const parsed = new URL(href);
-      const prefix = escapeRegex(`${parsed.origin}${parsed.pathname}`);
-      next = next
-        .replace(new RegExp(`\\[${n}\\]\\(\\s*<?${prefix}[^)\\s>]*>?\\s*\\)`, "g"), "")
-        .replace(new RegExp(`\\[\\\\?\\[${n}\\\\?\\]\\]\\(\\s*<?${prefix}[^)\\s>]*>?\\s*\\)`, "g"), "");
-    } catch {
-      // Exact URL replacement above is enough for non-standard URLs.
-    }
-    next = next.replace(new RegExp(`\\[${n}\\](?!\\()`, "g"), "");
-  });
-  return next
-    .replace(/[ \t]+([，。！？；：、,.!?;:])/g, "$1")
-    .replace(/([（(【「『])\s+/g, "$1")
-    .replace(/\s+([）)】」』])/g, "$1")
-    .replace(/[ \t]{2,}/g, " ")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n[ \t]+/g, "\n")
-    .trim();
-};
-
-export const normalizeCitationText = (content: string, citations: Props["citations"] = []): string => {
-  let next = stripModelAuthoredSources(content);
-  if (!citations.length) return next;
-  return removeInlineCitationMarkers(next, citations);
+  return (
+    <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={components} urlTransform={markdownUrlTransform}>
+      {content}
+    </ReactMarkdown>
+  );
 };
 
 export const MarkdownRenderer = memo(({ content, isStreaming, citations }: Props) => {
   const resolved = useResolvedTheme();
-  const components = useMemo(() => mdComponents(resolved, citations), [resolved, citations]);
-  const displayContent = useMemo(() => normalizeCitationText(content, citations), [content, citations]);
+  const components = useMemo(() => mdComponents(resolved), [resolved]);
+  const displayContent = useMemo(
+    () => preserveWindowsMarkdownFileLinks(normalizeLatexDelimiters(normalizeCitationText(content, citations))),
+    [content, citations],
+  );
   const prevStableRef = useRef("");
+
+  // Plain-text fast path: skip react-markdown entirely for content with
+  // no markdown syntax. This is the single biggest render-cost win for
+  // short replies and process narration text.
+  const isPlainText = !hasMarkdownSyntax(displayContent);
 
   // During streaming, split content into stable prefix + streaming tail
   if (isStreaming && displayContent.length > 200) {
     const splitIdx = findStableSplitPoint(displayContent);
     if (splitIdx > 0) {
       const stableContent = displayContent.slice(0, splitIdx);
-      if (stableContent.length > prevStableRef.current.length) {
+      if (!prevStableRef.current || !stableContent.startsWith(prevStableRef.current)) {
+        prevStableRef.current = stableContent;
+      } else if (stableContent.length > prevStableRef.current.length) {
         prevStableRef.current = stableContent;
       }
       const stable = prevStableRef.current;
@@ -724,11 +1479,7 @@ export const MarkdownRenderer = memo(({ content, isStreaming, citations }: Props
       return (
         <div className="md-body">
           <StableMarkdown content={stable} components={components} />
-          {tail && (
-            <div className="whitespace-pre-wrap font-inherit leading-[var(--leading-relaxed)]">
-              {tail}
-            </div>
-          )}
+          {tail && <StreamingTailMarkdown content={tail} components={components} />}
         </div>
       );
     }
@@ -736,9 +1487,31 @@ export const MarkdownRenderer = memo(({ content, isStreaming, citations }: Props
 
   // Not streaming or content too short: full render.
   prevStableRef.current = "";
+
+  // Plain-text fast path: skip the full react-markdown pipeline
+  if (isPlainText) {
+    return (
+      <div className="md-body">
+        <PlainText content={displayContent} />
+      </div>
+    );
+  }
+
+  // Cache check: if we've seen this exact content before (same hash),
+  // we know it's not plain text and can skip the syntax re-check. The
+  // actual react-markdown render is memoized by React.memo on this
+  // component, but cross-unmount remounts lose that memo. The hash cache
+  // just skips the hasMarkdownSyntax regex on re-mounts.
+  const contentHash = hashContent(displayContent);
+  if (!mdRenderCache.has(contentHash) && mdRenderCache.size >= MD_RENDER_CACHE_MAX) {
+    const firstKey = mdRenderCache.keys().next().value;
+    if (firstKey) mdRenderCache.delete(firstKey);
+  }
+  mdRenderCache.set(contentHash, displayContent);
+
   return (
     <div className="md-body">
-      <ReactMarkdown remarkPlugins={remarkPlugins} components={components} urlTransform={markdownUrlTransform}>
+      <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={components} urlTransform={markdownUrlTransform}>
         {displayContent}
       </ReactMarkdown>
     </div>

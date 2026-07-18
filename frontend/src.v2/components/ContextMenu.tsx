@@ -63,6 +63,7 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
   return createPortal(
     <div
       ref={ref}
+      className="context-menu-surface"
       tabIndex={-1}
       role="menu"
       style={{
@@ -78,7 +79,6 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
         boxShadow: "0 6px 20px rgba(0,0,0,0.22), 0 1px 4px rgba(0,0,0,0.12)",
         padding: "4px 0",
         outline: "none",
-        animation: "ctx-menu-fadein 80ms ease-out",
       }}
     >
       {items.map((item, i) =>
@@ -151,12 +151,6 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
           </button>
         ),
       )}
-      <style>{`
-        @keyframes ctx-menu-fadein {
-          from { opacity: 0; transform: translateY(-2px); }
-          to   { opacity: 1; transform: translateY(0); }
-        }
-      `}</style>
     </div>,
     document.body,
   );

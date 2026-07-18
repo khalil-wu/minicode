@@ -1,4 +1,14 @@
 import { useEffect } from "react";
+import {
+  Copy,
+  Eye,
+  FilePenLine,
+  FilePlus2,
+  FolderOpen,
+  FolderPlus,
+  Pencil,
+  Trash2,
+} from "lucide-react";
 import type { WorkspaceTreeNode } from "../protocol/workspace";
 import { useAppStore } from "../stores";
 import { isDesktop, desktop, revealPath } from "../desktop/runtime";
@@ -31,11 +41,16 @@ export const FileContextMenu = ({
 }) => {
   useEffect(() => {
     const handler = () => onClose();
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
     document.addEventListener("click", handler);
     document.addEventListener("contextmenu", handler);
+    document.addEventListener("keydown", closeOnEscape);
     return () => {
       document.removeEventListener("click", handler);
       document.removeEventListener("contextmenu", handler);
+      document.removeEventListener("keydown", closeOnEscape);
     };
   }, [onClose]);
 
@@ -143,16 +158,16 @@ export const FileContextMenu = ({
   };
 
   const items = [
-    ...(!menu.isDir ? [{ label: "Open in Editor", action: openInEditor }] : []),
-    ...(!menu.isDir && isPreviewableFile(menu.path) ? [{ label: "Open in Preview Pane", action: openPreview }] : []),
+    ...(!menu.isDir ? [{ label: "Open in Editor", action: openInEditor, icon: <FilePenLine size={14} /> }] : []),
+    ...(!menu.isDir && isPreviewableFile(menu.path) ? [{ label: "Open in Preview Pane", action: openPreview, icon: <Eye size={14} /> }] : []),
     ...(menu.isDir ? [
-      { label: "New File...", action: createChildFile },
-      { label: "New Folder...", action: createChildFolder },
+      { label: "New File...", action: createChildFile, icon: <FilePlus2 size={14} /> },
+      { label: "New Folder...", action: createChildFolder, icon: <FolderPlus size={14} /> },
     ] : []),
-    ...(isDesktop() ? [{ label: "Reveal in Explorer", action: revealInExplorer }] : []),
-    { label: "Copy Path", action: copyPath },
-    { label: "Rename...", action: renameFile },
-    { label: "Delete", action: deleteFile },
+    ...(isDesktop() ? [{ label: "Reveal in Explorer", action: revealInExplorer, icon: <FolderOpen size={14} /> }] : []),
+    { label: "Copy Path", action: copyPath, icon: <Copy size={14} /> },
+    { label: "Rename...", action: renameFile, icon: <Pencil size={14} /> },
+    { label: "Delete", action: deleteFile, icon: <Trash2 size={14} />, danger: true },
   ];
 
   return (
@@ -166,28 +181,35 @@ export const FileContextMenu = ({
         borderRadius: "var(--radius-sm, 6px)",
         boxShadow: "var(--shadow-md)",
         padding: 4,
-        zIndex: 200,
-        minWidth: 140,
+        zIndex: "var(--z-context-menu)",
+        minWidth: 184,
       }}
     >
       {items.map((item) => (
         <button
           key={item.label}
-          className={item.label === "Delete" ? "btn-ghost-danger" : "btn-ghost"}
+          type="button"
+          className={item.danger ? "btn-ghost-danger" : "btn-ghost"}
           onClick={item.action}
           style={{
-            display: "block",
+            minHeight: 30,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
             width: "100%",
             textAlign: "left",
             border: 0,
-            padding: "5px 10px",
+            padding: "0 8px",
             fontSize: "var(--text-xs)",
-            color: item.label === "Delete" ? "var(--state-danger)" : "var(--text-primary)",
+            color: item.danger ? "var(--state-danger)" : "var(--text-secondary)",
             cursor: "pointer",
             borderRadius: "var(--radius-sm, 4px)",
           }}
         >
-          {item.label}
+          <span aria-hidden="true" style={{ width: 16, display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            {item.icon}
+          </span>
+          <span>{item.label}</span>
         </button>
       ))}
     </div>

@@ -1,10 +1,10 @@
 import * as React from "react";
 import { Quote, X } from "lucide-react";
-import type { ChatMessage } from "../../stores/types";
+import type { ComposerQuote } from "../../stores/types";
 import "./message-quote.css";
 
 interface MessageQuoteProps {
-  message: ChatMessage;
+  message: ComposerQuote;
   onRemove: () => void;
 }
 
@@ -13,8 +13,9 @@ interface MessageQuoteProps {
  * Displays the message being replied to
  */
 export function MessageQuote({ message, onRemove }: MessageQuoteProps) {
-  const preview = message.content.slice(0, 150);
-  const needsEllipsis = message.content.length > 150;
+  const compact = message.content.replace(/\s+/g, " ").trim();
+  const preview = compact.slice(0, 180);
+  const needsEllipsis = compact.length > 180;
 
   return (
     <div className="message-quote">
@@ -28,6 +29,7 @@ export function MessageQuote({ message, onRemove }: MessageQuoteProps) {
           className="message-quote-remove"
           onClick={onRemove}
           title="取消引用"
+          aria-label="取消引用"
         >
           <X size={14} />
         </button>
@@ -44,9 +46,9 @@ export function MessageQuote({ message, onRemove }: MessageQuoteProps) {
  * Hook to manage message quote state
  */
 export function useMessageQuote() {
-  const [quotedMessage, setQuotedMessage] = React.useState<ChatMessage | null>(null);
+  const [quotedMessage, setQuotedMessage] = React.useState<ComposerQuote | null>(null);
 
-  const quoteMessage = (message: ChatMessage) => {
+  const quoteMessage = (message: ComposerQuote) => {
     setQuotedMessage(message);
   };
 

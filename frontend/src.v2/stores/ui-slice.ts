@@ -7,6 +7,7 @@ import type {
   UISlice,
 } from "./types";
 import { sendClientCommand } from "../protocol/ws-outbox";
+import { desktop } from "../desktop/runtime";
 import { buildApprovalResponseCommand } from "../protocol/prompt-responses";
 import {
   LS,
@@ -17,11 +18,17 @@ import {
   applyTheme,
   applyTextScale,
   ensureCodePanelSlots,
+  normalizePanelSlots,
   persistPanelSlots,
   preferredRightSidebarWidth,
   editorStateForWorkspace,
 } from "./shared-helpers";
 import { clampTextScale } from "../lib/text-scale";
+
+const initialRemoteImagePolicy = (): UISlice["remoteImagePolicy"] => {
+  const stored = readLS(LS.remoteImagePolicy);
+  return stored === "allow" || stored === "block" ? stored : "ask";
+};
 
 function cloneDiffReviewState(state: DiffReviewState | null): DiffReviewState | null {
   if (!state) return null;
@@ -46,6 +53,12 @@ function emptyConversationWorkbenchState(): ConversationWorkbenchState {
     rightStackTab: "tasks",
     rightPanelOpen: false,
     rightStackTabLocked: false,
+    draft: "",
+    attachments: [],
+    quotedMessage: null,
+    selectedMentions: [],
+    selectedSkills: [],
+    allowedRemoteImageDomains: [],
   };
 }
 
@@ -54,6 +67,12 @@ function cloneConversationWorkbenchState(state: ConversationWorkbenchState): Con
     ...state,
     diffReview: cloneDiffReviewState(state.diffReview),
     previewArtifact: cloneArtifactState(state.previewArtifact),
+    draft: state.draft ?? "",
+    attachments: (state.attachments ?? []).map((attachment) => ({ ...attachment })),
+    quotedMessage: state.quotedMessage ? { ...state.quotedMessage } : null,
+    selectedMentions: (state.selectedMentions ?? []).map((mention) => ({ ...mention })),
+    selectedSkills: (state.selectedSkills ?? []).map((skill) => ({ ...skill })),
+    allowedRemoteImageDomains: [...(state.allowedRemoteImageDomains ?? [])],
   };
 }
 
@@ -66,6 +85,12 @@ function liveConversationWorkbenchState(s: AppStore): ConversationWorkbenchState
     rightStackTab: s.rightStackTab,
     rightPanelOpen: s.rightPanelOpen,
     rightStackTabLocked: s.rightStackTabLocked,
+    draft: s.draft,
+    attachments: s.attachments.map((attachment) => ({ ...attachment })),
+    quotedMessage: s.quotedMessage ? { ...s.quotedMessage } : null,
+    selectedMentions: s.selectedMentions.map((mention) => ({ ...mention })),
+    selectedSkills: s.selectedSkills.map((skill) => ({ ...skill })),
+    allowedRemoteImageDomains: [...s.allowedRemoteImageDomains],
   };
 }
 
@@ -87,16 +112,24 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   appMode: "code" as const,
   rightStackTab: "tasks" as const,
   rightStackTabLocked: false,
+  focusedSubagentId: null,
   contextUsage: null,
+  remoteImagePolicy: initialRemoteImagePolicy(),
+  allowedRemoteImageDomains: [],
   commandPaletteOpen: false,
   settingsOpen: false,
+  automationsOpen: false,
   shortcutsHelpOpen: false,
   quickOpenVisible: false,
   quickOpenResults: [],
   quickOpenLoading: false,
   currentModel: "",
   currentProvider: "",
+  currentProviderId: "",
+  currentProviderBaseUrl: "",
+  currentWireApi: "",
   availableModels: [],
+  modelsSource: "",
   availableSkills: [],
   marketplaceSkills: [],
   slashCommands: [],
@@ -112,13 +145,50 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   previewVerification: null,
   fileChanges: [],
   fileTreeVersion: 0,
+  fileTreeRevealRequests: [],
   mcpServers: [],
   envVars: [],
   gitChanges: { workingTree: [], staged: [], untracked: [], loading: false },
   skillsMarketplaceOpen: false,
   liveArtifactsOpen: false,
   agentEditorOpen: false,
-  setAgentEditorOpen: (open) => set({ agentEditorOpen: open }),
+  pluginCommandPanelOpen: false,
+  pluginCommandPanelPayload: null,
+  toggleAgentEditor: () =>
+    set((s) => {
+      if (s.agentEditorOpen) {
+        return { agentEditorOpen: false };
+      }
+      return {
+        agentEditorOpen: true,
+        commandPaletteOpen: false,
+        settingsOpen: false,
+        automationsOpen: false,
+        shortcutsHelpOpen: false,
+        skillsMarketplaceOpen: false,
+        liveArtifactsOpen: false,
+        quickOpenVisible: false,
+        pluginCommandPanelOpen: false,
+      };
+    }),
+  openPluginCommandPanel: (payload) =>
+    set({
+      pluginCommandPanelOpen: true,
+      pluginCommandPanelPayload: payload,
+      commandPaletteOpen: false,
+      settingsOpen: false,
+      automationsOpen: false,
+      shortcutsHelpOpen: false,
+      skillsMarketplaceOpen: false,
+      liveArtifactsOpen: false,
+      quickOpenVisible: false,
+      agentEditorOpen: false,
+    }),
+  closePluginCommandPanel: () =>
+    set({
+      pluginCommandPanelOpen: false,
+      pluginCommandPanelPayload: null,
+    }),
   setThemeMode: (mode) => {
     writeLS(LS.theme, mode);
     applyTheme(mode);
@@ -133,7 +203,14 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   setViewMode: (m) => set({ viewMode: m }),
   setAppMode: (m) =>
     set((s) => {
-      if (m !== "code") return { appMode: m };
+      if (m !== "code") {
+        if (m === "cowork" && s.editorTabs.length === 0 && s.panelSlots.some((slot) => slot.kind === "editor")) {
+          const panelSlots = normalizePanelSlots(s.panelSlots.filter((slot) => slot.kind !== "editor"));
+          persistPanelSlots(panelSlots);
+          return { appMode: m, panelSlots };
+        }
+        return { appMode: m };
+      }
       const panelSlots = ensureCodePanelSlots(s.panelSlots);
       persistPanelSlots(panelSlots);
       return { appMode: m, panelSlots };
@@ -161,7 +238,19 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
       };
     }),
   setRightStackTabLocked: (locked) => set({ rightStackTabLocked: locked }),
+  setFocusedSubagentId: (id) => set({ focusedSubagentId: id }),
   setContextUsage: (u) => set({ contextUsage: u }),
+  setRemoteImagePolicy: (policy) => {
+    writeLS(LS.remoteImagePolicy, policy);
+    set({ remoteImagePolicy: policy });
+  },
+  allowRemoteImageDomain: (domain) =>
+    set((s) => {
+      const normalized = domain.trim().toLowerCase();
+      if (!normalized || s.allowedRemoteImageDomains.includes(normalized)) return s;
+      return { allowedRemoteImageDomains: [...s.allowedRemoteImageDomains, normalized] };
+    }),
+  clearAllowedRemoteImageDomains: () => set({ allowedRemoteImageDomains: [] }),
   toggleCommandPalette: () =>
     set((s) => {
       if (s.commandPaletteOpen) {
@@ -171,10 +260,13 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
       return {
         commandPaletteOpen: true,
         settingsOpen: false,
+        automationsOpen: false,
         shortcutsHelpOpen: false,
         skillsMarketplaceOpen: false,
         liveArtifactsOpen: false,
         quickOpenVisible: false,
+        agentEditorOpen: false,
+        pluginCommandPanelOpen: false,
       };
     }),
   toggleSettings: () =>
@@ -186,10 +278,30 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
       return {
         settingsOpen: true,
         commandPaletteOpen: false,
+        automationsOpen: false,
         shortcutsHelpOpen: false,
         skillsMarketplaceOpen: false,
         liveArtifactsOpen: false,
         quickOpenVisible: false,
+        agentEditorOpen: false,
+        pluginCommandPanelOpen: false,
+      };
+    }),
+  toggleAutomations: () =>
+    set((s) => {
+      if (s.automationsOpen) {
+        return { automationsOpen: false };
+      }
+      return {
+        automationsOpen: true,
+        commandPaletteOpen: false,
+        settingsOpen: false,
+        shortcutsHelpOpen: false,
+        skillsMarketplaceOpen: false,
+        liveArtifactsOpen: false,
+        quickOpenVisible: false,
+        agentEditorOpen: false,
+        pluginCommandPanelOpen: false,
       };
     }),
   toggleShortcutsHelp: () =>
@@ -202,9 +314,12 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         shortcutsHelpOpen: true,
         commandPaletteOpen: false,
         settingsOpen: false,
+        automationsOpen: false,
         skillsMarketplaceOpen: false,
         liveArtifactsOpen: false,
         quickOpenVisible: false,
+        agentEditorOpen: false,
+        pluginCommandPanelOpen: false,
       };
     }),
   toggleSkillsMarketplace: () =>
@@ -217,9 +332,12 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         skillsMarketplaceOpen: true,
         commandPaletteOpen: false,
         settingsOpen: false,
+        automationsOpen: false,
         shortcutsHelpOpen: false,
         liveArtifactsOpen: false,
         quickOpenVisible: false,
+        agentEditorOpen: false,
+        pluginCommandPanelOpen: false,
       };
     }),
   toggleLiveArtifacts: () =>
@@ -232,9 +350,12 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         liveArtifactsOpen: true,
         commandPaletteOpen: false,
         settingsOpen: false,
+        automationsOpen: false,
         shortcutsHelpOpen: false,
         skillsMarketplaceOpen: false,
         quickOpenVisible: false,
+        agentEditorOpen: false,
+        pluginCommandPanelOpen: false,
       };
     }),
   toggleQuickOpen: () =>
@@ -247,14 +368,24 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         quickOpenVisible: true,
         commandPaletteOpen: false,
         settingsOpen: false,
+        automationsOpen: false,
         shortcutsHelpOpen: false,
         skillsMarketplaceOpen: false,
         liveArtifactsOpen: false,
+        agentEditorOpen: false,
+        pluginCommandPanelOpen: false,
       };
     }),
   setCurrentModel: (m) => set({ currentModel: m }),
   setCurrentProvider: (p) => set({ currentProvider: p }),
+  setCurrentProviderMeta: (meta) =>
+    set({
+      currentProviderId: String(meta.providerId || ""),
+      currentProviderBaseUrl: String(meta.baseUrl || ""),
+      currentWireApi: String(meta.wireApi || ""),
+    }),
   setAvailableModels: (models) => set({ availableModels: models }),
+  setModelsSource: (source) => set({ modelsSource: source }),
   setAvailableSkills: (skills) => set({ availableSkills: skills }),
   setSlashCommands: (cmds) => set({ slashCommands: cmds }),
   setMarketplaceSkills: (skills) => set({ marketplaceSkills: skills }),
@@ -265,9 +396,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
       workspaceGit: d !== s.workingDirectory ? null : s.workspaceGit,
     }));
     if (d) {
-      const rt = typeof window !== "undefined"
-        ? (window as any).__MINICODE_RUNTIME__?.desktop
-        : undefined;
+      const rt = desktop();
       if (rt?.trustWorkspace) rt.trustWorkspace(d);
     }
   },
@@ -304,6 +433,12 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         rightStackTab: next.rightStackTab,
         rightPanelOpen: next.rightPanelOpen,
         rightStackTabLocked: next.rightStackTabLocked,
+        draft: next.draft,
+        attachments: next.attachments,
+        quotedMessage: next.quotedMessage,
+        selectedMentions: next.selectedMentions,
+        selectedSkills: next.selectedSkills,
+        allowedRemoteImageDomains: next.allowedRemoteImageDomains,
         ...(targetId
           ? {
               conversationWorkbenchStates: storeConversationWorkbenchState(
@@ -457,6 +592,27 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     set((s) => ({ fileChanges: [...s.fileChanges.slice(-99), change] })),
   bumpFileTreeVersion: () =>
     set((s) => ({ fileTreeVersion: s.fileTreeVersion + 1 })),
+  requestFileTreeReveal: (path, kind = "folder") =>
+    set((s) => {
+      const panelSlots = ensureCodePanelSlots(s.panelSlots);
+      persistPanelSlots(panelSlots);
+      return {
+        appMode: "code",
+        panelSlots,
+        fileTreeRevealRequests: [
+          ...s.fileTreeRevealRequests,
+          {
+            id: `reveal-${Date.now().toString(36)}-${s.fileTreeRevealRequests.length}`,
+            path,
+            kind,
+          },
+        ],
+      };
+    }),
+  consumeFileTreeRevealRequest: (id) =>
+    set((s) => ({
+      fileTreeRevealRequests: s.fileTreeRevealRequests.filter((request) => request.id !== id),
+    })),
   setMcpServers: (servers) => set({ mcpServers: servers }),
   setEnvVars: (entries) => set({ envVars: entries }),
   setGitChanges: (changes) =>
@@ -465,7 +621,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     set((s) => ({ gitChanges: { ...s.gitChanges, loading } })),
   requestGitChanges: () => {
     set((s) => ({ gitChanges: { ...s.gitChanges, loading: true } }));
-    sendClientCommand({ type: "diff.git_working_tree" });
-    sendClientCommand({ type: "diff.git_staged" });
+    sendClientCommand({ type: "diff.git_working_tree" }, { silent: true });
+    sendClientCommand({ type: "diff.git_staged" }, { silent: true });
   },
 });

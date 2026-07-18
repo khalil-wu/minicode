@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useAppStore } from "../stores";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { sendChatMessage } from "../chat/sendChatMessage";
@@ -7,6 +7,9 @@ import { hasRuntimePendingUserAction, hasRuntimePendingUserActionForConversation
 import { buildRuntimeSlashPaletteItems, executeRuntimeSlashCommand } from "../lib/runtime-commands";
 import { hasLocalPendingPromptForConversation } from "../lib/pending-prompts";
 import { workspaceDisplayName } from "../lib/workspace-display";
+import { openSettings } from "../lib/settings-navigation";
+import { capabilityFeatureEnabled } from "../protocol/capabilities";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 
 interface PaletteAction {
   id: string;
@@ -49,9 +52,12 @@ export const CommandPalette = () => {
   const setAppMode = useAppStore((s) => s.setAppMode);
   const conversations = useAppStore((s) => s.conversations);
   const conversationId = useAppStore((s) => s.conversationId);
+  const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities);
+  const globalSearchEnabled = capabilityFeatureEnabled(runtimeCapabilities, "global_search", true);
+  const agentEditorEnabled = capabilityFeatureEnabled(runtimeCapabilities, "agent_editor", true);
   const [query, setQuery] = useState("");
   const [activeIdx, setActiveIdx] = useState(0);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useFocusTrap(commandPaletteOpen);
   const closePaletteIfIdle = () => {
     if (hasPendingUserAction()) return;
     toggleCommandPalette();
@@ -62,7 +68,6 @@ export const CommandPalette = () => {
       setQuery("");
       setActiveIdx(0);
       sendClientCommand({ type: "commands.list" });
-      requestAnimationFrame(() => inputRef.current?.focus());
     }
   }, [commandPaletteOpen]);
 
@@ -115,19 +120,30 @@ export const CommandPalette = () => {
     run: () => runRuntimeSlashCommand(command.commandLine),
   }));
 
-  const recentConversationActions: PaletteAction[] = conversations
-    .filter((c) => !c.archived && c.id !== conversationId)
-    .slice(0, 9)
-    .map((c, i) => {
-      const project = workspaceDisplayName(c.workspaceRoot || c.worktreePath, "Computer");
-      const branch = c.gitBranch ? ` · ${c.gitBranch}` : "";
-      return {
-        id: `conversation.switch.${c.id}`,
-        label: c.title || "Untitled",
-        hint: `${project}${branch} · Ctrl+${i + 1}`,
-        run: () => useAppStore.getState().requestConversationSwitch(c.id),
-      };
-    });
+  const trimmedQuery = query.trim().toLowerCase();
+  // With a query, search across ALL conversations by title + goal so the
+  // palette acts as a global conversation search; without one, show the recent
+  // 9 (with Ctrl+N shortcut hints) as quick switch targets.
+  const conversationCandidates = conversations.filter(
+    (c) => !c.archived && c.id !== conversationId,
+  );
+  const matchedConversations = trimmedQuery && globalSearchEnabled
+    ? conversationCandidates.filter((c) =>
+        `${c.title ?? ""} ${c.goal?.text ?? ""}`.toLowerCase().includes(trimmedQuery),
+      )
+    : conversationCandidates.slice(0, 9);
+  const recentConversationActions: PaletteAction[] = matchedConversations.map((c, i) => {
+    const project = workspaceDisplayName(c.workspaceRoot || c.worktreePath, "Computer");
+    const branch = c.gitBranch ? ` · ${c.gitBranch}` : "";
+    const shortcut = trimmedQuery ? "" : ` · Ctrl+${i + 1}`;
+    const goalHint = trimmedQuery && c.goal?.text ? ` · ${c.goal.text.slice(0, 60)}` : "";
+    return {
+      id: `conversation.switch.${c.id}`,
+      label: c.title || "Untitled",
+      hint: `${project}${branch}${shortcut}${goalHint}`,
+      run: () => useAppStore.getState().requestConversationSwitch(c.id),
+    };
+  });
 
   const actions: PaletteAction[] = [
     ...recentConversationActions,
@@ -167,7 +183,7 @@ export const CommandPalette = () => {
       id: "settings",
       label: "Open settings",
       hint: "Ctrl+,",
-      run: () => useAppStore.getState().toggleSettings(),
+      run: () => openSettings(),
     },
     {
       id: "panel.editor",
@@ -215,15 +231,9 @@ export const CommandPalette = () => {
       run: () => openRightStack("terminal"),
     },
     {
-      id: "plan.open",
-      label: "Open plan",
-      hint: "panel",
-      run: () => openRightStack("plan"),
-    },
-    {
-      id: "tasks.open",
-      label: "Open tasks",
-      hint: "stack",
+      id: "output.open",
+      label: "Open output",
+      hint: "sources and artifacts",
       run: () => openRightStack("tasks"),
     },
     {
@@ -305,12 +315,12 @@ export const CommandPalette = () => {
       hint: "tool activity",
       run: () => openDockTab("timeline"),
     },
-    {
+    ...(globalSearchEnabled ? [{
       id: "quick.open",
       label: "Quick open file",
       hint: "Ctrl+P",
       run: () => useAppStore.getState().toggleQuickOpen(),
-    },
+    }] : []),
     {
       id: "sidebar.toggle",
       label: "Toggle left sidebar",
@@ -318,14 +328,6 @@ export const CommandPalette = () => {
       run: () => {
         const store = useAppStore.getState();
         store.setLeftSidebarWidth(store.leftSidebarWidth > 0 ? 0 : 320);
-      },
-    },
-    {
-      id: "plan.request",
-      label: "Open Plan",
-      hint: "steps",
-      run: () => {
-        useAppStore.getState().setRightStackTab("plan");
       },
     },
     {
@@ -358,6 +360,12 @@ export const CommandPalette = () => {
       hint: "browse and install",
       run: () => runRuntimeSlashCommand("/skills"),
     },
+    ...(agentEditorEnabled ? [{
+      id: "agents.editor",
+      label: "Agent editor",
+      hint: "create/edit subagent roles",
+      run: () => useAppStore.getState().toggleAgentEditor(),
+    }] : []),
     ...runtimeSlashActions,
   ];
 
@@ -390,7 +398,12 @@ export const CommandPalette = () => {
       }}
     >
       <div
+        ref={dialogRef}
         className="modal-content"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Command palette"
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
         style={{
           width: "min(560px, 100%)",
@@ -405,7 +418,6 @@ export const CommandPalette = () => {
         }}
       >
         <input
-          ref={inputRef}
           role="combobox"
           aria-expanded="true"
           aria-controls="command-palette-listbox"
@@ -414,8 +426,7 @@ export const CommandPalette = () => {
           value={query}
           onChange={(e) => { setQuery(e.target.value); setActiveIdx(0); }}
           onKeyDown={(e) => {
-            if (e.key === "Escape") closePaletteIfIdle();
-            else if (e.key === "ArrowDown") {
+            if (e.key === "ArrowDown") {
               e.preventDefault();
               setActiveIdx((i) => filtered.length ? (i + 1) % filtered.length : 0);
             } else if (e.key === "ArrowUp") {

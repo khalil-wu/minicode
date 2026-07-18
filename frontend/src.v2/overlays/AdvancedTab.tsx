@@ -1,26 +1,16 @@
 import { useState } from "react";
 import { useAppStore } from "../stores";
 import { pushToast } from "./ToastContainer";
-import { isDesktop, desktop, runtime, exportDiagnostics, revealPath } from "../desktop/runtime";
+import { isDesktop, exportDiagnostics, revealPath } from "../desktop/runtime";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import {
-  type ProviderId,
   Section,
-  monoTextStyle,
   inputStyle,
   secondaryActionStyle,
   preStyle,
 } from "./settingsShared";
 
-export const AdvancedTab = ({
-  currentModel,
-  provider,
-  availableModels,
-}: {
-  currentModel: string;
-  provider: ProviderId;
-  availableModels: string[];
-}) => {
+export const AdvancedTab = () => {
   const envVars = useAppStore((s) => s.envVars);
   const [newEnvName, setNewEnvName] = useState("");
   const [newEnvValue, setNewEnvValue] = useState("");
@@ -30,19 +20,7 @@ export const AdvancedTab = ({
 
   return (
     <>
-      <Section title="Session">
-        <div style={{ display: "grid", gap: 6, ...monoTextStyle }}>
-          <div>Model: {currentModel || "none"}</div>
-          <div>Provider: {provider}</div>
-          <div>Models: {availableModels.length > 0 ? availableModels.join(", ") : "none"}</div>
-        </div>
-      </Section>
-      <Section title="Shortcuts">
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px 24px", fontSize: "var(--text-xs)" }}>
-          {["Ctrl+K Command Palette", "Ctrl+, Settings", "Ctrl+J Terminal", "Ctrl+B Sidebar", "Enter Send", "Shift+Enter New Line", "/ Commands", "@ Mentions"].map((item) => <div key={item}>{item}</div>)}
-        </div>
-      </Section>
-      <Section title="Environment Variables" description="Encrypted local vault for secrets injected into tool execution">
+      <Section title="Environment Variables">
         {envVars.length > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             {envVars.map((v) => (
@@ -100,13 +78,6 @@ export const AdvancedTab = ({
 
       {isDesktop() && (
         <>
-          <Section title="Platform">
-            <div style={{ display: "grid", gap: 6, ...monoTextStyle }}>
-              <div>Platform: {desktop()?.platformInfo.platform}</div>
-              <div>Architecture: {desktop()?.platformInfo.arch}</div>
-              <div>Backend URL: {runtime()?.apiBaseUrl || "default"}</div>
-            </div>
-          </Section>
           <Section title="Export">
             <button
               onClick={async () => {

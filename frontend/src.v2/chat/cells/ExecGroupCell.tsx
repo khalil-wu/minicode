@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CheckCircle2, ChevronDown, ChevronRight, Loader2, TriangleAlert } from "lucide-react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import type { ExecCellState } from "./cellTypes";
 import { ExecCell } from "./ExecCell";
+import { StatusIcon } from "../../components/icons";
 import "./cells.css";
 
 export function ExecGroupCell({
@@ -48,7 +49,7 @@ export function ExecGroupCell({
         }}
       >
         {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        <ExecGroupStatusIcon status={status} />
+        <StatusIcon status={status} size={14} />
         <span className="exec-group-title">{title}</span>
       </button>
       {expanded && (
@@ -79,14 +80,4 @@ function execGroupTitle(cells: ExecCellState[], status: "running" | "done" | "fa
   const count = Math.max(1, cells.length);
   if (status === "running") return `正在运行 ${count} 条命令`;
   return `已运行 ${count} 条命令`;
-}
-
-function ExecGroupStatusIcon({ status }: { status: "running" | "done" | "failed" }) {
-  if (status === "running") {
-    return <Loader2 size={14} className="spinner exec-group-status-running" />;
-  }
-  if (status === "failed") {
-    return <TriangleAlert size={14} className="exec-group-status-failed" />;
-  }
-  return <CheckCircle2 size={14} className="exec-group-status-done" />;
 }

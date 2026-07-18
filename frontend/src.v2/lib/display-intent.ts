@@ -7,6 +7,9 @@ export type DisplayRoutable = {
   panelHint?: string;
   requires_attention?: boolean;
   requiresAttention?: boolean;
+  is_error?: boolean;
+  error?: unknown;
+  status?: string;
 };
 
 const RIGHT_TABS = new Set<RightStackTab>([
@@ -36,7 +39,11 @@ export function panelHintOf(event: DisplayRoutable): RightStackTab | null {
 }
 
 export function requiresAttention(event: DisplayRoutable): boolean {
-  return Boolean(event.requires_attention ?? event.requiresAttention);
+  const explicit = event.requires_attention ?? event.requiresAttention;
+  if (explicit != null) return Boolean(explicit);
+  if (event.is_error || event.error) return true;
+  const status = String(event.status || "").toLowerCase();
+  return status === "error" || status === "failed";
 }
 
 export function isHiddenFromActivity(event: DisplayRoutable): boolean {

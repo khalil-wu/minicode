@@ -1,19 +1,25 @@
-import { useEffect, useRef, useState } from "react";
-import { GitBranch, Pause, Play, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Pause, Play, X } from "lucide-react";
 import { useAppStore } from "../stores";
 import { deriveSendState } from "../lib/send-state";
 import { sendChatMessage } from "../chat/sendChatMessage";
-import type { DiffReviewFile, GitChangeFile, MessageAttachmentRef } from "../stores/types";
+import type { ComposerQuote, MessageAttachmentRef } from "../stores/types";
 import { ContextChipRegion } from "./ActionChipRegion";
 import { AttachmentStrip } from "./AttachmentStrip";
 import { ComposerTextarea } from "./ComposerTextarea";
 import { MenuOverlay } from "./MenuOverlay";
 import { FooterRow } from "./FooterRow";
+import { PromptHistoryOverlay } from "./PromptHistoryOverlay";
+import { QueuedMessageList } from "./QueuedMessageList";
+import { appendPromptHistory, clearPromptHistory, readPromptHistory } from "./prompt-history";
 import { uploadComposerFiles } from "./uploads";
 import { InlineAgentPrompt } from "../chat/InlineAgentPrompt";
 import { InlineTaskList } from "../chat/components/InlineTaskList";
+import { MessageQuote } from "../chat/components/MessageQuote";
 import { sendClientCommand } from "../protocol/ws-outbox";
-import { buildContextFallback, buildContextPayload } from "./contextPayload";
+import { pushToast } from "../overlays/ToastContainer";
+import { getWebSocket } from "../hooks/useWebSocket";
+import { buildContextFallback, buildContextNativeAttachments, buildContextPayload } from "./contextPayload";
 import {
   executeRuntimeSlashCommand,
   getActiveRuntimeSlashCommand,
@@ -27,6 +33,8 @@ let initialCatalogRequested = false;
 export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const draft = useAppStore((s) => s.draft);
   const setDraft = useAppStore((s) => s.setDraft);
+  const quotedMessage = useAppStore((s) => s.quotedMessage);
+  const clearQuotedMessage = useAppStore((s) => s.clearQuotedMessage);
   const isStreaming = useAppStore((s) => s.isStreaming);
   const isConnected = useAppStore((s) => s.isConnected);
   const interrupt = useAppStore((s) => s.interrupt);
@@ -44,15 +52,18 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const removeSelectedSkill = useAppStore((s) => s.removeSelectedSkill);
   const setMentionResults = useAppStore((s) => s.setMentionResults);
   const appMode = useAppStore((s) => s.appMode);
-  const gitChanges = useAppStore((s) => s.gitChanges);
   const selectedSkills = useAppStore((s) => s.selectedSkills);
   const activeGoal = useAppStore((s) => s.activeGoal);
   const currentModel = useAppStore((s) => s.currentModel);
+  const workingDirectory = useAppStore((s) => s.workingDirectory);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [menuFilter, setMenuFilter] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [selectedSlashCommand, setSelectedSlashCommand] = useState<string | null>(null);
+  const [skillPanelOpen, setSkillPanelOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyItems, setHistoryItems] = useState<string[]>([]);
   const hasReadyAttachment = useAppStore((s) => s.attachments.some((a) => a.status === "ready"));
 
   const sendState = deriveSendState({
@@ -65,33 +76,30 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const wideMode = codeMode;
   const activeSlashCommand = selectedSlashCommand ?? getActiveRuntimeSlashCommand(draft);
   const commandModeActive = Boolean(activeSlashCommand && !slashPanelOpen);
-  const changedFiles = [...gitChanges.workingTree, ...gitChanges.staged];
-  const hasGitChanges = changedFiles.length > 0 || gitChanges.untracked.length > 0;
 
-  const openDiffReview = () => {
-    const store = useAppStore.getState();
-    const files = buildDiffReviewFiles(store.gitChanges.workingTree, store.gitChanges.staged);
-    if (files.length > 0) {
-      store.setDiffReviewState({
-        requestId: "working-tree",
-        toolName: "working tree",
-        diff: files.map((file) => file.patch).filter(Boolean).join("\n\n"),
-        files,
-        selectedPath: files[0]?.path,
-        status: "viewing",
-        mode: "view",
-        fileDecisions: {},
-        lineComments: [],
-      });
-    }
-    store.setRightStackTab("diff");
-    store.requestGitChanges();
-  };
+  const openPromptHistory = useCallback(() => {
+    closeSlashPanel();
+    closeMentionPanel();
+    setSkillPanelOpen(false);
+    setMenuFilter("");
+    setHistoryItems(readPromptHistory(workingDirectory));
+    setHistoryOpen(true);
+  }, [closeMentionPanel, closeSlashPanel, workingDirectory]);
+
+  useEffect(() => {
+    window.addEventListener("composer:history-search", openPromptHistory);
+    return () => window.removeEventListener("composer:history-search", openPromptHistory);
+  }, [openPromptHistory]);
 
   const sendUserMessage = async (
     content: string,
     readyAttachments: Record<string, unknown>[] = [],
-    options?: { backendContent?: string; displayContent?: string; attachmentRefs?: MessageAttachmentRef[] },
+    options?: {
+      backendContent?: string;
+      displayContent?: string;
+      attachmentRefs?: MessageAttachmentRef[];
+      allowWhileStreaming?: boolean;
+    },
   ) => {
     const contextRefs = [
       ...useAppStore.getState().selectedMentions,
@@ -106,15 +114,24 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       console.warn("Failed to build context payload for @mentions, using fallback:", error);
       contextPayload = "";
     }
-    const prefix = contextPayload || fallbackPayload;
+    let nativeContext = { attachments: [] as Record<string, unknown>[], attachmentRefs: [] as MessageAttachmentRef[], notes: "" };
+    try {
+      nativeContext = await buildContextNativeAttachments(contextRefs, getWebSocket()?.sessionId);
+    } catch (error) {
+      console.warn("Failed to build native context attachments:", error);
+    }
+    const prefix = [contextPayload || fallbackPayload, nativeContext.notes].filter(Boolean).join("\n\n");
+    const mergedAttachments = [...readyAttachments, ...nativeContext.attachments];
+    const mergedAttachmentRefs = [...(options?.attachmentRefs ?? []), ...nativeContext.attachmentRefs];
     const effectiveContent = [prefix, content].filter(Boolean).join("\n\n").trim();
-    if (!effectiveContent && readyAttachments.length === 0) return false;
+    if (!effectiveContent && mergedAttachments.length === 0) return false;
     return sendChatMessage({
       displayContent: options?.displayContent ?? content,
       backendContent: [prefix, options?.backendContent ?? content].filter(Boolean).join("\n\n").trim(),
-      attachments: readyAttachments,
-      attachmentRefs: options?.attachmentRefs ?? [],
+      attachments: mergedAttachments,
+      attachmentRefs: mergedAttachmentRefs,
       contextRefs,
+      allowWhileStreaming: options?.allowWhileStreaming,
     });
   };
 
@@ -136,11 +153,20 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       console.warn("Failed to build context payload for @mentions, using fallback:", error);
       contextPayload = "";
     }
-    const prefix = contextPayload || fallbackPayload;
+    let nativeContext = { attachments: [] as Record<string, unknown>[], attachmentRefs: [] as MessageAttachmentRef[], notes: "" };
+    try {
+      nativeContext = await buildContextNativeAttachments(contextRefs, getWebSocket()?.sessionId);
+    } catch (error) {
+      console.warn("Failed to build native context attachments:", error);
+    }
+    const prefix = [contextPayload || fallbackPayload, nativeContext.notes].filter(Boolean).join("\n\n");
     return sendChatMessage({
       ...options,
       backendContent: [prefix, options.backendContent].filter(Boolean).join("\n\n").trim(),
+      attachments: nativeContext.attachments,
+      attachmentRefs: nativeContext.attachmentRefs,
       contextRefs,
+      allowWhileStreaming: useAppStore.getState().isStreaming,
     });
   };
 
@@ -149,9 +175,11 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     clearAttachments();
     clearSelectedMentions();
     clearSelectedSkills();
+    clearQuotedMessage();
     setMentionResults([]);
     closeSlashPanel();
     closeMentionPanel();
+    setSkillPanelOpen(false);
     setMenuFilter("");
     setSelectedSlashCommand(null);
   };
@@ -167,11 +195,8 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
 
   const submit = async () => {
     if (sendState === "stop" && !draft.trim()) return;
-    if (sendState === "stop" && draft.trim()) {
-      // User has typed content during streaming; ignore Enter and keep the run alive.
-      return;
-    }
-    if (sendState !== "idle") return;
+    if (sendState !== "idle" && sendState !== "queue" && sendState !== "offline-queue") return;
+    const queueWhileStreaming = sendState === "queue";
     const content = selectedSlashCommand
       ? [selectedSlashCommand, draft.trim()].filter(Boolean).join(" ")
       : draft.trim();
@@ -182,6 +207,14 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         addSelectedMention(mention);
       }
       await executeSlashCommand(slashInput.commandLine);
+      return;
+    }
+
+    const composerAttachments = useAppStore.getState().attachments;
+    const blockingAttachment = composerAttachments.find((a) => a.status !== "ready" || !a.attachment);
+    if (blockingAttachment) {
+      const verb = blockingAttachment.status === "uploading" ? "finish uploading" : "be removed or uploaded again";
+      pushToast(`Wait for "${blockingAttachment.name}" to ${verb} before sending.`, "warning", 3500);
       return;
     }
 
@@ -200,17 +233,29 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         artifactId: String(payload.artifact_id || a.artifactId || ""),
         docId: String(payload.doc_id || a.docId || ""),
         indexedChunks: Number(payload.indexed_chunks ?? a.indexedChunks ?? 0),
+        dataUrl: a.type.startsWith("image/") ? a.dataUrl : undefined,
+        inputSource: payload.input_source === "pasted_text" || a.inputSource === "pasted_text"
+          ? "pasted_text" as const
+          : "upload" as const,
+        sourceCharCount: Number(payload.source_char_count ?? a.sourceCharCount ?? 0) || undefined,
       };
     });
 
     const finalContent = content;
+    const quoteContext = quotedMessage ? formatQuotedMessageForBackend(quotedMessage) : "";
     const mentions = useAppStore.getState().selectedMentions;
     const mentionSuffix = mentions.length > 0
       ? " " + mentions.map((m) => `@${m.name}`).join(" ")
       : "";
     const displayContent = content + mentionSuffix;
 
-    if (!await sendUserMessage(finalContent, readyAttachments, { attachmentRefs, displayContent })) return;
+    if (!await sendUserMessage(finalContent, readyAttachments, {
+      attachmentRefs,
+      displayContent,
+      backendContent: [quoteContext, finalContent].filter(Boolean).join("\n\n"),
+      allowWhileStreaming: queueWhileStreaming,
+    })) return;
+    if (finalContent.trim()) appendPromptHistory(workingDirectory, finalContent);
     resetComposer();
   };
 
@@ -244,6 +289,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   };
 
   const handleChange = (v: string) => {
+    if (historyOpen) setHistoryOpen(false);
     setDraft(v);
 
     const lines = v.split("\n");
@@ -257,8 +303,24 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       sendClientCommand,
     });
 
+    const skillMatch = getSkillMatch(lastLine);
+    if (skillMatch && !slashPanelOpen) {
+      closeMentionPanel();
+      closeSlashPanel();
+      setSkillPanelOpen(true);
+      setMenuFilter(skillMatch[1]);
+      sendClientCommand({ type: "skills.list" });
+      return;
+    }
+
+    if (skillPanelOpen) {
+      setSkillPanelOpen(false);
+      setMenuFilter("");
+    }
+
     const atMatch = getMentionMatch(lastLine);
     if (atMatch) {
+      setSkillPanelOpen(false);
       if (!mentionPanelOpen) openMentionPanel();
       setMenuFilter(normalizeMentionFilter(atMatch[1]));
     } else if (mentionPanelOpen) {
@@ -271,6 +333,25 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     if (!value) {
       closeSlashPanel();
       closeMentionPanel();
+      setSkillPanelOpen(false);
+      setMenuFilter("");
+      return;
+    }
+
+    if (skillPanelOpen) {
+      const skillName = value.match(/^skill:(.+)$/)?.[1] ?? value.replace(/^\$/, "");
+      const skill = useAppStore.getState().availableSkills.find((item) => item.name === skillName);
+      if (skill) {
+        addSelectedSkill({
+          name: skill.name,
+          description: skill.description,
+          sourceLevel: skill.source_level,
+        });
+        sendClientCommand({ type: "load_skill", skill_name: skill.name });
+      }
+      const dollarIdx = draft.lastIndexOf("$");
+      if (dollarIdx >= 0) setDraft(draft.slice(0, dollarIdx));
+      setSkillPanelOpen(false);
       setMenuFilter("");
       return;
     }
@@ -334,6 +415,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       if (!containerRef.current.contains(e.target as Node)) {
         closeSlashPanel();
         closeMentionPanel();
+        setSkillPanelOpen(false);
         setMenuFilter("");
       }
     };
@@ -365,12 +447,15 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   return (
     <>
       {!minimal && <InlineTaskList wide={wideMode} />}
+      <QueuedMessageList wide={wideMode} minimal={minimal} />
       <div
         ref={containerRef}
         onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}
         onDrop={handleDrop}
         className="composer-container relative mx-auto flex flex-col transition-[background_140ms_ease,border-color_300ms_ease,box-shadow_140ms_ease]"
+        data-command-mode={commandModeActive ? "true" : "false"}
+        data-drag-over={dragOver ? "true" : "false"}
         style={{
           position: "relative",
           left: undefined,
@@ -394,36 +479,17 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
             : "none",
         }}
       >
-      {codeMode && (
-        <div className="min-h-[36px] flex items-center gap-3 px-3 text-sm" style={{ borderBottom: "1px solid var(--border-subtle)" }}>
-          <span className="flex-1" />
-          {hasGitChanges && (
-            <button
-              type="button"
-              className="h-7 px-[10px] rounded-sm text-sm inline-flex items-center gap-1.5"
-              style={{
-                border: "1px solid var(--border-subtle)",
-                background: "var(--surface-base)",
-                color: "var(--text-secondary)",
-                cursor: "pointer",
-              }}
-              onClick={openDiffReview}
-            >
-              <GitBranch size={13} />
-              Review diff
-            </button>
-          )}
-        </div>
-      )}
       {activeGoal && <GoalBar />}
       <InlineAgentPrompt />
       <ContextChipRegion />
       <AttachmentStrip />
+      {quotedMessage && <MessageQuote message={quotedMessage} onRemove={clearQuotedMessage} />}
       <ComposerTextarea
         value={draft}
         onChange={handleChange}
         onSubmit={submit}
-        menuOpen={slashPanelOpen || mentionPanelOpen}
+        menuOpen={slashPanelOpen || mentionPanelOpen || skillPanelOpen || historyOpen}
+        onHistorySearch={openPromptHistory}
         onDropFiles={handleComposerFiles}
         compact={codeMode}
         minimal={minimal}
@@ -439,32 +505,41 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
           const last = useAppStore.getState().selectedSkills.at(-1);
           if (last) removeSelectedSkill(last.name);
         }}
-        placeholder={selectedSlashCommand ? "Add instructions..." : codeMode ? "Type / for commands" : "Write a message..."}
+        placeholder={selectedSlashCommand ? "Add instructions..." : "Write a message..."}
       />
       <MenuOverlay
-        open={slashPanelOpen || mentionPanelOpen}
-        kind={slashPanelOpen ? "slash" : "mention"}
+        open={slashPanelOpen || mentionPanelOpen || skillPanelOpen}
+        kind={slashPanelOpen ? "slash" : skillPanelOpen ? "skill" : "mention"}
         filter={menuFilter}
         onSelect={handleMenuSelect}
         placement={minimal ? "below" : "above"}
       />
-      <FooterRow sendState={sendState} onSend={sendState === "stop" ? stopRun : submit} compact={codeMode} minimal={minimal} />
+      <FooterRow
+        sendState={sendState}
+        onSend={sendState === "stop" ? stopRun : submit}
+        onStop={stopRun}
+        compact={codeMode}
+        minimal={minimal}
+      />
+      <PromptHistoryOverlay
+        open={historyOpen}
+        items={historyItems}
+        placement={minimal ? "below" : "above"}
+        onClose={() => setHistoryOpen(false)}
+        onSelect={(prompt) => {
+          setDraft(prompt);
+          setHistoryOpen(false);
+          queueMicrotask(() => window.dispatchEvent(new Event("composer:focus")));
+        }}
+        onClear={() => {
+          clearPromptHistory(workingDirectory);
+          setHistoryItems([]);
+        }}
+      />
       </div>
     </>
   );
 };
-
-const buildDiffReviewFiles = (workingTree: GitChangeFile[], staged: GitChangeFile[]): DiffReviewFile[] =>
-  [...staged, ...workingTree].flatMap((file) => {
-    if (!file.patch) return [];
-    return [{
-      path: file.path,
-      patch: file.patch,
-      additions: file.additions,
-      deletions: file.deletions,
-      isBinary: file.isBinary,
-    }];
-  });
 
 const GoalBar = () => {
   const goal = useAppStore((s) => s.activeGoal);
@@ -517,6 +592,11 @@ const GoalBar = () => {
 const commandComposerBackground =
   "color-mix(in oklch, var(--command-accent, var(--state-info)) 7%, var(--surface-page))";
 
+const formatQuotedMessageForBackend = (quote: ComposerQuote): string => {
+  const speaker = quote.role === "user" ? "User" : quote.role === "assistant" ? "Assistant" : "System";
+  return [`Quoted ${speaker} message:`, quote.content.trim()].filter(Boolean).join("\n");
+};
+
 const normalizeMentionFilter = (value: string): string => {
   return value.trim();
 };
@@ -525,6 +605,12 @@ const getMentionMatch = (line: string): RegExpMatchArray | null => {
   const match = line.match(/(?:^|\s)(@[A-Za-z0-9_./\\:#-]*)$/);
   if (!match) return null;
   if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(match[1].slice(1))) return null;
+  return match;
+};
+
+const getSkillMatch = (line: string): RegExpMatchArray | null => {
+  const match = line.match(/(?:^|\s)(\$[A-Za-z0-9_.:/\\-]*)$/);
+  if (!match) return null;
   return match;
 };
 

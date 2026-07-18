@@ -28,6 +28,7 @@ export type WorkspaceServerEventType =
   // Git CI
   | "git.pr_status"
   // Checkpoints
+  | "checkpoint.created"
   | "checkpoint.list"
   | "checkpoint.rewound"
   | "checkpoint.run.list"
@@ -112,6 +113,9 @@ export interface GitDiffWorkingTreeEvent {
   type: "diff.git_working_tree";
   files?: GitDiffFilePayload[];
   untracked?: string[];
+  preview?: boolean;
+  tool_call_id?: string;
+  progress?: number;
 }
 
 export interface GitDiffStagedEvent {

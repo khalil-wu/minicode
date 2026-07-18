@@ -1,11 +1,10 @@
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { useAppStore } from "../stores";
-import { ToolCallTimeline } from "../chat/tool-calls/ToolCallTimeline";
 import { GitPanel } from "../panels/GitPanel";
+import { promptCacheHitRate } from "../chat/cacheUsage";
 
 const TABS = [
   { id: "git", label: "Git" },
-  { id: "timeline", label: "Activity" },
   { id: "budget", label: "Budget" },
   { id: "debug", label: "Debug" },
 ] as const;
@@ -15,10 +14,9 @@ export const BottomDock = () => {
   const dockHeight = useAppStore((s) => s.dockHeight);
   const activeBottomTab = useAppStore((s) => s.activeBottomTab);
   const totalBudgetPercent = useAppStore((s) => s.totalBudgetPercent);
-  const toolCount = useAppStore((s) => s.toolCallCount);
   const setActiveBottomTab = useAppStore((s) => s.setActiveBottomTab);
   const toggleDock = useAppStore((s) => s.toggleDock);
-  const visibleTab = activeBottomTab === "terminal" || activeBottomTab === "tasks" ? "git" : activeBottomTab;
+  const visibleTab = activeBottomTab === "terminal" || activeBottomTab === "tasks" || activeBottomTab === "timeline" ? "git" : activeBottomTab;
   return (
     <section
       className="flex flex-col shrink-0"
@@ -47,9 +45,6 @@ export const BottomDock = () => {
         {TABS.map((t) => {
           let badge: string | null = null;
           if (t.id === "budget" && totalBudgetPercent > 0.7) badge = `${Math.round(totalBudgetPercent * 100)}%`;
-          if (t.id === "timeline") {
-            if (toolCount > 0) badge = String(toolCount);
-          }
 
           return (
             <button
@@ -107,12 +102,12 @@ export const BottomDock = () => {
           transition: "opacity 140ms ease, transform var(--transition-md, 200ms cubic-bezier(0.4,0,0.2,1))",
         }}
       >
-          {visibleTab === "timeline" && <div className="p-3"><ToolCallTimeline /></div>}
           {visibleTab === "budget" && (
             <div className="p-3">
               <div className="mb-2" style={{ color: "var(--text-secondary)" }}>
                 Total: {(totalBudgetPercent * 100).toFixed(1)}%
               </div>
+              <PromptCacheStats />
               <BudgetBars />
             </div>
           )}
@@ -120,6 +115,47 @@ export const BottomDock = () => {
           {visibleTab === "debug" && <div className="p-3"><DebugLog /></div>}
       </div>
     </section>
+  );
+};
+
+const formatTokenCount = (value: number): string => {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+  return String(Math.round(value));
+};
+
+const PromptCacheStats = () => {
+  const lastUsage = useAppStore((s) => s.lastUsage);
+  const usageTotals = useAppStore((s) => s.usageTotals);
+  if (!lastUsage && usageTotals.turns <= 0) return null;
+  const last = lastUsage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 };
+  const cacheRead = Math.max(0, last.cacheRead || 0);
+  const cacheWrite = Math.max(0, last.cacheWrite || 0);
+  const totalCacheRead = Math.max(0, usageTotals.cacheRead || 0);
+  const totalCacheWrite = Math.max(0, usageTotals.cacheWrite || 0);
+  const lastReasoning = Math.max(0, last.reasoning || 0);
+  const totalReasoning = Math.max(0, usageTotals.reasoning || 0);
+  const hasCache = cacheRead > 0 || cacheWrite > 0 || totalCacheRead > 0 || totalCacheWrite > 0;
+  const hasReasoning = lastReasoning > 0 || totalReasoning > 0;
+  if (!hasCache && !hasReasoning) return null;
+  const hitRate = Math.round(promptCacheHitRate(last) ?? 0);
+  const totalHitRate = Math.round(promptCacheHitRate(usageTotals) ?? 0);
+  const cacheText = hasCache
+    ? `cache last ${hitRate}% · read ${formatTokenCount(cacheRead)} · wrote ${formatTokenCount(cacheWrite)}`
+      + (usageTotals.turns > 1 ? ` · session ${totalHitRate}% / ${usageTotals.turns} turns` : "")
+    : "";
+  const reasoningText = hasReasoning
+    ? `reasoning ${formatTokenCount(lastReasoning)}`
+      + (usageTotals.turns > 1 ? ` / ${formatTokenCount(totalReasoning)} session` : "")
+    : "";
+  const details = [cacheText, reasoningText].filter(Boolean).join(" · ");
+  return (
+    <div style={cacheStatsStyle}>
+      <div style={{ color: "var(--text-secondary)", fontWeight: 650 }}>Provider usage</div>
+      <div style={{ color: "var(--text-muted)", textAlign: "right" }}>
+        {details}
+      </div>
+    </div>
   );
 };
 
@@ -163,6 +199,19 @@ const BudgetBars = () => {
       })}
     </div>
   );
+};
+
+const cacheStatsStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 12,
+  marginBottom: 10,
+  padding: "8px 10px",
+  border: "1px solid var(--border-subtle)",
+  borderRadius: "var(--radius-sm, 7px)",
+  background: "var(--surface-soft)",
+  fontSize: "var(--text-xs)",
 };
 
 const DebugLog = () => {

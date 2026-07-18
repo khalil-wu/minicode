@@ -1,15 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 
-// window.find() is a non-standard but widely supported browser API
-declare global {
-  interface Window {
-    find(
-      text?: string,
-      caseSensitive?: boolean,
-      backwards?: boolean,
-      wrapAround?: boolean,
-    ): boolean;
-  }
+interface SearchMatch {
+  range: Range;
 }
 
 interface ChatSearchProps {
@@ -22,6 +14,7 @@ export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
   const [matchCount, setMatchCount] = useState(0);
   const [currentIndex, setCurrentIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const matchesRef = useRef<SearchMatch[]>([]);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -34,10 +27,21 @@ export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
     };
   }, []);
 
-  // Count matches by walking text nodes in the container
-  const countMatches = useCallback(
+  const selectMatch = useCallback((index: number) => {
+    const match = matchesRef.current[index];
+    if (!match) return;
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(match.range);
+    const target = match.range.startContainer.parentElement;
+    target?.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+    setCurrentIndex(index + 1);
+  }, []);
+
+  const collectMatches = useCallback(
     (text: string) => {
       if (!text || !containerRef.current) {
+        matchesRef.current = [];
         setMatchCount(0);
         setCurrentIndex(0);
         return;
@@ -46,49 +50,64 @@ export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
       const treeWalker = document.createTreeWalker(
         container,
         NodeFilter.SHOW_TEXT,
-        null,
+        {
+          acceptNode(node) {
+            return node.parentElement?.closest("[aria-hidden='true'], button, input, textarea, [contenteditable='true']")
+              ? NodeFilter.FILTER_REJECT
+              : NodeFilter.FILTER_ACCEPT;
+          },
+        },
       );
-      let count = 0;
-      const searchLower = text.toLowerCase();
+      const nodes: Text[] = [];
+      let combined = "";
+      const spans: Array<{ node: Text; start: number; end: number }> = [];
       while (treeWalker.nextNode()) {
-        const nodeText = treeWalker.currentNode.textContent || "";
-        const lower = nodeText.toLowerCase();
-        let idx = lower.indexOf(searchLower);
-        while (idx !== -1) {
-          count++;
-          idx = lower.indexOf(searchLower, idx + 1);
+        const node = treeWalker.currentNode as Text;
+        const value = node.data;
+        if (!value) continue;
+        nodes.push(node);
+        spans.push({ node, start: combined.length, end: combined.length + value.length });
+        combined += value;
+      }
+      const searchLower = text.toLowerCase();
+      const combinedLower = combined.toLowerCase();
+      const matches: SearchMatch[] = [];
+      let start = combinedLower.indexOf(searchLower);
+      while (start >= 0) {
+        const end = start + text.length;
+        const startSpan = spans.find((span) => start >= span.start && start < span.end);
+        const endSpan = [...spans].reverse().find((span) => end > span.start && end <= span.end);
+        if (startSpan && endSpan) {
+          const range = document.createRange();
+          range.setStart(startSpan.node, start - startSpan.start);
+          range.setEnd(endSpan.node, end - endSpan.start);
+          matches.push({ range });
         }
+        start = combinedLower.indexOf(searchLower, start + Math.max(1, text.length));
       }
-      setMatchCount(count);
-      if (count > 0) {
-        setCurrentIndex(1);
-      } else {
-        setCurrentIndex(0);
-      }
+      matchesRef.current = matches;
+      setMatchCount(matches.length);
+      setCurrentIndex(0);
+      window.getSelection()?.removeAllRanges();
+      if (matches.length > 0) selectMatch(0);
     },
-    [containerRef],
+    [containerRef, selectMatch],
   );
 
   useEffect(() => {
-    countMatches(query);
-  }, [query, countMatches]);
+    collectMatches(query);
+  }, [query, collectMatches]);
 
   const findNext = useCallback(
     (backwards = false) => {
       if (!query || matchCount === 0) return;
-      const found = window.find(query, false, backwards, true);
-      if (found) {
-        setCurrentIndex((prev) => {
-          if (backwards) return Math.max(1, prev - 1);
-          return Math.min(matchCount, prev + 1);
-        });
-      } else {
-        // Wrap around: search from the opposite direction
-        window.find(query, false, !backwards, true);
-        setCurrentIndex(backwards ? matchCount : 1);
-      }
+      const current = Math.max(0, currentIndex - 1);
+      const next = backwards
+        ? (current - 1 + matchCount) % matchCount
+        : (current + 1) % matchCount;
+      selectMatch(next);
     },
-    [query, matchCount],
+    [query, matchCount, currentIndex, selectMatch],
   );
 
   const handleKeyDown = (e: React.KeyboardEvent) => {

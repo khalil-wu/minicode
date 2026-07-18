@@ -1,5 +1,6 @@
 import { memo } from "react";
 import { useAppStore } from "../../stores";
+import { getWebSocket } from "../../hooks/useWebSocket";
 
 /**
  * ContextBudgetIndicator — shows real-time token/context usage.
@@ -9,7 +10,7 @@ import { useAppStore } from "../../stores";
  * - Yellow when 70-90% used
  * - Red when > 90% used
  *
- * Clicking opens detailed budget breakdown.
+ * Clicking requests detailed usage from the backend.
  */
 export const ContextBudgetIndicator = memo(function ContextBudgetIndicator() {
   const contextUsage = useAppStore((s) => s.contextUsage);
@@ -34,12 +35,7 @@ export const ContextBudgetIndicator = memo(function ContextBudgetIndicator() {
   const icon = percentage > 90 ? "◉" : percentage > 50 ? "◐" : "○";
 
   const handleClick = () => {
-    // Open inspector or budget panel
-    useAppStore.getState().setActiveBottomTab("budget");
-    const dock = useAppStore.getState().dockCollapsed;
-    if (dock) {
-      useAppStore.getState().toggleDock();
-    }
+    getWebSocket()?.send({ type: "session.usage.inspect", source: "usage_indicator" });
   };
 
   return (

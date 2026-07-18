@@ -1,0 +1,14 @@
+.model-brand-icon-color,
+.model-brand-icon-mono {
+  display: block;
+  object-fit: contain;
+}
+
+.model-brand-icon-mono {
+  opacity: 0.82;
+}
+
+html[data-theme="dark"] .model-brand-icon-mono {
+  filter: invert(1);
+  opacity: 0.9;
+}

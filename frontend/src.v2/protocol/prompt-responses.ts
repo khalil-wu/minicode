@@ -8,10 +8,13 @@ export const buildApprovalResponseCommand = (
   action: ApprovalAction,
   protocol?: PromptProtocol,
   decisions?: Record<string, "approved" | "rejected">,
+  feedback?: string,
 ): ClientCommand => {
+  const trimmedFeedback = feedback?.trim() || undefined;
   if (protocol === "control") {
     const response: Record<string, unknown> = { action };
     if (decisions) response.decisions = decisions;
+    if (trimmedFeedback) response.feedback = trimmedFeedback;
     return {
       type: "control_response",
       request_id: requestId,
@@ -26,6 +29,7 @@ export const buildApprovalResponseCommand = (
     tool_call_id: requestId,
     action,
     ...(decisions ? { decisions } : {}),
+    ...(trimmedFeedback ? { feedback: trimmedFeedback } : {}),
   };
 };
 

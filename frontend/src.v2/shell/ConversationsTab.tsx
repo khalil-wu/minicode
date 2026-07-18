@@ -1,20 +1,20 @@
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
   ChevronDown,
   ChevronRight,
   Circle,
   Loader,
-  MoreHorizontal,
   Pause,
   SlidersHorizontal,
   Trash2,
+  X,
 } from "lucide-react";
 import { useAppStore } from "../stores";
 import { isDesktop, revealPath } from "../desktop/runtime";
 import type { ConversationMeta, SessionFilter } from "../stores/types";
 import { sendClientCommand } from "../protocol/ws-outbox";
-import { workspaceDisplayName } from "../lib/workspace-display";
+import { canonicalWorkspacePath, workspaceDisplayName } from "../lib/workspace-display";
 import {
   hasRuntimePendingUserActionForConversation,
   runtimePendingUserActionLabelForConversation,
@@ -26,6 +26,7 @@ import {
   sectionMetaStyle,
   bulkBarStyle,
   bulkActionStyle,
+  bulkActionsStyle,
   bulkMetaStyle,
   searchBarWrapStyle,
   searchInputStyle,
@@ -38,11 +39,23 @@ import {
   projectHeaderStyle,
   projectCountStyle,
   projectItemsStyle,
-  sessionFooterStyle,
 } from "./sidebarStyles";
 import { isConversationRunning } from "./sessionStatus";
 
 type SidebarTab = "conversations" | "files";
+
+const CONVERSATION_UI_STATE_KEY = "minicode.sidebar.conversations.state";
+const readConversationUiState = () => {
+  try {
+    const value = JSON.parse(localStorage.getItem(CONVERSATION_UI_STATE_KEY) || "{}");
+    return {
+      collapsedGroups: new Set<string>(Array.isArray(value.collapsedGroups) ? value.collapsedGroups : []),
+      scrollTop: typeof value.scrollTop === "number" ? value.scrollTop : 0,
+    };
+  } catch {
+    return { collapsedGroups: new Set<string>(), scrollTop: 0 };
+  }
+};
 
 const SESSION_FILTERS: { id: SessionFilter; label: string; icon: React.ReactNode }[] = [
   { id: "all", label: "All", icon: null },
@@ -52,13 +65,63 @@ const SESSION_FILTERS: { id: SessionFilter; label: string; icon: React.ReactNode
   { id: "archived", label: "Archived", icon: <Archive size={10} /> },
 ];
 
-function groupByWorkspace(conversations: (ConversationMeta & { sessionStatus: string })[]): Map<string, (ConversationMeta & { sessionStatus: "running" | "waiting" | "idle" })[]> {
-  const groups = new Map<string, (ConversationMeta & { sessionStatus: "running" | "waiting" | "idle" })[]>();
+export type EnrichedConversation = ConversationMeta & { sessionStatus: "running" | "waiting" | "idle" };
+
+export interface WorkspaceConversationGroup {
+  baseLabel: string;
+  label: string;
+  items: EnrichedConversation[];
+}
+
+const workspaceGroupIdentity = (path: string | null | undefined): string => {
+  const canonical = canonicalWorkspacePath(path || "").replace(/\\/g, "/").replace(/\/+$/, "");
+  if (!canonical) return "__computer__";
+  const windowsStyle = /^[A-Za-z]:\//.test(canonical) || canonical.startsWith("//");
+  return windowsStyle ? canonical.toLowerCase() : canonical;
+};
+
+const workspacePathParts = (path: string | null | undefined): string[] => {
+  const canonical = canonicalWorkspacePath(path || "").replace(/\\/g, "/").replace(/\/+$/, "");
+  return canonical.split("/").filter(Boolean);
+};
+
+export function groupByWorkspace(conversations: (ConversationMeta & { sessionStatus: string })[]): Map<string, WorkspaceConversationGroup> {
+  const groups = new Map<string, WorkspaceConversationGroup>();
   for (const c of conversations) {
     const basePath = c.workspaceRoot || c.worktreePath;
-    const key = workspaceDisplayName(basePath, "Computer");
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key)!.push(c as ConversationMeta & { sessionStatus: "running" | "waiting" | "idle" });
+    const key = workspaceGroupIdentity(basePath);
+    if (!groups.has(key)) {
+      const label = workspaceDisplayName(basePath, "Computer");
+      groups.set(key, { baseLabel: label, label, items: [] });
+    }
+    groups.get(key)!.items.push(c as EnrichedConversation);
+  }
+
+  const labelCounts = new Map<string, number>();
+  for (const group of groups.values()) {
+    labelCounts.set(group.baseLabel, (labelCounts.get(group.baseLabel) ?? 0) + 1);
+  }
+  for (const [key, group] of groups) {
+    if ((labelCounts.get(group.baseLabel) ?? 0) < 2) continue;
+    const duplicateGroups = Array.from(groups.entries()).filter(([, candidate]) => candidate.baseLabel === group.baseLabel);
+    const first = group.items[0];
+    const parts = workspacePathParts(first?.workspaceRoot || first?.worktreePath);
+    let qualifier = key;
+    for (let depth = 1; depth < parts.length; depth += 1) {
+      const candidateQualifier = parts.slice(Math.max(0, parts.length - 1 - depth), -1).join("/");
+      const isUnique = duplicateGroups.every(([candidateKey, candidate]) => {
+        if (candidateKey === key) return true;
+        const candidateFirst = candidate.items[0];
+        const candidateParts = workspacePathParts(candidateFirst?.workspaceRoot || candidateFirst?.worktreePath);
+        const otherQualifier = candidateParts.slice(Math.max(0, candidateParts.length - 1 - depth), -1).join("/");
+        return otherQualifier !== candidateQualifier;
+      });
+      if (isUnique) {
+        qualifier = candidateQualifier;
+        break;
+      }
+    }
+    group.label = `${group.baseLabel} — ${qualifier}`;
   }
   return groups;
 }
@@ -78,9 +141,11 @@ ConversationWaitingLabel.displayName = "ConversationWaitingLabel";
 
 export const ConversationsTab = ({
   conversationId,
+  onNavigate,
   onSetConfirmDialog,
 }: {
   conversationId: string;
+  onNavigate?: () => void;
   onSetConfirmDialog: (dialog: { title: string; message: string; confirmLabel: string; danger?: boolean; onConfirm: () => void }) => void;
 }) => {
   const conversations = useAppStore((s) => s.conversations);
@@ -91,12 +156,17 @@ export const ConversationsTab = ({
   const pendingDiffReview = useAppStore((s) => s.pendingDiffReview);
   const pendingAskUser = useAppStore((s) => s.pendingAskUser);
   const runtimeSession = useAppStore((s) => s.runtimeSession);
+  const workingDirectory = useAppStore((s) => s.workingDirectory);
+  const workspaceGit = useAppStore((s) => s.workspaceGit);
 
   const [search, setSearch] = useState("");
+  const [currentWorkspaceOnly, setCurrentWorkspaceOnly] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>("all");
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const initialUiState = useMemo(readConversationUiState, []);
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(initialUiState.collapsedGroups);
+  const listRef = useRef<HTMLDivElement | null>(null);
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(new Set());
@@ -137,21 +207,42 @@ export const ConversationsTab = ({
     return counts;
   }, [enrichedConversations]);
 
+  const currentWorkspaceDisplayPath = useMemo(() => {
+    return canonicalWorkspacePath(workspaceGit?.currentPath || workingDirectory || "");
+  }, [workspaceGit?.currentPath, workingDirectory]);
+  const currentWorkspacePath = useMemo(() => (
+    currentWorkspaceDisplayPath ? workspaceGroupIdentity(currentWorkspaceDisplayPath) : ""
+  ), [currentWorkspaceDisplayPath]);
+
   const filtered = useMemo(() => {
     let list = enrichedConversations;
     if (search) {
       const q = search.toLowerCase();
-      list = list.filter((c) => c.title.toLowerCase().includes(q) || c.workspaceRoot?.toLowerCase().includes(q) || c.gitBranch?.toLowerCase().includes(q));
+      list = list.filter((c) =>
+        c.title.toLowerCase().includes(q) ||
+        c.workspaceRoot?.toLowerCase().includes(q) ||
+        c.worktreePath?.toLowerCase().includes(q) ||
+        c.gitBranch?.toLowerCase().includes(q) ||
+        c.goal?.text.toLowerCase().includes(q)
+      );
+    }
+    if (currentWorkspaceOnly && currentWorkspacePath) {
+      list = list.filter((c) => {
+        const conversationWorkspace = workspaceGroupIdentity(c.workspaceRoot || c.worktreePath || "");
+        const conversationWorktree = workspaceGroupIdentity(c.worktreePath || "");
+        return conversationWorkspace === currentWorkspacePath || conversationWorktree === currentWorkspacePath;
+      });
     }
     if (sessionFilter === "archived") list = list.filter((c) => c.archived);
     else if (sessionFilter === "all") list = list.filter((c) => !c.archived);
     else list = list.filter((c) => !c.archived && c.sessionStatus === sessionFilter);
     return list;
-  }, [enrichedConversations, search, sessionFilter]);
+  }, [enrichedConversations, search, currentWorkspaceOnly, currentWorkspacePath, sessionFilter]);
 
   const projectGroups = useMemo(() => groupByWorkspace(filtered), [filtered]);
   const selectedSessions = useMemo(() => enrichedConversations.filter((c) => selectedSessionIds.has(c.id)), [enrichedConversations, selectedSessionIds]);
   const selectableFiltered = useMemo(() => filtered.filter((c) => c.sessionStatus !== "running" && c.sessionStatus !== "waiting"), [filtered]);
+  const allFilteredSelected = selectableFiltered.length > 0 && selectableFiltered.every((c) => selectedSessionIds.has(c.id));
 
   useEffect(() => {
     if (!menuFor) return;
@@ -161,6 +252,10 @@ export const ConversationsTab = ({
     window.addEventListener("keydown", closeOnEsc);
     return () => { window.removeEventListener("click", close); window.removeEventListener("keydown", closeOnEsc); };
   }, [menuFor]);
+
+  useEffect(() => {
+    if (listRef.current) listRef.current.scrollTop = initialUiState.scrollTop;
+  }, [initialUiState.scrollTop]);
 
   const deleteConversation = (id: string) => {
     const conversation = conversations.find((c) => c.id === id);
@@ -233,7 +328,19 @@ export const ConversationsTab = ({
     useAppStore.setState((s) => ({ conversations: s.conversations.map((c) => (c.id === id ? { ...c, archived } : c)) }));
   };
 
-  const handleSwitch = (id: string) => { setMenuFor(null); requestConversationSwitch(id); };
+  const handleSwitch = (id: string) => {
+    setMenuFor(null);
+    requestConversationSwitch(id);
+    onNavigate?.();
+  };
+
+  const handoffWorktree = (id: string, target: "local" | "worktree") => {
+    sendClientCommand({
+      type: "conversation.worktree.handoff.preflight",
+      conversation_id: id,
+      target,
+    });
+  };
   const revealConversationPath = (path?: string) => { if (!path) return; setMenuFor(null); if (isDesktop()) void revealPath(path); };
   const copyConversationPath = (path?: string) => { if (!path) return; setMenuFor(null); void navigator.clipboard?.writeText(path); };
   const startRename = (id: string, currentTitle: string) => { setRenaming(id); setRenameValue(currentTitle); };
@@ -253,28 +360,43 @@ export const ConversationsTab = ({
     return `${Math.floor(diff / 86_400_000)}d`;
   };
 
-  const toggleGroup = (key: string) => { setCollapsedGroups((prev) => { const next = new Set(prev); next.has(key) ? next.delete(key) : next.add(key); return next; }); };
-
-  const statusDot = (status: string) => {
-    const color = status === "running" ? "var(--state-info)" : status === "waiting" ? "var(--state-warning)" : "var(--text-muted)";
-    return (
-      <span style={{ width: 6, height: 6, borderRadius: "50%", background: color, flexShrink: 0, boxShadow: status === "running" ? `0 0 4px ${color}` : "none", animation: status === "running" ? "thinking-pulse 1.5s ease-in-out infinite" : "none" }} />
-    );
+  const toggleGroup = (key: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      try {
+        localStorage.setItem(CONVERSATION_UI_STATE_KEY, JSON.stringify({
+          collapsedGroups: Array.from(next),
+          scrollTop: listRef.current?.scrollTop ?? 0,
+        }));
+      } catch { /* noop */ }
+      return next;
+    });
   };
 
-  const runningCount = filterCounts.running || 0;
+  if (enrichedConversations.length === 0) return null;
 
   return (
     <>
       {selectionMode && (
-        <div style={bulkBarStyle}>
-          <button type="button" onClick={() => setAllFilteredSelected(selectedSessionIds.size < selectableFiltered.length)} style={bulkActionStyle} disabled={selectableFiltered.length === 0}>
-            {selectedSessionIds.size < selectableFiltered.length ? "Select visible" : "Clear"}
-          </button>
-          <span style={bulkMetaStyle}>{selectedSessions.length} selected</span>
-          <button type="button" onClick={() => deleteSessionBatch(selectedSessions, "Delete selected sessions")} style={{ ...bulkActionStyle, color: "var(--state-danger)" }} disabled={selectedSessions.length === 0}>
-            Delete
-          </button>
+        <div style={bulkBarStyle} role="toolbar" aria-label="Session selection actions">
+          <span style={bulkMetaStyle} aria-live="polite">{selectedSessions.length} selected</span>
+          <div style={bulkActionsStyle}>
+            <button type="button" onClick={() => setAllFilteredSelected(!allFilteredSelected)} style={bulkActionStyle} disabled={selectableFiltered.length === 0}>
+              {allFilteredSelected ? "Clear shown" : "Select shown"}
+            </button>
+            <button
+              type="button"
+              onClick={() => deleteSessionBatch(selectedSessions, "Delete selected sessions")}
+              className="mc-icon-button mc-icon-button-danger"
+              style={{ color: "var(--state-danger)" }}
+              disabled={selectedSessions.length === 0}
+              title="Delete selected sessions"
+              aria-label="Delete selected sessions"
+            >
+              <Trash2 size={14} />
+            </button>
+          </div>
         </div>
       )}
 
@@ -288,45 +410,73 @@ export const ConversationsTab = ({
           aria-label={selectionMode ? "Cancel selection" : "Select sessions"}
           style={recentsActionStyle(selectionMode)}
         >
-          <SlidersHorizontal size={13} />
+          {selectionMode ? <X size={14} /> : <SlidersHorizontal size={13} />}
         </button>
       </div>
       <div style={{ ...searchBarWrapStyle, padding: "6px 6px 8px" }}>
         <input type="text" placeholder="Search sessions" value={search} onChange={(e) => setSearch(e.target.value)} style={searchInputStyle} />
       </div>
 
-      <div style={{ ...filterRowStyle, padding: "0 6px 8px" }}>
-        {SESSION_FILTERS.map((f) => {
-          const count = filterCounts[f.id] || 0;
-          return (
-            <button key={f.id} onClick={() => setSessionFilter(f.id)}
-              style={{ ...filterButtonStyle, background: sessionFilter === f.id ? "var(--accent-soft)" : "transparent", color: sessionFilter === f.id ? "var(--accent-primary)" : "var(--text-muted)", fontWeight: sessionFilter === f.id ? 600 : 500 }}>
-              {f.icon}{f.label}{count > 0 && <span style={filterCountStyle}>{count}</span>}
+      {(currentWorkspacePath || sessionFilter !== "all" || filterCounts.running > 0 || filterCounts.waiting > 0 || filterCounts.archived > 0) && (
+        <div style={{ ...filterRowStyle, padding: "0 6px 8px" }}>
+          {currentWorkspacePath && (
+            <button
+              type="button"
+              onClick={() => setCurrentWorkspaceOnly((value) => !value)}
+              style={{
+                ...filterButtonStyle,
+                background: currentWorkspaceOnly ? "var(--accent-soft)" : "transparent",
+                color: currentWorkspaceOnly ? "var(--accent-primary)" : "var(--text-muted)",
+                fontWeight: currentWorkspaceOnly ? 600 : 500,
+              }}
+              title={currentWorkspaceDisplayPath}
+            >
+              Current workspace
             </button>
-          );
-        })}
-      </div>
+          )}
+          {SESSION_FILTERS.filter((f) => f.id === "all" || f.id === sessionFilter || (filterCounts[f.id] || 0) > 0).map((f) => {
+            const count = filterCounts[f.id] || 0;
+            return (
+              <button key={f.id} onClick={() => setSessionFilter(f.id)}
+                style={{ ...filterButtonStyle, background: sessionFilter === f.id ? "var(--accent-soft)" : "transparent", color: sessionFilter === f.id ? "var(--accent-primary)" : "var(--text-muted)", fontWeight: sessionFilter === f.id ? 600 : 500 }}>
+                {f.icon}{f.label}{count > 0 && <span style={filterCountStyle}>{count}</span>}
+              </button>
+            );
+          })}
+        </div>
+      )}
 
-      <div style={sessionListWrapStyle}>
+      <div
+        ref={listRef}
+        style={sessionListWrapStyle}
+        onScroll={(event) => {
+          try {
+            localStorage.setItem(CONVERSATION_UI_STATE_KEY, JSON.stringify({
+              collapsedGroups: Array.from(collapsedGroups),
+              scrollTop: event.currentTarget.scrollTop,
+            }));
+          } catch { /* noop */ }
+        }}
+      >
         {filtered.length === 0 ? (
           <div style={emptyStateStyle}>
-            {search ? "No matches." : sessionFilter !== "all" ? "No sessions with this status." : "No sessions yet."}
+            {search ? "No matches." : "No sessions with this filter."}
           </div>
         ) : (
-          Array.from(projectGroups.entries()).map(([project, items]) => (
-            <div key={project} style={projectGroupStyle}>
+          Array.from(projectGroups.entries()).map(([projectKey, group]) => (
+            <div key={projectKey} style={projectGroupStyle}>
               {projectGroups.size > 1 && (
-                <button onClick={() => toggleGroup(project)} style={projectHeaderStyle}>
+                <button onClick={() => toggleGroup(projectKey)} style={projectHeaderStyle}>
                   <span style={{ fontSize: 10, opacity: 0.7, display: "inline-flex" }}>
-                    {collapsedGroups.has(project) ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+                    {collapsedGroups.has(projectKey) ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
                   </span>
-                  {project}
-                  <span style={projectCountStyle}>{items.length}</span>
+                  {group.label}
+                  <span style={projectCountStyle}>{group.items.length}</span>
                 </button>
               )}
-              {!collapsedGroups.has(project) && (
+              {!collapsedGroups.has(projectKey) && (
                 <div style={projectItemsStyle}>
-                  {items.map((c) => (
+                  {group.items.map((c) => (
                     <SessionRow
                       key={c.id}
                       conversation={c}
@@ -337,7 +487,6 @@ export const ConversationsTab = ({
                       renaming={renaming}
                       renameValue={renameValue}
                       waitingLabelForConversation={waitingLabelForConversation}
-                      statusDot={statusDot}
                       relativeTime={relativeTime}
                       onSwitch={handleSwitch}
                       onToggleSelected={toggleSessionSelected}
@@ -349,6 +498,7 @@ export const ConversationsTab = ({
                       onArchive={archiveConversation}
                       onDelete={deleteConversation}
                       onCleanup={cleanupWorktree}
+                      onHandoff={handoffWorktree}
                       onReveal={revealConversationPath}
                       onCopy={copyConversationPath}
                     />
@@ -360,12 +510,6 @@ export const ConversationsTab = ({
         )}
       </div>
 
-      <div style={sessionFooterStyle}>
-        <span>{enrichedConversations.filter((c) => !c.archived).length} sessions</span>
-        {runningCount > 0 && <span style={{ color: "var(--state-info)", display: "flex", alignItems: "center", gap: 3 }}><Loader size={10} /> {runningCount} active</span>}
-        <span style={{ flex: 1 }} />
-        {enrichedConversations.filter((c) => c.archived).length > 0 && <span>{enrichedConversations.filter((c) => c.archived).length} archived</span>}
-      </div>
     </>
   );
 };

@@ -135,20 +135,6 @@ export const fileTreeSearchInputStyle: React.CSSProperties = {
   fontSize: "var(--text-sm)",
 };
 
-export const fileTreeIconButtonStyle: React.CSSProperties = {
-  width: 26,
-  height: 26,
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  border: 0,
-  borderRadius: "var(--radius-sm, 5px)",
-  background: "transparent",
-  color: "var(--text-muted)",
-  cursor: "pointer",
-  padding: 0,
-};
-
 export const toolbarMenuWrapStyle: React.CSSProperties = {
   position: "relative",
   flexShrink: 0,

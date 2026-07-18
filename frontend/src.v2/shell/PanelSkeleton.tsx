@@ -4,16 +4,16 @@ import type { PanelKind } from "../stores/types";
 export const PanelSkeleton = ({ kind }: { kind: PanelKind }) => (
   <div style={shellStyle} aria-label={`Loading ${kind} panel`}>
     <div style={toolbarStyle}>
-      <span style={{ ...barStyle, width: 82 }} />
-      <span style={{ ...barStyle, width: 38 }} />
-      <span style={{ ...barStyle, width: 52 }} />
+      <span className="panel-skeleton-shimmer" style={{ ...barStyle, width: 82 }} />
+      <span className="panel-skeleton-shimmer" style={{ ...barStyle, width: 38 }} />
+      <span className="panel-skeleton-shimmer" style={{ ...barStyle, width: 52 }} />
     </div>
     <div style={bodyStyle}>
-      <span style={{ ...lineStyle, width: "62%" }} />
-      <span style={{ ...lineStyle, width: "78%" }} />
-      <span style={{ ...lineStyle, width: "46%" }} />
-      <span style={{ ...blockStyle, width: "100%", height: 92 }} />
-      <span style={{ ...lineStyle, width: "70%" }} />
+      <span className="panel-skeleton-shimmer" style={{ ...lineStyle, width: "62%" }} />
+      <span className="panel-skeleton-shimmer" style={{ ...lineStyle, width: "78%" }} />
+      <span className="panel-skeleton-shimmer" style={{ ...lineStyle, width: "46%" }} />
+      <span className="panel-skeleton-shimmer" style={{ ...blockStyle, width: "100%", height: 92 }} />
+      <span className="panel-skeleton-shimmer" style={{ ...lineStyle, width: "70%" }} />
     </div>
   </div>
 );
@@ -22,7 +22,6 @@ const shimmer: CSSProperties = {
   background:
     "linear-gradient(90deg, var(--surface-soft), var(--surface-active), var(--surface-soft))",
   backgroundSize: "220% 100%",
-  animation: "shimmer 1.4s ease-in-out infinite",
 };
 
 const shellStyle: CSSProperties = {

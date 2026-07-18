@@ -1,10 +1,12 @@
 import { Boxes, Plug, RefreshCw, Search, Sparkles, Trash2, Wrench, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAppStore } from "../stores";
 import { getWebSocket } from "../hooks/useWebSocket";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { pushToast } from "./ToastContainer";
 import { apiBase, authHeaders } from "../protocol/api";
+import { normalizeSkillList } from "../lib/catalog-normalizers";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 
 type Category = "skills" | "skills-market" | "mcp" | "mcp-market";
 
@@ -26,38 +28,40 @@ export const SkillsMarketplace = () => {
   const [query, setQuery] = useState("");
   const [installing, setInstalling] = useState<Set<string>>(new Set());
   const [removing, setRemoving] = useState<Set<string>>(new Set());
+  const [loadState, setLoadState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [loadError, setLoadError] = useState("");
+  const loadEpochRef = useRef(0);
+  const dialogRef = useFocusTrap(skillsMarketplaceOpen);
 
   const loadSkills = async () => {
+    const epoch = ++loadEpochRef.current;
+    setLoadState("loading");
+    setLoadError("");
     try {
       const [statusRes, marketplaceRes] = await Promise.all([
         fetch(`${apiBase()}/api/status`, { cache: "no-store", headers: authHeaders() }),
         fetch(`${apiBase()}/api/skills/marketplace`, { cache: "no-store", headers: authHeaders() }),
       ]);
-      if (statusRes.ok) {
-        const payload = await statusRes.json();
-        const skills = Array.isArray(payload.skills) ? payload.skills : [];
-        useAppStore.getState().setAvailableSkills(skills.map((skill: any) => ({
-          name: String(skill.name ?? ""),
-          description: String(skill.description ?? ""),
-          version: skill.version ? String(skill.version) : undefined,
-          triggers: Array.isArray(skill.triggers) ? skill.triggers.map(String) : [],
-          source_level: String(skill.source_level ?? skill.level ?? "builtin"),
-          active: Boolean(skill.active),
-        })).filter((skill: { name: string }) => skill.name));
-      }
-      if (marketplaceRes.ok) {
-        const payload = await marketplaceRes.json();
-        const skills = Array.isArray(payload.skills) ? payload.skills : [];
-        useAppStore.getState().setMarketplaceSkills(skills.map((skill: any) => ({
+      if (!statusRes.ok) throw new Error(`Skills status request failed (${statusRes.status})`);
+      if (!marketplaceRes.ok) throw new Error(`Skills marketplace request failed (${marketplaceRes.status})`);
+      const [statusPayload, marketplacePayload] = await Promise.all([statusRes.json(), marketplaceRes.json()]);
+      if (epoch !== loadEpochRef.current) return;
+      useAppStore.getState().setAvailableSkills(normalizeSkillList(statusPayload.skills));
+      const skills = Array.isArray(marketplacePayload.skills) ? marketplacePayload.skills : [];
+      useAppStore.getState().setMarketplaceSkills(skills.map((skill: any) => ({
           name: String(skill.name ?? ""),
           title: String(skill.title ?? skill.name ?? ""),
           description: String(skill.description ?? ""),
           triggers: Array.isArray(skill.triggers) ? skill.triggers.map(String) : [],
           installed: Boolean(skill.installed),
         })).filter((skill: { name: string }) => skill.name));
-      }
+      setLoadState("ready");
     } catch (error) {
-      pushToast(`Failed to load skills: ${error instanceof Error ? error.message : String(error)}`, "warning");
+      if (epoch !== loadEpochRef.current) return;
+      const message = `Failed to load skills: ${error instanceof Error ? error.message : String(error)}`;
+      setLoadError(message);
+      setLoadState("error");
+      pushToast(message, "warning");
     }
   };
 
@@ -73,6 +77,7 @@ export const SkillsMarketplace = () => {
   useEffect(() => {
     if (!skillsMarketplaceOpen) return;
     refreshAll();
+    return () => { loadEpochRef.current += 1; };
   }, [skillsMarketplaceOpen]);
 
   useEffect(() => {
@@ -177,7 +182,7 @@ export const SkillsMarketplace = () => {
 
   return (
     <div className="overlay-backdrop" onClick={toggleSkillsMarketplace} style={backdropStyle}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()} style={modalStyle}>
+      <div ref={dialogRef} className="modal-content" role="dialog" aria-modal="true" aria-label="能力中心" tabIndex={-1} onClick={(e) => e.stopPropagation()} style={modalStyle}>
         <div style={headerStyle}>
           <div>
             <h2 style={{ margin: 0, fontSize: "var(--text-lg)", color: "var(--text-primary)", fontWeight: 700 }}>能力中心</h2>
@@ -208,7 +213,16 @@ export const SkillsMarketplace = () => {
         </div>
 
         <div style={listWrapStyle}>
-          {category === "skills" && (
+          {loadState === "loading" && (category === "skills" || category === "skills-market") && (
+            <EmptyState title="正在加载" hint="正在获取技能与市场数据。" />
+          )}
+          {loadState === "error" && (category === "skills" || category === "skills-market") && (
+            <div role="alert" style={{ padding: 24, color: "var(--state-danger)", textAlign: "center" }}>
+              <div>{loadError}</div>
+              <button type="button" onClick={refreshAll} style={{ ...closeBtn, marginTop: 12, width: "auto", padding: "0 12px" }}>重试</button>
+            </div>
+          )}
+          {loadState === "ready" && category === "skills" && (
             installedFiltered.length === 0 ? (
               <EmptyState title={availableSkills.length === 0 ? "尚未安装技能" : "无匹配项"} hint="在「技能市场」安装精选技能,或在本地添加 SKILL.md 文件。" />
             ) : (
@@ -220,7 +234,7 @@ export const SkillsMarketplace = () => {
             )
           )}
 
-          {category === "skills-market" && (
+          {loadState === "ready" && category === "skills-market" && (
             discoverFiltered.length === 0 ? (
               <EmptyState title={marketplaceSkills.length === 0 ? "市场暂无条目" : "无匹配项"} hint="连接后端后会自动填充精选技能。" />
             ) : (
@@ -266,7 +280,20 @@ const InstalledRow = ({
   removing,
   onRemove,
 }: {
-  skill: { name: string; description: string; version?: string; triggers?: string[]; source_level?: string; active?: boolean };
+  skill: {
+    name: string;
+    description: string;
+    display_name?: string;
+    icon?: string;
+    version?: string;
+    triggers?: string[];
+    source_level?: string;
+    active?: boolean;
+    allow_implicit_invocation?: boolean;
+    mcp_required?: string[];
+    mcp_dependencies?: string[];
+    usage?: { load_count?: number };
+  };
   removing: boolean;
   onRemove: () => void;
 }) => {
@@ -284,13 +311,19 @@ const InstalledRow = ({
     <span style={rowIconStyle}><Wrench size={15} /></span>
     <div style={{ flex: 1, minWidth: 0 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
-        <span style={skillNameStyle}>{skill.name}</span>
+        <span style={skillNameStyle}>{skill.display_name || skill.name}</span>
+        {skill.display_name && <span style={tagStyle}>{skill.name}</span>}
         {skill.active && <span style={activeTagStyle}>active</span>}
+        {skill.allow_implicit_invocation === false && <span style={tagStyle}>explicit only</span>}
         {skill.source_level && <span style={tagStyle}>{skill.source_level}</span>}
         {skill.version && <span style={tagStyle}>v{skill.version}</span>}
+        {Number(skill.usage?.load_count ?? 0) > 0 && <span style={tagStyle}>used {skill.usage?.load_count}</span>}
       </div>
       <p style={descStyle}>{skill.description || "(no description)"}</p>
       {skill.triggers && skill.triggers.length > 0 && <TagList tags={skill.triggers} />}
+      {[...(skill.mcp_required ?? []), ...(skill.mcp_dependencies ?? [])].length > 0 && (
+        <TagList tags={[...(skill.mcp_required ?? []), ...(skill.mcp_dependencies ?? [])].map((name) => `MCP: ${name}`)} />
+      )}
     </div>
     <div style={rowActionsStyle}>
       <button type="button" onClick={activate} style={secondaryButtonStyle}>

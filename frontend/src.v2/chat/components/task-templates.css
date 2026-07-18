@@ -41,22 +41,6 @@
 
 .task-templates-close {
   margin-left: auto;
-  width: 24px;
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-sm);
-  color: var(--text-muted);
-  cursor: pointer;
-  transition: var(--transition-fast);
-}
-
-.task-templates-close:hover {
-  background: var(--surface-hover);
-  color: var(--text-primary);
 }
 
 .task-templates-grid {
@@ -87,8 +71,15 @@
 }
 
 .task-template-icon {
-  font-size: 32px;
-  line-height: 1;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent-primary);
+  flex-shrink: 0;
 }
 
 .task-template-content {
@@ -114,4 +105,80 @@
   font-size: var(--text-xs);
   color: var(--text-secondary);
   opacity: 0.8;
+}
+
+
+
+/* ── Migrated from workbench-polish.css ── */
+.task-suggestions,
+.task-stats,
+.task-templates {
+  background: var(--surface-base);
+  border: 1px solid var(--border-subtle);
+  border-left: 2px solid color-mix(in oklch, var(--accent-primary) 60%, var(--border-subtle));
+  border-radius: var(--radius-lg);
+  box-shadow: none;
+}
+
+
+
+.inline-task-header,
+.task-suggestions-header,
+.task-stats-header,
+.task-templates-header {
+  border-bottom-color: var(--border-subtle);
+}
+
+
+
+.inline-task-row,
+.task-suggestion-item,
+.task-stat-card,
+.task-template-card {
+  border-radius: var(--radius-md);
+  background: transparent;
+  box-shadow: none;
+}
+
+
+
+.task-suggestion-item:hover,
+.task-stat-card:hover,
+.task-template-card:hover {
+  transform: none;
+  box-shadow: none;
+}
+
+
+
+.task-suggestion-item,
+.task-stat-card,
+.task-template-card {
+  border-color: var(--border-subtle);
+}
+
+
+
+.task-template-card {
+  padding: 14px;
+}
+
+
+
+.task-templates-trigger,
+.task-suggestions-adopt-all,
+.task-suggestions-close,
+.task-stats-close,
+.task-templates-close,
+.inline-task-filter-btn,
+.inline-task-add-btn,
+.inline-task-add-save-btn,
+.inline-task-add-cancel-btn {
+  border-radius: var(--radius-sm);
+}
+
+
+
+.task-templates-trigger {
+  background: var(--surface-base);
 }

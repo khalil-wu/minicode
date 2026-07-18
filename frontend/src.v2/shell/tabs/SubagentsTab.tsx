@@ -5,16 +5,18 @@
  * Inspector. This panel only answers: what is being worked on, where it stands,
  * and what result is available.
  */
-import { ArrowLeft, ChevronDown, ChevronRight, Square } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronRight, RotateCcw, Send, Square } from "lucide-react";
 import { useState } from "react";
 import { MarkdownRenderer } from "../../chat/messages/MarkdownRenderer";
 import {
   projectAgentViews,
+  hasCompletedAssistantReply,
   type AgentDisplayStatus,
   type AgentView,
 } from "../../lib/agent-view-model";
 import { sendClientCommand } from "../../protocol/ws-outbox";
 import { useAppStore } from "../../stores";
+import type { SubagentMessageState } from "../../stores/types";
 import { EmptyLine, PanelHeader, SmallButton, StatusMark } from "../SidebarShared";
 import "./SubagentsTab.css";
 
@@ -31,6 +33,7 @@ const GROUPS: Array<{
 ];
 
 const statusMarkValue = (view: AgentView): string => {
+  if (view.status === "completed") return "done";
   if (view.effectiveStatus === "partial" || view.effectiveStatus === "cancelled") {
     return "blocked";
   }
@@ -56,6 +59,9 @@ const AgentRow = ({
     <StatusMark status={statusMarkValue(view)} />
     <span className="subagents-row-copy">
       <span className="subagents-row-title">{view.title}</span>
+      <span className="subagents-row-summary">
+        {view.executionMode === "background" ? "后台继续，不阻塞主回答" : "主回答会等待此任务"}
+      </span>
       {view.summary && view.summary !== view.title && (
         <span className="subagents-row-summary">{view.summary}</span>
       )}
@@ -70,14 +76,25 @@ const AgentDetail = ({
   onBack,
   onFetchResult,
   onStop,
+  onResume,
+  messages,
+  canSteer,
+  onSendMessage,
 }: {
   view: AgentView;
   onBack: () => void;
   onFetchResult: () => void;
   onStop: () => void;
+  onResume: () => void;
+  messages: SubagentMessageState[];
+  canSteer: boolean;
+  onSendMessage: (message: string) => void;
 }) => {
-  const hasResult = Boolean(view.resultContent || view.resultError);
-  const showSummary = Boolean(view.summary && view.summary !== view.title);
+  const [messageDraft, setMessageDraft] = useState("");
+  const hasResult = !view.handledByParent && Boolean(view.resultContent || view.resultError);
+  const showSummary = !view.handledByParent
+    && Boolean(view.summary && view.summary !== view.title)
+    && (view.status === "running" || !hasResult);
 
   return (
     <section className="subagents-detail" aria-label={`任务详情：${view.title}`}>
@@ -94,6 +111,7 @@ const AgentDetail = ({
         <span className="subagents-detail-heading">
           <strong>{view.title}</strong>
           <span>{view.statusLabel}</span>
+          <span>{view.executionMode === "background" ? "后台任务" : "主回答依赖"}</span>
         </span>
       </header>
 
@@ -102,6 +120,64 @@ const AgentDetail = ({
           <section className="subagents-detail-progress" aria-label="任务进展">
             <h3>{view.status === "running" ? "当前进展" : "任务摘要"}</h3>
             <p>{view.summary}</p>
+          </section>
+        )}
+
+        {!view.handledByParent && view.activityLog.length > 0 && (
+          <section className="subagents-detail-timeline" aria-label="执行过程">
+            <h3>执行过程</h3>
+            <ol>
+              {view.activityLog.map((activity, index) => (
+                <li key={`${index}-${activity}`}>{activity}</li>
+              ))}
+            </ol>
+          </section>
+        )}
+
+        {!view.handledByParent && (messages.length > 0 || canSteer) && (
+          <section className="subagents-detail-messages" aria-label="协作消息">
+            <h3>协作消息</h3>
+            {messages.length > 0 && (
+              <ol>
+                {messages.map((message) => (
+                  <li key={message.messageId} data-sender={message.senderId === "user" ? "user" : "agent"}>
+                    <span>{message.senderId === "user" ? "你" : view.title}</span>
+                    <p>{message.content}</p>
+                    {message.deliveryStatus === "sending" && <small>发送中…</small>}
+                    {message.deliveryStatus === "failed" && <small>发送失败</small>}
+                  </li>
+                ))}
+              </ol>
+            )}
+            {canSteer && (
+              <form
+                className="subagents-message-composer"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  const value = messageDraft.trim();
+                  if (!value) return;
+                  onSendMessage(value);
+                  setMessageDraft("");
+                }}
+              >
+                <textarea
+                  value={messageDraft}
+                  onChange={(event) => setMessageDraft(event.target.value)}
+                  placeholder="给这个子智能体补充指令…"
+                  aria-label="给子智能体发送消息"
+                  rows={2}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                      event.preventDefault();
+                      event.currentTarget.form?.requestSubmit();
+                    }
+                  }}
+                />
+                <button type="submit" disabled={!messageDraft.trim()} aria-label="发送给子智能体">
+                  <Send size={14} />
+                </button>
+              </form>
+            )}
           </section>
         )}
 
@@ -115,23 +191,30 @@ const AgentDetail = ({
           </section>
         )}
 
-        {view.needsResult && !hasResult && (
+        {!view.handledByParent && view.needsResult && !hasResult && (
           <p className="subagents-result-ready">结果已就绪，可以获取查看。</p>
         )}
 
         <div className="subagents-detail-actions">
-          {view.needsResult && (
+          {!view.handledByParent && view.needsResult && (
             <SmallButton
               icon={<ChevronRight size={12} />}
               label="获取结果"
               onClick={onFetchResult}
             />
           )}
-          {view.canStop && (
+          {!view.handledByParent && view.canStop && (
             <SmallButton
               icon={<Square size={12} />}
               label="停止任务"
               onClick={onStop}
+            />
+          )}
+          {!view.handledByParent && view.canResume && (
+            <SmallButton
+              icon={<RotateCcw size={12} />}
+              label={view.effectiveStatus === "partial" ? "继续任务" : "重试任务"}
+              onClick={onResume}
             />
           )}
         </div>
@@ -142,11 +225,16 @@ const AgentDetail = ({
 
 export const SubagentsTab = () => {
   const subagents = useAppStore((state) => state.subagents);
+  const messages = useAppStore((state) => state.messages);
+  const isStreaming = useAppStore((state) => state.isStreaming);
   const selectedAgentId = useAppStore((state) => state.focusedSubagentId);
   const setSelectedAgentId = useAppStore((state) => state.setFocusedSubagentId);
   const [showAllCompleted, setShowAllCompleted] = useState(false);
-  const views = projectAgentViews(subagents);
+  const parentCompleted = !isStreaming && hasCompletedAssistantReply(messages);
+  const views = projectAgentViews(subagents, Date.now(), { parentCompleted });
   const selectedView = views.find((view) => view.id === selectedAgentId);
+  const selectedAgent = subagents.find((agent) => agent.id === selectedAgentId);
+  const conversationId = useAppStore((state) => state.conversationId);
 
   const stop = (id: string) => {
     sendClientCommand({ type: "subagent.cancel", subagent_id: id });
@@ -160,6 +248,35 @@ export const SubagentsTab = () => {
     });
   };
 
+  const sendMessage = (id: string, message: string) => {
+    const target = subagents.find((agent) => agent.id === id);
+    const messageId = globalThis.crypto?.randomUUID?.() ?? `msg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+    const optimistic: SubagentMessageState = {
+      messageId,
+      senderId: "user",
+      recipientId: id,
+      content: message,
+      createdAt: Date.now(),
+      deliveryStatus: "sending",
+    };
+    useAppStore.getState().updateSubagent(id, {
+      messages: [...(target?.messages ?? []), optimistic].slice(-100),
+    }, conversationId ?? undefined);
+    sendClientCommand({
+      type: "send_message",
+      recipient: id,
+      sender: "user",
+      message,
+      message_id: messageId,
+      conversation_id: conversationId ?? undefined,
+      task_id: target?.taskId,
+    });
+  };
+
+  const resume = (id: string) => {
+    sendClientCommand({ type: "subagent.resume", subagent_id: id });
+  };
+
   if (selectedView) {
     return (
       <AgentDetail
@@ -167,6 +284,10 @@ export const SubagentsTab = () => {
         onBack={() => setSelectedAgentId(null)}
         onFetchResult={() => fetchResult(selectedView.id)}
         onStop={() => stop(selectedView.id)}
+        onResume={() => resume(selectedView.id)}
+        messages={selectedAgent?.messages ?? []}
+        canSteer={Boolean(selectedAgent && ["pending", "running", "blocked"].includes(selectedAgent.status))}
+        onSendMessage={(message) => sendMessage(selectedView.id, message)}
       />
     );
   }
@@ -213,6 +334,7 @@ export const SubagentsTab = () => {
                     showStatus={group.status !== "completed" || view.statusLabel !== "已完成"}
                     onOpen={() => {
                       setSelectedAgentId(view.id);
+                      fetchResult(view.id);
                     }}
                   />
                 ))}

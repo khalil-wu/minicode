@@ -18,14 +18,40 @@ export interface AgentCapabilitiesPayload {
   tools?: AgentCapabilityTool[];
   tool_views?: AgentCapabilityToolView[];
   tool_runtime_metadata?: Record<string, unknown>;
+  provider_capabilities?: AgentProviderCapabilities;
   commands?: AgentCapabilityNamedItem[];
   skills?: AgentCapabilityNamedItem[];
   composer_commands?: AgentCapabilityNamedItem[];
+  feature_flags?: Record<string, AgentCapabilityFeatureFlag>;
   permission?: AgentCapabilityPermission;
-  /** backend/feature_flags.py payload: { name: { enabled, source } }. */
-  feature_flags?: Record<string, { enabled?: boolean; source?: string }>;
   mcp_registry_version?: number;
   version?: number;
+}
+
+export interface AgentProviderCapabilities {
+  provider?: unknown;
+  model?: unknown;
+  wire_api?: unknown;
+  provider_id?: unknown;
+  base_url?: unknown;
+  streaming?: unknown;
+  tool_calling?: unknown;
+  parallel_tool_calls?: unknown;
+  json_mode?: unknown;
+  reasoning_effort?: unknown;
+  reasoning_effort_levels?: unknown;
+  vision?: unknown;
+  native_pdf?: unknown;
+  image_generation?: unknown;
+  stateful_continuation?: unknown;
+  confidence?: unknown;
+  limitations?: unknown;
+  adapters?: unknown;
+}
+
+export interface AgentCapabilityFeatureFlag {
+  enabled?: unknown;
+  source?: unknown;
 }
 
 export interface AgentCapabilityPermission {
@@ -75,7 +101,24 @@ export interface AgentCapabilityToolView {
 export interface AgentCapabilityNamedItem {
   name?: unknown;
   command?: unknown;
+  label?: unknown;
   description?: unknown;
+  type?: unknown;
+  enabled?: unknown;
+  args?: unknown;
+  display_name?: unknown;
+  icon?: unknown;
+  version?: unknown;
+  triggers?: unknown;
+  tools_required?: unknown;
+  mcp_required?: unknown;
+  mcp_dependencies?: unknown;
+  allow_implicit_invocation?: unknown;
+  default_prompt?: unknown;
+  source_level?: unknown;
+  level?: unknown;
+  active?: unknown;
+  usage?: unknown;
 }
 
 export interface ToolViewSummary {
@@ -118,6 +161,7 @@ export const mergeCapabilities = (
     commands: primary.commands ?? fallback.commands,
     skills: primary.skills ?? fallback.skills,
     composer_commands: primary.composer_commands ?? fallback.composer_commands,
+    feature_flags: primary.feature_flags ?? fallback.feature_flags,
   });
 };
 
@@ -228,6 +272,105 @@ export const capabilityFlagLabel = (ready: boolean | undefined): string => {
   if (ready === true) return "Ready";
   if (ready === false) return "Missing";
   return "Unknown";
+};
+
+export type ProviderCapabilityTone = "ready" | "missing" | "unavailable" | "unknown";
+
+const providerCapabilityValue = (
+  supported: boolean | undefined,
+  required = false,
+): { value: string; tone: ProviderCapabilityTone } => {
+  if (supported === true) return { value: "Ready", tone: "ready" };
+  if (supported === false && required) return { value: "Missing", tone: "missing" };
+  if (supported === false) return { value: "Unavailable", tone: "unavailable" };
+  return { value: "Unknown", tone: "unknown" };
+};
+
+const capabilityBool = (value: unknown): boolean | undefined => {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const text = value.trim().toLowerCase();
+    if (["1", "true", "yes", "on"].includes(text)) return true;
+    if (["0", "false", "no", "off"].includes(text)) return false;
+  }
+  return undefined;
+};
+
+const capabilityText = (value: unknown): string => (
+  typeof value === "string" ? value.trim() : ""
+);
+
+export const formatProviderCapabilityTitle = (
+  capabilities: AgentProviderCapabilities | undefined,
+): string => {
+  if (!capabilities) return "Provider capability unknown";
+  const provider = capabilityText(capabilities.provider) || "provider";
+  const model = capabilityText(capabilities.model) || "model";
+  const wireApi = capabilityText(capabilities.wire_api);
+  return wireApi ? `${provider} / ${model} / ${wireApi}` : `${provider} / ${model}`;
+};
+
+export const providerCapabilityRows = (
+  capabilities: AgentProviderCapabilities | undefined,
+): { label: string; value: string; supported?: boolean; tone: ProviderCapabilityTone }[] => {
+  if (!capabilities) return [];
+  const row = (label: string, supported: boolean | undefined, required = false) => ({
+    label,
+    supported,
+    ...providerCapabilityValue(supported, required),
+  });
+  return [
+    row("Streaming", capabilityBool(capabilities.streaming), true),
+    row("Tool calling", capabilityBool(capabilities.tool_calling), true),
+    row("Parallel tools", capabilityBool(capabilities.parallel_tool_calls)),
+    row("Stateful", capabilityBool(capabilities.stateful_continuation)),
+    row("Reasoning effort", capabilityBool(capabilities.reasoning_effort)),
+    row("JSON mode", capabilityBool(capabilities.json_mode)),
+    row("Vision", capabilityBool(capabilities.vision)),
+    row("Native PDF", capabilityBool(capabilities.native_pdf)),
+    row("Image generation", capabilityBool(capabilities.image_generation)),
+  ];
+};
+
+export const providerCapabilityLimitations = (
+  capabilities: AgentProviderCapabilities | undefined,
+): string[] => {
+  const limitations = capabilities?.limitations;
+  if (!Array.isArray(limitations)) return [];
+  return limitations
+    .map((item) => formatProviderCapabilityLimitation(String(item ?? "").trim()))
+    .filter(Boolean);
+};
+
+const formatProviderCapabilityLimitation = (value: string): string => {
+  if (value === "stateful_continuation_requires_responses_api") {
+    return "Stateful continuation requires Responses API";
+  }
+  if (value === "gpt_like_chat_completions_no_stateful_continuation") {
+    return "GPT-like models on Chat Completions cannot use stateful continuation; use Responses to enable previous_response_id";
+  }
+  if (value === "image_generation_model_requires_responses_api") {
+    return "Image generation models require Responses API";
+  }
+  if (value === "known_text_only_image_provider") {
+    return "This provider/model is text-only for image inputs";
+  }
+  if (value.startsWith("unsupported_openai_wire_api:")) {
+    return `Unsupported API format: ${value.slice("unsupported_openai_wire_api:".length)}`;
+  }
+  return value.replace(/_/g, " ");
+};
+
+export const capabilityFeatureEnabled = (
+  capabilities: AgentCapabilitiesPayload | null | undefined,
+  name: string,
+  defaultEnabled = true,
+): boolean => {
+  const flags = capabilities?.feature_flags;
+  if (!flags || typeof flags !== "object") return defaultEnabled;
+  const flag = flags[name];
+  if (!flag || typeof flag !== "object") return defaultEnabled;
+  return typeof flag.enabled === "boolean" ? flag.enabled : defaultEnabled;
 };
 
 const cleanCapabilityName = (value: unknown): string => (

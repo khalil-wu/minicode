@@ -1,11 +1,25 @@
 import { lazy, Suspense, useRef, useEffect, useState, useMemo } from "react";
 import type React from "react";
+import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 
-const MonacoDiffEditor = lazy(() =>
-  import("@monaco-editor/react").then((mod) => ({
-    default: mod.DiffEditor,
-  })),
-);
+const MonacoDiffEditor = lazy(async () => {
+  const scope = globalThis as typeof globalThis & { MonacoEnvironment?: { getWorker?: () => Worker } };
+  if (!scope.MonacoEnvironment?.getWorker) {
+    scope.MonacoEnvironment = { ...scope.MonacoEnvironment, getWorker: () => new EditorWorker() };
+  }
+  const [reactMonaco, monaco] = await Promise.all([
+    import("@monaco-editor/react"),
+    import("monaco-editor/esm/vs/editor/editor.api.js"),
+    import("monaco-editor/esm/vs/basic-languages/typescript/typescript.contribution.js"),
+    import("monaco-editor/esm/vs/basic-languages/javascript/javascript.contribution.js"),
+    import("monaco-editor/esm/vs/basic-languages/css/css.contribution.js"),
+    import("monaco-editor/esm/vs/basic-languages/html/html.contribution.js"),
+    import("monaco-editor/esm/vs/basic-languages/markdown/markdown.contribution.js"),
+    import("monaco-editor/esm/vs/basic-languages/python/python.contribution.js"),
+  ]);
+  reactMonaco.loader?.config?.({ monaco });
+  return { default: reactMonaco.DiffEditor };
+});
 
 /**
  * Parse a unified diff patch string into original and modified content strings

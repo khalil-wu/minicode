@@ -1,5 +1,6 @@
 import { Sparkles, X } from "lucide-react";
 import { useEffect, useRef } from "react";
+import { buildPastedTextFile, shouldAttachPastedText } from "./pastedText";
 
 interface Props {
   value: string;
@@ -16,31 +17,11 @@ interface Props {
   onRemoveSkill?: (name: string) => void;
   onRemoveLastSkill?: () => void;
   placeholder?: string;
+  onHistorySearch?: () => void;
 }
 
 const MIN_HEIGHT = 44;
 const MAX_HEIGHT = 260;
-
-// Paste-to-attachment thresholds (Codex-style). Above either bound, a pasted
-// text blob is converted into a `pasted-N.txt` attachment chip instead of
-// flooding the textarea.
-const PASTE_LINE_THRESHOLD = 10;
-const PASTE_CHAR_THRESHOLD = 500;
-
-// Session-scoped counter so pasted attachments read pasted-1.txt, pasted-2.txt…
-let pastedTextCounter = 0;
-
-const shouldDivertPaste = (text: string): boolean => {
-  if (!text) return false;
-  if (text.length > PASTE_CHAR_THRESHOLD) return true;
-  const lineCount = text.split("\n").length;
-  return lineCount > PASTE_LINE_THRESHOLD;
-};
-
-const buildPastedTextFile = (text: string): File => {
-  pastedTextCounter += 1;
-  return new File([text], `pasted-${pastedTextCounter}.txt`, { type: "text/plain" });
-};
 
 export const ComposerTextarea = ({
   value,
@@ -57,6 +38,7 @@ export const ComposerTextarea = ({
   onRemoveSkill,
   onRemoveLastSkill,
   placeholder,
+  onHistorySearch,
 }: Props) => {
   const ref = useRef<HTMLTextAreaElement>(null);
   const lastValRef = useRef(value);
@@ -123,11 +105,14 @@ export const ComposerTextarea = ({
       return;
     }
 
-    // Large plain-text pastes become a `pasted-N.txt` attachment chip instead
-    // of flooding the textarea (Codex-style). Smaller pastes insert normally.
+    // Keep ordinary long-form text editable. Only divert a paste when the
+    // resulting draft would exceed the composer's safe editing budget.
     if (onDropFiles) {
       const text = e.clipboardData.getData("text");
-      if (shouldDivertPaste(text)) {
+      const target = e.currentTarget as HTMLTextAreaElement;
+      const selectionStart = target.selectionStart ?? value.length;
+      const selectionEnd = target.selectionEnd ?? selectionStart;
+      if (shouldAttachPastedText(value, text, selectionStart, selectionEnd)) {
         e.preventDefault();
         onDropFiles([buildPastedTextFile(text)]);
       }
@@ -152,6 +137,12 @@ export const ComposerTextarea = ({
       onPaste={handlePaste}
       onDrop={handleDrop}
       onKeyDown={(e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "r") {
+          e.preventDefault();
+          e.stopPropagation();
+          onHistorySearch?.();
+          return;
+        }
         if (menuOpen && ["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(e.key)) {
           e.preventDefault();
           return;
@@ -180,7 +171,7 @@ export const ComposerTextarea = ({
       }}
       placeholder={placeholder ?? "Write a message..."}
       autoFocus
-      className="composer-textarea bg-transparent border-0 outline-0 resize-none overflow-y-hidden tracking-normal transition-colors duration-[140ms]"
+      className="composer-textarea bg-transparent border-0 outline-0 resize-none overflow-y-auto tracking-normal transition-colors duration-[140ms]"
       style={{
         width: "100%",
         flex: hasContextPrefix ? "0 0 auto" : undefined,

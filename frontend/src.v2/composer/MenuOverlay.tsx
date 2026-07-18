@@ -1,26 +1,22 @@
-import { AtSign, Command, File, Folder, Sparkles } from "lucide-react";
+import { AtSign, Command, Folder, Sparkles } from "lucide-react";
+import { fileIcon } from "../shell/fileTreeHelpers";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { isDesktop, fsListTree, fsSearchFiles } from "../desktop/runtime";
 import { useAppStore } from "../stores";
 import { listWorkspaceTree, searchWorkspaceFiles } from "../protocol/workspace";
 import { fuzzyFilter } from "../lib/fuzzy-match";
 import { buildRuntimeSlashArgMenuItems, buildRuntimeSlashMenuItems } from "../lib/runtime-commands";
+import { mentionSearchCache, mentionTreeCache, type MentionFileItem } from "./mentionCache";
 
 interface Props {
   open: boolean;
-  kind: "slash" | "mention";
+  kind: "slash" | "mention" | "skill";
   filter?: string;
   onSelect: (value: string) => void;
   placement?: "above" | "below";
 }
 
-interface FileItem {
-  name: string;
-  description: string;
-  type: "file" | "folder";
-  path: string;
-  section?: string;
-}
+type FileItem = MentionFileItem;
 
 interface MenuItem {
   name: string;
@@ -28,20 +24,21 @@ interface MenuItem {
   type?: "file" | "folder" | "skill" | "command" | "argument";
   path?: string;
   section?: string;
+  keywords?: string[];
+  displayName?: string;
   sourceLevel?: string;
   active?: boolean;
   triggers?: string[];
+  allowImplicitInvocation?: boolean;
+  mcpRequired?: string[];
+  mcpDependencies?: string[];
+  defaultPrompt?: string;
 }
 
 const MENTION_SEARCH_DEBOUNCE_MS = 150;
 const MENTION_CACHE_LIMIT = 80;
-const mentionTreeCache = new Map<string, FileItem[]>();
-const mentionSearchCache = new Map<string, FileItem[]>();
-
-export const __clearMentionFileCacheForTests = () => {
-  mentionTreeCache.clear();
-  mentionSearchCache.clear();
-};
+const SLASH_MENU_LIMIT = 18;
+const ROOT_SLASH_SKILL_PREVIEW_LIMIT = 6;
 
 const rememberMentionResults = (cache: Map<string, FileItem[]>, key: string, results: FileItem[]) => {
   if (!cache.has(key) && cache.size >= MENTION_CACHE_LIMIT) {
@@ -65,11 +62,11 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
   const slashFilter = filter ?? "";
   const selectedSkillNames = new Set(selectedSkills.map((skill) => skill.name));
 
-  // Slash commands
+  // Slash commands and explicit skill picker
   const slashBaseItems: MenuItem[] = buildRuntimeSlashMenuItems(storeCommands).map((item) => ({
     ...item,
     type: "command" as const,
-    section: "Commands",
+    section: item.section ?? "Commands",
     path: item.name,
   }));
   const slashSkillItems: MenuItem[] = availableSkills.map((skill) => ({
@@ -78,11 +75,17 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
     type: "skill" as const,
     path: `/${skill.name}`,
     section: "Skills",
+    displayName: skill.display_name,
     sourceLevel: skill.source_level,
     active: Boolean(skill.active || selectedSkillNames.has(skill.name)),
     triggers: skill.triggers,
+    allowImplicitInvocation: skill.allow_implicit_invocation,
+    mcpRequired: skill.mcp_required,
+    mcpDependencies: skill.mcp_dependencies,
+    defaultPrompt: skill.default_prompt,
   }));
   const skillsPickerActive = /^\/skills(?:\s|$)/i.test(slashFilter);
+  const explicitSkillPickerActive = kind === "skill";
 
   // Argument stage: "/effort" or "/effort lo" with a local command that
   // declares args shows its argument completions instead of command matches.
@@ -101,12 +104,16 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
     ? fuzzyFilter(
         slashSkillItems,
         slashFilter.replace(/^\/skills\s*/i, "").replace(/^\//, ""),
-        (c) => c.name + " " + c.description,
+        (c) => [c.name, c.displayName, c.description, c.defaultPrompt, ...(c.triggers ?? []), ...(c.mcpRequired ?? []), ...(c.mcpDependencies ?? [])].filter(Boolean).join(" "),
       )
     : slashFilter && slashFilter !== "/"
-      ? fuzzyFilter([...slashBaseItems, ...slashSkillItems], slashFilter.replace(/^\//, ""), (c) => c.name + " " + c.description)
-      : [...slashBaseItems, ...slashSkillItems];
-  const slashItems = slashCommandItems.slice(0, 18);
+      ? fuzzyFilter(
+          [...slashBaseItems, ...slashSkillItems],
+          slashFilter.replace(/^\//, ""),
+          (c) => [c.name, c.description, c.section, ...(c.keywords ?? [])].filter(Boolean).join(" "),
+        )
+      : balancedRootSlashItems(slashBaseItems, slashSkillItems);
+  const slashItems = slashCommandItems.slice(0, SLASH_MENU_LIMIT);
 
   // Mention mode: extract query from @<query>
   const mentionQuery = kind === "mention" ? (filter ?? "").replace(/^@/, "").trim() : "";
@@ -119,13 +126,39 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
           type: "skill" as const,
           path: `skill:${skill.name}`,
           section: "Skills",
+          displayName: skill.display_name,
           sourceLevel: skill.source_level,
           active: Boolean(skill.active || selectedSkillNames.has(skill.name)),
           triggers: skill.triggers,
+          allowImplicitInvocation: skill.allow_implicit_invocation,
+          mcpRequired: skill.mcp_required,
+          mcpDependencies: skill.mcp_dependencies,
+          defaultPrompt: skill.default_prompt,
         })),
         mentionSearchQuery,
-        (skill) => `${skill.name} ${skill.description}`,
+        (skill) => [skill.name, skill.displayName, skill.description, skill.defaultPrompt].filter(Boolean).join(" "),
       ).slice(0, 8)
+    : [];
+  const explicitSkillItems: MenuItem[] = kind === "skill"
+    ? fuzzyFilter(
+        availableSkills.map((skill) => ({
+          name: `$${skill.name}`,
+          description: skill.description || "Skill",
+          type: "skill" as const,
+          path: `skill:${skill.name}`,
+          section: "Skills",
+          displayName: skill.display_name,
+          sourceLevel: skill.source_level,
+          active: Boolean(skill.active || selectedSkillNames.has(skill.name)),
+          triggers: skill.triggers,
+          allowImplicitInvocation: skill.allow_implicit_invocation,
+          mcpRequired: skill.mcp_required,
+          mcpDependencies: skill.mcp_dependencies,
+          defaultPrompt: skill.default_prompt,
+        })),
+        (filter ?? "").replace(/^\$/, ""),
+        (skill) => [skill.name, skill.displayName, skill.description, skill.defaultPrompt, ...(skill.triggers ?? []), ...(skill.mcpRequired ?? []), ...(skill.mcpDependencies ?? [])].filter(Boolean).join(" "),
+      ).slice(0, 18)
     : [];
 
   useEffect(() => {
@@ -268,7 +301,9 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
 
   const items: MenuItem[] =
     kind === "slash"
-      ? slashItems.slice(0, 18)
+      ? slashItems.slice(0, SLASH_MENU_LIMIT)
+      : kind === "skill"
+        ? explicitSkillItems
       : [...skillItems, ...fileResults].slice(0, 18);
 
   useEffect(() => {
@@ -331,20 +366,21 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
         role="listbox"
         className="composer-menu-list"
         data-kind={kind}
-        data-skills-picker={skillsPickerActive ? "true" : "false"}
-        style={menuListStyle(kind, skillsPickerActive)}
+        data-skills-picker={skillsPickerActive || explicitSkillPickerActive ? "true" : "false"}
+        style={menuListStyle(kind, skillsPickerActive || explicitSkillPickerActive)}
       >
         {items.length === 0 ? (
           <div style={emptyMenuStyle}>
-            {searching ? "Searching..." : kind === "mention" ? "No files found" : skillsPickerActive ? "No skills found" : "No matches"}
+            {searching ? "Searching..." : kind === "mention" ? "No files found" : (skillsPickerActive || explicitSkillPickerActive) ? "No skills found" : "No matches"}
           </div>
         ) : (
           items.map((it, i) => {
             const showSection = i === 0 || items[i - 1]?.section !== it.section;
-            const displayName = displayMenuName(it, skillsPickerActive);
+            const displayName = displayMenuName(it, skillsPickerActive || explicitSkillPickerActive);
             const sourceLabel = it.type === "skill" ? formatSourceLevel(it.sourceLevel) : "";
             const triggerLabel = it.triggers?.slice(0, 2).join(", ");
             const showTriggers = Boolean(skillsPickerActive && triggerLabel);
+            const skillPolicyLabel = it.type === "skill" ? formatSkillPolicy(it) : "";
             return (
               <div key={it.path ?? it.name}>
                 {showSection && it.section && (
@@ -376,6 +412,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
                     </span>
                     {it.description && <span style={menuDescriptionStyle}>{it.description}</span>}
                     {showTriggers && <span style={menuTriggerStyle}>triggers: {triggerLabel}</span>}
+                    {skillPolicyLabel && <span style={menuTriggerStyle}>{skillPolicyLabel}</span>}
                   </span>
                   {sourceLabel && <span style={sourceBadgeStyle}>{sourceLabel}</span>}
                   {i === activeIndex && <span style={menuShortcutStyle}>Enter</span>}
@@ -515,15 +552,23 @@ const activeBadgeStyle: React.CSSProperties = {
 
 function renderMenuIcon(item: MenuItem) {
   if (item.type === "folder") return <Folder size={14} />;
-  if (item.type === "file") return <File size={14} />;
+  if (item.type === "file") return fileIcon(item.name || item.path || "file", { size: 14, className: "composer-context-icon-svg" });
   if (item.type === "skill") return <Sparkles size={14} />;
   if (item.type === "argument") return <AtSign size={14} />;
   return <Command size={14} />;
 }
 
 function displayMenuName(item: MenuItem, skillsPickerActive: boolean): string {
-  if (skillsPickerActive && item.type === "skill") return item.name.replace(/^\//, "");
+  if (skillsPickerActive && item.type === "skill") return item.displayName || item.name.replace(/^[/$]/, "");
   return item.name;
+}
+
+function formatSkillPolicy(item: MenuItem): string {
+  const parts: string[] = [];
+  if (item.allowImplicitInvocation === false) parts.push("explicit only");
+  const mcp = [...(item.mcpRequired ?? []), ...(item.mcpDependencies ?? [])].filter(Boolean);
+  if (mcp.length > 0) parts.push(`MCP: ${mcp.slice(0, 2).join(", ")}`);
+  return parts.join(" · ");
 }
 
 function formatSourceLevel(level?: string): string {
@@ -536,4 +581,14 @@ function formatSourceLevel(level?: string): string {
 
 function stripLineAnchor(value: string): string {
   return value.replace(/#L?\d+(?:-L?\d+)?$/i, "");
+}
+
+function balancedRootSlashItems(commands: MenuItem[], skills: MenuItem[]): MenuItem[] {
+  if (skills.length === 0) return commands;
+  const skillCount = Math.min(ROOT_SLASH_SKILL_PREVIEW_LIMIT, skills.length);
+  const commandCount = Math.max(0, SLASH_MENU_LIMIT - skillCount);
+  return [
+    ...commands.slice(0, commandCount),
+    ...skills.slice(0, skillCount),
+  ];
 }

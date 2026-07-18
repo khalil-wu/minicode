@@ -13,8 +13,12 @@ type SendUserMessage = (content: string) => Promise<boolean>;
 
 export type RuntimeCommandState = {
   conversationId?: string | null;
+  agentMode?: "build" | "plan" | "review" | "explore";
+  permissionMode?: "ask_permissions" | "plan" | "auto" | "bypass";
   availableSkills?: SkillInfo[];
   skillsMarketplaceOpen?: boolean;
+  automationsOpen?: boolean;
+  toggleAutomations?: () => void;
   addSelectedSkill?: (skill: Omit<SkillContextRef, "kind">) => void;
   hydrateConversationMessages?: (
     conversationId: string,
@@ -22,6 +26,8 @@ export type RuntimeCommandState = {
     options?: { activate?: boolean; isStreaming?: boolean },
   ) => void;
   toggleSkillsMarketplace?: () => void;
+  setAgentMode?: (mode: "build" | "plan" | "review" | "explore") => void;
+  setPermissionMode?: (mode: "ask_permissions" | "plan" | "auto" | "bypass") => void;
   upsertSystemMessage?: (
     id: string,
     content: string,
@@ -53,6 +59,8 @@ export type ParsedRuntimeSlashInput = {
 export type RuntimeSlashMenuItem = {
   name: string;
   description: string;
+  section?: "Review" | "Context" | "Skills" | "System" | "Tools" | "Project" | "Workspace" | "Commands";
+  keywords?: string[];
 };
 
 export type RuntimeSlashPaletteItem = RuntimeSlashMenuItem & {
@@ -79,34 +87,46 @@ export type RuntimeSlashPanelDraftDeps = {
 };
 
 export const FALLBACK_RUNTIME_SLASH_COMMANDS: RuntimeSlashMenuItem[] = [
-  { name: "/review", description: "Review code changes" },
-  { name: "/debug", description: "Debug the current issue" },
-  { name: "/refactor", description: "Refactor safely" },
-  { name: "/test", description: "Add or update tests" },
-  { name: "/docs", description: "Write developer docs" },
-  { name: "/explain", description: "Explain code paths" },
-  { name: "/commit", description: "Prepare a commit summary" },
-  { name: "/skills", description: "Browse skills" },
-  { name: "/permissions", description: "Inspect or change permissions" },
-  { name: "/effort", description: "Set reasoning effort" },
-  { name: "/new", description: "Start a new conversation" },
-  { name: "/clear", description: "Clear conversation" },
-  { name: "/compact", description: "Compact context" },
-  { name: "/memory", description: "Set memory mode" },
-  { name: "/archive", description: "Archive conversation" },
-  { name: "/unarchive", description: "Unarchive conversation" },
-  { name: "/tasks", description: "Show running tasks" },
-  { name: "/status", description: "Show runtime status" },
-  { name: "/usage", description: "Show token, context, and cost usage" },
-  { name: "/context", description: "Show context token budget" },
-  { name: "/cost", description: "Show session cost breakdown" },
-  { name: "/init", description: "Generate a CLAUDE.md for this project" },
-  { name: "/help", description: "Show slash command help" },
+  { name: "/plan", description: "Enable plan mode", section: "Project", keywords: ["design", "readonly", "proposal"] },
+  { name: "/review", description: "Review code changes", section: "Review", keywords: ["diff", "pr", "quality"] },
+  { name: "/debug", description: "Debug the current issue", section: "Review", keywords: ["bug", "failure", "diagnose"] },
+  { name: "/refactor", description: "Refactor safely", section: "Review", keywords: ["cleanup", "rewrite"] },
+  { name: "/test", description: "Add or update tests", section: "Review", keywords: ["verify", "coverage"] },
+  { name: "/docs", description: "Write developer docs", section: "Review", keywords: ["readme", "documentation"] },
+  { name: "/explain", description: "Explain code paths", section: "Review", keywords: ["understand", "trace"] },
+  { name: "/commit", description: "Prepare a commit summary", section: "Project", keywords: ["git", "changes"] },
+  { name: "/skills", description: "Browse skills", section: "Skills", keywords: ["capabilities", "workflow"] },
+  { name: "/model", description: "Choose or inspect the active model", section: "System", keywords: ["provider", "gpt", "reasoning"] },
+  { name: "/mcp", description: "Show MCP servers and tools", section: "Tools", keywords: ["connectors", "tools", "servers"] },
+  { name: "/permissions", description: "Inspect or change permissions", section: "System", keywords: ["sandbox", "approval", "access"] },
+  { name: "/effort", description: "Set reasoning effort", section: "System", keywords: ["model", "thinking"] },
+  { name: "/goal", description: "Set or manage the thread goal", section: "Project", keywords: ["objective", "task", "long running"] },
+  { name: "/new", description: "Start a new conversation", section: "Project", keywords: ["thread", "session"] },
+  { name: "/clear", description: "Clear conversation", section: "Project", keywords: ["reset", "messages"] },
+  { name: "/compact", description: "Compact context", section: "Context", keywords: ["summary", "compress"] },
+  { name: "/summary", description: "Show or update the task summary", section: "Context", keywords: ["recap", "handoff", "transcript"] },
+  { name: "/memory", description: "Set memory mode", section: "Context", keywords: ["remember", "preferences"] },
+  { name: "/archive", description: "Archive conversation", section: "Project", keywords: ["thread", "hide"] },
+  { name: "/unarchive", description: "Unarchive conversation", section: "Project", keywords: ["thread", "restore"] },
+  { name: "/tasks", description: "Show running tasks", section: "Tools", keywords: ["background", "jobs"] },
+  { name: "/terminal", description: "Inspect terminal sessions and output", section: "Tools", keywords: ["shell", "logs", "build", "tests"] },
+  { name: "/browser", description: "Open or inspect the browser preview", section: "Tools", keywords: ["preview", "web", "app"] },
+  { name: "/worktree", description: "Inspect or manage worktree isolation", section: "Workspace", keywords: ["branch", "git", "isolation"] },
+  { name: "/automation", description: "Create or inspect thread automations", section: "Tools", keywords: ["schedule", "monitor", "wake"] },
+  { name: "/status", description: "Show runtime status", section: "System", keywords: ["health", "agent"] },
+  { name: "/usage", description: "Show token, context, and cost usage", section: "Context", keywords: ["tokens", "budget"] },
+  { name: "/context", description: "Show context token budget", section: "Context", keywords: ["tokens", "window"] },
+  { name: "/cost", description: "Show session cost breakdown", section: "Context", keywords: ["usage", "spend"] },
+  { name: "/init", description: "Generate a CLAUDE.md for this project", section: "Project", keywords: ["instructions", "repo"] },
+  { name: "/help", description: "Show slash command help", section: "System", keywords: ["commands", "shortcuts"] },
 ];
 
 const SLASH_MENU_ORDER = FALLBACK_RUNTIME_SLASH_COMMANDS.map((item) => item.name);
 const FALLBACK_MENU_DESCRIPTION = new Map(
   FALLBACK_RUNTIME_SLASH_COMMANDS.map((item) => [item.name, item.description]),
+);
+const FALLBACK_MENU_METADATA = new Map(
+  FALLBACK_RUNTIME_SLASH_COMMANDS.map((item) => [item.name, item]),
 );
 
 const result = (sent: boolean, reset: RuntimeSlashCommandResult["reset"]): RuntimeSlashCommandResult => ({
@@ -118,7 +138,13 @@ export const buildRuntimeSlashMenuItems = (slashCommands: SlashCommand[]): Runti
   const rawItems = slashCommands.length > 0
     ? slashCommands.map((command) => {
         const name = command.label?.startsWith("/") ? command.label : `/${command.command}`;
-        return { name, description: command.description || FALLBACK_MENU_DESCRIPTION.get(name) || "" };
+        const fallback = FALLBACK_MENU_METADATA.get(name);
+        return {
+          name,
+          description: command.description || fallback?.description || FALLBACK_MENU_DESCRIPTION.get(name) || "",
+          section: fallback?.section ?? "Commands",
+          keywords: fallback?.keywords,
+        };
       })
     : FALLBACK_RUNTIME_SLASH_COMMANDS;
 
@@ -332,6 +358,31 @@ export const executeRuntimeSlashCommand = async (
   const cmd = cmdRaw.toLowerCase();
   const rest = restParts.join(" ");
 
+  if (cmd === "/plan") {
+    const state = deps.getState();
+    const enteringPlan = state.permissionMode !== "plan" || state.agentMode !== "plan";
+    if (enteringPlan) {
+      state.setAgentMode?.("plan");
+      state.setPermissionMode?.("plan");
+      state.upsertSystemMessage?.(
+        "system-plan-mode-status",
+        "Plan mode enabled. The agent will inspect and propose a plan before making changes.",
+        { replacePrefix: "Plan mode" },
+      );
+    } else if (!rest) {
+      state.upsertSystemMessage?.(
+        "system-plan-mode-status",
+        "Already in plan mode.",
+        { replacePrefix: "Plan mode" },
+      );
+    }
+    if (rest && rest.toLowerCase() !== "open") {
+      const sent = await deps.sendUserMessage?.(rest);
+      return result(Boolean(sent), sent ? "composer" : "none");
+    }
+    return result(true, "input");
+  }
+
   const skill = findRuntimeSkill(deps.getState().availableSkills, cmd.replace(/^\//, ""));
   if (skill) {
     deps.getState().addSelectedSkill?.({
@@ -365,6 +416,13 @@ export const executeRuntimeSlashCommand = async (
     if (!state.skillsMarketplaceOpen) state.toggleSkillsMarketplace?.();
     deps.sendClientCommand({ type: "skills.list" });
     deps.sendClientCommand({ type: "skills.marketplace.list" });
+    return result(true, "input");
+  }
+
+  if ((cmd === "/automation" || cmd === "/automations") && !rest) {
+    const state = deps.getState();
+    if (!state.automationsOpen) state.toggleAutomations?.();
+    deps.sendClientCommand({ type: "scheduler.list" });
     return result(true, "input");
   }
 

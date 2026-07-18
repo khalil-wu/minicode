@@ -17,6 +17,8 @@ export function PlanCell({ cell }: { cell: PlanCellState }) {
   const completedCount = cell.steps.filter(
     (s) => s.status === "completed",
   ).length;
+  const compact = cell.status !== "proposed";
+  const activeStep = currentVisibleStep(cell);
 
   const statusLabels: Record<string, string> = {
     proposed: "等待确认",
@@ -25,6 +27,23 @@ export function PlanCell({ cell }: { cell: PlanCellState }) {
     completed: "已完成",
     cancelled: "已取消",
   };
+
+  if (compact) {
+    return (
+      <div className={`plan-cell plan-cell-${cell.status} plan-cell-compact`}>
+        <div className="plan-cell-compact-row">
+          <CircleDot size={14} className="plan-cell-status-icon" />
+          <span className="plan-cell-title">
+            {activeStep?.title || cell.title}
+          </span>
+          <span className="plan-cell-meta">
+            {statusLabels[cell.status] ?? cell.status}
+            {cell.steps.length > 0 ? ` · ${completedCount}/${cell.steps.length}` : ""}
+          </span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={`plan-cell plan-cell-${cell.status}`}>
@@ -60,7 +79,7 @@ export function PlanCell({ cell }: { cell: PlanCellState }) {
             type="button"
             className="plan-cell-action plan-cell-action-primary"
             onClick={() => {
-              const planId = cell.planId || cell.id.replace("plan-", "").split("-")[0];
+              const planId = cell.planId || cell.id.replace("plan-", "");
               sendClientCommand({
                 type: "plan.edit",
                 plan_id: planId,
@@ -77,7 +96,7 @@ export function PlanCell({ cell }: { cell: PlanCellState }) {
             type="button"
             className="plan-cell-action plan-cell-action-secondary"
             onClick={() => {
-              const planId = cell.planId || cell.id.replace("plan-", "").split("-")[0];
+              const planId = cell.planId || cell.id.replace("plan-", "");
               sendClientCommand({
                 type: "plan.edit",
                 plan_id: planId,
@@ -93,6 +112,14 @@ export function PlanCell({ cell }: { cell: PlanCellState }) {
         </div>
       )}
     </div>
+  );
+}
+
+function currentVisibleStep(cell: PlanCellState) {
+  return (
+    cell.steps.find((step) => step.status === "in_progress") ||
+    cell.steps.find((step) => step.status === "pending") ||
+    cell.steps.at(-1)
   );
 }
 

@@ -1,4 +1,4 @@
-import { Braces, Code2, FileText, GitCompare, Image as ImageIcon, Layers, Paperclip, X } from "lucide-react";
+import { Braces, Code2, FileText, FileType, GitCompare, Image as ImageIcon, Layers, Paperclip, X } from "lucide-react";
 import { useMemo } from "react";
 import { useAppStore } from "../stores";
 import { getWebSocket } from "../hooks/useWebSocket";
@@ -11,6 +11,7 @@ const KIND_ICON = {
   json: Braces,
   code: Code2,
   text: FileText,
+  pdf: FileType,
 } as const;
 
 interface ArtifactEntry extends ArtifactPreview {

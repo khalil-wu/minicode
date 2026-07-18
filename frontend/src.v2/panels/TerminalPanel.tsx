@@ -3,9 +3,10 @@ import { Copy, ExternalLink, Globe, Plus, RotateCcw, Square, Trash2 } from "luci
 import "@xterm/xterm/css/xterm.css";
 import { getWebSocket } from "../hooks/useWebSocket";
 import { useAppStore } from "../stores";
-import { desktop, isDesktop, ptyKill, ptyList, ptyResize, ptySpawn, ptyWrite } from "../desktop/runtime";
+import { desktop, isDesktop, ptyAckExit, ptyKill, ptyList, ptyResize, ptySnapshot, ptySpawn, ptyWrite } from "../desktop/runtime";
 import type { TerminalSessionInfo } from "../stores/types";
 import { sendClientCommand } from "../protocol/ws-outbox";
+import { openWebInPreview } from "../chat/openWebInPreview";
 import {
   NEW_TERMINAL_SESSION_EVENT,
   consumeNewTerminalSessionRequest,
@@ -36,6 +37,39 @@ type FitAddonLike = {
 type XtermWithOptions = XtermLike & { options: { theme?: Record<string, string> } };
 
 const DEV_SERVER_URL_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):\d+(?:[/?#][^\s'"<>]*)?/gi;
+const TERMINAL_OUTPUT_BUFFER_CHARS = 80_000;
+
+export const mergeTerminalOutputSnapshot = (snapshot: string, live: string): string => {
+  if (!snapshot) return live.slice(-TERMINAL_OUTPUT_BUFFER_CHARS);
+  if (!live) return snapshot.slice(-TERMINAL_OUTPUT_BUFFER_CHARS);
+  if (snapshot.endsWith(live)) return snapshot.slice(-TERMINAL_OUTPUT_BUFFER_CHARS);
+  if (live.endsWith(snapshot)) return live.slice(-TERMINAL_OUTPUT_BUFFER_CHARS);
+  const overlapLimit = Math.min(snapshot.length, live.length, 4096);
+  let overlap = overlapLimit;
+  while (overlap > 0 && snapshot.slice(-overlap) !== live.slice(0, overlap)) overlap -= 1;
+  return `${snapshot}${live.slice(overlap)}`.slice(-TERMINAL_OUTPUT_BUFFER_CHARS);
+};
+
+export const mergeTerminalOutputByCursor = (
+  snapshot: string,
+  snapshotStartCursor: number | undefined,
+  snapshotEndCursor: number | undefined,
+  live: string,
+  liveEndCursor: number | undefined,
+): { output: string; endCursor?: number } => {
+  if (snapshotStartCursor == null || snapshotEndCursor == null || liveEndCursor == null) {
+    return { output: mergeTerminalOutputSnapshot(snapshot, live), endCursor: snapshotEndCursor ?? liveEndCursor };
+  }
+  const liveStartCursor = liveEndCursor - live.length;
+  if (liveEndCursor <= snapshotEndCursor) {
+    return { output: snapshot.slice(-TERMINAL_OUTPUT_BUFFER_CHARS), endCursor: snapshotEndCursor };
+  }
+  const liveSuffixOffset = Math.max(0, snapshotEndCursor - liveStartCursor);
+  return {
+    output: `${snapshot}${live.slice(liveSuffixOffset)}`.slice(-TERMINAL_OUTPUT_BUFFER_CHARS),
+    endCursor: liveEndCursor,
+  };
+};
 
 const normalizeDetectedUrl = (url: string): string =>
   url.replace(/^https?:\/\/0\.0\.0\.0/i, (prefix) => prefix.replace("0.0.0.0", "localhost"));
@@ -107,6 +141,9 @@ export const TerminalPanel = () => {
   const fitRef = useRef<FitAddonLike | null>(null);
   const activeRef = useRef<string | null>(null);
   const outputBufferRef = useRef<Record<string, string>>({});
+  const outputCursorRef = useRef<Record<string, number>>({});
+  const hydratedSnapshotRef = useRef<Set<string>>(new Set());
+  const refreshEpochRef = useRef(0);
   const inputQueueRef = useRef<Record<string, string[]>>({});
   const webLineRef = useRef("");
   const mountedRef = useRef(true);
@@ -114,8 +151,8 @@ export const TerminalPanel = () => {
   const terminalSessions = useAppStore((s) => s.terminalSessions);
   const activeTerminalSessionId = useAppStore((s) => s.activeTerminalSessionId);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
-  const openLivePreview = useAppStore((s) => s.openLivePreview);
   const themeMode = useAppStore((s) => s.themeMode);
+  const terminalSnapshots = useAppStore((s) => s.terminalSnapshots);
   const [booting, setBooting] = useState(true);
   const [autoCreating, setAutoCreating] = useState(false);
   const [terminalReady, setTerminalReady] = useState(false);
@@ -221,6 +258,7 @@ export const TerminalPanel = () => {
     return () => {
       disposed = true;
       mountedRef.current = false;
+      refreshEpochRef.current += 1;
       termRef.current?.dispose();
       setTerminalReady(false);
     };
@@ -280,15 +318,14 @@ export const TerminalPanel = () => {
     let desktopExitCleanup: (() => void) | undefined;
     if (isDesktop()) {
       const d = desktop();
-      desktopDataCleanup = d?.pty.onData(({ sessionId, data }) => {
-        appendOutput(sessionId, data);
+      desktopDataCleanup = d?.pty.onData(({ sessionId, data, startCursor, endCursor }) => {
+        appendOutput(sessionId, data, startCursor, endCursor);
         mirrorTerminalOutput(sessionId, data);
       }) as (() => void) | undefined;
       desktopExitCleanup = d?.pty.onExit(({ sessionId, exitCode }) => {
-        appendOutput(sessionId, `\r\n[Process exited with code ${exitCode}]\r\n`);
         mirrorTerminalExit(sessionId, exitCode);
         const current = useAppStore.getState().terminalSessions.find((session) => session.id === sessionId);
-        if (current) useAppStore.getState().upsertTerminalSession({ ...current, status: "exited" });
+        if (current) useAppStore.getState().upsertTerminalSession({ ...current, status: "exited", exitCode, exitedAt: Date.now() });
       }) as (() => void) | undefined;
     }
 
@@ -347,21 +384,41 @@ export const TerminalPanel = () => {
   }, [terminalReady, booting, terminalSessions.length]);
 
   const refreshSessions = async () => {
+    const refreshEpoch = ++refreshEpochRef.current;
     setBooting(true);
     setStatusMessage("");
     let waitForBackendList = false;
     try {
       if (isDesktop()) {
-        const sessions = await ptyList();
+        const listedSessions = await ptyList();
+        const sessions = await Promise.all(listedSessions.map(async (session) => (
+          await ptySnapshot(session.sessionId, TERMINAL_OUTPUT_BUFFER_CHARS) ?? session
+        )));
+        if (!mountedRef.current || refreshEpoch !== refreshEpochRef.current) return;
+        for (const session of sessions) {
+          if (!session.output) continue;
+          const merged = mergeTerminalOutputByCursor(
+            session.output,
+            session.outputStartCursor,
+            session.outputEndCursor,
+            outputBufferRef.current[session.sessionId] ?? "",
+            outputCursorRef.current[session.sessionId],
+          );
+          outputBufferRef.current[session.sessionId] = merged.output;
+          if (merged.endCursor != null) outputCursorRef.current[session.sessionId] = merged.endCursor;
+        }
         const normalized: TerminalSessionInfo[] = sessions.map((session) => ({
           id: session.sessionId,
           pid: session.pid,
           shell: session.shell,
           cwd: session.cwd,
-          status: "running",
+          status: session.isAlive === false ? "exited" : "running",
+          exitCode: session.exitCode,
+          exitedAt: session.exitedAt,
         }));
         useAppStore.getState().setTerminalSessions(normalized);
         for (const session of normalized) mirrorTerminalCreated(session);
+        redrawActiveSession();
       } else {
         // Web 浏览器环境禁用后端列表请求，防止异步覆盖 fallback 终端
         const sent = getWebSocket()?.send({ type: "terminal.list" }) ?? false;
@@ -371,7 +428,7 @@ export const TerminalPanel = () => {
     } catch (error) {
       setStatusMessage(`Terminal refresh failed: ${String(error)}`);
     } finally {
-      if (mountedRef.current && !waitForBackendList) setBooting(false);
+      if (mountedRef.current && refreshEpoch === refreshEpochRef.current && !waitForBackendList) setBooting(false);
     }
   };
 
@@ -458,8 +515,12 @@ export const TerminalPanel = () => {
 
   const killSession = (sessionId: string) => {
     delete outputBufferRef.current[sessionId];
+    delete outputCursorRef.current[sessionId];
+    hydratedSnapshotRef.current.delete(sessionId);
     if (isDesktop()) {
-      void ptyKill(sessionId);
+      const session = useAppStore.getState().terminalSessions.find((item) => item.id === sessionId);
+      if (session?.status === "exited") void ptyAckExit(sessionId);
+      else void ptyKill(sessionId);
       useAppStore.getState().removeTerminalSession(sessionId);
     } else {
       sendClientCommand({ type: "terminal.kill", session_id: sessionId });
@@ -471,9 +532,30 @@ export const TerminalPanel = () => {
     await createSession();
   };
 
-  const appendOutput = (sessionId: string, data: string) => {
-    outputBufferRef.current[sessionId] = `${outputBufferRef.current[sessionId] ?? ""}${data}`.slice(-80_000);
-    const found = Array.from(data.matchAll(DEV_SERVER_URL_RE), (match) => normalizeDetectedUrl(match[0]));
+  const appendOutput = (sessionId: string, data: string, startCursor?: number, endCursor?: number) => {
+    let appendedData = data;
+    let redrawRequired = false;
+    const currentCursor = outputCursorRef.current[sessionId];
+    if (startCursor != null && endCursor != null) {
+      if (currentCursor != null && endCursor <= currentCursor) return;
+      if (currentCursor != null && startCursor < currentCursor) {
+        appendedData = data.slice(Math.max(0, currentCursor - startCursor));
+      }
+      outputCursorRef.current[sessionId] = endCursor;
+      outputBufferRef.current[sessionId] = `${outputBufferRef.current[sessionId] ?? ""}${appendedData}`.slice(-TERMINAL_OUTPUT_BUFFER_CHARS);
+    } else if (hydratedSnapshotRef.current.has(sessionId)) {
+      const currentOutput = outputBufferRef.current[sessionId] ?? "";
+      const mergedOutput = mergeTerminalOutputSnapshot(currentOutput, data);
+      outputBufferRef.current[sessionId] = mergedOutput;
+      appendedData = mergedOutput.startsWith(currentOutput)
+        ? mergedOutput.slice(currentOutput.length)
+        : "";
+      redrawRequired = !mergedOutput.startsWith(currentOutput);
+      hydratedSnapshotRef.current.delete(sessionId);
+    } else {
+      outputBufferRef.current[sessionId] = `${outputBufferRef.current[sessionId] ?? ""}${appendedData}`.slice(-TERMINAL_OUTPUT_BUFFER_CHARS);
+    }
+    const found = Array.from(appendedData.matchAll(DEV_SERVER_URL_RE), (match) => normalizeDetectedUrl(match[0]));
     if (found.length > 0) {
       const store = useAppStore.getState();
       for (const url of found) {
@@ -487,7 +569,11 @@ export const TerminalPanel = () => {
         return next.slice(0, 5);
       });
     }
-    if (activeRef.current === sessionId || (!activeRef.current && sessionId === "web-fallback")) termRef.current?.write(data);
+    if (redrawRequired && activeRef.current === sessionId) {
+      redrawActiveSession();
+    } else if (activeRef.current === sessionId || (!activeRef.current && sessionId === "web-fallback")) {
+      termRef.current?.write(appendedData);
+    }
   };
 
   const runWebFallbackCommand = (command: string) => {
@@ -556,6 +642,19 @@ export const TerminalPanel = () => {
     }
   };
 
+  useEffect(() => {
+    if (!terminalReady) return;
+    let activeSnapshotWasApplied = false;
+    for (const snapshot of Object.values(terminalSnapshots)) {
+      if (!snapshot.output) continue;
+      const current = outputBufferRef.current[snapshot.id] ?? "";
+      outputBufferRef.current[snapshot.id] = mergeTerminalOutputSnapshot(snapshot.output, current);
+      hydratedSnapshotRef.current.add(snapshot.id);
+      if (activeRef.current === snapshot.id) activeSnapshotWasApplied = true;
+    }
+    if (activeSnapshotWasApplied) redrawActiveSession();
+  }, [terminalSnapshots, terminalReady]);
+
   const writeToSession = (sessionId: string, data: string) => {
     const session = useAppStore.getState().terminalSessions.find((item) => item.id === sessionId);
     if (!session || session.status === "exited") {
@@ -622,8 +721,7 @@ export const TerminalPanel = () => {
             title={`Open ${liveUrl} in Preview Pane`}
             aria-label={`Open ${liveUrl} in Preview Pane`}
             onClick={() => {
-              openLivePreview(liveUrl);
-              getWebSocket()?.send({ type: "preview.navigate", url: liveUrl });
+              openWebInPreview(liveUrl);
             }}
             className="inline-flex items-center gap-1.5 max-w-52 h-7 px-2 cursor-pointer"
             style={{

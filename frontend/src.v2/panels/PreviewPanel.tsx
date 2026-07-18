@@ -4,6 +4,7 @@ import { useAppStore } from "../stores";
 import type { PreviewLaunchConfigInfo, PreviewLaunchProcessInfo, PreviewVerificationInfo } from "../stores/types";
 import { getWebSocket } from "../hooks/useWebSocket";
 import { openExternal as openExternalTarget } from "../desktop/runtime";
+import { openWebInPreview } from "../chat/openWebInPreview";
 
 const isLikelyJson = (content: string) => {
   const trimmed = content.trim();
@@ -26,7 +27,7 @@ const isLocalPreviewUrl = (url: string | null): boolean => {
     const host = parsed.hostname.toLowerCase();
     return host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0" || host === "::1" || host.endsWith(".localhost");
   } catch {
-    return true;
+    return false;
   }
 };
 
@@ -34,6 +35,28 @@ const previewSandboxForUrl = (url: string | null): string =>
   isLocalPreviewUrl(url)
     ? "allow-scripts allow-forms allow-same-origin allow-popups allow-modals"
     : "allow-scripts allow-forms allow-popups allow-modals";
+
+const PREVIEW_REFERRER_POLICY = "no-referrer";
+const ARTIFACT_FRAME_SANDBOX = "allow-scripts allow-forms";
+
+const isSafePreviewImageUrl = (url: string): boolean => {
+  const trimmed = url.trim();
+  if (/^data:image\/(?:png|jpe?g|gif|webp|avif);base64,[a-z0-9+/=\s]+$/i.test(trimmed)) return true;
+  try {
+    const parsed = new URL(trimmed);
+    return ["http:", "https:", "file:", "blob:"].includes(parsed.protocol);
+  } catch {
+    return false;
+  }
+};
+
+const isSafePreviewImageArtifact = (mediaType?: string, url?: string): boolean =>
+  Boolean(
+    mediaType?.startsWith("image/") &&
+    mediaType.toLowerCase() !== "image/svg+xml" &&
+    url &&
+    isSafePreviewImageUrl(url),
+  );
 
 type PreviewMode = "live" | "artifact";
 type PreviewZoom = "fit" | number;
@@ -61,7 +84,6 @@ export const PreviewPanel = () => {
   const previewVerification = useAppStore((s) => s.previewVerification);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const setLivePreviewUrl = useAppStore((s) => s.setLivePreviewUrl);
-  const openLivePreview = useAppStore((s) => s.openLivePreview);
 
   const [mode, setMode] = useState<PreviewMode>(livePreviewUrl ? "live" : previewArtifact ? "artifact" : "live");
   const [urlInput, setUrlInput] = useState(livePreviewUrl ?? "");
@@ -96,8 +118,10 @@ export const PreviewPanel = () => {
     if (livePreviewUrl) {
       setUrlInput(livePreviewUrl);
       setMode("live");
+    } else if (previewArtifact) {
+      setMode("artifact");
     }
-  }, [livePreviewUrl]);
+  }, [livePreviewUrl, previewArtifact]);
 
   useEffect(() => {
     getWebSocket()?.send({ type: "preview.launch.config", workspace_root: workingDirectory || undefined });
@@ -140,8 +164,7 @@ export const PreviewPanel = () => {
       return;
     }
     const withProtocol = /^https?:\/\//i.test(normalized) ? normalized : `http://${normalized}`;
-    openLivePreview(withProtocol);
-    getWebSocket()?.send({ type: "preview.navigate", url: withProtocol });
+    openWebInPreview(withProtocol);
   };
 
   const handleDetect = () => {
@@ -170,9 +193,7 @@ export const PreviewPanel = () => {
       window.open(livePreviewUrl, "_blank", "noopener,noreferrer");
       return;
     }
-    void opened.catch(() => {
-      window.open(livePreviewUrl, "_blank", "noopener,noreferrer");
-    });
+    void opened.catch(() => undefined);
   };
 
   return (
@@ -250,7 +271,7 @@ const ModeBar = ({
     }}
   >
     <ModeTab active={mode === "live"} onClick={() => setMode("live")} icon={<Globe size={12} />} label="App" badge={hasUrl ? "active" : undefined} />
-    <ModeTab active={mode === "artifact"} onClick={() => setMode("artifact")} icon={<FileText size={12} />} label="Artifact" badge={hasArtifact ? "ready" : undefined} />
+    <ModeTab active={mode === "artifact"} onClick={() => setMode("artifact")} icon={<FileText size={12} />} label="文件" badge={hasArtifact ? "可查看" : undefined} />
   </div>
 );
 
@@ -444,6 +465,7 @@ const LiveView = ({
       </button>
       <input
         type="text"
+        aria-label="Preview URL"
         placeholder="http://localhost:3000"
         value={urlInput}
         onChange={(e) => setUrlInput(e.target.value)}
@@ -739,6 +761,7 @@ const LiveView = ({
       <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", position: "relative" }}>
         {refreshFlash && (
           <div
+            className="preview-refresh-flash"
             style={{
               position: "absolute",
               top: 0,
@@ -747,7 +770,6 @@ const LiveView = ({
               height: 2,
               background: "var(--accent-primary)",
               zIndex: 10,
-              animation: "preview-flash 0.6s ease-out forwards",
             }}
           />
         )}
@@ -811,6 +833,7 @@ const LiveView = ({
             src={livePreviewUrl}
             title="App Preview"
             sandbox={previewSandboxForUrl(livePreviewUrl)}
+            referrerPolicy={PREVIEW_REFERRER_POLICY}
             style={{
               ...(zoom === "fit"
                 ? { width: "100%", height: "100%" }
@@ -937,6 +960,7 @@ const ExpandedLivePreview = ({
         </button>
         <input
           type="text"
+          aria-label="Preview URL"
           value={urlInput}
           onChange={(e) => setUrlInput(e.target.value)}
           onKeyDown={(e) => {
@@ -1029,6 +1053,7 @@ const ExpandedLivePreview = ({
             src={livePreviewUrl}
             title="Expanded App Preview"
             sandbox={previewSandboxForUrl(livePreviewUrl)}
+            referrerPolicy={PREVIEW_REFERRER_POLICY}
             style={{
               ...(zoom === "fit"
                 ? { width: "100%", height: "100%" }
@@ -1080,17 +1105,19 @@ const ArtifactView = () => {
           textAlign: "center",
         }}
       >
-        Open an artifact from chat to preview its full content here.
+        在对话中打开文件后，可在这里查看完整内容。
       </div>
     );
   }
 
-  if (previewArtifact.url && previewArtifact.mediaType?.startsWith("image/")) {
+  const artifactUrl = previewArtifact.url ?? "";
+
+  if (isSafePreviewImageArtifact(previewArtifact.mediaType, artifactUrl)) {
     return (
       <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-        <ArtifactHeader artifactId={previewArtifact.name || previewArtifact.artifactId} sizeLabel={previewArtifact.mediaType} />
+        <ArtifactHeader artifactId={previewArtifact.name || "生成图片"} sizeLabel={previewArtifact.mediaType ?? "Image"} />
         <div style={{ flex: 1, minHeight: 0, overflow: "auto", display: "grid", placeItems: "center", background: "var(--surface-base)" }}>
-          <img src={previewArtifact.url} alt={previewArtifact.name || previewArtifact.artifactId} style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} />
+          <img src={artifactUrl} alt={previewArtifact.name || "生成图片"} style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} />
         </div>
       </div>
     );
@@ -1099,8 +1126,14 @@ const ArtifactView = () => {
   if (previewArtifact.url && previewArtifact.mediaType === "application/pdf") {
     return (
       <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-        <ArtifactHeader artifactId={previewArtifact.name || previewArtifact.artifactId} sizeLabel="PDF" />
-        <iframe title={previewArtifact.name || previewArtifact.artifactId} src={previewArtifact.url} style={{ flex: 1, minHeight: 0, border: 0, background: "var(--surface-base)" }} />
+        <ArtifactHeader artifactId={previewArtifact.name || "生成的 PDF"} sizeLabel="PDF" />
+        <iframe
+          title={previewArtifact.name || "生成的 PDF"}
+          src={previewArtifact.url}
+          sandbox={ARTIFACT_FRAME_SANDBOX}
+          referrerPolicy={PREVIEW_REFERRER_POLICY}
+          style={{ flex: 1, minHeight: 0, border: 0, background: "var(--surface-base)" }}
+        />
       </div>
     );
   }
@@ -1110,7 +1143,7 @@ const ArtifactView = () => {
   return (
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
       <ArtifactHeader
-        artifactId={previewArtifact.name || previewArtifact.artifactId}
+        artifactId={previewArtifact.name || "生成文件"}
         sizeLabel={`${(previewArtifact.content.length / 1024).toFixed(1)} KB`}
         onCopy={() => void navigator.clipboard?.writeText(previewArtifact.content)}
       />
@@ -1190,8 +1223,8 @@ const ArtifactHeader = ({
     <span style={{ color: "var(--text-muted)" }}>{sizeLabel}</span>
     {onCopy && (
       <button
-        title="Copy artifact content"
-        aria-label="Copy artifact content"
+        title="复制文件内容"
+        aria-label="复制文件内容"
         onClick={onCopy}
         style={{
           width: 26,
@@ -1234,7 +1267,6 @@ const iconBtnStyle = (disabled: boolean): React.CSSProperties => ({
   alignItems: "center",
   justifyContent: "center",
   cursor: disabled ? "not-allowed" : "pointer",
-  opacity: disabled ? 0.4 : 1,
   flexShrink: 0,
 });
 
@@ -1265,7 +1297,6 @@ const secondaryBtnStyle: React.CSSProperties = {
 const disabledSecondaryBtnStyle: React.CSSProperties = {
   ...secondaryBtnStyle,
   color: "var(--text-disabled, var(--text-muted))",
-  opacity: 0.45,
   cursor: "not-allowed",
 };
 

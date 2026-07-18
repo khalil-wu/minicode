@@ -11,7 +11,7 @@ import type {
 } from "./types";
 import { clamp } from "../lib/clamp";
 import { clampTextScale } from "../lib/text-scale";
-import { getThinkingFromMessage, getToolCallsFromMessage } from "../lib/content-blocks";
+import { getContentBlocks, getThinkingFromMessage, getToolCallsFromMessage } from "../lib/content-blocks";
 import type { ToolCallRecord } from "../lib/tool-call-reducer";
 
 // ── LocalStorage keys ──────────────────────────────────────────────
@@ -29,6 +29,12 @@ export const LS = {
     panelSlots: "minicode.layout.panel-slots",
   },
   permissionMode: "minicode.composer.permissionMode",
+  agentMode: "minicode.composer.agentMode",
+  promptPersona: "minicode.composer.promptPersona",
+  remoteImagePolicy: "minicode.markdown.remoteImagePolicy",
+  conversation: {
+    activeId: "minicode.conversation.active-id",
+  },
   editorTabs: "minicode.editor.tabs",
 };
 
@@ -73,7 +79,7 @@ export const applyTextScale = (s: number) => {
 export const initialTheme = (): UISlice["themeMode"] => {
   const v = readLS(LS.theme);
   if (v === "dark" || v === "light" || v === "system") return v;
-  return "light";
+  return "system";
 };
 
 export const initialTextScale = (): number => {
@@ -102,11 +108,24 @@ export const ensureCodePanelSlots = (slots: PanelSlot[]): PanelSlot[] => {
   const withoutMaximized = slots.map((slot) => ({ ...slot, maximized: false }));
   const codeSlots = withoutMaximized.filter((slot) => slot.kind === "chat" || slot.kind === "editor");
   const focusedSlotId = codeSlots.find((slot) => slot.focused)?.id;
-  const chatSlot: PanelSlot = { id: "main-chat", kind: "chat", label: "Chat", size: 1, focused: !focusedSlotId };
-  const hasChat = codeSlots.some((slot) => slot.kind === "chat");
-  const next: PanelSlot[] = hasChat ? codeSlots : [chatSlot, ...codeSlots];
+  const chatSlot: PanelSlot = codeSlots.find((slot) => slot.kind === "chat") ?? {
+    id: "main-chat",
+    kind: "chat",
+    label: "Chat",
+    size: 1,
+    focused: !focusedSlotId,
+  };
+  const editorSlot: PanelSlot = codeSlots.find((slot) => slot.kind === "editor") ?? {
+    id: "main-editor",
+    kind: "editor",
+    label: "File",
+    size: 1,
+    focused: false,
+  };
+  const next: PanelSlot[] = [chatSlot, editorSlot];
   return normalizePanelSlots(next.map((slot) => ({
     ...slot,
+    label: slot.kind === "chat" ? (slot.label ?? "Chat") : (slot.label ?? "File"),
     focused: focusedSlotId ? slot.id === focusedSlotId : Boolean(slot.focused),
   })));
 };
@@ -133,7 +152,7 @@ export const loadInitialLayout = () => {
       const parsed = (JSON.parse(raw) as (PanelSlot | (Omit<PanelSlot, "kind"> & { kind: "subagent" }))[])
         .map((slot) =>
           slot.kind === "subagent"
-            ? { ...slot, kind: "subagents", label: slot.label ?? "Subagents" }
+            ? { ...slot, kind: "subagents", label: slot.label ?? "协作" }
             : slot,
         ) as PanelSlot[];
       if (Array.isArray(parsed) && parsed.length > 0) slots = parsed;
@@ -170,6 +189,7 @@ export const preferredRightSidebarWidth = (
       tab === "browser" ? 680 :
         tab === "terminal" ? 720 :
           tab === "subagents" ? 360 :
+            tab === "artifacts" ? 360 :
             0;
   if (!preferred || currentWidth >= preferred) return currentWidth;
   return clamp(320, RIGHT_SIDEBAR_MAX, preferred);
@@ -211,6 +231,18 @@ const editorWorkspaceKey = (workspace: string | null | undefined): string => {
 const editorTabsStorageKey = (workspace: string | null | undefined): string =>
   `${LS.editorTabs}:${editorWorkspaceKey(workspace)}`;
 
+export const normalizeEditorPath = (path: string, workingDirectory = ""): string => {
+  const raw = String(path || "").trim().replace(/\\/g, "/");
+  if (!raw) return raw;
+  const root = workingDirectory.replace(/\\/g, "/").replace(/\/+$/, "");
+  const normalizedRoot = root.toLowerCase();
+  const normalizedRaw = raw.toLowerCase();
+  if (normalizedRoot && (normalizedRaw === normalizedRoot || normalizedRaw.startsWith(`${normalizedRoot}/`))) {
+    return raw.slice(root.length).replace(/^\/+/, "") || ".";
+  }
+  return raw.replace(/\/+/g, "/").replace(/^\.\/+/, "");
+};
+
 const blankEditorTab = (path: string): EditorTab => ({
   path,
   content: "",
@@ -225,12 +257,19 @@ const blankEditorTab = (path: string): EditorTab => ({
 
 export const loadPersistedEditorTabs = (workspace?: string | null): EditorTab[] => {
   try {
-    const scopedRaw = readLS(editorTabsStorageKey(workspace));
+    const storageKey = editorTabsStorageKey(workspace);
+    const scopedRaw = readLS(storageKey);
     const raw = scopedRaw ?? (editorWorkspaceKey(workspace) === DEFAULT_WORKSPACE_KEY ? readLS(LS.editorTabs) : null);
     if (!raw) return [];
     const paths = JSON.parse(raw) as string[];
     if (!Array.isArray(paths)) return [];
-    return paths.slice(0, 20).map(blankEditorTab);
+    const normalizedPaths = paths
+      .slice(0, 20)
+      .map((path) => normalizeEditorPath(path, workspace ?? ""))
+      .filter(Boolean);
+    const normalizedRaw = JSON.stringify(normalizedPaths);
+    if (normalizedRaw !== JSON.stringify(paths.slice(0, 20))) writeLS(storageKey, normalizedRaw);
+    return normalizedPaths.map(blankEditorTab);
   } catch {
     return [];
   }
@@ -265,12 +304,24 @@ export const newConversationId = (): string =>
 
 // ── Message helpers ────────────────────────────────────────────────
 
+const hasVisibleContentBlocks = (message: ChatMessage): boolean =>
+  getContentBlocks(message).some((block) => {
+    if (block.type === "text" || block.type === "thinking" || block.type === "process") {
+      return Boolean(block.content?.trim());
+    }
+    if (block.type === "progress") {
+      return Boolean((block.label || block.summary || block.message || "").trim());
+    }
+    return block.type === "tool_call";
+  });
+
 export const isStructurallyEmptyAssistantMessage = (message: ChatMessage) =>
   message.role === "assistant"
   && message.isStreaming
   && !message.content
   && !getThinkingFromMessage(message)
   && getToolCallsFromMessage(message).length === 0
+  && !hasVisibleContentBlocks(message)
   && message.artifacts.length === 0;
 
 export const cacheMessagesForConversation = (
@@ -356,23 +407,6 @@ export const findLastStreamingIndex = (messages: AppStore["messages"]): number =
   return -1;
 };
 
-/**
- * Resolve the message a turn-scoped block should attach to: the streaming
- * assistant message with the given id when provided, otherwise the last
- * streaming message. A stale messageId (already sealed) attaches nothing.
- */
-export const findStreamingTargetIndex = (
-  messages: AppStore["messages"],
-  messageId?: string,
-): number => {
-  if (!messageId) return findLastStreamingIndex(messages);
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i];
-    if (message?.id === messageId) return message.isStreaming ? i : -1;
-  }
-  return findLastStreamingIndex(messages);
-};
-
 export const computeToolCallCount = (messages: ChatMessage[]): number =>
   messages.reduce((sum, m) => sum + getToolCallsFromMessage(m).length, 0);
 
@@ -383,7 +417,7 @@ export const conversationWorkspacePath = (conversation?: AppStore["conversations
 
 // ── Thinking metadata helpers ──────────────────────────────────────
 
-const THINKING_METADATA_KEYS = ["source", "visibility", "is_raw_provider_reasoning"] as const;
+const THINKING_METADATA_KEYS = ["source", "visibility", "is_raw_provider_reasoning", "provider_reasoning_type"] as const;
 
 export const normalizeThinkingMetadata = (
   metadata?: Partial<Omit<ThinkingContentBlock, "type" | "content">>,
@@ -394,6 +428,9 @@ export const normalizeThinkingMetadata = (
   if (metadata.visibility !== undefined) normalized.visibility = metadata.visibility;
   if (metadata.is_raw_provider_reasoning !== undefined) {
     normalized.is_raw_provider_reasoning = metadata.is_raw_provider_reasoning;
+  }
+  if (metadata.provider_reasoning_type !== undefined) {
+    normalized.provider_reasoning_type = metadata.provider_reasoning_type;
   }
   return normalized;
 };
@@ -414,6 +451,7 @@ const pendingToolCallToRecord = (tc: PendingToolCallResume) => ({
   startedAt: tc.startedAt ?? tc.started_at ?? Date.now(),
   displayHint: tc.displayHint ?? tc.display_hint,
   inputSummary: tc.inputSummary ?? tc.input_summary,
+  turnId: tc.turnId ?? tc.turn_id,
   iterationId: tc.iterationId ?? tc.iteration_id,
   phase: tc.phase,
 });
@@ -459,6 +497,7 @@ export function conversationResetPayload(): Record<string, unknown> {
     rightStackTab: "tasks",
     rightPanelOpen: false,
     rightStackTabLocked: false,
+    allowedRemoteImageDomains: [],
     pendingAskUser: null,
     plan: null,
     todos: [],
@@ -469,6 +508,7 @@ export function conversationResetPayload(): Record<string, unknown> {
     totalBudgetPercent: 0,
     contextUsage: null,
     lastUsage: null,
+    usageTotals: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, turns: 0 },
     inspectorEntries: [],
   };
 }
@@ -478,6 +518,7 @@ const sameToolCallRecord = (
   right: ToolCallRecord,
 ): boolean => {
   if (left.id !== right.id) return false;
+  if (left.turnId && right.turnId) return left.turnId === right.turnId;
   if (left.iterationId && right.iterationId) return left.iterationId === right.iterationId;
   if (left.stepId && right.stepId) return left.stepId === right.stepId;
   return true;

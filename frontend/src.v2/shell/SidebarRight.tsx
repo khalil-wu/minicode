@@ -1,22 +1,21 @@
 import {
   Activity,
-  CheckCircle,
+  FileDiff,
+  FileSearch,
   FolderOpen,
   Globe,
-  GitBranch,
+  HeartPulse,
+  Layers,
   MessageCircle,
   MonitorPlay,
   Plus,
   PanelRightClose,
-  Search,
   TerminalSquare,
   Users,
-  Wrench,
   X,
 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAppStore } from "../stores";
-import { getToolCallsFromMessage } from "../lib/content-blocks";
 import { PanelSkeleton } from "./PanelSkeleton";
 import { ChunkErrorBoundary, SafeBoundary } from "./ChunkErrorBoundary";
 import { PanelErrorFallback } from "../components/PanelErrorFallback";
@@ -26,13 +25,8 @@ import { DiffPanel } from "../panels/DiffPanel";
 import { requestNewTerminalSession } from "../panels/terminalRequests";
 import { ScrollablePanel } from "./SidebarShared";
 import { ActivityTab } from "./tabs/ActivityTab";
-import { PlanTab } from "./tabs/PlanTab";
-import { SubagentsTab } from "./tabs/SubagentsTab";
-import { InspectorTab } from "./tabs/InspectorTab";
-import { DiagnosticsTab } from "./tabs/DiagnosticsTab";
-import { hasVisiblePlanSteps } from "../lib/planVisibility";
 
-type StackTab = "preview" | "browser" | "terminal" | "tasks" | "diff" | "plan" | "subagents" | "inspector" | "diagnostics";
+type StackTab = "preview" | "browser" | "terminal" | "tasks" | "diff" | "plan" | "subagents" | "artifacts" | "inspector" | "diagnostics";
 type LauncherItem =
   | { type: "separator"; key: string; label: string }
   | { type: "item"; key: string; label: string; badge?: string; icon: React.ReactNode; shortcut?: string; onSelect: () => void };
@@ -44,16 +38,31 @@ interface SidebarRightProps {
 
 const normalizeInitialTab = (tab: SidebarRightProps["initialTab"]): StackTab => {
   if (tab === "details" || tab === "context") return "inspector";
+  if (tab === "plan") return "tasks";
   return tab ?? "tasks";
 };
 
+const defaultOpenTabs: StackTab[] = ["tasks"];
+
 const shouldAllowAutomaticTabSwitch = (activeTab: StackTab, rightPanelOpen: boolean): boolean => {
   if (!rightPanelOpen) return true;
-  return activeTab === "preview" || activeTab === "tasks" || activeTab === "plan";
+  return activeTab === "preview" || activeTab === "tasks";
 };
 
 const LazyTerminalPanel = lazy(() =>
   import("../panels/TerminalPanel").then((module) => ({ default: module.TerminalPanel })),
+);
+const LazySubagentsTab = lazy(() =>
+  import("./tabs/SubagentsTab").then((module) => ({ default: module.SubagentsTab })),
+);
+const LazyArtifactsTab = lazy(() =>
+  import("./tabs/ArtifactsTab").then((module) => ({ default: module.ArtifactsTab })),
+);
+const LazyInspectorTab = lazy(() =>
+  import("./tabs/InspectorTab").then((module) => ({ default: module.InspectorTab })),
+);
+const LazyDiagnosticsTab = lazy(() =>
+  import("./tabs/DiagnosticsTab").then((module) => ({ default: module.DiagnosticsTab })),
 );
 
 const preferredManualSidebarWidth = (tab: StackTab): number => {
@@ -65,6 +74,7 @@ const preferredManualSidebarWidth = (tab: StackTab): number => {
       return 640;
     case "preview":
       return 560;
+    case "artifacts":
     case "inspector":
     case "plan":
     case "subagents":
@@ -108,19 +118,25 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
   const sideChatOpen = useAppStore((s) => s.sideChatOpen);
   const toggleSideChat = useAppStore((s) => s.toggleSideChat);
   const [localTab, setLocalTab] = useState<StackTab>(normalizeInitialTab(initialTab));
-  const [openTabIds, setOpenTabIds] = useState<StackTab[]>(() => [normalizeInitialTab(initialTab)]);
+  const [openTabIds, setOpenTabIds] = useState<StackTab[]>(() => Array.from(new Set([...defaultOpenTabs, normalizeInitialTab(initialTab)])));
   const [launcherMenuOpen, setLauncherMenuOpen] = useState(false);
   const launcherMenuRef = useRef<HTMLDivElement | null>(null);
-  const activeTab = embedded ? localTab : rightStackTab;
+  const requestedActiveTab = embedded ? localTab : rightStackTab;
+  const normalizedRequestedTab = requestedActiveTab === "plan" ? "tasks" : requestedActiveTab;
+  const activeTab = normalizedRequestedTab;
   const setActiveTab = embedded ? setLocalTab : setRightStackTab;
+
+  useEffect(() => {
+    setOpenTabIds((current) => {
+      return Array.from(new Set([...defaultOpenTabs, ...current]));
+    });
+  }, []);
 
   // 用户手动切换tab时锁定自动切换
   const lockAndSetTab = useCallback((tab: StackTab) => {
     setUserTabLocked(true);
     setActiveTab(tab);
   }, [setActiveTab]);
-  const plan = useAppStore((s) => s.plan);
-  const todos = useAppStore((s) => s.todos);
   const subagents = useAppStore((s) => s.subagents);
   const livePreviewUrl = useAppStore((s) => s.livePreviewUrl);
   const previewArtifact = useAppStore((s) => s.previewArtifact);
@@ -128,36 +144,22 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
   const gitChanges = useAppStore((s) => s.gitChanges);
   const terminalSessions = useAppStore((s) => s.terminalSessions);
   const mcpServers = useAppStore((s) => s.mcpServers);
-  const runningTasks = todos.filter((t) => t.status === "in_progress").length;
-
-  const runningProgress = useAppStore((s) => {
-    const key = s.conversationId || "__active__";
-    return s.agentProgress.filter((entry) =>
-      entry.status === "running" && (entry.conversationId === key || entry.conversationId === "__active__")
-    ).length;
-  });
-
   const [userTabLocked, setUserTabLocked] = useState(false);
   const allowAutoSwitch = !embedded && !rightStackTabLocked && !userTabLocked && shouldAllowAutomaticTabSwitch(activeTab, rightPanelOpen);
-  const runningToolCount = runningTasks + runningProgress;
 
   // 切换会话时释放tab锁
   useEffect(() => {
     setUserTabLocked(false);
+    setOpenTabIds(Array.from(new Set([...defaultOpenTabs, activeTab])));
   }, [conversationId]);
 
   useEffect(() => {
     if (!allowAutoSwitch) return;
-    if (runningToolCount > 0) {
-      setRightStackTab("tasks", { automatic: true });
-    } else if (livePreviewUrl) {
+    if (livePreviewUrl) {
       setRightStackTab("preview", { automatic: true });
-    } else if (hasVisiblePlanSteps(plan) && plan?.status === "executing") {
-      setRightStackTab("plan", { automatic: true });
     }
-  }, [allowAutoSwitch, plan, livePreviewUrl, runningToolCount, setRightStackTab]);
+  }, [allowAutoSwitch, livePreviewUrl, setRightStackTab]);
 
-  const lastToolCalls = useMemo(() => messages.flatMap((m) => getToolCallsFromMessage(m)).slice(-5), [messages]);
   const runningSubagents = subagents.filter((subagent) => subagent.status === "running").length;
   const runningTerminals = terminalSessions.filter((t) => t.status !== "exited").length;
   const mcpErrors = mcpServers.filter((s) => s.status === "error").length;
@@ -167,19 +169,17 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
     if (activeTab === "terminal" || runningTerminals > 0) requestTerminalPreload();
   }, [activeTab, runningTerminals]);
 
-  const hasPlan = hasVisiblePlanSteps(plan);
-  const hasSubagents = subagents.length > 0;
   const hasHealthIssues = mcpErrors > 0;
   const tabs: { id: StackTab; label: string; badge?: string; icon: React.ReactNode }[] = [
-    { id: "tasks", label: "Activity", badge: runningTasks || runningProgress ? String(runningTasks + runningProgress) : undefined, icon: <CheckCircle size={15} /> },
-    { id: "inspector", label: "Context", icon: <Search size={15} /> },
-    { id: "diff", label: "Review", badge: diffReview ? "1" : gitChangeCount ? String(gitChangeCount) : undefined, icon: <GitBranch size={15} /> },
+    { id: "tasks", label: "Activity", icon: <Activity size={15} /> },
+    { id: "subagents", label: "Agents", badge: runningSubagents ? String(runningSubagents) : undefined, icon: <Users size={15} /> },
+    { id: "artifacts", label: "Artifacts", badge: previewArtifact ? "1" : undefined, icon: <Layers size={15} /> },
+    { id: "inspector", label: "Inspector", icon: <FileSearch size={15} /> },
+    { id: "diff", label: "Review", badge: diffReview ? "1" : gitChangeCount ? String(gitChangeCount) : undefined, icon: <FileDiff size={15} /> },
     { id: "preview", label: "Preview", badge: livePreviewUrl || previewArtifact ? "on" : undefined, icon: <MonitorPlay size={15} /> },
     { id: "terminal", label: "Terminal", badge: runningTerminals ? String(runningTerminals) : undefined, icon: <TerminalSquare size={15} /> },
-    { id: "browser", label: "Chrome/CDP", icon: <Globe size={15} /> },
-    { id: "plan", label: "Plan", badge: hasPlan && plan?.status === "executing" ? "run" : undefined, icon: <Activity size={15} /> },
-    { id: "subagents", label: "Agents", badge: runningSubagents ? String(runningSubagents) : undefined, icon: <Users size={15} /> },
-    { id: "diagnostics", label: "Health", badge: mcpErrors ? String(mcpErrors) : undefined, icon: <Wrench size={15} /> },
+    { id: "browser", label: "Browser Control", icon: <Globe size={15} /> },
+    { id: "diagnostics", label: "Health", badge: mcpErrors ? String(mcpErrors) : undefined, icon: <HeartPulse size={15} /> },
   ];
   const activeItem = tabs.find((tab) => tab.id === activeTab) ?? tabs[0];
   const tabById = useMemo(() => new Map(tabs.map((tab) => [tab.id, tab])), [tabs]);
@@ -247,18 +247,14 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
         if (!sideChatOpen) toggleSideChat();
       },
     },
-    { type: "item", key: "review", label: "Show Review", badge: diffReview ? "1" : gitChangeCount ? String(gitChangeCount) : undefined, icon: <GitBranch size={15} />, onSelect: () => openRightTab("diff") },
-    { type: "item", key: "activity", label: "Show Activity", badge: runningToolCount ? String(runningToolCount) : undefined, icon: <CheckCircle size={15} />, onSelect: () => openRightTab("tasks") },
-    ...(hasPlan
-      ? [{ type: "item" as const, key: "plan", label: "Show Plan", badge: plan?.status === "executing" ? "run" : undefined, icon: <Activity size={15} />, onSelect: () => openRightTab("plan") }]
-      : []),
+    { type: "item", key: "review", label: "Show Review", badge: diffReview ? "1" : gitChangeCount ? String(gitChangeCount) : undefined, icon: <FileDiff size={15} />, onSelect: () => openRightTab("diff") },
+    { type: "item", key: "activity", label: "Show Activity", icon: <Activity size={15} />, onSelect: () => openRightTab("tasks") },
+    { type: "item", key: "artifacts", label: "Show Artifacts", badge: previewArtifact ? "1" : undefined, icon: <Layers size={15} />, onSelect: () => openRightTab("artifacts") },
     { type: "separator", key: "advanced", label: "Advanced" },
-    { type: "item", key: "browser", label: "Chrome/CDP", icon: <Globe size={15} />, onSelect: () => openRightTab("browser") },
-    ...(hasSubagents
-      ? [{ type: "item" as const, key: "agents", label: "Show Agents", badge: runningSubagents ? String(runningSubagents) : undefined, icon: <Users size={15} />, onSelect: () => openRightTab("subagents") }]
-      : []),
+    { type: "item", key: "browser", label: "Browser Control", icon: <Globe size={15} />, onSelect: () => openRightTab("browser") },
+    { type: "item", key: "agents", label: "Show Agents", badge: runningSubagents ? String(runningSubagents) : undefined, icon: <Users size={15} />, onSelect: () => openRightTab("subagents") },
     ...(hasHealthIssues
-      ? [{ type: "item" as const, key: "health", label: "Show Health", badge: String(mcpErrors), icon: <Wrench size={15} />, onSelect: () => openRightTab("diagnostics") }]
+      ? [{ type: "item" as const, key: "health", label: "Show Health", badge: String(mcpErrors), icon: <HeartPulse size={15} />, onSelect: () => openRightTab("diagnostics") }]
       : []),
   ];
   useEffect(() => {
@@ -274,8 +270,9 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
   }, [addOpenTab, livePreviewUrl, previewArtifact]);
 
   const activePrimaryTab = openedTabs.some((tab) => tab.id === activeTab);
-  const compactPanel = ["tasks", "inspector", "plan", "subagents", "diagnostics"].includes(activeTab);
+  const compactPanel = ["tasks", "inspector", "subagents", "artifacts", "diagnostics"].includes(activeTab);
   const minSidebarWidth = embedded ? 0 : compactPanel ? 292 : 332;
+  const effectiveResizeMin = embedded ? 0 : Math.max(320, minSidebarWidth);
   const sidebarWidth = Math.max(minSidebarWidth, rightSidebarWidth);
   const sidebarWidthStyle = embedded ? "100%" : `${sidebarWidth}px`;
   const sidebarMaxWidth = embedded ? "none" : "min(1040px, calc(100vw - 360px))";
@@ -364,10 +361,23 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
     if (embedded) return;
     setRightSidebarWidth(preferredManualSidebarWidth(activeTab));
   };
+  const handleResizeKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const step = event.shiftKey ? 48 : 16;
+    let nextWidth: number | null = null;
+    if (event.key === "ArrowLeft") nextWidth = rightSidebarWidth + step;
+    else if (event.key === "ArrowRight") nextWidth = rightSidebarWidth - step;
+    else if (event.key === "Home") nextWidth = effectiveResizeMin;
+    else if (event.key === "End") nextWidth = 1040;
+    else if (event.key === "Enter") nextWidth = preferredManualSidebarWidth(activeTab);
+    if (nextWidth == null) return;
+    event.preventDefault();
+    setRightSidebarWidth(nextWidth);
+  };
 
   return (
     <aside
       className={`mc-sidebar-right relative flex flex-col overflow-hidden ${!embedded ? "anim-slide-right" : ""}`}
+      data-embedded={embedded ? "true" : "false"}
       style={{
         "--right-sidebar-width": `${sidebarWidth}px`,
         position: "relative",
@@ -388,12 +398,15 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
           role="separator"
           aria-orientation="vertical"
           aria-label="Resize right sidebar"
-          aria-valuemin={minSidebarWidth}
+           aria-valuemin={effectiveResizeMin}
           aria-valuemax={1040}
-          aria-valuenow={Math.round(rightSidebarWidth)}
+           aria-valuenow={Math.round(rightSidebarWidth)}
+           aria-valuetext={`${Math.round(rightSidebarWidth)} pixels`}
+           tabIndex={0}
           title="Resize side panel"
           onPointerDown={startResize}
-          onDoubleClick={resetSidebarWidth}
+           onDoubleClick={resetSidebarWidth}
+           onKeyDown={handleResizeKeyDown}
           style={resizeHandleStyle}
         />
       )}
@@ -421,7 +434,7 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
               className="min-w-0 inline-flex items-center gap-1.5 border-0 cursor-pointer"
               style={sidebarTabButtonStyle(activeTab === t.id)}
             >
-              <span className="inline-flex" style={{ color: activeTab === t.id ? "var(--text-secondary)" : "var(--text-muted)" }}>{t.icon}</span>
+              <span className="mc-sidebar-tab-icon" style={{ color: activeTab === t.id ? "var(--text-secondary)" : "var(--text-muted)" }}>{t.icon}</span>
               <span className="truncate">{t.label}</span>
               {t.badge && <span className="text-[10px] min-w-4 h-4 px-1 inline-flex items-center justify-center rounded-full" style={{ fontFamily: "var(--font-mono)", color: "var(--accent-primary)", background: "color-mix(in oklch, var(--accent-primary) 12%, transparent)", border: "1px solid color-mix(in oklch, var(--accent-primary) 28%, transparent)" }}>{t.badge}</span>}
             </button>
@@ -434,7 +447,7 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
                   event.stopPropagation();
                   closeOpenTab(t.id);
                 }}
-                className="inline-flex items-center justify-center border-0 cursor-pointer"
+                className="mc-icon-button mc-icon-button-compact"
                 style={sidebarTabCloseStyle(activeTab === t.id)}
               >
                 <X size={12} />
@@ -453,12 +466,8 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
             aria-label="Add panel"
             aria-haspopup="menu"
             aria-expanded={launcherMenuOpen}
-            className="w-8 h-8 inline-flex items-center justify-center border border-transparent rounded-[var(--radius-sm,6px)] cursor-pointer text-xs p-0 relative"
-            style={{
-              background: launcherMenuOpen ? "var(--surface-page)" : "transparent",
-              color: launcherMenuOpen ? "var(--text-primary)" : "var(--text-muted)",
-              borderColor: launcherMenuOpen ? "var(--border-subtle)" : "transparent",
-            }}
+            className="mc-icon-button"
+            data-active={launcherMenuOpen ? "true" : "false"}
           >
             <Plus size={17} />
           </button>
@@ -497,12 +506,7 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
             onClick={toggleRightPanel}
             title="Close panel"
             aria-label="Close right panel"
-            className="w-8 h-8 inline-flex items-center justify-center border border-transparent rounded-[var(--radius-sm,6px)] cursor-pointer text-xs p-0 relative"
-            style={{
-              background: "transparent",
-              color: "var(--text-muted)",
-              borderColor: "transparent",
-            }}
+            className="mc-icon-button"
           >
             <PanelRightClose size={15} />
           </button>
@@ -524,7 +528,7 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
             </SafeBoundary>
           )}
           {activeTab === "browser" && (
-            <SafeBoundary fallback={<PanelErrorFallback panelName="Chrome/CDP" />}>
+            <SafeBoundary fallback={<PanelErrorFallback panelName="Browser Control" />}>
               <BrowserPanel />
             </SafeBoundary>
           )}
@@ -543,10 +547,16 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
               <DiffPanel />
             </SafeBoundary>
           )}
-          {activeTab === "plan" && <ScrollablePanel><PlanTab /></ScrollablePanel>}
-          {activeTab === "subagents" && <ScrollablePanel><SubagentsTab /></ScrollablePanel>}
-          {activeTab === "inspector" && <ScrollablePanel><InspectorTab toolCalls={lastToolCalls} /></ScrollablePanel>}
-          {activeTab === "diagnostics" && <ScrollablePanel><DiagnosticsTab /></ScrollablePanel>}
+          {activeTab === "subagents" && (
+            <ChunkErrorBoundary>
+              <Suspense fallback={<PanelSkeleton kind="subagents" />}>
+                <ScrollablePanel><LazySubagentsTab /></ScrollablePanel>
+              </Suspense>
+            </ChunkErrorBoundary>
+          )}
+          {activeTab === "artifacts" && <Suspense fallback={<PanelSkeleton kind="artifacts" />}><ScrollablePanel><LazyArtifactsTab /></ScrollablePanel></Suspense>}
+          {activeTab === "inspector" && <Suspense fallback={<PanelSkeleton kind="inspector" />}><ScrollablePanel><LazyInspectorTab /></ScrollablePanel></Suspense>}
+          {activeTab === "diagnostics" && <Suspense fallback={<PanelSkeleton kind="inspector" />}><ScrollablePanel><LazyDiagnosticsTab /></ScrollablePanel></Suspense>}
         </div>
       </div>
     </aside>
@@ -569,7 +579,7 @@ const resizeHandleStyle: React.CSSProperties = {
 };
 
 const sidebarTabFrameStyle = (active: boolean): React.CSSProperties => ({
-  height: 32,
+  height: "var(--mc-sidebar-tab-height, 32px)",
   maxWidth: 168,
   minWidth: 0,
   flex: "0 0 auto",
@@ -592,11 +602,6 @@ const sidebarTabButtonStyle = (active: boolean): React.CSSProperties => ({
 });
 
 const sidebarTabCloseStyle = (active: boolean): React.CSSProperties => ({
-  width: 22,
-  height: 22,
   marginRight: 4,
-  borderRadius: "var(--radius-sm, 5px)",
-  background: "transparent",
   color: active ? "var(--text-muted)" : "color-mix(in oklch, var(--text-muted) 72%, transparent)",
-  padding: 0,
 });

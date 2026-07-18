@@ -25,50 +25,51 @@
   /* ── Surface layers (9) — Pillar 1.1
      Tonal monotonicity invariant (P1.2):
        L is monotone non-decreasing across the 9 steps,
-       adjacent ΔL ∈ [0.018, 0.035]. ───────────────────── */
-  --surface-sunken:  oklch(0.120 0.004 80);
-  --surface-base:    oklch(0.145 0.004 80);
-  --surface-sidebar: oklch(0.165 0.004 80);
-  --surface-page:    oklch(0.185 0.005 80);
-  --surface-soft:    oklch(0.210 0.005 80);
-  --surface-panel:   oklch(0.230 0.006 80);
-  --surface-raised:  oklch(0.260 0.006 80);
-  --surface-hover:   oklch(0.295 0.007 80);
-  --surface-active:  oklch(0.330 0.007 80);
+       adjacent ΔL ∈ [0.018, 0.035].
+
+     Dark-theme base/frame lifted slightly above the original 0.075–0.135 band
+     so the app frame reads closer to Codex/Claude-Code dark UIs (~0.16–0.22)
+     and panel boundaries stay distinguishable instead of near-black. ──── */
+  --surface-sunken:  oklch(0.100 0.002 250);
+  --surface-base:    oklch(0.120 0.002 250);
+  --surface-sidebar: oklch(0.140 0.003 250);
+  --surface-page:    oklch(0.160 0.003 250);
+  --surface-soft:    oklch(0.180 0.004 250);
+  --surface-panel:   oklch(0.200 0.004 250);
+  --surface-raised:  oklch(0.220 0.005 250);
+  --surface-hover:   oklch(0.255 0.005 250);
+  --surface-active:  oklch(0.290 0.006 250);
 
   /* ── Text (4) — Pillar 1.2
      WCAG invariant (P1.3): primary/secondary ≥ 4.5:1 vs any surface,
      muted ≥ 3.0:1 (large text only). ────────────────────── */
-  --text-primary:   oklch(0.965 0.005 80);
-  --text-secondary: oklch(0.840 0.006 80);
-  --text-muted:     oklch(0.680 0.006 80);
-  --text-disabled:  oklch(0.965 0.005 80 / 0.50);
-  --text-on-accent: oklch(0.985 0.005 80);
+  --text-primary:   oklch(0.995 0.002 250);
+  --text-secondary: oklch(0.930 0.003 250);
+  --text-muted:     oklch(0.800 0.004 250);
+  --text-disabled:  oklch(0.995 0.002 250 / 0.48);
+  --text-on-accent: oklch(0.985 0.005 250);
 
   /* ── Border (4) — Pillar 1.3 ──────────────────────────── */
-  --border-subtle: oklch(0.870 0.006 80 / 0.15);
-  --border-soft:   oklch(0.870 0.006 80 / 0.22);
-  --border-strong: oklch(0.870 0.006 80 / 0.40);
+  --border-subtle: oklch(0.870 0.006 250 / 0.15);
+  --border-soft:   oklch(0.870 0.006 250 / 0.22);
+  --border-strong: oklch(0.870 0.006 250 / 0.40);
   --border-focus:  var(--accent-primary);
 
-  /* ── Accent (7) — Pillar 1.3
-     P1.5: hue ∈ [60°, 80°], chroma ∈ [0.04, 0.10] for primary.
-     --accent-primary  ≈ #a89278 (warm brown, Anthropic mid)
-     --accent-strong   ≈ #d97757 (warm orange, used sparingly) ── */
-  --accent-primary:   oklch(0.66 0.05 70);
-  --accent-secondary: oklch(0.74 0.06 72);
-  --accent-strong:    oklch(0.69 0.13 45);
-  --accent-hover:     oklch(0.78 0.06 70);
-  --accent-active:    oklch(0.58 0.05 70);
-  --accent-soft:      oklch(0.66 0.05 70 / 0.10);
+  /* ── Accent (7) — Pillar 1.3: cool blue, never warm brown/yellow. ── */
+  --accent-primary:   oklch(0.68 0.12 250);
+  --accent-secondary: oklch(0.76 0.10 248);
+  --accent-strong:    oklch(0.64 0.18 255);
+  --accent-hover:     oklch(0.78 0.11 250);
+  --accent-active:    oklch(0.58 0.13 252);
+  --accent-soft:      oklch(0.68 0.12 250 / 0.12);
   --accent-glow:      none;
 
   /* ── State (8) — Pillar 1.4
      4 base + 4 soft (alpha 0.12). Hue ranges per requirement R1.4. ── */
   --state-success:      oklch(0.74 0.13 142);
   --state-success-soft: oklch(0.74 0.13 142 / 0.12);
-  --state-warning:      oklch(0.78 0.14 80);
-  --state-warning-soft: oklch(0.78 0.14 80 / 0.12);
+  --state-warning:      oklch(0.76 0.14 305);
+  --state-warning-soft: oklch(0.76 0.14 305 / 0.12);
   --state-danger:       oklch(0.71 0.16 28);
   --state-danger-soft:  oklch(0.71 0.16 28 / 0.12);
   --state-info:         oklch(0.74 0.10 240);
@@ -77,38 +78,29 @@
   --command-accent-strong: oklch(0.86 0.055 245);
   --command-border:        oklch(0.82 0.045 245 / 0.48);
 
-  /* ── Font stacks (3) — Pillar 2.2
-     Three families: UI sans / Mono / Reading prose.
-     Each stack provides ≥ 3 fallbacks.
-     Noto Sans SC is the primary CJK font — geometric, clean,
-     designed by Google to pair with Inter/Roboto. Matches
-     Anthropic's CJK typography aesthetic: light strokes,
-     proportional widths, consistent weight distribution.
-     Microsoft YaHei is retained as fallback (Windows only) but
-     suppressed below Noto Sans SC to avoid its heavy, mechanical
-     stroke rendering on Chinese text. ─────────────────── */
-  --font-ui:    'Inter', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif;
-  --font-mono:  'JetBrains Mono', 'Cascadia Code', 'Fira Code', 'Consolas', 'Courier New', monospace;
-  --font-cjk:   "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
-  --font-prose: "Inter", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", var(--font-cjk);
+  /* Desktop-native typography: fast offline startup and stable CJK metrics. */
+  --font-ui:    "Manrope", "Noto Sans SC", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
+  --font-mono:  "JetBrains Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --font-cjk:   "Noto Sans SC", "Microsoft YaHei UI", "PingFang SC", "Source Han Sans SC", sans-serif;
+  --font-prose: var(--font-ui);
 
   /* ── Font sizes (8) — Pillar 2.3
-     Calibrated to Claude Code's UI scale (body ~13px). ── */
-  --text-xs:   11px;
-  --text-sm:   12px;
-  --text-base: 13px;
-  --text-md:   14px;
-  --text-lg:   16px;
-  --text-xl:   19px;
-  --text-2xl:  24px;
-  --text-3xl:  29px;
+     Calibrated closer to Codex desktop readability (body ~14–15px). ── */
+  --text-xs:   14px;
+  --text-sm:   15px;
+  --text-base: 16px;
+  --text-md:   17px;
+  --text-lg:   19px;
+  --text-xl:   22px;
+  --text-2xl:  26px;
+  --text-3xl:  32px;
 
   /* ── Leading (5) — Pillar 2.4 ─────────────────────────── */
-  --leading-tight:   1.25;
-  --leading-snug:    1.40;
+  --leading-tight:   1.28;
+  --leading-snug:    1.42;
   --leading-normal:  1.55;
-  --leading-relaxed: 1.70;
-  --leading-loose:   1.85;
+  --leading-relaxed: 1.68;
+  --leading-loose:   1.82;
 
   /* ── Weight (4) — Pillar 2.5 ──────────────────────────── */
   --weight-regular:  400;
@@ -139,35 +131,53 @@
   --shadow-medium: 0 8px 32px oklch(0 0 0 / 0.14);
   --shadow-strong-overlay: 0 10px 30px oklch(0 0 0 / 0.22);
 
-  /* ── Easing (3) — single registry for all cubic-beziers ── */
-  --easing-standard:   cubic-bezier(0.4, 0, 0.2, 1);    /* material standard */
-  --easing-decelerate: cubic-bezier(0.2, 0.8, 0.2, 1);  /* expand / reveal */
-  --easing-spring:     cubic-bezier(0.34, 1.56, 0.64, 1); /* playful overshoot (modal/toast/checkmark) */
-  --easing-out:        cubic-bezier(0.16, 1, 0.3, 1);   /* strong ease-out (quote slide-down) */
+  /* ── Easing ────────────────────────────────────────── */
+  --easing-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --easing-pulse: cubic-bezier(0.42, 0, 0.18, 1);
 
   /* ── Duration primitives (4) — raw ms values for @keyframes
      Used by animations.css utility classes. The --transition-*
      shorthands below compose these with easing + property. ──── */
   --duration-micro: 100ms;
   --duration-fast:  150ms;
-  --duration-enter: 180ms;
   --duration-base:  200ms;
   --duration-slow:  250ms;
-  --duration-slower: 300ms;
 
   /* ── Transitions (4) — Cross-cutting #7
      Single registry: 100 / 150 / 200 / 250 ms with the standard
      material easing. Animation duration allowlist documented in
      design.md §Cross-cutting #7. ───────────────────────── */
-  --transition-micro:  all var(--duration-micro) var(--easing-standard);
-  --transition-fast:   all var(--duration-fast)  var(--easing-standard);
-  --transition-normal: all var(--duration-base)  var(--easing-standard);
-  --transition-slow:   all var(--duration-slow)  var(--easing-standard);
+  --transition-micro:  var(--duration-micro) var(--easing-standard);
+  --transition-fast:   var(--duration-fast) var(--easing-standard);
+  --transition-normal: var(--duration-base) var(--easing-standard);
+  --transition-slow:   var(--duration-slow) var(--easing-standard);
 
-  /* Z-index: defined exclusively in styles/z-index.css (loaded after this
-     file). The old 0–90 scale that lived here collided with that ladder
-     (e.g. --z-overlay == --z-overlay-backdrop == 40) and every shared name
-     was silently overridden anyway; removed to keep one source of truth. */
+  /* Z-index scale */
+  --z-base: 0;
+  --z-below: -1;
+  --z-content: 1;
+  --z-sticky: 10;
+  --z-composer: 20;
+  --z-header: 100;
+  --z-sidebar: 200;
+  --z-dock: 250;
+  --z-fab: 300;
+  --z-dropdown: 500;
+  --z-panel-popup: 500;
+  --z-popover: 550;
+  --z-tooltip: 600;
+  --z-drawer: 800;
+  --z-overlay: 900;
+  --z-overlay-backdrop: 900;
+  --z-modal-backdrop: 900;
+  --z-modal: 1000;
+  --z-approval: 1050;
+  --z-toast: 1100;
+  --z-dialog: 1200;
+  --z-dialog-service: 1200;
+  --z-context-menu: 1250;
+  --z-loading: 1500;
+  --z-debug: 9999;
 
   /* ── Layout vars ──────────────────────────────────────── */
   --header-height:       44px;
@@ -201,6 +211,8 @@
   --message-assistant-bg: color-mix(in oklch, var(--accent-soft) 3%, transparent);
   --message-activity-bg:  var(--surface-page);
   --message-error-bg:     color-mix(in oklch, var(--state-danger) 8%, transparent);
+  --attachment-chip-bg:   var(--surface-soft);
+  --attachment-chip-fg:   var(--text-secondary);
 
   /* ────────────────────────────────────────────────────────
      Backward-compatibility aliases.
@@ -215,17 +227,50 @@
         Phase F 可清理 deprecated alias"
      ──────────────────────────────────────────────────────── */
   --font-sans:        var(--font-ui);
-  --surface-input:    oklch(0.240 0.006 80);
-  --surface-overlay:  oklch(0.260 0.006 80);
-  --text-strong:      oklch(0.965 0.005 80);
-  --accent-border:    oklch(0.66 0.05 70 / 0.25);
+  --surface-elevated: var(--surface-raised);
+  --bg-app:           var(--surface-sunken);
+  --bg-sidebar:       var(--surface-sidebar);
+  --bg-card:          var(--surface-page);
+  --bg-card-hover:    var(--surface-hover);
+  --surface-input:    oklch(0.240 0.006 250);
+  --surface-overlay:  oklch(0.260 0.006 250);
+  --text-strong:      var(--text-primary);
+  --text-tertiary:    var(--text-muted);
+  --border-light:     var(--border-subtle);
+  --border-medium:    var(--border-soft);
+  --border-rail:      var(--border-strong);
+  --accent-border:    oklch(0.68 0.12 250 / 0.25);
+  --accent-orange:    var(--accent-primary);
+  --success-green:    var(--state-success);
+  --error-red:        var(--state-danger);
+  --warning-yellow:   var(--state-warning);
+  --diff-add-bg:      var(--state-success-soft);
+  --diff-add-text:    var(--state-success);
+  --diff-del-bg:      var(--state-danger-soft);
+  --diff-del-text:    var(--state-danger);
+  --line-height-tight:   var(--leading-tight);
+  --line-height-normal:  var(--leading-normal);
+  --line-height-relaxed: var(--leading-relaxed);
+  --spacing-1:        4px;
+  --spacing-2:        8px;
+  --spacing-3:        12px;
+  --spacing-4:        16px;
+  --spacing-5:        20px;
+  --spacing-6:        24px;
+  --spacing-8:        32px;
+  --spacing-10:       40px;
+  --spacing-12:       48px;
+  --shadow-lg:        var(--shadow-strong);
+  --shadow-hover:     var(--shadow-medium);
   --shadow-glow:      none;
-  --ai-accent:            #a89278;
-  --ai-accent-rgb:        168, 146, 120;
-  --ai-accent-strong:     #c4a882;
-  --ai-accent-strong-rgb: 196, 168, 130;
-  --ai-accent-deep-rgb:   140, 122, 100;
-  --accent-rgb:           168, 146, 120;
+  --transition-base:  var(--transition-normal);
+  --z-notification:   var(--z-toast);
+  --ai-accent:            #60a5fa;
+  --ai-accent-rgb:        96, 165, 250;
+  --ai-accent-strong:     #93c5fd;
+  --ai-accent-strong-rgb: 147, 197, 253;
+  --ai-accent-deep-rgb:   59, 130, 246;
+  --accent-rgb:           96, 165, 250;
 }
 
 /* ════════════════════════════════════════════════════════
@@ -236,45 +281,50 @@
 [data-theme="light"] {
   color-scheme: light;
 
-  /* Surface (9) */
-  --surface-sunken:  oklch(0.970 0.004 85);
-  --surface-base:    oklch(0.985 0.004 85);
-  --surface-sidebar: oklch(0.972 0.004 85);
-  --surface-page:    oklch(0.962 0.004 85);
-  --surface-soft:    oklch(0.945 0.004 85);
-  --surface-panel:   oklch(0.930 0.005 85);
-  --surface-raised:  oklch(0.910 0.005 85);
-  --surface-hover:   oklch(0.880 0.005 85);
-  --surface-active:  oklch(0.850 0.006 85);
+  /* User prompts stay crisp against the page instead of reading as grey blocks. */
+  --message-user-bg: #fff;
+  --attachment-chip-bg: oklch(0.985 0.003 250);
+  --attachment-chip-fg: var(--text-secondary);
 
-  /* Text (4) */
-  --text-primary:   oklch(0.220 0.006 80);
-  --text-secondary: oklch(0.380 0.006 80);
-  --text-muted:     oklch(0.520 0.006 80);
-  --text-disabled:  oklch(0.220 0.006 80 / 0.50);
-  --text-on-accent: oklch(0.985 0.005 80);
+  /* Surface (9) */
+  --surface-sunken:  oklch(0.975 0.004 250);
+  --surface-base:    oklch(1 0 0);
+  --surface-sidebar: oklch(0.985 0.004 250);
+  --surface-page:    oklch(0.975 0.004 250);
+  --surface-soft:    oklch(0.955 0.005 250);
+  --surface-panel:   oklch(0.935 0.006 250);
+  --surface-raised:  oklch(0.915 0.007 250);
+  --surface-hover:   oklch(0.890 0.008 250);
+  --surface-active:  oklch(0.860 0.009 250);
+
+  /* Text (4) — muted/secondary darkened for readability on white (was 0.52/0.38) */
+  --text-primary:   oklch(0.110 0.004 250);
+  --text-secondary: oklch(0.220 0.005 250);
+  --text-muted:     oklch(0.340 0.005 250);
+  --text-disabled:  oklch(0.110 0.004 250 / 0.48);
+  --text-on-accent: oklch(0.985 0.005 250);
 
   /* Border (4) */
-  --border-subtle: oklch(0.220 0.006 80 / 0.10);
-  --border-soft:   oklch(0.220 0.006 80 / 0.18);
-  --border-strong: oklch(0.220 0.006 80 / 0.30);
+  --border-subtle: oklch(0.220 0.006 250 / 0.10);
+  --border-soft:   oklch(0.220 0.006 250 / 0.18);
+  --border-strong: oklch(0.220 0.006 250 / 0.30);
   --border-focus:  var(--accent-primary);
 
   /* Accent (7) — light mode pushes L lower so primary stays
      ≥ 4.5:1 vs surface-page (P1.4 invariant under light theme). */
-  --accent-primary:   oklch(0.55 0.06 65);
-  --accent-secondary: oklch(0.62 0.06 67);
-  --accent-strong:    oklch(0.58 0.13 45);
-  --accent-hover:     oklch(0.49 0.06 65);
-  --accent-active:    oklch(0.42 0.06 65);
-  --accent-soft:      oklch(0.55 0.06 65 / 0.12);
+  --accent-primary:   oklch(0.52 0.16 255);
+  --accent-secondary: oklch(0.59 0.14 252);
+  --accent-strong:    oklch(0.47 0.20 260);
+  --accent-hover:     oklch(0.46 0.17 255);
+  --accent-active:    oklch(0.40 0.16 258);
+  --accent-soft:      oklch(0.52 0.16 255 / 0.12);
   --accent-glow:      none;
 
   /* State (8) — chroma raised on light surfaces for visibility. */
   --state-success:      oklch(0.55 0.16 142);
   --state-success-soft: oklch(0.55 0.16 142 / 0.12);
-  --state-warning:      oklch(0.62 0.16 80);
-  --state-warning-soft: oklch(0.62 0.16 80 / 0.12);
+  --state-warning:      oklch(0.55 0.17 305);
+  --state-warning-soft: oklch(0.55 0.17 305 / 0.12);
   --state-danger:       oklch(0.55 0.18 28);
   --state-danger-soft:  oklch(0.55 0.18 28 / 0.12);
   --state-info:         oklch(0.52 0.13 240);
@@ -290,25 +340,30 @@
   --shadow-strong: 0 10px 15px -3px rgba(15, 23, 42, 0.12), 0 4px 6px -4px rgba(15, 23, 42, 0.10);
 
   /* Backdrop overlays — slightly stronger on light surfaces. */
-  --backdrop-overlay: oklch(0.15 0.005 80 / 0.50);
-  --backdrop-strong:  oklch(0.15 0.005 80 / 0.48);
-  --backdrop-subtle:  oklch(0.15 0.005 80 / 0.18);
+  --backdrop-overlay: oklch(0.15 0.005 250 / 0.50);
+  --backdrop-strong:  oklch(0.15 0.005 250 / 0.48);
+  --backdrop-subtle:  oklch(0.15 0.005 250 / 0.18);
 
   /* Semantic shadows — deeper on light backgrounds. */
-  --shadow-soft:   0 4px 16px oklch(0.15 0.005 80 / 0.10);
-  --shadow-medium: 0 8px 32px oklch(0.15 0.005 80 / 0.14);
-  --shadow-strong-overlay: 0 10px 30px oklch(0.15 0.005 80 / 0.22);
+  --shadow-soft:   0 4px 16px oklch(0.15 0.005 250 / 0.10);
+  --shadow-medium: 0 8px 32px oklch(0.15 0.005 250 / 0.14);
+  --shadow-strong-overlay: 0 10px 30px oklch(0.15 0.005 250 / 0.22);
 
   /* Backward-compat aliases (mirror :root layout). */
-  --surface-input:        oklch(0.945 0.004 85);
-  --surface-overlay:      oklch(0.930 0.005 85);
-  --text-strong:          oklch(0.150 0.006 80);
-  --accent-border:        oklch(0.55 0.06 65 / 0.30);
+  --surface-elevated:     var(--surface-raised);
+  --surface-input:        oklch(0.965 0.005 250);
+  --surface-overlay:      oklch(0.950 0.006 250);
+  --text-strong:          var(--text-primary);
+  --border-light:         var(--border-subtle);
+  --border-medium:        var(--border-soft);
+  --border-rail:          var(--border-strong);
+  --accent-border:        oklch(0.52 0.16 255 / 0.30);
+  --accent-orange:        var(--accent-primary);
   --shadow-glow:          none;
-  --ai-accent:            #8c7a64;
-  --ai-accent-rgb:        140, 122, 100;
-  --ai-accent-strong:     #b9986f;
-  --ai-accent-strong-rgb: 185, 152, 111;
-  --ai-accent-deep-rgb:   105, 90, 72;
-  --accent-rgb:           140, 122, 100;
+  --ai-accent:            #2563eb;
+  --ai-accent-rgb:        37, 99, 235;
+  --ai-accent-strong:     #3b82f6;
+  --ai-accent-strong-rgb: 59, 130, 246;
+  --ai-accent-deep-rgb:   29, 78, 216;
+  --accent-rgb:           37, 99, 235;
 }

@@ -1,59 +1,73 @@
 import type { SubagentState } from "../stores/types";
 
-/**
- * Coordinator guardrail notices (backend/agent/coordinator.py) arrive as raw
- * protocol summaries on blocked subagent rows:
- *   "Coordinator delegation blocked: required delegated results are already
- *    available but not collected (...)"            → collect_results
- *   "Coordinator delegation blocked: similar delegated work already exists
- *    (...)"                                        → duplicate_delegation
- *   "Coordinator delegation blocked: the active delegated-work budget is full
- *    (...)" / "maximum concurrent subagents ..."   → capacity
- *
- * The ordinary UI never shows those sentences; this module classifies them and
- * provides the user-facing replacement copy.
- */
-export type CoordinatorNoticeKind = "collect_results" | "duplicate_delegation" | "capacity";
+export type CoordinatorNoticeKind =
+  | "direct_tool"
+  | "collect_results"
+  | "duplicate_delegation"
+  | "capacity"
+  | "delegation";
 
-const COORDINATOR_BLOCKED_RE = /coordinator delegation blocked\s*:/i;
+const COORDINATOR_DIRECT_TOOL_RE =
+  /Coordinator mode blocks direct tool|all direct tools .* coordinator mode|direct tools are blocked in coordinator mode/i;
+const COORDINATOR_DELEGATION_RE = /Coordinator delegation blocked/i;
 
-const noticeText = (agent: SubagentState): string =>
-  [agent.summary, agent.detail, agent.currentActivity]
-    .map((value) => String(value || ""))
-    .find((value) => COORDINATOR_BLOCKED_RE.test(value)) || "";
-
-/** Classify a coordinator guardrail notice on a subagent row, if any. */
-export function coordinatorNoticeKindForSubagent(agent: SubagentState): CoordinatorNoticeKind | null {
-  const text = noticeText(agent);
-  if (!text) return null;
-  if (/already available but not collected|not collected/i.test(text)) return "collect_results";
-  if (/similar delegated work already exists|duplicate/i.test(text)) return "duplicate_delegation";
-  if (/budget is full|maximum concurrent subagents|capacity/i.test(text)) return "capacity";
-  // Unknown blocked reason still comes from the coordinator; treat as capacity
-  // (queued) so the raw protocol sentence never leaks into ordinary UI.
-  return "capacity";
+function combinedText(parts: Array<string | undefined | null>): string {
+  return parts.filter(Boolean).join("\n");
 }
 
-const NOTICE_COPY: Record<CoordinatorNoticeKind, string> = {
-  collect_results: "结果正在整理",
-  duplicate_delegation: "相同任务已在处理",
-  capacity: "任务较多，正在依次处理",
-};
-
-/** User-facing replacement copy for a coordinator guardrail notice. */
-export function userFacingCoordinatorNoticeForSubagent(agent: SubagentState): string {
-  const kind = coordinatorNoticeKindForSubagent(agent);
-  return kind ? NOTICE_COPY[kind] : "";
-}
-
-/**
- * The status the UI should treat a subagent as being in. Rows carrying a
- * coordinator guardrail notice are protocol-level "blocked" placeholders, and
- * stay blocked; everything else uses the stored lifecycle status directly.
- */
-export function effectiveSubagentStatus(agent: SubagentState): SubagentState["status"] {
-  if (agent.status === "blocked" || coordinatorNoticeKindForSubagent(agent)) {
-    return "blocked";
+export function coordinatorNoticeKind(text: string): CoordinatorNoticeKind | null {
+  if (COORDINATOR_DIRECT_TOOL_RE.test(text)) return "direct_tool";
+  if (!COORDINATOR_DELEGATION_RE.test(text)) return null;
+  if (/required delegated results are already available|not collected|workflow outputs|subagent results/i.test(text)) {
+    return "collect_results";
   }
-  return agent.status;
+  if (/similar delegated work already exists|duplicate worker/i.test(text)) {
+    return "duplicate_delegation";
+  }
+  if (/active delegated-work budget is full|active item\(s\)|budget is full/i.test(text)) {
+    return "capacity";
+  }
+  return "delegation";
+}
+
+export function coordinatorNoticeKindForSubagent(subagent: SubagentState): CoordinatorNoticeKind | null {
+  return coordinatorNoticeKind(combinedText([
+    subagent.summary,
+    subagent.detail,
+    subagent.currentActivity,
+    subagent.resultContent,
+    subagent.resultError,
+  ]));
+}
+
+export function isInternalCoordinatorNotice(text: string): boolean {
+  return coordinatorNoticeKind(text) !== null;
+}
+
+export function userFacingCoordinatorNotice(kind: CoordinatorNoticeKind | null): string {
+  switch (kind) {
+    case "direct_tool":
+      return "任务缺少必要的读取或搜索能力";
+    case "collect_results":
+      return "结果正在整理";
+    case "duplicate_delegation":
+      return "相同任务已在处理中";
+    case "capacity":
+      return "任务较多，正在依次处理";
+    case "delegation":
+      return "任务已暂停，请查看现有结果";
+    default:
+      return "";
+  }
+}
+
+export function userFacingCoordinatorNoticeForSubagent(subagent: SubagentState): string {
+  return userFacingCoordinatorNotice(coordinatorNoticeKindForSubagent(subagent));
+}
+
+export function effectiveSubagentStatus(subagent: SubagentState): SubagentState["status"] {
+  const kind = coordinatorNoticeKindForSubagent(subagent);
+  if (kind === "direct_tool" && subagent.status === "done") return "error";
+  if (kind && kind !== "direct_tool" && subagent.status === "done") return "blocked";
+  return subagent.status;
 }

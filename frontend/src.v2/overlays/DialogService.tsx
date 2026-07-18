@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { type CSSProperties, useEffect, useRef, useState } from "react";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 
 interface ConfirmOptions {
   title?: string;
@@ -80,17 +81,28 @@ export function showPrompt(options: PromptOptions): Promise<string | null> {
 
 // --- Dialog Components ---
 
-const Backdrop = ({ children, onDismiss }: { children: React.ReactNode; onDismiss: () => void }) => (
-  <div
-    role="presentation"
-    onClick={onDismiss}
-    style={backdropStyle}
-  >
-    <div role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()} style={panelStyle}>
-      {children}
+const Backdrop = ({ children, label, onDismiss }: { children: React.ReactNode; label: string; onDismiss: () => void }) => {
+  const dialogRef = useFocusTrap(true);
+  return (
+    <div
+      role="presentation"
+      onClick={onDismiss}
+      style={backdropStyle}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={label}
+        tabIndex={-1}
+        onClick={(e) => e.stopPropagation()}
+        style={panelStyle}
+      >
+        {children}
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 const ConfirmDialog = ({
   title,
@@ -103,24 +115,23 @@ const ConfirmDialog = ({
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") onResult(false);
-      if (e.key === "Enter") onResult(true);
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
   }, [onResult]);
 
   return (
-    <Backdrop onDismiss={() => onResult(false)}>
+    <Backdrop label={title || "Confirm action"} onDismiss={() => onResult(false)}>
       {title && <div style={titleStyle}>{title}</div>}
       <div style={messageStyle}>{message}</div>
       <div style={actionsStyle}>
-        <button type="button" onClick={() => onResult(false)} style={cancelBtnStyle}>
+        <button type="button" onClick={() => onResult(false)} autoFocus={Boolean(danger)} style={cancelBtnStyle}>
           {cancelLabel}
         </button>
         <button
           type="button"
           onClick={() => onResult(true)}
-          autoFocus
+          autoFocus={!danger}
           style={{ ...confirmBtnStyle, background: danger ? "var(--state-danger)" : "var(--accent-primary)" }}
         >
           {confirmLabel}
@@ -145,7 +156,7 @@ const AlertDialog = ({
   }, [onClose]);
 
   return (
-    <Backdrop onDismiss={onClose}>
+    <Backdrop label={title || "Alert"} onDismiss={onClose}>
       {title && <div style={titleStyle}>{title}</div>}
       <div style={messageStyle}>{message}</div>
       <div style={actionsStyle}>
@@ -177,7 +188,7 @@ const PromptDialog = ({
   const submit = () => onResult(value || null);
 
   return (
-    <Backdrop onDismiss={() => onResult(null)}>
+    <Backdrop label={title || "Input required"} onDismiss={() => onResult(null)}>
       {title && <div style={titleStyle}>{title}</div>}
       <div style={messageStyle}>{message}</div>
       <input

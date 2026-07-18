@@ -2,6 +2,7 @@ import type { ClientCommand } from "./events";
 import { pushToast } from "../overlays/ToastContainer";
 
 type Sender = (command: ClientCommand) => boolean;
+type SendClientCommandOptions = { silent?: boolean };
 
 let sender: Sender | null = null;
 
@@ -9,13 +10,18 @@ export const registerWebSocketSender = (nextSender: Sender | null) => {
   sender = nextSender;
 };
 
-export const sendClientCommand = (command: ClientCommand): boolean => {
+const shouldNotifyOffline = (command: ClientCommand, options?: SendClientCommandOptions): boolean =>
+  !options?.silent && !(command as ClientCommand & { silent?: boolean }).silent;
+
+export const sendClientCommand = (command: ClientCommand, options?: SendClientCommandOptions): boolean => {
   if (!sender) {
-    pushToast("Operation failed: connection is offline.", "error", 3000);
+    if (shouldNotifyOffline(command, options)) {
+      pushToast("Operation failed: connection is offline.", "error", 3000);
+    }
     return false;
   }
   const sent = sender(command);
-  if (!sent) {
+  if (!sent && shouldNotifyOffline(command, options)) {
     pushToast("Operation failed: connection is offline.", "error", 3000);
   }
   return sent;

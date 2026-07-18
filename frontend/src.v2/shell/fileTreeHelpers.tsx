@@ -1,19 +1,33 @@
 import type { ReactNode } from "react";
-import {
-  File,
-  FileCode,
-  FileText,
-  Folder,
-  Hash,
-  Image,
-  FileJson,
-  FileCog,
-  FileArchive,
-  FileType,
-} from "lucide-react";
+import { Icon } from "@iconify/react";
+import type { IconifyIcon } from "@iconify/types";
+import defaultFileIcon from "@iconify-icons/vscode-icons/default-file";
+import defaultFolderIcon from "@iconify-icons/vscode-icons/default-folder";
+import defaultFolderOpenedIcon from "@iconify-icons/vscode-icons/default-folder-opened";
+import cssIcon from "@iconify-icons/vscode-icons/file-type-css";
+import excelIcon from "@iconify-icons/vscode-icons/file-type-excel";
+import gitIcon from "@iconify-icons/vscode-icons/file-type-git";
+import htmlIcon from "@iconify-icons/vscode-icons/file-type-html";
+import imageIcon from "@iconify-icons/vscode-icons/file-type-image";
+import jsIcon from "@iconify-icons/vscode-icons/file-type-js-official";
+import jsonIcon from "@iconify-icons/vscode-icons/file-type-json-official";
+import markdownIcon from "@iconify-icons/vscode-icons/file-type-markdown";
+import npmIcon from "@iconify-icons/vscode-icons/file-type-npm";
+import pdfIcon from "@iconify-icons/vscode-icons/file-type-pdf2";
+import powerpointIcon from "@iconify-icons/vscode-icons/file-type-powerpoint";
+import powershellIcon from "@iconify-icons/vscode-icons/file-type-powershell";
+import pythonIcon from "@iconify-icons/vscode-icons/file-type-python";
+import reactIcon from "@iconify-icons/vscode-icons/file-type-reactjs";
+import shellIcon from "@iconify-icons/vscode-icons/file-type-shell";
+import textIcon from "@iconify-icons/vscode-icons/file-type-text";
+import tomlIcon from "@iconify-icons/vscode-icons/file-type-toml";
+import tsIcon from "@iconify-icons/vscode-icons/file-type-typescript-official";
+import wordIcon from "@iconify-icons/vscode-icons/file-type-word";
+import yamlIcon from "@iconify-icons/vscode-icons/file-type-yaml";
+import zipIcon from "@iconify-icons/vscode-icons/file-type-zip";
 import type { WorkspaceTreeNode } from "../protocol/workspace";
 import { isDesktop, type FsEntry } from "../desktop/runtime";
-import { withRuntimeToken } from "../protocol/api";
+import { workspaceRawResourceUrlWithToken } from "../protocol/api";
 import { workspaceDisplayName } from "../lib/workspace-display";
 import {
   type FileSearchResult,
@@ -115,8 +129,41 @@ export const joinWorkspacePath = (root: string, path: string): string => {
   return `${root.replace(/[\\/]+$/, "")}/${path.replace(/^[\\/]+/, "")}`;
 };
 
-export const normalizeDesktopExpandedPaths = (workspace: string, paths: Iterable<string>): Set<string> =>
-  new Set(Array.from(paths, (path) => joinWorkspacePath(workspace, path)));
+const treePathKey = (path: string): string => {
+  const normalized = normalizeTreePath(path).replace(/\\/g, "/").replace(/\/+/g, "/");
+  const driveMatch = normalized.match(/^([A-Za-z]:)(?:\/|$)/);
+  const prefix = driveMatch ? `${driveMatch[1]}/` : normalized.startsWith("/") ? "/" : "";
+  const body = driveMatch ? normalized.slice(driveMatch[0].length) : normalized.replace(/^\/+/, "");
+  const parts: string[] = [];
+  for (const part of body.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      if (parts.length > 0 && parts[parts.length - 1] !== "..") parts.pop();
+      else parts.push(part);
+      continue;
+    }
+    parts.push(part);
+  }
+  return `${prefix}${parts.join("/")}`.replace(/\/+$/, "").toLowerCase();
+};
+
+export const isPathInsideTreeRoot = (root: string, path: string): boolean => {
+  const rootKey = treePathKey(root);
+  const pathKey = treePathKey(path);
+  return Boolean(rootKey && (pathKey === rootKey || pathKey.startsWith(`${rootKey}/`)));
+};
+
+export const normalizeDesktopExpandedPaths = (workspace: string, paths: Iterable<string>): Set<string> => {
+  const normalizedWorkspace = normalizeTreePath(workspace);
+  const next = new Set<string>();
+  for (const rawPath of paths) {
+    const normalizedPath = joinWorkspacePath(workspace, rawPath);
+    if (isPathInsideTreeRoot(normalizedWorkspace, normalizedPath)) {
+      next.add(normalizedPath);
+    }
+  }
+  return next;
+};
 
 export const normalizeChangePath = (path: string): string =>
   path.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/\/$/, "");
@@ -134,7 +181,28 @@ export const parentTreePath = (path: string, workingDirectory: string): string =
 export const normalizeTreePath = (path: string): string => path.replace(/\\/g, "/").replace(/\/+$/, "");
 
 export const isSameTreePath = (left?: string | null, right?: string | null): boolean =>
-  Boolean(left && right && normalizeTreePath(left) === normalizeTreePath(right));
+  Boolean(left && right && treePathKey(left) === treePathKey(right));
+
+export const findTreeNode = (
+  node: WorkspaceTreeNode | null | undefined,
+  path: string,
+): WorkspaceTreeNode | null => {
+  if (!node) return null;
+  if (isSameTreePath(node.path, path)) return node;
+  for (const child of node.children ?? []) {
+    const found = findTreeNode(child, path);
+    if (found) return found;
+  }
+  return null;
+};
+
+export const hasLoadedDirectoryNode = (
+  node: WorkspaceTreeNode | null | undefined,
+  path: string,
+): boolean => {
+  const found = findTreeNode(node, path);
+  return Boolean(found?.is_dir);
+};
 
 // ── Search / preview helpers ────────────────────────────────────────────
 
@@ -153,7 +221,7 @@ export const isPreviewableFile = (path: string): boolean =>
   /(\.png|\.jpe?g|\.gif|\.webp|\.svg|\.pdf)$/i.test(path);
 
 export const previewUrlForPath = (path: string): string => {
-  if (!isDesktop()) return withRuntimeToken(`/api/workspace/raw?path=${encodeURIComponent(path)}`);
+  if (!isDesktop()) return workspaceRawResourceUrlWithToken(path);
   const normalized = path.replace(/\\/g, "/");
   const withLeadingSlash = /^[a-zA-Z]:\//.test(normalized) ? `/${normalized}` : normalized;
   return encodeURI(`file://${withLeadingSlash}`);
@@ -203,32 +271,148 @@ export const formatBytes = (value: number): string => {
 
 // ── Icon helpers ───────────────────────────────────────────────────────
 
-export const iconColor = (node: WorkspaceTreeNode): string => {
-  if (node.is_dir) return "var(--accent-primary)";
-  const ext = node.name.split(".").pop()?.toLowerCase() ?? "";
-  if (["ts", "tsx"].includes(ext)) return "var(--icon-ts, #3178c6)";
-  if (["js", "jsx", "mjs", "cjs"].includes(ext)) return "var(--icon-js, #d6b84f)";
-  if (["py"].includes(ext)) return "var(--icon-py, #4b8bbe)";
-  if (["html", "xml"].includes(ext)) return "var(--icon-html, #e44d26)";
-  if (["json", "yaml", "yml", "toml"].includes(ext)) return "var(--state-warning)";
-  if (["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(ext)) return "var(--state-success)";
-  if (["zip", "gz", "tar", "rar", "7z"].includes(ext)) return "var(--text-muted)";
-  if (["md", "txt", "pdf"].includes(ext)) return "var(--text-muted)";
-  if (["css", "scss"].includes(ext)) return "var(--accent-primary)";
-  return "var(--text-muted)";
+export type FileGlyphKind =
+  | "archive"
+  | "code"
+  | "config"
+  | "data"
+  | "database"
+  | "document"
+  | "font"
+  | "generic"
+  | "git"
+  | "image"
+  | "lock"
+  | "package"
+  | "pdf"
+  | "style"
+  | "terminal";
+
+const CODE_EXTENSIONS = new Set([
+  "c", "cc", "cjs", "cpp", "cs", "dart", "ex", "exs", "go", "h", "hpp", "html", "java", "js", "jsx", "kt", "lua", "mjs", "php", "py", "r", "rb", "rs", "scala", "svelte", "swift", "ts", "tsx", "vue",
+]);
+const DATA_EXTENSIONS = new Set(["csv", "ini", "json", "toml", "xml", "yaml", "yml"]);
+const DATABASE_EXTENSIONS = new Set(["db", "sqlite", "sqlite3", "sql"]);
+const DOCUMENT_EXTENSIONS = new Set(["doc", "docx", "md", "mdx", "rst", "txt"]);
+const IMAGE_EXTENSIONS = new Set(["gif", "ico", "jpeg", "jpg", "png", "svg", "webp", "bmp"]);
+const ARCHIVE_EXTENSIONS = new Set(["7z", "gz", "rar", "tar", "tgz", "zip"]);
+const FONT_EXTENSIONS = new Set(["otf", "ttf", "woff", "woff2"]);
+const STYLE_EXTENSIONS = new Set(["css", "less", "sass", "scss"]);
+const TERMINAL_EXTENSIONS = new Set(["bat", "cmd", "ps1", "sh", "zsh"]);
+
+export const fileGlyphKind = (name: string): FileGlyphKind => {
+  const lower = name.toLowerCase();
+  const base = lower.includes("/") || lower.includes("\\")
+    ? (lower.split(/[/\\]/).pop() ?? lower)
+    : lower;
+  const ext = base.includes(".") ? base.split(".").pop() ?? "" : "";
+  if (base.endsWith(".lock") || base.includes("-lock.") || base === "lockfile") return "lock";
+  if (base.startsWith(".git") || base === ".gitattributes" || base === ".gitignore") return "git";
+  if (
+    base === "package.json"
+    || base === "package-lock.json"
+    || base === "pnpm-lock.yaml"
+    || base === "yarn.lock"
+    || base === "cargo.toml"
+    || base.startsWith("requirements")
+  ) return "package";
+  if (
+    base.startsWith(".env")
+    || base.includes("config")
+    || ["dockerfile", "makefile", "pyproject.toml", "compose.yml", "compose.yaml", "tsconfig.json", "jsconfig.json"].includes(base)
+  ) return "config";
+  if (/^(readme|license|changelog|contributing)(\.|$)/.test(base)) return "document";
+  if (ext === "pdf") return "pdf";
+  if (CODE_EXTENSIONS.has(ext)) return "code";
+  if (STYLE_EXTENSIONS.has(ext)) return "style";
+  if (DATA_EXTENSIONS.has(ext)) return "data";
+  if (DATABASE_EXTENSIONS.has(ext)) return "database";
+  if (DOCUMENT_EXTENSIONS.has(ext)) return "document";
+  if (IMAGE_EXTENSIONS.has(ext)) return "image";
+  if (ARCHIVE_EXTENSIONS.has(ext)) return "archive";
+  if (FONT_EXTENSIONS.has(ext)) return "font";
+  if (TERMINAL_EXTENSIONS.has(ext)) return "terminal";
+  return "generic";
 };
 
-export const fileIcon = (name: string): ReactNode => {
-  const ext = name.split(".").pop()?.toLowerCase() ?? "";
+const officialFileIcon = (name: string): IconifyIcon => {
   const lower = name.toLowerCase();
-  if (lower.includes("config") || lower.startsWith(".env")) return <FileCog size={16} />;
-  if (["ts", "tsx", "js", "jsx", "py", "html", "go", "rs", "java", "c", "cpp"].includes(ext)) return <FileCode size={16} />;
-  if (["json"].includes(ext)) return <FileJson size={16} />;
-  if (["yaml", "yml", "toml"].includes(ext)) return <FileCog size={16} />;
-  if (["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(ext)) return <Image size={16} />;
-  if (["zip", "gz", "tar", "rar", "7z"].includes(ext)) return <FileArchive size={16} />;
-  if (["woff", "woff2", "ttf", "otf"].includes(ext)) return <FileType size={16} />;
-  if (["md", "txt", "pdf"].includes(ext)) return <FileText size={16} />;
-  if (["css", "scss"].includes(ext)) return <Hash size={16} />;
-  return <File size={16} />;
+  const ext = lower.includes(".") ? lower.split(".").pop() ?? "" : "";
+  if (lower === "package.json" || lower === "package-lock.json") return npmIcon;
+  if (lower.startsWith(".git") || lower === "gitignore") return gitIcon;
+  if (ext === "pdf") return pdfIcon;
+  if (ext === "doc" || ext === "docx") return wordIcon;
+  if (["xls", "xlsx", "csv"].includes(ext)) return excelIcon;
+  if (["ppt", "pptx"].includes(ext)) return powerpointIcon;
+  if (ext === "py") return pythonIcon;
+  if (ext === "ts") return tsIcon;
+  if (ext === "tsx" || ext === "jsx") return reactIcon;
+  if (ext === "js") return jsIcon;
+  if (ext === "json") return jsonIcon;
+  if (ext === "md" || ext === "mdx") return markdownIcon;
+  if (ext === "html") return htmlIcon;
+  if (ext === "css" || ext === "scss") return cssIcon;
+  if (ext === "ps1") return powershellIcon;
+  if (["sh", "bash", "zsh"].includes(ext)) return shellIcon;
+  if (["yaml", "yml"].includes(ext)) return yamlIcon;
+  if (ext === "toml") return tomlIcon;
+  if (["zip", "7z", "rar", "tar", "gz"].includes(ext)) return zipIcon;
+  if (["png", "jpg", "jpeg", "gif", "svg", "webp", "ico"].includes(ext)) return imageIcon;
+  if (["txt", "log"].includes(ext) || lower === "license" || lower === "readme") return textIcon;
+  return defaultFileIcon;
 };
+
+const FILE_GLYPH_COLORS: Record<FileGlyphKind, string> = {
+  archive: "var(--mc-icon-archive, var(--text-muted))",
+  code: "var(--mc-icon-code, var(--state-info))",
+  config: "var(--mc-icon-config, var(--state-warning))",
+  data: "var(--mc-icon-data, var(--accent-primary))",
+  database: "var(--mc-icon-database, var(--accent-primary))",
+  document: "var(--mc-icon-document, var(--text-muted))",
+  font: "var(--mc-icon-font, var(--text-secondary))",
+  generic: "var(--mc-icon-generic, var(--text-muted))",
+  git: "var(--mc-icon-git, var(--text-muted))",
+  image: "var(--mc-icon-media, var(--state-success))",
+  lock: "var(--mc-icon-config, var(--state-warning))",
+  package: "var(--mc-icon-package, var(--state-warning))",
+  pdf: "var(--mc-icon-pdf, var(--state-danger))",
+  style: "var(--mc-icon-style, var(--accent-primary))",
+  terminal: "var(--mc-icon-terminal, var(--text-secondary))",
+};
+
+export const fileGlyphColor = (name: string): string =>
+  FILE_GLYPH_COLORS[fileGlyphKind(name)];
+
+export const iconColor = (node: WorkspaceTreeNode): string => {
+  if (node.is_dir) return "var(--mc-icon-folder, var(--text-secondary))";
+  return fileGlyphColor(node.name);
+};
+
+export const fileIcon = (
+  name: string,
+  options: { size?: number; className?: string } = {},
+): ReactNode => {
+  const kind = fileGlyphKind(name);
+  const size = options.size ?? 16;
+  const className = options.className ?? "file-tree-file-icon";
+  return (
+    <Icon
+      icon={officialFileIcon(name)}
+      width={size}
+      height={size}
+      className={className}
+      data-file-kind={kind}
+      aria-hidden="true"
+    />
+  );
+};
+
+export const folderIcon = (expanded: boolean, size = 16): ReactNode => (
+  <Icon
+    icon={expanded ? defaultFolderOpenedIcon : defaultFolderIcon}
+    width={size}
+    height={size}
+    className="file-tree-folder-icon"
+    aria-hidden="true"
+  />
+);

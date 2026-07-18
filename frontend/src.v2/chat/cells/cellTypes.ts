@@ -5,6 +5,7 @@
 
 import type { ToolCallRecord } from "../../lib/tool-call-reducer";
 import type { TurnActivityKind } from "../../lib/turn-projection";
+import type { ActivityItem } from "../../agent-loop/activity-item";
 import type { Citation } from "../../stores/types";
 
 // ── Plan Step ───────────────────────────────────────────────────────
@@ -35,11 +36,18 @@ export interface UserMessageCellState {
   id: string;
   content: string;
   attachments?: {
+    id?: string;
+    artifactId?: string;
+    docId?: string;
     name: string;
     type: string;
     size?: number;
+    dataUrl?: string;
   }[];
   createdAt: number;
+  queueState?: "queued" | "cancelled";
+  queuePosition?: number;
+  queueMessageId?: string;
 }
 
 export interface StatusNoticeCellState {
@@ -78,8 +86,19 @@ export interface ActivityCellState {
     total?: number;
     text?: string;
   };
+  skill?: SkillProcessMetadata;
   startedAt: number;
   completedAt?: number;
+  canonical?: ActivityItem;
+}
+
+export interface SkillProcessMetadata {
+  name?: string;
+  triggerMode?: string;
+  sourceLevel?: string;
+  reason?: string;
+  tokenEstimate?: number;
+  content?: string;
 }
 
 export interface ActivityGroupCellState {
@@ -170,7 +189,7 @@ export interface AssistantMarkdownCellState {
   isStreaming?: boolean; // ✅ 添加流式状态标志
   /** Origin of the reply text. Used for data-source attribution, not for
    * visual divergence in this phase. */
-  source?: "send_message" | "stream" | "fallback" | "partial";
+  source?: "reply" | "stream" | "fallback" | "partial";
   /** Attachments carried by a BriefTool (send_message) reply. Rendered as a
    * compact chip list below the answer; image attachments are previewable. */
   attachments?: AssistantReplyAttachment[];
@@ -193,12 +212,24 @@ export interface StreamingAssistantTailCellState {
   updatedAt: number;
 }
 
+export interface StreamingAssistantNarrationCellState {
+  kind: "streaming_assistant_narration";
+  id: string;
+  partialMarkdown: string;
+  isStreaming: boolean;
+  updatedAt: number;
+  eventIndex?: number;
+}
+
 export interface ThinkingCellState {
   kind: "thinking";
   id: string;
   content: string;
   source: "model_preamble" | "post_tool" | "provider" | "reasoning" | "runtime";
+  isRawProviderReasoning?: boolean;
+  providerReasoningType?: string;
   phase?: string; // Optional phase indicator (e.g., "analyzing", "planning")
+  isStreaming?: boolean;
   createdAt: number;
 }
 
@@ -217,6 +248,7 @@ export type HistoryCellState =
   | ErrorCellState
   | AssistantMarkdownCellState
   | StreamingAssistantTailCellState
+  | StreamingAssistantNarrationCellState
   | ThinkingCellState;
 
 // ── Turn State ──────────────────────────────────────────────────────

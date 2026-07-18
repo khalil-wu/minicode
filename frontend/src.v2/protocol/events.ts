@@ -33,6 +33,7 @@ export type {
   AgentLoopEvent,
   AgentItemEvent,
   AgentProgressEvent,
+  RuntimeSpanEvent,
   AgentRunStartedEvent,
   AgentRunUpdatedEvent,
   AgentRunCompletedEvent,
@@ -40,21 +41,21 @@ export type {
   VerificationStartedEvent,
   VerificationResultEvent,
   ApprovalRequestEvent,
-  ApprovalFileDiffEvent,
+  PermissionDecisionEvent,
+    ApprovalFileDiffEvent,
   ApprovalCancelledEvent,
   AskUserEvent,
   DoneEvent,
   ErrorEvent,
   StreamResumeEvent,
-  SubagentStartEvent,
-  SubagentEventEvent,
-  SubagentProgressEvent,
-  SubagentDoneEvent,
-  RuntimeSpanEvent,
   StreamEventEvent,
   RateLimitEvent,
   SessionStateEvent,
   ToolUseSummaryEvent,
+  SubagentStartEvent,
+  SubagentEventEvent,
+  SubagentProgressEvent,
+  SubagentDoneEvent,
   CitationAddEvent,
   ArtifactPreviewEvent,
   InspectorUpdateEvent,
@@ -69,8 +70,12 @@ export type {
   TaskEditCommand,
   PlanEditCommand,
   AgentResumeCommand,
+  WorkflowResumeCommand,
   VerificationRunCommand,
   SubagentCancelCommand,
+  SubagentStatusCommand,
+  SendMessageCommand,
+  SubagentResumeCommand,
   InspectorFocusCommand,
 } from "./streaming-types";
 
@@ -89,7 +94,10 @@ export type {
   ConversationListEvent,
   ConversationSwitchedEvent,
   LlmModelUpdatedEvent,
+  UserMessageQueueUpdatedEvent,
   UserMessageCommand,
+  UserMessageQueueCancelCommand,
+  UserMessageQueueSteerCommand,
   ApprovalCommand,
   AnswerCommand,
   InterruptCommand,
@@ -98,8 +106,11 @@ export type {
   ConversationCreateCommand,
   ConversationSwitchCommand,
   ConversationClearCommand,
+  ConversationTruncateCommand,
   ConversationDeleteCommand,
   ConversationWorktreeCleanupCommand,
+  ConversationWorktreeHandoffPreflightCommand,
+  ConversationWorktreeHandoffExecuteCommand,
   ConversationArchiveCommand,
   ConversationRenameCommand,
   ConversationGoalSetCommand,
@@ -195,6 +206,7 @@ export type {
   SessionSnapshotPayload,
   SessionWorkspacePayload,
   SessionRestoredEvent,
+  SessionReplayEvent,
   SessionSyncedEvent,
   SkillsListCommand,
   SkillsMarketplaceListCommand,
@@ -267,10 +279,13 @@ export interface UntypedServerEvent {
     | "agent.run.started"
     | "agent.run.updated"
     | "agent.run.completed"
+    | "user_message.queue.updated"
     | "agent.phase.updated"
     | "agent.item"
     | "agent.progress"
+    | "runtime.span"
     | "approval_request"
+    | "permission.decision"
     | "approval.cancelled"
     | "ask_user"
     | "done"
@@ -286,11 +301,6 @@ export interface UntypedServerEvent {
     | "subagent.event"
     | "subagent.progress"
     | "subagent.done"
-    | "runtime.span"
-    | "stream_event"
-    | "rate_limit"
-    | "session.state_changed"
-    | "tool_use_summary"
     | "verification.started"
     | "verification.result"
     | "citation.add"
@@ -350,8 +360,10 @@ export interface UntypedClientCommand {
     | "ping"
     | "task.edit"
     | "agent.resume"
+    | "workflow.resume"
     | "verification.run"
     | "subagent.cancel"
+    | "subagent.resume"
     | "inspector.focus"
     | "terminal.create"
     | "terminal.input"
@@ -381,6 +393,7 @@ export interface UntypedClientCommand {
     | "conversation.create"
     | "conversation.switch"
     | "conversation.clear"
+    | "conversation.truncate"
     | "conversation.delete"
     | "conversation.worktree.cleanup"
     | "conversation.archive"
@@ -412,6 +425,7 @@ import type {
   AgentLoopEvent,
   AgentItemEvent,
   AgentProgressEvent,
+  RuntimeSpanEvent,
   AgentRunStartedEvent,
   AgentRunUpdatedEvent,
   AgentRunCompletedEvent,
@@ -419,12 +433,17 @@ import type {
   VerificationStartedEvent,
   VerificationResultEvent,
   ApprovalRequestEvent,
+  PermissionDecisionEvent,
   ApprovalFileDiffEvent,
   ApprovalCancelledEvent,
   AskUserEvent,
   DoneEvent,
   ErrorEvent,
   StreamResumeEvent,
+  StreamEventEvent,
+  RateLimitEvent,
+  SessionStateEvent,
+  ToolUseSummaryEvent,
   PlanStepUpdatedEvent,
   PlanUpdatedEvent,
   TaskUpdateEvent,
@@ -432,11 +451,6 @@ import type {
   SubagentEventEvent,
   SubagentProgressEvent,
   SubagentDoneEvent,
-  RuntimeSpanEvent,
-  StreamEventEvent,
-  RateLimitEvent,
-  SessionStateEvent,
-  ToolUseSummaryEvent,
   CitationAddEvent,
   ArtifactPreviewEvent,
   InspectorUpdateEvent,
@@ -451,6 +465,7 @@ import type {
   ConversationListEvent,
   ConversationSwitchedEvent,
   LlmModelUpdatedEvent,
+  UserMessageQueueUpdatedEvent,
 } from "./conversation-types";
 
 import type {
@@ -505,6 +520,7 @@ import type {
   RuntimeCapabilitiesEvent,
   ClientCommandAckEvent,
   SessionRestoredEvent,
+  SessionReplayEvent,
   SessionSyncedEvent,
 } from "./common-types";
 
@@ -512,6 +528,8 @@ export interface ServerEventEnvelope {
   seq?: number;
   event_id?: string;
   timestamp?: string;
+  task_id?: string;
+  turn_id?: string;
 }
 
 type ServerEventPayload =
@@ -524,6 +542,7 @@ type ServerEventPayload =
   | AgentLoopEvent
   | AgentItemEvent
   | AgentProgressEvent
+  | RuntimeSpanEvent
   | AgentRunStartedEvent
   | AgentRunUpdatedEvent
   | AgentRunCompletedEvent
@@ -531,6 +550,7 @@ type ServerEventPayload =
   | VerificationStartedEvent
   | VerificationResultEvent
   | ApprovalRequestEvent
+  | PermissionDecisionEvent
   | ApprovalFileDiffEvent
   | ApprovalCancelledEvent
   | AskUserEvent
@@ -547,11 +567,6 @@ type ServerEventPayload =
   | SubagentEventEvent
   | SubagentProgressEvent
   | SubagentDoneEvent
-  | RuntimeSpanEvent
-  | StreamEventEvent
-  | RateLimitEvent
-  | SessionStateEvent
-  | ToolUseSummaryEvent
   | CitationAddEvent
   | ArtifactPreviewEvent
   | InspectorUpdateEvent
@@ -583,11 +598,13 @@ type ServerEventPayload =
   | ConversationListEvent
   | ConversationSwitchedEvent
   | LlmModelUpdatedEvent
+  | UserMessageQueueUpdatedEvent
   | SkillsListEvent
   | SkillsMarketplaceListEvent
   | RuntimeCapabilitiesEvent
   | ClientCommandAckEvent
   | SessionRestoredEvent
+  | SessionReplayEvent
   | SessionSyncedEvent
   | PreviewServersUpdatedEvent
   | PreviewServerDetectedEvent
@@ -609,6 +626,8 @@ export type ServerEvent = ServerEventPayload & ServerEventEnvelope;
 
 import type {
   UserMessageCommand,
+  UserMessageQueueCancelCommand,
+  UserMessageQueueSteerCommand,
   ApprovalCommand,
   AnswerCommand,
   InterruptCommand,
@@ -617,8 +636,11 @@ import type {
   ConversationCreateCommand,
   ConversationSwitchCommand,
   ConversationClearCommand,
+  ConversationTruncateCommand,
   ConversationDeleteCommand,
   ConversationWorktreeCleanupCommand,
+  ConversationWorktreeHandoffPreflightCommand,
+  ConversationWorktreeHandoffExecuteCommand,
   ConversationArchiveCommand,
   ConversationRenameCommand,
   ConversationGoalSetCommand,
@@ -630,8 +652,12 @@ import type {
   TaskEditCommand,
   PlanEditCommand,
   AgentResumeCommand,
+  WorkflowResumeCommand,
   VerificationRunCommand,
   SubagentCancelCommand,
+  SubagentStatusCommand,
+  SendMessageCommand,
+  SubagentResumeCommand,
   InspectorFocusCommand,
 } from "./streaming-types";
 
@@ -683,6 +709,8 @@ export interface ClientCommandEnvelope {
 
 type ClientCommandPayload =
   | UserMessageCommand
+  | UserMessageQueueCancelCommand
+  | UserMessageQueueSteerCommand
   | ApprovalCommand
   | AnswerCommand
   | InterruptCommand
@@ -690,8 +718,12 @@ type ClientCommandPayload =
   | TaskEditCommand
   | PlanEditCommand
   | AgentResumeCommand
+  | WorkflowResumeCommand
   | VerificationRunCommand
   | SubagentCancelCommand
+  | SubagentStatusCommand
+  | SendMessageCommand
+  | SubagentResumeCommand
   | InspectorFocusCommand
   | TerminalCreateCommand
   | TerminalInputCommand
@@ -722,8 +754,11 @@ type ClientCommandPayload =
   | ConversationCreateCommand
   | ConversationSwitchCommand
   | ConversationClearCommand
+  | ConversationTruncateCommand
   | ConversationDeleteCommand
   | ConversationWorktreeCleanupCommand
+  | ConversationWorktreeHandoffPreflightCommand
+  | ConversationWorktreeHandoffExecuteCommand
   | ConversationArchiveCommand
   | ConversationRenameCommand
   | ConversationGoalSetCommand
@@ -758,17 +793,24 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   "agent.run.started",
   "agent.run.updated",
   "agent.run.completed",
+  "user_message.queue.updated",
   "agent.phase.updated",
   "agent.item",
   "agent.progress",
+  "runtime.span",
   "task.update",
   "approval_request",
+  "permission.decision",
   "approval.cancelled",
   "approval.file_diff",
   "ask_user",
   "done",
   "error",
   "stream_resume",
+  "stream_event",
+  "rate_limit",
+  "session.state_changed",
+  "tool_use_summary",
   // Subagents + citations + inspector
   "subagent.start",
   "subagent.event",
@@ -776,11 +818,6 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   "subagent.done",
   "verification.started",
   "verification.result",
-  "runtime.span",
-  "stream_event",
-  "rate_limit",
-  "session.state_changed",
-  "tool_use_summary",
   "citation.add",
   "inspector.update",
   "plan_step_updated",
@@ -788,6 +825,9 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   // Context lifecycle
   "context_usage",
   "context_compacted",
+  "context_forked",
+  "context_ledger",
+  "context_side_query_result",
   "budget_update",
   "budget.warning",
   // Conversation runtime
@@ -832,6 +872,7 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   "workspace.recent.list",
   "env.list",
   "git.pr_status",
+  "checkpoint.created",
   "checkpoint.list",
   "checkpoint.rewound",
   "checkpoint.run.list",
@@ -848,6 +889,7 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   "scheduler.list",
   "connectors.marketplace.list",
   "session.restored",
+  "session.replay",
   "session.synced",
   "runtime.capabilities",
   "client.command.ack",
@@ -870,6 +912,8 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
 export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<ClientCommandType>([
   // Chat
   "user_message",
+  "user_message.queue.cancel",
+  "user_message.queue.steer",
   "approval",
   "answer",
   "interrupt",
@@ -887,6 +931,7 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "conversation.switch",
   "conversation.list",
   "conversation.clear",
+  "conversation.truncate",
   "conversation.delete",
   "conversation.archive",
   "conversation.unarchive",
@@ -895,10 +940,16 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "conversation.permission_mode.set",
   "conversation.goal.set",
   "conversation.worktree.cleanup",
+  "conversation.worktree.handoff.preflight",
+  "conversation.worktree.handoff.execute",
   "conversation.permission.rules.list",
   "conversation.permission.rules.add",
   "conversation.permission.rules.remove",
   "permissions.content_rule.add",
+  "context.compact",
+  "context.fork",
+  "context.ledger",
+  "context.side_query",
   // Session inspection
   "session.tasks.inspect",
   "session.status.inspect",
@@ -936,9 +987,12 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "plan.edit",
   "task.stop",
   "agent.resume",
+  "workflow.resume",
   "verification.run",
   "subagent.cancel",
   "subagent.status",
+  "subagent.resume",
+  "send_message",
   "inspector.focus",
   // Skills / commands catalog
   "skills.list",

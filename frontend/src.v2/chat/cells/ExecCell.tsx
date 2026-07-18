@@ -1,17 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type React from "react";
 import {
-  CheckCircle2,
-  CircleAlert,
-  CircleDashed,
-  Clock3,
   Copy,
-  LoaderCircle,
   StopCircle,
 } from "lucide-react";
 import type { ExecCellState } from "./cellTypes";
 import { shortCommand } from "./activityCellHelpers";
 import { extractCommandCommentLabel } from "../../lib/command-comment-label";
+import { StatusIcon } from "../../components/icons";
 import "./cells.css";
 
 const streamOutputText = (full: string | undefined, preview: string[]): string =>
@@ -28,9 +24,7 @@ export function ExecCell({
   onStop?: () => void;
 }) {
   const [expanded, setExpanded] = useState(
-    cell.status === "running" ||
-    cell.status === "pending_approval" ||
-    !cell.collapsed,
+    cell.status === "pending_approval" || (cell.status !== "running" && !cell.collapsed),
   );
   const [copied, setCopied] = useState(false);
   const stdoutText = useMemo(
@@ -49,10 +43,6 @@ export function ExecCell({
   }, [stderrText, stdoutText]);
   const hasOutput = Boolean(stdoutText || stderrText);
   const labelStreams = Boolean(stdoutText && stderrText);
-
-  useEffect(() => {
-    if (cell.status === "running") setExpanded(true);
-  }, [cell.status]);
 
   const statusColor =
     cell.status === "running" || cell.status === "pending_approval"
@@ -73,12 +63,20 @@ export function ExecCell({
           : cell.status === "failed"
             ? "失败"
             : "已取消";
+  const statusMeta =
+    cell.status === "failed"
+      ? cell.exitCode != null ? `exit ${cell.exitCode}` : ""
+      : statusLabel;
   const title = commandTitle(cell.status);
   const commandPreview = shortCommand(cell.command).replace(/^\$\s*/, "");
   // Prefer a leading `# comment` as the human-readable label (what the model
   // wrote for the user to read); fall back to the raw command preview. The full
   // command stays available via the title tooltip and the expanded shell block.
   const commandLabel = extractCommandCommentLabel(cell.command) ?? commandPreview;
+  const collapsedOutputPreview = useMemo(
+    () => compactInlineOutputPreview(stdoutText || stderrText),
+    [stderrText, stdoutText],
+  );
 
   const duration =
     cell.durationMs != null
@@ -114,7 +112,11 @@ export function ExecCell({
   }, [onStop]);
 
   return (
-    <div className={`exec-cell ${cellStateClass}`}>
+    <div
+      className={`exec-cell ${cellStateClass}`}
+      data-status={cell.status}
+      data-expanded={expanded ? "true" : "false"}
+    >
       <div className="exec-cell-header-row">
         <button
           type="button"
@@ -123,16 +125,13 @@ export function ExecCell({
           aria-expanded={expanded}
         >
           <span className={`exec-cell-status-badge exec-cell-status-${statusColor}`}>
-            <StatusIcon status={cell.status} />
+            <StatusIcon status={cell.status} size={12} spinningClassName="exec-cell-spin-icon" />
           </span>
           <span className="exec-cell-title">{title}</span>
           <span className="exec-cell-command-preview" title={cell.command}>{commandLabel}</span>
           <span className="exec-cell-meta">
-            {statusLabel}
+            {statusMeta}
             {duration ? ` · ${duration}` : ""}
-            {cell.exitCode != null && cell.status === "failed"
-              ? ` · exit ${cell.exitCode}`
-              : ""}
           </span>
         </button>
         {cell.status === "running" && onStop && (
@@ -153,9 +152,12 @@ export function ExecCell({
         <div className="exec-cell-output-stack">
           <div className="exec-cell-shell-header">
             <span>Shell</span>
-            <span>{statusLabel}</span>
+            <span>{statusMeta}</span>
           </div>
-          <pre className="exec-cell-shell-command">{`$ ${cell.command}`}</pre>
+          <pre className="exec-cell-shell-command">
+            <span className="exec-cell-shell-prompt">$</span>
+            <span className="exec-cell-shell-command-text">{cell.command}</span>
+          </pre>
           {hasOutput ? (
             <>
               {stdoutText && (
@@ -179,38 +181,51 @@ export function ExecCell({
             </div>
           ) : (
             <div className="exec-cell-empty-output">
-              {cell.status === "cancelled" ? "已取消" : "无输出"}
+              {cell.status === "cancelled"
+                ? "已取消"
+                : cell.status === "success"
+                  ? "命令已完成，无 stdout/stderr 输出。"
+                  : "无输出"}
             </div>
           )}
           <button
             type="button"
             onClick={handleCopy}
             title={copied ? "已复制" : "复制输出"}
-            aria-label={copied ? "已复制" : "复制输出"}
             className="exec-cell-copy-button"
           >
             <Copy size={11} />
           </button>
         </div>
       )}
+      {!expanded && cell.status === "running" && (
+        <div className="exec-cell-collapsed-output" aria-label="Command output preview">
+          <span className="exec-cell-collapsed-output-marker" aria-hidden="true">&gt;</span>
+          <span className="exec-cell-collapsed-output-label">
+            {hasOutput ? (stderrText && !stdoutText ? "stderr" : "output") : "waiting"}
+          </span>
+          <span className="exec-cell-collapsed-output-text">
+            {hasOutput ? collapsedOutputPreview : "等待输出..."}
+          </span>
+        </div>
+      )}
     </div>
   );
+}
+
+function compactInlineOutputPreview(value: string): string {
+  const lines = value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return lines.slice(-2).join(" · ");
 }
 
 function commandTitle(status: ExecCellState["status"]): string {
   if (status === "pending_approval") return "等待运行命令";
   if (status === "running") return "正在运行命令";
-  if (status === "failed") return "命令运行失败";
   if (status === "cancelled") return "命令已取消";
   return "已运行命令";
-}
-
-function StatusIcon({ status }: { status: ExecCellState["status"] }) {
-  if (status === "running") return <LoaderCircle size={12} className="exec-cell-spin-icon" />;
-  if (status === "pending_approval") return <Clock3 size={12} />;
-  if (status === "success") return <CheckCircle2 size={12} />;
-  if (status === "failed") return <CircleAlert size={12} />;
-  return <CircleDashed size={12} />;
 }
 
 function OutputSection({

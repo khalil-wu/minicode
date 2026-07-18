@@ -1,6 +1,17 @@
 import { getWebSocket } from "../hooks/useWebSocket";
 import { uploadAttachment } from "../protocol/api";
 import { useAppStore } from "../stores";
+import { pushToast } from "../overlays/ToastContainer";
+import { getPastedTextMetadata, PASTED_TEXT_INPUT_SOURCE } from "./pastedText";
+
+const activeUploads = new Map<string, AbortController>();
+
+const attachmentId = (): string => {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `att-${crypto.randomUUID()}`;
+  }
+  return `att-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+};
 
 const uploadWarning = (
   file: File,
@@ -22,76 +33,100 @@ const shortUploadError = (value: string): string => {
   return normalized;
 };
 
+const startUpload = (id: string, file: File, sessionId: string) => {
+  const controller = new AbortController();
+  activeUploads.get(id)?.abort();
+  activeUploads.set(id, controller);
+  const pastedText = getPastedTextMetadata(file);
+
+  uploadAttachment(sessionId, file, controller.signal)
+    .then((result) => {
+      if (activeUploads.get(id) !== controller) return;
+      const attachment = {
+        ...result.attachment,
+        ...(pastedText ? {
+          input_source: PASTED_TEXT_INPUT_SOURCE,
+          source_char_count: pastedText.charCount,
+        } : {}),
+      };
+      useAppStore.getState().updateAttachment(id, {
+        status: "ready",
+        artifactId: result.artifact_id,
+        docId: result.doc_id,
+        indexedChunks: result.indexed_chunks,
+        attachment,
+        error: uploadWarning(file, result),
+      });
+      activeUploads.delete(id);
+    })
+    .catch((error: unknown) => {
+      if (activeUploads.get(id) !== controller) return;
+      activeUploads.delete(id);
+      if (controller.signal.aborted) return;
+      const message = error && typeof error === "object" && "message" in error
+        ? String((error as { message?: unknown }).message)
+        : "Upload failed";
+      useAppStore.getState().updateAttachment(id, { status: "error", error: shortUploadError(message) });
+    });
+};
+
 export const uploadComposerFiles = (files: File[]) => {
   const sessionId = getWebSocket()?.sessionId;
-  if (!sessionId) {
-    for (const file of files) {
-      const id = `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      useAppStore.getState().addAttachment({
-        id,
-        name: file.name || "file",
-        type: file.type || "application/octet-stream",
-        size: file.size,
-        status: "error",
-        error: "Session disconnected. Reconnect before uploading.",
-      });
-    }
-    return;
-  }
-
-  // Track active uploads for cleanup
-  const activeUploads = new Set<string>();
+  const createdIds: string[] = [];
 
   for (const file of files) {
-    const id = `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const id = attachmentId();
     const isImage = file.type.startsWith("image/");
     const dataUrl = isImage ? URL.createObjectURL(file) : undefined;
-
-    activeUploads.add(id);
+    const pastedText = getPastedTextMetadata(file);
+    createdIds.push(id);
 
     useAppStore.getState().addAttachment({
       id,
       name: file.name || (isImage ? "pasted-image.png" : "file"),
       type: file.type || "application/octet-stream",
       size: file.size,
-      status: "uploading",
+      status: sessionId ? "uploading" : "error",
       dataUrl,
+      inputSource: pastedText?.inputSource ?? "upload",
+      sourceCharCount: pastedText?.charCount,
+      localFile: file,
+      ...(!sessionId ? { error: "Session disconnected. Reconnect before uploading." } : {}),
     });
 
-    uploadAttachment(sessionId, file)
-      .then((result) => {
-        // Check if upload was cancelled (component unmounted)
-        if (!activeUploads.has(id)) {
-          // Clean up dataUrl if upload was cancelled
-          if (dataUrl) URL.revokeObjectURL(dataUrl);
-          return;
-        }
-        useAppStore.getState().updateAttachment(id, {
-          status: "ready",
-          artifactId: result.artifact_id,
-          docId: result.doc_id,
-          indexedChunks: result.indexed_chunks,
-          attachment: result.attachment,
-          error: uploadWarning(file, result),
-        });
-        activeUploads.delete(id);
-      })
-      .catch((error: unknown) => {
-        // Check if upload was cancelled
-        if (!activeUploads.has(id)) {
-          if (dataUrl) URL.revokeObjectURL(dataUrl);
-          return;
-        }
-        const message = error && typeof error === "object" && "message" in error
-          ? String((error as { message?: unknown }).message)
-          : "Upload failed";
-        useAppStore.getState().updateAttachment(id, { status: "error", error: shortUploadError(message) });
-        activeUploads.delete(id);
-      });
+    if (pastedText) {
+      pushToast(
+        `Long paste (${pastedText.charCount.toLocaleString()} characters) attached as ${file.name}. It will be treated as your message.`,
+        "info",
+        4200,
+      );
+    }
+
+    if (sessionId) startUpload(id, file, sessionId);
   }
 
-  // Return cleanup function
   return () => {
-    activeUploads.clear();
+    for (const id of createdIds) cancelComposerUpload(id);
   };
+};
+
+export const retryComposerAttachment = (id: string): boolean => {
+  const attachment = useAppStore.getState().attachments.find((item) => item.id === id);
+  if (!attachment?.localFile) return false;
+  const sessionId = getWebSocket()?.sessionId;
+  if (!sessionId) {
+    useAppStore.getState().updateAttachment(id, {
+      status: "error",
+      error: "Session disconnected. Reconnect before uploading.",
+    });
+    return false;
+  }
+  useAppStore.getState().updateAttachment(id, { status: "uploading", error: undefined });
+  startUpload(id, attachment.localFile, sessionId);
+  return true;
+};
+
+export const cancelComposerUpload = (id: string): void => {
+  activeUploads.get(id)?.abort();
+  activeUploads.delete(id);
 };

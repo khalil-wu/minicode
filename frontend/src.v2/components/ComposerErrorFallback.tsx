@@ -10,7 +10,7 @@ export const ComposerErrorFallback = () => {
   return (
     <div className="flex h-full w-full items-center justify-center border-t border-gray-800 bg-gray-900">
       <div className="max-w-md space-y-3 px-4 text-center">
-        <div className="text-4xl">⚠️</div>
+        <TriangleAlert className="mx-auto h-10 w-10" style={{ color: "var(--state-warning)" }} strokeWidth={1.75} aria-hidden="true" />
         <h3 className="text-base font-semibold text-gray-100">
           Composer Error
         </h3>
@@ -27,3 +27,4 @@ export const ComposerErrorFallback = () => {
     </div>
   );
 };
+import { TriangleAlert } from "lucide-react";

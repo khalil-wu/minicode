@@ -1,6 +1,10 @@
 .inline-task-list {
   position: relative;
-  z-index: 1;
+  /* Inline status indicator, not a floating popover — keep it in the content
+     layer so it cannot paint over the composer and its dropdowns (the composer
+     container forms its own z:6 stacking context). Drop isolation so the
+     nested collaboration tooltip can escape/layer normally. */
+  z-index: var(--z-content, 1);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -239,12 +243,12 @@
   position: absolute;
   left: 50%;
   bottom: calc(100% + 8px);
-  z-index: 4;
+  z-index: 1;
   width: min(310px, calc(100vw - 32px));
   padding: 8px;
   border: 1px solid color-mix(in oklch, var(--border-subtle) 88%, var(--accent-primary));
   border-radius: 12px;
-  background: color-mix(in oklch, var(--surface-elevated) 96%, var(--surface-page));
+  background: var(--surface-elevated);
   box-shadow:
     0 12px 28px color-mix(in oklch, var(--text-primary) 13%, transparent),
     0 2px 7px color-mix(in oklch, var(--text-primary) 7%, transparent);
@@ -459,6 +463,17 @@
 @keyframes inline-task-file-strip-in {
   from { opacity: 0; transform: translateY(5px) scale(0.99); }
   to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+html[data-theme="light"] .inline-task-pill,
+html[data-theme="light"] .inline-task-file-strip,
+html[data-theme="light"] .inline-task-collaboration-preview,
+html[data-theme="light"] .inline-task-collaboration-preview::after {
+  background: var(--surface-base);
+}
+
+html[data-theme="light"] .inline-task-collaboration-preview-row {
+  background: color-mix(in oklch, var(--surface-sidebar) 72%, var(--surface-base));
 }
 
 @keyframes inline-task-preview-in {

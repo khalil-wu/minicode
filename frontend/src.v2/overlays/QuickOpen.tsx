@@ -2,24 +2,32 @@ import { useEffect, useRef, useState } from "react";
 import { useAppStore } from "../stores";
 import { isDesktop, fsSearchFiles } from "../desktop/runtime";
 import { searchWorkspaceFiles } from "../protocol/workspace";
+import { capabilityFeatureEnabled } from "../protocol/capabilities";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 
 export const QuickOpen = () => {
   const visible = useAppStore((s) => s.quickOpenVisible);
   const storeResults = useAppStore((s) => s.quickOpenResults);
   const storeLoading = useAppStore((s) => s.quickOpenLoading);
+  const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities);
+  const enabled = capabilityFeatureEnabled(runtimeCapabilities, "global_search", true);
   const [query, setQuery] = useState("");
   const [activeIdx, setActiveIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<number>(0);
+  const dialogRef = useFocusTrap(visible && enabled);
 
   useEffect(() => {
+    if (visible && !enabled) {
+      useAppStore.setState({ quickOpenVisible: false, quickOpenResults: [], quickOpenLoading: false });
+      return;
+    }
     if (visible) {
       setQuery("");
       setActiveIdx(0);
       useAppStore.setState({ quickOpenResults: [], quickOpenLoading: false });
-      requestAnimationFrame(() => inputRef.current?.focus());
     }
-  }, [visible]);
+  }, [visible, enabled]);
 
   const close = () => useAppStore.setState({ quickOpenVisible: false });
 
@@ -61,7 +69,7 @@ export const QuickOpen = () => {
     close();
   };
 
-  if (!visible) return null;
+  if (!visible || !enabled) return null;
 
   return (
     <div
@@ -80,10 +88,19 @@ export const QuickOpen = () => {
       }}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="Quick open file"
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            close();
+          }
+        }}
         style={{
           width: "min(600px, 100%)",
           background: "var(--surface-raised)",
@@ -105,8 +122,7 @@ export const QuickOpen = () => {
           aria-controls="quick-open-results"
           aria-activedescendant={storeResults[activeIdx] ? `qo-${activeIdx}` : undefined}
           onKeyDown={(e) => {
-            if (e.key === "Escape") close();
-            else if (e.key === "ArrowDown") {
+            if (e.key === "ArrowDown") {
               e.preventDefault();
               setActiveIdx((i) => Math.min(i + 1, storeResults.length - 1));
             } else if (e.key === "ArrowUp") {

@@ -3,6 +3,7 @@ import {
   Archive,
   Copy,
   FolderOpen,
+  GitBranch,
   LogIn,
   RotateCcw,
   Trash2,
@@ -12,7 +13,7 @@ import {
 // ── Small shared components ────────────────────────────────────────────
 
 export const SectionTitle = ({ label }: { label: string }) => (
-  <div style={{ color: "var(--text-muted)", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0 }}>
+  <div style={{ color: "var(--text-secondary)", fontSize: "var(--text-sm)", fontWeight: 650 }}>
     {label}
   </div>
 );
@@ -27,21 +28,11 @@ export const IconAction = ({
   onClick: React.MouseEventHandler<HTMLButtonElement>;
 }) => (
   <button
+    type="button"
     onClick={onClick}
     title={label}
     aria-label={label}
-    className="btn-ghost"
-    style={{
-      border: 0,
-      color: "var(--text-muted)",
-      cursor: "pointer",
-      padding: "2px 4px",
-      opacity: 0.7,
-      display: "inline-flex",
-      alignItems: "center",
-      justifyContent: "center",
-      borderRadius: "var(--radius-sm, 4px)",
-    }}
+    className="btn-ghost mc-icon-button mc-icon-button-compact"
   >
     {children}
   </button>
@@ -108,6 +99,7 @@ export const ConversationMenu = ({
   onReveal,
   onCopy,
   onCleanup,
+  onHandoff,
   onArchive,
   onDelete,
 }: {
@@ -121,6 +113,7 @@ export const ConversationMenu = ({
   onReveal: () => void;
   onCopy: () => void;
   onCleanup: () => void;
+  onHandoff: () => void;
   onArchive: () => void;
   onDelete: () => void;
 }) => (
@@ -142,6 +135,11 @@ export const ConversationMenu = ({
     {canSwitch && <MenuItem icon={<LogIn size={13} />} label="Switch session" onClick={onSwitch} />}
     {canReveal && <MenuItem icon={<FolderOpen size={13} />} label="Reveal workspace" onClick={onReveal} />}
     {canCopy && <MenuItem icon={<Copy size={13} />} label="Copy workspace path" onClick={onCopy} />}
+    <MenuItem
+      icon={<GitBranch size={13} />}
+      label={isIsolated ? "Move to local checkout" : "Move to protected workspace"}
+      onClick={onHandoff}
+    />
     {isIsolated && (
       <MenuItem icon={<XCircle size={13} />} label="Clean up workspace" onClick={onCleanup} />
     )}

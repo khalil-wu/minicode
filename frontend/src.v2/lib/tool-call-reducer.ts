@@ -1,6 +1,6 @@
 import type { ToolCallEvent, ToolErrorInfo, ToolResultEvent } from "../protocol/events";
 
-export type ToolCallStatus = "pending" | "running" | "success" | "failed" | "blocked" | "partial";
+export type ToolCallStatus = "pending" | "running" | "success" | "failed" | "blocked" | "partial" | "timeout";
 
 export interface ToolCallRecord {
   id: string;
@@ -30,6 +30,9 @@ export interface ToolCallRecord {
   inputSummary?: string;
   groupId?: string;
   stepId?: string;
+  taskId?: string;
+  turnId?: string;
+  seq?: number;
   iterationId?: string;
   phase?: string;
   displayScope?: string;
@@ -42,6 +45,40 @@ export interface ToolCallRecord {
   stderrPreview?: string;
   diff?: { plus: number; minus: number; patch?: string };
 }
+
+export const isAgentControlToolName = (name: string): boolean =>
+  /^(?:task(?:_.*)?|workflow(?:_.*)?|team_.*|send_message|message_list)$/i.test(name.trim());
+
+const normalizedProjectionValue = (value: string | undefined): string => String(value || "").trim().toLowerCase();
+
+export const isCommandToolRecord = (record: ToolCallRecord): boolean =>
+  normalizedProjectionValue(record.activityKind) === "commandexecution"
+  || normalizedProjectionValue(record.resultKind) === "command";
+
+export const isFileChangeToolRecord = (record: ToolCallRecord): boolean =>
+  normalizedProjectionValue(record.activityKind) === "filechange"
+  || normalizedProjectionValue(record.resultKind) === "edit"
+  || Boolean(record.diff);
+
+export const isWorkspaceSearchToolRecord = (record: ToolCallRecord): boolean =>
+  normalizedProjectionValue(record.activityKind) === "workspacesearch";
+
+export const isFileReadToolRecord = (record: ToolCallRecord): boolean =>
+  normalizedProjectionValue(record.activityKind) === "fileread"
+  || normalizedProjectionValue(record.resultKind) === "file";
+
+export const isWebFetchToolRecord = (record: ToolCallRecord): boolean =>
+  normalizedProjectionValue(record.resultKind) === "web";
+
+export const isWebSearchToolRecord = (record: ToolCallRecord): boolean =>
+  normalizedProjectionValue(record.resultKind) === "search"
+  && normalizedProjectionValue(record.activityKind) === "websearch";
+
+export const isBrowserToolRecord = (record: ToolCallRecord): boolean => {
+  const resultKind = normalizedProjectionValue(record.resultKind);
+  const panelHint = normalizedProjectionValue(record.panelHint);
+  return resultKind === "browser" || resultKind === "preview" || panelHint === "browser" || panelHint === "preview";
+};
 
 const toFiniteNumber = (value: unknown): number => {
   const n = typeof value === "number" ? value : Number(value);
@@ -164,6 +201,9 @@ export const reduceToolCallStart = (
     activityKind: e.activity_kind,
     groupId: e.group_id,
     stepId: e.step_id,
+    taskId: e.task_id,
+    turnId: e.turn_id,
+    seq: e.seq,
     iterationId: e.iteration_id,
     phase: e.phase,
     displayScope: e.display_scope,
@@ -187,11 +227,13 @@ export const reduceToolCallResult = (
       ? "blocked"
       : e.status === "failed"
         ? "failed"
-        : e.status === "partial"
-          ? "partial"
-          : e.is_error
-            ? "failed"
-            : "success",
+        : e.status === "timeout"
+          ? "timeout"
+          : e.status === "partial"
+            ? "partial"
+            : e.is_error
+              ? "failed"
+              : "success",
     summary: e.summary,
     artifactId: e.artifact_id,
     sourceUrl: e.source_url,
@@ -202,6 +244,9 @@ export const reduceToolCallResult = (
     resultKind: e.result_kind,
     groupId: e.group_id ?? existing.groupId,
     stepId: e.step_id ?? existing.stepId,
+    taskId: e.task_id ?? existing.taskId,
+    turnId: e.turn_id ?? existing.turnId,
+    seq: e.seq ?? existing.seq,
     limitation: e.limitation,
     provider: e.provider,
     providerErrorType: e.provider_error_type,

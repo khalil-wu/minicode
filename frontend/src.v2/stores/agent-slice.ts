@@ -1,11 +1,8 @@
 import type { StateCreator } from "zustand";
 import type { AgentSlice } from "./types";
-import {
-  progressConversationKey,
-  automaticRightPanelState,
-} from "./shared-helpers";
-import { hasVisiblePlanSteps } from "../lib/planVisibility";
+import { progressConversationKey } from "./shared-helpers";
 import type { AgentProgressEntry, AppStore, ConversationAgentState, ProgressContentBlock } from "./types";
+import { capabilityFeatureEnabled } from "../protocol/capabilities";
 
 const SERIAL_MAIN_PROGRESS_STAGES = new Set<ProgressContentBlock["stage"]>([
   "planning",
@@ -67,6 +64,19 @@ function liveConversationAgentState(s: AppStore): ConversationAgentState {
   };
 }
 
+function upsertSubagentStable(
+  subagents: ConversationAgentState["subagents"],
+  nextSubagent: ConversationAgentState["subagents"][number],
+): ConversationAgentState["subagents"] {
+  const index = subagents.findIndex((existing) => existing.id === nextSubagent.id);
+  if (index >= 0) {
+    const next = subagents.slice();
+    next[index] = { ...next[index], ...nextSubagent };
+    return next;
+  }
+  return [...subagents, nextSubagent];
+}
+
 function targetConversationId(s: AppStore, conversationId?: string): string | undefined {
   return conversationId || s.conversationId || undefined;
 }
@@ -96,7 +106,6 @@ export const createAgentSlice: StateCreator<AppStore, [], [], AgentSlice> = (set
   plan: null,
   todos: [],
   subagents: [],
-  focusedSubagentId: null,
   agentProgress: [],
   conversationAgentStates: {},
   runtimeSession: null,
@@ -125,9 +134,6 @@ export const createAgentSlice: StateCreator<AppStore, [], [], AgentSlice> = (set
                 plan: p,
               }),
             }
-          : {}),
-        ...(hasVisiblePlanSteps(p) && p?.status !== "completed" && p?.status !== "cancelled"
-          ? automaticRightPanelState(s, "plan")
           : {}),
       };
       return patch;
@@ -246,7 +252,6 @@ export const createAgentSlice: StateCreator<AppStore, [], [], AgentSlice> = (set
       }
       const todos = targetState.todos.slice();
       todos[index] = nextTodo;
-      const hasRunningTask = todos.some((todo) => todo.status === "in_progress");
       if (!active && targetId) {
         return {
           conversationAgentStates: storeConversationAgentState(s, targetId, {
@@ -257,7 +262,6 @@ export const createAgentSlice: StateCreator<AppStore, [], [], AgentSlice> = (set
       }
       return {
         todos,
-        ...(hasRunningTask ? automaticRightPanelState(s, "tasks") : {}),
         ...(targetId
           ? {
               conversationAgentStates: storeConversationAgentState(s, targetId, {
@@ -273,10 +277,7 @@ export const createAgentSlice: StateCreator<AppStore, [], [], AgentSlice> = (set
       const targetId = targetConversationId(s, conversationId);
       const active = isActiveConversationTarget(s, targetId);
       const targetState = active ? liveConversationAgentState(s) : targetId ? getStoredConversationAgentState(s, targetId) : liveConversationAgentState(s);
-      const subagents = [
-        ...targetState.subagents.filter((existing) => existing.id !== sa.id),
-        sa,
-      ].slice(-20);
+      const subagents = upsertSubagentStable(targetState.subagents, sa);
       if (!active && targetId) {
         return {
           conversationAgentStates: storeConversationAgentState(s, targetId, {
@@ -302,7 +303,23 @@ export const createAgentSlice: StateCreator<AppStore, [], [], AgentSlice> = (set
       const targetId = targetConversationId(s, conversationId);
       const active = isActiveConversationTarget(s, targetId);
       const targetState = active ? liveConversationAgentState(s) : targetId ? getStoredConversationAgentState(s, targetId) : liveConversationAgentState(s);
-      const subagents = targetState.subagents.map((sa) => (sa.id === id ? { ...sa, ...patch } : sa));
+      const existing = targetState.subagents.find((sa) => sa.id === id);
+      const terminalStatuses = new Set(["done", "partial", "cancelled", "error"]);
+      const incomingStatus = patch.status;
+      const safePatch = existing
+        && terminalStatuses.has(existing.status)
+        && incomingStatus
+        && !terminalStatuses.has(incomingStatus)
+        ? { ...patch, status: existing.status }
+        : patch;
+      const subagents = existing
+        ? targetState.subagents.map((sa) => (sa.id === id ? { ...sa, ...safePatch } : sa))
+        : upsertSubagentStable(targetState.subagents, {
+            id,
+            role: patch.role || "subagent",
+            status: patch.status || "pending",
+            ...patch,
+          });
       if (!active && targetId) {
         return {
           conversationAgentStates: storeConversationAgentState(s, targetId, {
@@ -350,8 +367,16 @@ export const createAgentSlice: StateCreator<AppStore, [], [], AgentSlice> = (set
       };
     }),
   setRuntimeSession: (session) => set({ runtimeSession: session }),
-  setFocusedSubagentId: (id) => set({ focusedSubagentId: id }),
-  setRuntimeCapabilities: (capabilities) => set({ runtimeCapabilities: capabilities }),
+  setRuntimeCapabilities: (capabilities) =>
+    set((s) => ({
+      runtimeCapabilities: capabilities,
+      ...(!capabilityFeatureEnabled(capabilities, "global_search", true)
+        ? { quickOpenVisible: false, quickOpenResults: [], quickOpenLoading: false }
+        : {}),
+      ...(!capabilityFeatureEnabled(capabilities, "agent_editor", true) && s.agentEditorOpen
+        ? { agentEditorOpen: false }
+        : {}),
+    })),
   appendAgentProgress: (progress, conversationId) =>
     set((s) => {
       const timestamp = Date.now();
@@ -368,9 +393,6 @@ export const createAgentSlice: StateCreator<AppStore, [], [], AgentSlice> = (set
       const existingIdx = targetState.agentProgress.findIndex((item) =>
         item.conversationId === key && item.id === progress.id,
       );
-      const rightPanelPatch = active && entry.status === "running" && entry.stage === "planning"
-        ? automaticRightPanelState(s, "tasks")
-        : {};
       const serializedProgress = completePreviousMainAgentProgress(targetState.agentProgress, key, progress, timestamp);
       let agentProgress: AgentProgressEntry[];
       if (existingIdx >= 0) {
@@ -398,7 +420,6 @@ export const createAgentSlice: StateCreator<AppStore, [], [], AgentSlice> = (set
               }),
             }
           : {}),
-        ...rightPanelPatch,
       };
     }),
   finishAgentProgress: (conversationId, status = "completed") =>

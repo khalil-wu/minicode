@@ -1,35 +1,34 @@
-import { CheckCircle2, ChevronDown, ChevronRight, CircleAlert } from "lucide-react";
-import type { AgentLoopSummaryItem } from "../projection/project-turn";
+import { CheckCircle2, ChevronDown, ChevronRight, CircleAlert, LoaderCircle } from "lucide-react";
 import type { AgentTurnStatus } from "../types";
 
 export function AgentProcessSummary({
   status,
-  shouldCollapseProcess,
   processExpanded,
   durationLabel,
-  summaryItems,
+  hasTimelineItems,
   onToggle,
 }: {
   status: AgentTurnStatus;
-  shouldCollapseProcess: boolean;
   processExpanded: boolean;
   durationLabel: string;
-  summaryItems: AgentLoopSummaryItem[];
+  hasTimelineItems: boolean;
   onToggle: () => void;
 }) {
-  const completedSummaryItems = summaryItems.filter((item) => item.kind !== "command");
+  const completedLabel =
+    status === "failed"
+      ? "出错"
+      : status === "stopped"
+        ? "已停止"
+        : "完成";
 
-  if (!shouldCollapseProcess) {
-    if (status !== "running") return null;
+  const running = status === "running";
+  const label = running ? "正在处理" : completedLabel;
+
+  if (running && !hasTimelineItems) {
     return (
-      <div className="agent-loop-running-summary" aria-label="Agent is processing">
-        <span className="agent-loop-running-dot" aria-hidden="true" />
-        <span>正在处理</span>
-        {summaryItems.length > 0 && (
-          <span className="agent-loop-running-meta">
-            {summaryItems.map((item) => item.label).join(" · ")}
-          </span>
-        )}
+      <div className="agent-loop-running-summary agent-loop-thinking-indicator" aria-label="Agent is processing" role="status">
+        <LoaderCircle size={13} className="agent-loop-thinking-spinner" aria-hidden="true" />
+        <span className="agent-loop-thinking-shimmer" data-text={label}>{label}</span>
       </div>
     );
   }
@@ -44,25 +43,22 @@ export function AgentProcessSummary({
         onClick={onToggle}
       >
         <span className="agent-loop-process-summary-icon" aria-hidden="true">
-          {status === "failed" ? (
+          {running ? (
+            <LoaderCircle size={13} className="agent-loop-thinking-spinner" />
+          ) : status === "failed" ? (
             <CircleAlert size={13} className="agent-loop-failed-icon" />
           ) : (
             <CheckCircle2 size={13} className="agent-loop-done-icon" />
           )}
         </span>
         <span className="chat-turn-process-summary-text">
-          已处理
-          {durationLabel && (
+          {label}
+          {!running && durationLabel && (
             <span className="chat-turn-process-summary-duration">
               {durationLabel}
             </span>
           )}
         </span>
-        {completedSummaryItems.length > 0 && (
-          <span className="agent-loop-process-summary-meta">
-            {completedSummaryItems.map((item) => item.label).join(" · ")}
-          </span>
-        )}
         {processExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
       </button>
     </div>

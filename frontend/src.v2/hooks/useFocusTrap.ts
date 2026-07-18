@@ -1,4 +1,14 @@
 import { useEffect, useRef } from 'react';
+import type { RefObject } from 'react';
+
+const FOCUSABLE_SELECTOR = [
+  'button:not([disabled])',
+  '[href]',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"]):not([disabled])',
+].join(', ');
 
 /**
  * useFocusTrap - Trap keyboard focus within a container (for modals, dialogs)
@@ -18,7 +28,7 @@ import { useEffect, useRef } from 'react';
  * return <div ref={containerRef} tabIndex={-1}>...</div>
  * ```
  */
-export function useFocusTrap(isActive: boolean) {
+export function useFocusTrap(isActive: boolean, fallbackFocusRef?: RefObject<HTMLElement>) {
   const containerRef = useRef<HTMLDivElement>(null);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
 
@@ -32,9 +42,13 @@ export function useFocusTrap(isActive: boolean) {
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
 
-    // Focus the container
+    // Prefer the first real control so keyboard users can act immediately.
     requestAnimationFrame(() => {
-      containerRef.current?.focus();
+      const container = containerRef.current;
+      container?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR)?.focus();
+      if (document.activeElement === previouslyFocusedRef.current) {
+        container?.focus();
+      }
     });
 
     // Focus trap handler
@@ -45,9 +59,7 @@ export function useFocusTrap(isActive: boolean) {
       if (!container) return;
 
       // Get all focusable elements
-      const focusable = container.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"]):not([disabled])'
-      );
+      const focusable = container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
 
       if (focusable.length === 0) {
         e.preventDefault();
@@ -77,12 +89,17 @@ export function useFocusTrap(isActive: boolean) {
       document.body.style.overflow = previousOverflow;
       document.removeEventListener('keydown', handleKeyDown);
 
-      // Restore focus
-      if (previouslyFocusedRef.current && document.body.contains(previouslyFocusedRef.current)) {
-        previouslyFocusedRef.current.focus();
+      // Restore focus to the original trigger when it still exists. A nested
+      // drawer may have unmounted that trigger, so fall back to stable shell UI.
+      const previous = previouslyFocusedRef.current;
+      const target = previous && previous !== document.body && document.body.contains(previous)
+        ? previous
+        : fallbackFocusRef?.current;
+      if (target && document.body.contains(target)) {
+        target.focus();
       }
     };
-  }, [isActive]);
+  }, [fallbackFocusRef, isActive]);
 
   return containerRef;
 }

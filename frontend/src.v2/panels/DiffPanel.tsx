@@ -11,6 +11,12 @@ type DiffViewMode = "unified" | "split" | "monaco";
 type ChangeScope = "review" | "history" | "git";
 const HISTORY_PREVIEW_LINE_LIMIT = 180;
 const INLINE_COLORIZE_LINE_LIMIT = 900;
+const REVIEW_PREVIEW_LINE_LIMIT = 900;
+const REVIEW_FILE_INITIAL_LIMIT = 96;
+const REVIEW_FILE_INCREMENT = 96;
+const GIT_PREVIEW_LINE_LIMIT = 600;
+const GIT_FILE_INITIAL_LIMIT = 48;
+const GIT_FILE_INCREMENT = 48;
 
 interface DiffLine {
   kind: "context" | "add" | "del" | "hunk" | "meta";
@@ -207,12 +213,17 @@ interface DiffLineCommentData {
 }
 
 const DiffBody = ({ lines, language, viewMode = "unified", comments, onLineClick, filePath, activeCommentLine, onCommentSubmit, onCommentCancel, rawPatch, previewLineLimit }: { lines: DiffLine[]; language?: string; viewMode?: DiffViewMode; comments?: DiffLineCommentData[]; onLineClick?: (lineIndex: number) => void; filePath?: string; activeCommentLine?: number | null; onCommentSubmit?: (lineIndex: number, text: string) => void; onCommentCancel?: () => void; rawPatch?: string; previewLineLimit?: number }) => {
-  const visibleLines = previewLineLimit && lines.length > previewLineLimit
+  const [showFullPreview, setShowFullPreview] = useState(false);
+  useEffect(() => {
+    setShowFullPreview(false);
+  }, [filePath, rawPatch, previewLineLimit]);
+  const shouldPreview = Boolean(previewLineLimit && lines.length > previewLineLimit && !showFullPreview);
+  const visibleLines = shouldPreview && previewLineLimit
     ? lines.slice(0, previewLineLimit)
     : lines;
   const hiddenLineCount = lines.length - visibleLines.length;
   if (hiddenLineCount > 0 && viewMode === "monaco") {
-    return <UnifiedDiffBody lines={visibleLines} language={language} comments={comments} onLineClick={onLineClick} filePath={filePath} activeCommentLine={activeCommentLine} onCommentSubmit={onCommentSubmit} onCommentCancel={onCommentCancel} hiddenLineCount={hiddenLineCount} />;
+    return <UnifiedDiffBody lines={visibleLines} language={language} comments={comments} onLineClick={onLineClick} filePath={filePath} activeCommentLine={activeCommentLine} onCommentSubmit={onCommentSubmit} onCommentCancel={onCommentCancel} hiddenLineCount={hiddenLineCount} onShowFull={() => setShowFullPreview(true)} />;
   }
   if (viewMode === "monaco" && rawPatch) {
     const lang = language ?? guessLanguageFromPath(filePath ?? extractFilePathFromDiff(visibleLines));
@@ -239,11 +250,11 @@ const DiffBody = ({ lines, language, viewMode = "unified", comments, onLineClick
       </div>
     );
   }
-  if (viewMode === "split") return <SplitDiffBody lines={visibleLines} language={language} comments={comments} onLineClick={onLineClick} filePath={filePath} activeCommentLine={activeCommentLine} onCommentSubmit={onCommentSubmit} onCommentCancel={onCommentCancel} hiddenLineCount={hiddenLineCount} />;
-  return <UnifiedDiffBody lines={visibleLines} language={language} comments={comments} onLineClick={onLineClick} filePath={filePath} activeCommentLine={activeCommentLine} onCommentSubmit={onCommentSubmit} onCommentCancel={onCommentCancel} hiddenLineCount={hiddenLineCount} />;
+  if (viewMode === "split") return <SplitDiffBody lines={visibleLines} language={language} comments={comments} onLineClick={onLineClick} filePath={filePath} activeCommentLine={activeCommentLine} onCommentSubmit={onCommentSubmit} onCommentCancel={onCommentCancel} hiddenLineCount={hiddenLineCount} onShowFull={() => setShowFullPreview(true)} />;
+  return <UnifiedDiffBody lines={visibleLines} language={language} comments={comments} onLineClick={onLineClick} filePath={filePath} activeCommentLine={activeCommentLine} onCommentSubmit={onCommentSubmit} onCommentCancel={onCommentCancel} hiddenLineCount={hiddenLineCount} onShowFull={() => setShowFullPreview(true)} />;
 };
 
-const UnifiedDiffBody = ({ lines, language, comments, onLineClick, filePath, activeCommentLine, onCommentSubmit, onCommentCancel, hiddenLineCount = 0 }: { lines: DiffLine[]; language?: string; comments?: DiffLineCommentData[]; onLineClick?: (lineIndex: number) => void; filePath?: string; activeCommentLine?: number | null; onCommentSubmit?: (lineIndex: number, text: string) => void; onCommentCancel?: () => void; hiddenLineCount?: number }) => {
+const UnifiedDiffBody = ({ lines, language, comments, onLineClick, filePath, activeCommentLine, onCommentSubmit, onCommentCancel, hiddenLineCount = 0, onShowFull }: { lines: DiffLine[]; language?: string; comments?: DiffLineCommentData[]; onLineClick?: (lineIndex: number) => void; filePath?: string; activeCommentLine?: number | null; onCommentSubmit?: (lineIndex: number, text: string) => void; onCommentCancel?: () => void; hiddenLineCount?: number; onShowFull?: () => void }) => {
   const lang = language ?? guessLanguageFromPath(extractFilePathFromDiff(lines));
   const colorized = useColorizedLines(lines.length <= INLINE_COLORIZE_LINE_LIMIT ? lines : [], lang);
   const commentMap = useMemo(() => {
@@ -281,7 +292,7 @@ const UnifiedDiffBody = ({ lines, language, comments, onLineClick, filePath, act
             <span className="select-none" style={{ color: colorForKind(line.kind) }}>
               {line.kind === "add" ? "+" : line.kind === "del" ? "-" : " "}
             </span>
-            {colorized?.[i] ? (
+            {line.kind === "context" && colorized?.[i] ? (
               <span dangerouslySetInnerHTML={{ __html: colorized[i] }} />
             ) : (
               line.text
@@ -302,7 +313,7 @@ const UnifiedDiffBody = ({ lines, language, comments, onLineClick, filePath, act
           )}
         </div>
       ))}
-      {hiddenLineCount > 0 && <DiffTruncationNotice hiddenLineCount={hiddenLineCount} />}
+      {hiddenLineCount > 0 && <DiffTruncationNotice hiddenLineCount={hiddenLineCount} onShowFull={onShowFull} />}
     </div>
   );
 };
@@ -334,7 +345,7 @@ const InlineCommentInput = ({ lineIndex, onSubmit, onCancel }: { lineIndex: numb
   );
 };
 
-const SplitDiffBody = ({ lines, language, comments, onLineClick, filePath, activeCommentLine, onCommentSubmit, onCommentCancel, hiddenLineCount = 0 }: { lines: DiffLine[]; language?: string; comments?: DiffLineCommentData[]; onLineClick?: (lineIndex: number) => void; filePath?: string; activeCommentLine?: number | null; onCommentSubmit?: (lineIndex: number, text: string) => void; onCommentCancel?: () => void; hiddenLineCount?: number }) => {
+const SplitDiffBody = ({ lines, language, comments, onLineClick, filePath, activeCommentLine, onCommentSubmit, onCommentCancel, hiddenLineCount = 0, onShowFull }: { lines: DiffLine[]; language?: string; comments?: DiffLineCommentData[]; onLineClick?: (lineIndex: number) => void; filePath?: string; activeCommentLine?: number | null; onCommentSubmit?: (lineIndex: number, text: string) => void; onCommentCancel?: () => void; hiddenLineCount?: number; onShowFull?: () => void }) => {
   const lang = language ?? guessLanguageFromPath(extractFilePathFromDiff(lines));
   const colorized = useColorizedLines(lines.length <= INLINE_COLORIZE_LINE_LIMIT ? lines : [], lang);
   const rows = useMemo(() => {
@@ -414,14 +425,14 @@ const SplitDiffBody = ({ lines, language, comments, onLineClick, filePath, activ
           </div>
         );
       })}
-      {hiddenLineCount > 0 && <DiffTruncationNotice hiddenLineCount={hiddenLineCount} />}
+      {hiddenLineCount > 0 && <DiffTruncationNotice hiddenLineCount={hiddenLineCount} onShowFull={onShowFull} />}
     </div>
   );
 };
 
-const DiffTruncationNotice = ({ hiddenLineCount }: { hiddenLineCount: number }) => (
+const DiffTruncationNotice = ({ hiddenLineCount, onShowFull }: { hiddenLineCount: number; onShowFull?: () => void }) => (
   <div
-    className="px-2.5 py-2"
+    className="px-2.5 py-2 flex items-center gap-2"
     style={{
       borderTop: "1px solid var(--border-subtle)",
       color: "var(--text-muted)",
@@ -430,7 +441,12 @@ const DiffTruncationNotice = ({ hiddenLineCount }: { hiddenLineCount: number }) 
       background: "var(--surface-page)",
     }}
   >
-    Showing preview. {hiddenLineCount.toLocaleString()} more diff lines hidden.
+    <span className="flex-1">Showing preview. {hiddenLineCount.toLocaleString()} more diff lines hidden.</span>
+    {onShowFull && (
+      <button type="button" onClick={onShowFull} style={smallActionButtonStyle}>
+        Show full diff
+      </button>
+    )}
   </div>
 );
 
@@ -459,7 +475,11 @@ const SplitRowPair = ({ row, colorizedMap, onLineClick }: { row: SplitRow; color
         style={{ background: bg, cursor: clickable ? "pointer" : undefined }}
         onClick={clickable ? () => onLineClick(lineIndex) : undefined}
       >
-        {html ? <span dangerouslySetInnerHTML={{ __html: html }} /> : <span style={{ color: colorForKind(line.kind) }}>{line.text}</span>}
+        {line.kind === "context" && html ? (
+          <span dangerouslySetInnerHTML={{ __html: html }} />
+        ) : (
+          <span style={{ color: colorForKind(line.kind) }}>{line.text}</span>
+        )}
       </div>
     );
   };
@@ -512,6 +532,15 @@ const smallActionButtonStyle: React.CSSProperties = {
   gap: 4,
   height: 22,
   whiteSpace: "nowrap",
+};
+
+const showMoreButtonStyle: React.CSSProperties = {
+  border: "1px solid var(--border-subtle)",
+  borderRadius: "var(--radius-sm, 4px)",
+  background: "var(--surface-soft)",
+  color: "var(--text-muted)",
+  cursor: "pointer",
+  fontSize: "var(--text-xs)",
 };
 
 const fileDecisionBtnStyle: React.CSSProperties = {
@@ -601,8 +630,6 @@ const scopeCountStyle: React.CSSProperties = {
 import type { DiffReviewState } from "../stores/types";
 
 const ReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState | null; viewMode: DiffViewMode }) => {
-  const [commentLineIndex, setCommentLineIndex] = useState<number | null>(null);
-
   if (!diffReview) {
     return (
       <div className="flex-1 grid place-items-center p-4" style={{ color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>
@@ -611,16 +638,45 @@ const ReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState | nul
     );
   }
 
-  const selectedFile = diffReview.files.find((file) => file.path === diffReview.selectedPath);
+  return <ActiveReviewTab diffReview={diffReview} viewMode={viewMode} />;
+};
+
+const ActiveReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState; viewMode: DiffViewMode }) => {
+  const [commentLineIndex, setCommentLineIndex] = useState<number | null>(null);
+  const [visibleFileLimit, setVisibleFileLimit] = useState(REVIEW_FILE_INITIAL_LIMIT);
+
+  useEffect(() => {
+    setVisibleFileLimit(REVIEW_FILE_INITIAL_LIMIT);
+    setCommentLineIndex(null);
+  }, [diffReview.requestId]);
+
+  const selectedFile = useMemo(
+    () => diffReview.files.find((file) => file.path === diffReview.selectedPath),
+    [diffReview.files, diffReview.selectedPath],
+  );
   const diff = selectedFile?.patch || diffReview.diff;
-  const parsed = parseUnifiedDiff(diff);
-  const plus = parsed.filter((line) => line.kind === "add").length;
-  const minus = parsed.filter((line) => line.kind === "del").length;
+  const parsed = useMemo(() => parseUnifiedDiff(diff), [diff]);
+  const { plus, minus } = useMemo(
+    () => parsed.reduce(
+      (acc, line) => {
+        if (line.kind === "add") acc.plus += 1;
+        if (line.kind === "del") acc.minus += 1;
+        return acc;
+      },
+      { plus: 0, minus: 0 },
+    ),
+    [parsed],
+  );
   const needsFetch = selectedFile && !selectedFile.patch;
   const comments = diffReview.lineComments ?? [];
   const isReadOnly = diffReview.mode === "view" || diffReview.status === "viewing";
   const isSubmitted = diffReview.status === "submitted";
   const allFilesDecided = Object.keys(diffReview.fileDecisions ?? {}).length >= diffReview.files.length;
+  const visibleFiles = useMemo(
+    () => diffReview.files.slice(0, visibleFileLimit),
+    [diffReview.files, visibleFileLimit],
+  );
+  const hiddenFileCount = Math.max(0, diffReview.files.length - visibleFiles.length);
   const handleLineClick = (lineIndex: number) => {
     setCommentLineIndex(commentLineIndex === lineIndex ? null : lineIndex);
   };
@@ -635,7 +691,7 @@ const ReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState | nul
             <span style={{ color: "var(--text-muted)" }}>{diffReview.files.length}</span>
           </div>
           <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
-            {diffReview.files.map((file) => {
+            {visibleFiles.map((file) => {
               const decision = diffReview.fileDecisions?.[file.path];
               return (
                 <div key={file.path} className="flex items-center gap-1 mb-0.5">
@@ -659,20 +715,22 @@ const ReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState | nul
                     <div className="flex gap-2 mt-0.5" style={{ color: "var(--text-muted)" }}>
                       {file.additions != null && <span style={{ color: "var(--state-success)" }}>+{file.additions}</span>}
                       {file.deletions != null && <span style={{ color: "var(--state-danger)" }}>-{file.deletions}</span>}
-                      {file.isLarge && <span>large</span>}
+                      {file.isLarge && <span>大文件</span>}
                     </div>
                   </button>
                   {!isReadOnly && (
                     <>
                       <button
-                        title="Approve file"
+                        title="接受文件"
+                        aria-label={`接受文件 ${file.path}`}
                         onClick={(e) => { e.stopPropagation(); useAppStore.getState().setDiffFileDecision(file.path, "approved"); }}
                         style={{ ...fileDecisionBtnStyle, color: decision === "approved" ? "var(--text-on-accent)" : "var(--state-success)", background: decision === "approved" ? "var(--state-success)" : "transparent" }}
                       >
                         <CheckCircle size={13} />
                       </button>
                       <button
-                        title="Reject file"
+                        title="拒绝文件"
+                        aria-label={`拒绝文件 ${file.path}`}
                         onClick={(e) => { e.stopPropagation(); useAppStore.getState().setDiffFileDecision(file.path, "rejected"); }}
                         style={{ ...fileDecisionBtnStyle, color: decision === "rejected" ? "var(--text-on-accent)" : "var(--state-danger)", background: decision === "rejected" ? "var(--state-danger)" : "transparent" }}
                       >
@@ -683,6 +741,23 @@ const ReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState | nul
                 </div>
               );
             })}
+            {hiddenFileCount > 0 && (
+              <button
+                type="button"
+                onClick={() => setVisibleFileLimit((limit) => limit + REVIEW_FILE_INCREMENT)}
+                className="w-full mt-1 px-2 py-1.5"
+                style={{
+                  border: "1px solid var(--border-subtle)",
+                  borderRadius: "var(--radius-sm, 4px)",
+                  background: "var(--surface-soft)",
+                  color: "var(--text-muted)",
+                  cursor: "pointer",
+                  fontSize: "var(--text-xs)",
+                }}
+              >
+                再显示 {Math.min(REVIEW_FILE_INCREMENT, hiddenFileCount)} 个文件
+              </button>
+            )}
           </div>
           {!isReadOnly && Object.keys(diffReview.fileDecisions ?? {}).length > 0 && (
             <button
@@ -699,7 +774,7 @@ const ReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState | nul
                 opacity: allFilesDecided && !isSubmitted ? 1 : 0.5,
               }}
             >
-              {isSubmitted ? "Submitting..." : `Submit Review (${Object.keys(diffReview.fileDecisions ?? {}).length}/${diffReview.files.length})`}
+              {isSubmitted ? "提交中..." : `提交审查 (${Object.keys(diffReview.fileDecisions ?? {}).length}/${diffReview.files.length})`}
             </button>
           )}
         </aside>
@@ -723,17 +798,17 @@ const ReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState | nul
           {diffReview.status === "error" && diffReview.error && (
             <span style={{ color: "var(--state-danger)" }}>{diffReview.error}</span>
           )}
-          {!isReadOnly && isSubmitted && <span style={{ color: "var(--text-muted)" }}>Submitted</span>}
-          {!isReadOnly && <button disabled={isSubmitted} onClick={() => respond(diffReview.requestId, false)} style={{ ...rejectButtonStyle, opacity: isSubmitted ? 0.6 : 1 }}><X size={13} /> Reject all</button>}
-          {!isReadOnly && <button disabled={isSubmitted} onClick={() => respond(diffReview.requestId, true)} style={{ ...acceptButtonStyle, opacity: isSubmitted ? 0.6 : 1 }}><Check size={13} /> Approve all</button>}
+          {!isReadOnly && isSubmitted && <span style={{ color: "var(--text-muted)" }}>已提交</span>}
+          {!isReadOnly && <button disabled={isSubmitted} onClick={() => respond(diffReview.requestId, false)} style={{ ...rejectButtonStyle, opacity: isSubmitted ? 0.6 : 1 }}><X size={13} /> 全部拒绝</button>}
+          {!isReadOnly && <button disabled={isSubmitted} onClick={() => respond(diffReview.requestId, true)} style={{ ...acceptButtonStyle, opacity: isSubmitted ? 0.6 : 1 }}><Check size={13} /> 全部接受</button>}
           {!isReadOnly && comments.length > 0 && (
             <button disabled={isSubmitted} onClick={() => useAppStore.getState().submitDiffReviewWithComments()} style={{ ...acceptButtonStyle, background: "var(--accent-primary)", borderColor: "var(--accent-primary)", marginLeft: 4, opacity: isSubmitted ? 0.6 : 1 }}>
-              <MessageCircle size={13} /> Review Code ({comments.length})
+              <MessageCircle size={13} /> 提交意见 ({comments.length})
             </button>
           )}
         </div>
         {needsFetch ? (
-          <div className="flex-1 grid place-items-center" style={{ color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>Loading file diff...</div>
+          <div className="flex-1 grid place-items-center" style={{ color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>正在加载文件差异...</div>
         ) : (
           <DiffBody
             lines={parsed}
@@ -752,6 +827,7 @@ const ReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState | nul
               setCommentLineIndex(null);
             }}
             onCommentCancel={isReadOnly ? undefined : () => setCommentLineIndex(null)}
+            previewLineLimit={isReadOnly ? REVIEW_PREVIEW_LINE_LIMIT : undefined}
           />
         )}
       </main>
@@ -818,10 +894,23 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
   const gitChanges = useAppStore((s) => s.gitChanges);
   const requestGitChanges = useAppStore((s) => s.requestGitChanges);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [visibleGitLimits, setVisibleGitLimits] = useState({
+    staged: GIT_FILE_INITIAL_LIMIT,
+    working: GIT_FILE_INITIAL_LIMIT,
+    untracked: GIT_FILE_INITIAL_LIMIT,
+  });
 
   useEffect(() => {
     requestGitChanges();
   }, [requestGitChanges]);
+
+  useEffect(() => {
+    setVisibleGitLimits({
+      staged: GIT_FILE_INITIAL_LIMIT,
+      working: GIT_FILE_INITIAL_LIMIT,
+      untracked: GIT_FILE_INITIAL_LIMIT,
+    });
+  }, [gitChanges.staged.length, gitChanges.workingTree.length, gitChanges.untracked.length]);
 
   const allFiles = useMemo(() => {
     const staged = gitChanges.staged.map((f) => ({ ...f, section: "staged" as const }));
@@ -834,6 +923,25 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
     const file = allFiles.find((f) => f.path === selectedFile);
     return file?.patch ?? null;
   }, [selectedFile, allFiles]);
+  const selectedPatchLines = useMemo(
+    () => selectedPatch ? parseUnifiedDiff(selectedPatch) : [],
+    [selectedPatch],
+  );
+  const visibleStaged = useMemo(
+    () => gitChanges.staged.slice(0, visibleGitLimits.staged),
+    [gitChanges.staged, visibleGitLimits.staged],
+  );
+  const visibleWorking = useMemo(
+    () => gitChanges.workingTree.slice(0, visibleGitLimits.working),
+    [gitChanges.workingTree, visibleGitLimits.working],
+  );
+  const visibleUntracked = useMemo(
+    () => gitChanges.untracked.slice(0, visibleGitLimits.untracked),
+    [gitChanges.untracked, visibleGitLimits.untracked],
+  );
+  const hiddenStagedCount = Math.max(0, gitChanges.staged.length - visibleStaged.length);
+  const hiddenWorkingCount = Math.max(0, gitChanges.workingTree.length - visibleWorking.length);
+  const hiddenUntrackedCount = Math.max(0, gitChanges.untracked.length - visibleUntracked.length);
 
   const handleStage = (path: string) => {
     sendClientCommand({ type: "diff.git_stage_file", path });
@@ -883,6 +991,21 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
 
   const hasWorkingChanges = gitChanges.workingTree.length + gitChanges.untracked.length > 0;
   const hasStagedChanges = gitChanges.staged.length > 0;
+  const showMoreGitFiles = (section: keyof typeof visibleGitLimits, hiddenCount: number, label: string) => (
+    hiddenCount > 0 ? (
+      <button
+        type="button"
+        onClick={() => setVisibleGitLimits((limits) => ({
+          ...limits,
+          [section]: limits[section] + GIT_FILE_INCREMENT,
+        }))}
+        className="w-full mt-1 px-2 py-1.5"
+        style={showMoreButtonStyle}
+      >
+        Show {Math.min(GIT_FILE_INCREMENT, hiddenCount)} more {label}
+      </button>
+    ) : null
+  );
 
   return (
     <div className="h-full grid min-h-0 overflow-hidden" style={{ gridTemplateColumns: "minmax(200px, 280px) 1fr" }}>
@@ -890,7 +1013,7 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
         <div className="flex flex-col gap-1.5" style={{ fontSize: "var(--text-xs)" }}>
           <div className="flex items-center gap-1.5">
             <GitBranch size={13} color="var(--accent-primary)" />
-            <span className="flex-1 font-bold" style={{ color: "var(--text-primary)" }}>Uncommitted changes</span>
+            <span className="flex-1 font-bold" style={{ color: "var(--text-primary)" }}>未提交更改</span>
             <button onClick={requestGitChanges} title="Refresh" aria-label="Refresh git changes" className="w-[22px] h-5" style={iconButtonStyle}>
               <RefreshCw size={11} className={gitChanges.loading ? "spin" : ""} />
             </button>
@@ -905,7 +1028,7 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
                   style={{ ...smallActionButtonStyle, color: "var(--state-success)" }}
                 >
                   <Plus size={11} />
-                  Stage all
+                  全部暂存
                 </button>
               )}
               {hasStagedChanges && (
@@ -916,7 +1039,7 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
                   style={{ ...smallActionButtonStyle, color: "var(--text-muted)" }}
                 >
                   <Minus size={11} />
-                  Unstage all
+                  全部取消暂存
                 </button>
               )}
             </div>
@@ -926,9 +1049,9 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
         {gitChanges.staged.length > 0 && (
           <div>
             <div className="uppercase mb-1 tracking-wide" style={{ fontSize: 10, color: "var(--text-muted)", letterSpacing: "0.5px" }}>
-              Staged ({gitChanges.staged.length})
+              已暂存 ({gitChanges.staged.length})
             </div>
-            {gitChanges.staged.map((f) => (
+            {visibleStaged.map((f) => (
               <div key={`staged-${f.path}`} className="flex items-center gap-1 mb-0.5">
                 <button
                   onClick={() => setSelectedFile(f.path)}
@@ -951,15 +1074,16 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
                 </button>
               </div>
             ))}
+            {showMoreGitFiles("staged", hiddenStagedCount, "staged files")}
           </div>
         )}
 
         {gitChanges.workingTree.length > 0 && (
           <div>
             <div className="uppercase mb-1 tracking-wide" style={{ fontSize: 10, color: "var(--text-muted)", letterSpacing: "0.5px" }}>
-              Modified ({gitChanges.workingTree.length})
+              已修改 ({gitChanges.workingTree.length})
             </div>
-            {gitChanges.workingTree.map((f) => (
+            {visibleWorking.map((f) => (
               <div key={`wt-${f.path}`} className="flex items-center gap-1 mb-0.5">
                 <button
                   onClick={() => setSelectedFile(f.path)}
@@ -985,15 +1109,16 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
                 </button>
               </div>
             ))}
+            {showMoreGitFiles("working", hiddenWorkingCount, "modified files")}
           </div>
         )}
 
         {gitChanges.untracked.length > 0 && (
           <div>
             <div className="uppercase mb-1 tracking-wide" style={{ fontSize: 10, color: "var(--text-muted)", letterSpacing: "0.5px" }}>
-              Untracked ({gitChanges.untracked.length})
+              未跟踪 ({gitChanges.untracked.length})
             </div>
-            {gitChanges.untracked.map((path) => (
+            {visibleUntracked.map((path) => (
               <div key={`ut-${path}`} className="flex items-center gap-1 mb-0.5">
                 <button
                   onClick={() => useAppStore.getState().openEditorFile(path, path.split(/[/\\]/).pop())}
@@ -1012,13 +1137,19 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
                 </button>
               </div>
             ))}
+            {showMoreGitFiles("untracked", hiddenUntrackedCount, "untracked files")}
           </div>
         )}
       </aside>
 
       <main className="min-w-0 min-h-0 overflow-hidden flex flex-col">
         {selectedPatch ? (
-          <DiffBody lines={parseUnifiedDiff(selectedPatch)} viewMode={viewMode} rawPatch={selectedPatch} />
+          <DiffBody
+            lines={selectedPatchLines}
+            viewMode={viewMode}
+            rawPatch={selectedPatch}
+            previewLineLimit={GIT_PREVIEW_LINE_LIMIT}
+          />
         ) : (
           <div className="flex-1 grid place-items-center" style={{ color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>
             Select a file to view its diff

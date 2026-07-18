@@ -3,7 +3,7 @@ import { useId, useMemo, useState, type CSSProperties } from "react";
 import { useAppStore } from "../../stores";
 import { planStepTodoStatus, shouldSurfacePlanProgress } from "../../lib/planVisibility";
 import { coordinatorNoticeKindForSubagent, effectiveSubagentStatus, type CoordinatorNoticeKind } from "../../lib/collaborationDisplay";
-import { projectAgentViews, type AgentDisplayStatus } from "../../lib/agent-view-model";
+import { hasCompletedAssistantReply, projectAgentViews, type AgentDisplayStatus } from "../../lib/agent-view-model";
 import type { ConversationAgentState, ConversationMeta, GitChangesState, PlanState, SubagentState, TodoItem } from "../../stores/types";
 import { RollingNumber } from "../../components/RollingNumber";
 import { initialDiffReviewPatch } from "../diffReviewState";
@@ -17,6 +17,7 @@ export function InlineTaskList({ wide = false }: InlineTaskListProps = {}) {
   const todos = useAppStore((s) => s.todos);
   const plan = useAppStore((s) => s.plan);
   const subagents = useAppStore((s) => s.subagents);
+  const messages = useAppStore((s) => s.messages);
   const isStreaming = useAppStore((s) => s.isStreaming);
   const gitChanges = useAppStore((s) => s.gitChanges);
   const conversationId = useAppStore((s) => s.conversationId);
@@ -28,7 +29,11 @@ export function InlineTaskList({ wide = false }: InlineTaskListProps = {}) {
   const collaborationPreviewId = useId();
 
   const currentSummary = useMemo(() => summarizeWork(todos, plan), [todos, plan]);
-  const collaborationSummary = useMemo(() => summarizeCollaboration(subagents), [subagents]);
+  const parentCompleted = useMemo(() => hasCompletedAssistantReply(messages), [messages]);
+  const collaborationSummary = useMemo(
+    () => parentCompleted && !isStreaming ? null : summarizeCollaboration(subagents),
+    [subagents, parentCompleted, isStreaming],
+  );
   const backgroundSummary = useMemo(
     () => summarizeBackgroundRun({
       activeConversationId: conversationId,
@@ -388,6 +393,19 @@ function selectCurrentCollaborationBatch(subagents: SubagentState[]): SubagentSt
   );
   if (active.length === 0) {
     return subagents.filter((subagent) => effectiveSubagentStatus(subagent) === "error");
+  }
+
+  const activeTurnIds = [...new Set(active.map((subagent) => subagent.turnId).filter(Boolean))] as string[];
+  if (activeTurnIds.length > 0) {
+    const newestTurnId = activeTurnIds
+      .map((turnId) => ({
+        turnId,
+        latest: Math.max(...active
+          .filter((subagent) => subagent.turnId === turnId)
+          .map((subagent) => subagent.lastEventAt ?? subagent.lastProgressAt ?? 0)),
+      }))
+      .sort((left, right) => right.latest - left.latest)[0].turnId;
+    return subagents.filter((subagent) => subagent.turnId === newestTurnId);
   }
 
   const grouped = new Map<string, SubagentState[]>();

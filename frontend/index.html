@@ -3,32 +3,10 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'self'; object-src 'none'; script-src 'self' http://localhost:* http://127.0.0.1:*; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:* https://localhost:* https://127.0.0.1:* wss://localhost:* wss://127.0.0.1:*; frame-src 'self' data: blob:; worker-src 'self' blob:; media-src 'self' data: blob:; form-action 'self';" />
     <title>MiniCode</title>
-    <!--
-      Theme boot script — must execute synchronously before any stylesheet
-      (including the JS-imported tokens.css from src/index.css) is evaluated,
-      so that `[data-theme]` selectors resolve correctly on first paint and
-      no FOUC occurs. See design.md §Cross-cutting #6.1.
-    -->
-    <script>
-      (function () {
-        try {
-          var pref = localStorage.getItem('minicode.theme');
-          var theme = pref;
-          if (!theme || theme === 'system') {
-            theme = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
-          }
-          if (theme !== 'light' && theme !== 'dark') {
-            theme = 'light';
-          }
-          document.documentElement.setAttribute('data-theme', theme);
-        } catch (e) { /* localStorage unavailable: leave default (CSS :root = light) */ }
-      })();
-    </script>
+    <script type="module" src="/theme-boot.js"></script>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
 </head>
 <body class="antialiased" style="font-family:var(--font-ui);font-synthesis:none;font-variant-east-asian:proportional-width;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;text-rendering:optimizeLegibility;background:var(--surface-base);color:var(--text-primary)">
     <div id="root"></div>

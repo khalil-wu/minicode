@@ -5,6 +5,24 @@ import { buildApprovalResponseCommand } from "../protocol/prompt-responses";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { LS, readLS, writeLS } from "./shared-helpers";
 
+const revokeBlobDataUrl = (dataUrl: string | undefined | null): void => {
+  if (
+    typeof dataUrl === "string" &&
+    dataUrl.startsWith("blob:") &&
+    typeof URL !== "undefined" &&
+    typeof URL.revokeObjectURL === "function"
+  ) {
+    URL.revokeObjectURL(dataUrl);
+  }
+};
+
+const initialAgentMode = (): ComposerSlice["agentMode"] => {
+  const stored = readLS(LS.agentMode);
+  if (stored === "build" || stored === "plan" || stored === "review" || stored === "explore") return stored;
+  writeLS(LS.agentMode, "build");
+  return "build";
+};
+
 const initialPermissionMode = (): ComposerSlice["permissionMode"] => {
   const stored = readLS(LS.permissionMode);
   const normalized = initialUiPermissionMode(stored);
@@ -14,10 +32,21 @@ const initialPermissionMode = (): ComposerSlice["permissionMode"] => {
   return normalized;
 };
 
+const initialPromptPersona = (): ComposerSlice["promptPersona"] => {
+  const stored = readLS(LS.promptPersona);
+  if (stored !== "codex") {
+    writeLS(LS.promptPersona, "codex");
+  }
+  return "codex";
+};
+
 export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> = (set, get) => ({
   draft: "",
   attachments: [],
+  quotedMessage: null,
   permissionMode: initialPermissionMode(),
+  agentMode: initialAgentMode(),
+  promptPersona: initialPromptPersona(),
   effortLevel: "high" as const,
   prMonitor: null,
   actionChip: null,
@@ -27,15 +56,40 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
   slashPanelOpen: false,
   mentionPanelOpen: false,
   setDraft: (d) => set({ draft: d }),
+  setQuotedMessage: (message) => set({ quotedMessage: message }),
+  clearQuotedMessage: () => set({ quotedMessage: null }),
   addAttachment: (a) =>
     set((s) => ({ attachments: [...s.attachments, a] })),
   updateAttachment: (id, patch) =>
     set((s) => ({
       attachments: s.attachments.map((a) => (a.id === id ? { ...a, ...patch } : a)),
+      conversationWorkbenchStates: Object.fromEntries(
+        Object.entries(s.conversationWorkbenchStates).map(([conversationId, state]) => [
+          conversationId,
+          (state.attachments ?? []).some((attachment) => attachment.id === id)
+            ? {
+                ...state,
+                attachments: (state.attachments ?? []).map((attachment) =>
+                  attachment.id === id ? { ...attachment, ...patch } : attachment,
+                ),
+              }
+            : state,
+        ]),
+      ),
     })),
   removeAttachment: (id) =>
-    set((s) => ({ attachments: s.attachments.filter((a) => a.id !== id) })),
-  clearAttachments: () => set({ attachments: [] }),
+    set((s) => {
+      const removed = s.attachments.find((a) => a.id === id);
+      revokeBlobDataUrl(removed?.dataUrl);
+      return { attachments: s.attachments.filter((a) => a.id !== id) };
+    }),
+  clearAttachments: () =>
+    set((s) => {
+      // Revoke every blob: dataURL so image blob URLs don't leak when the
+      // composer is cleared on send / conversation switch / long sessions.
+      for (const attachment of s.attachments) revokeBlobDataUrl(attachment.dataUrl);
+      return { attachments: [] };
+    }),
   setPermissionMode: (m) => {
     const before = get();
     writeLS(LS.permissionMode, m);
@@ -77,6 +131,14 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
         }));
       }
     }
+  },
+  setAgentMode: (m) => {
+    writeLS(LS.agentMode, m);
+    set({ agentMode: m });
+  },
+  setPromptPersona: (persona) => {
+    writeLS(LS.promptPersona, persona);
+    set({ promptPersona: persona });
   },
   setEffortLevel: (e) => {
     set({ effortLevel: e });

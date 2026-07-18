@@ -31,11 +31,11 @@ export const AgentTurn = memo(function AgentTurn({
     setProcessExpanded(turn.initialProcessExpanded);
   }, [turn.id, turn.initialProcessExpanded]);
 
+  const hasTimelineItems = turn.timelineItems.length > 0;
   const showProcessStack =
     turn.hasProcessContent &&
-    (!turn.shouldCollapseProcess || processExpanded);
-  const showRunningSummaryAfterStack =
-    turn.status === "running" && !turn.shouldCollapseProcess;
+    hasTimelineItems &&
+    processExpanded;
   return (
     <div
       className="chat-turn agent-loop-turn"
@@ -52,16 +52,15 @@ export const AgentTurn = memo(function AgentTurn({
           className="chat-turn-process agent-loop-process agent-loop-work-area"
           data-zone="work"
           data-active={turn.status === "running" ? "true" : "false"}
-          data-collapsed={turn.shouldCollapseProcess && !processExpanded ? "true" : "false"}
+          data-collapsed={!processExpanded ? "true" : "false"}
           aria-label="Agent progress"
         >
-          {!showRunningSummaryAfterStack && (
+          {(hasTimelineItems || turn.status === "running") && (
             <AgentProcessSummary
               status={turn.status}
-              shouldCollapseProcess={turn.shouldCollapseProcess}
               processExpanded={processExpanded}
               durationLabel={turn.durationLabel}
-              summaryItems={turn.summaryItems}
+              hasTimelineItems={hasTimelineItems}
               onToggle={() => setProcessExpanded((value) => !value)}
             />
           )}
@@ -75,16 +74,6 @@ export const AgentTurn = memo(function AgentTurn({
             />
           )}
 
-          {showRunningSummaryAfterStack && (
-            <AgentProcessSummary
-              status={turn.status}
-              shouldCollapseProcess={turn.shouldCollapseProcess}
-              processExpanded={processExpanded}
-              durationLabel={turn.durationLabel}
-              summaryItems={turn.summaryItems}
-              onToggle={() => setProcessExpanded((value) => !value)}
-            />
-          )}
         </section>
       )}
 

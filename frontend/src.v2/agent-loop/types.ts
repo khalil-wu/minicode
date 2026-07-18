@@ -1,4 +1,4 @@
-import type { DiffCellState } from "../chat/cells/cellTypes";
+import type { DiffCellState, PlanCellState } from "../chat/cells/cellTypes";
 
 export type AgentTurnStatus = "running" | "completed" | "failed" | "stopped";
 
@@ -6,20 +6,40 @@ export type AgentTimelineStatus = "pending" | "running" | "completed" | "failed"
 
 export type AgentTimelineItem =
   | ProcessItem
+  | LiveNarrationItem
   | ActivityGroupItem
   | FileChangesItem
+  | PlanTimelineItem
   | BrowserPreviewItem
   | SystemStatusItem;
 
 export interface ProcessItem {
   id: string;
   type: "process";
-  kind: "process_text" | "action_summary" | "observation";
-  source: "model" | "runtime";
+  kind: "process_text" | "action_summary" | "observation" | "skill";
+  source: "model" | "provider" | "runtime";
   loopId?: string;
   seq: number;
   content: string;
-  status: "completed";
+  status: "running" | "completed" | "failed" | "info";
+  title?: string;
+  summary?: string;
+  skill?: {
+    name?: string;
+    triggerMode?: string;
+    sourceLevel?: string;
+    reason?: string;
+    tokenEstimate?: number;
+  };
+}
+
+export interface LiveNarrationItem {
+  id: string;
+  type: "live_narration";
+  seq: number;
+  partialMarkdown: string;
+  isStreaming: boolean;
+  updatedAt: number;
 }
 
 export interface ActivityGroupItem {
@@ -29,6 +49,7 @@ export interface ActivityGroupItem {
     | "web_search"
     | "web_read"
     | "file_read"
+    | "file_change"
     | "command"
     | "test"
     | "browser"
@@ -38,6 +59,7 @@ export interface ActivityGroupItem {
   seq: number;
   title: string;
   summary: string;
+  durationLabel?: string;
   status: "running" | "completed" | "failed";
   details: ActivityDetail[];
   defaultCollapsed: boolean;
@@ -59,6 +81,10 @@ export type ActivityDetail =
       path?: string;
       query?: string;
       excerpt?: string;
+      lineInfo?: string;
+      additions?: number;
+      deletions?: number;
+      changeType?: "created" | "updated" | "deleted";
     }
   | {
       kind: "text";
@@ -78,11 +104,15 @@ export interface FileChangesItem {
     added: number;
     removed: number;
     status: "modified" | "created" | "deleted";
+    patch?: string;
   }[];
-  actions: {
-    canReview: boolean;
-    canUndo: boolean;
-  };
+}
+
+export interface PlanTimelineItem {
+  id: string;
+  type: "plan";
+  seq: number;
+  cell: PlanCellState;
 }
 
 export interface BrowserPreviewItem {

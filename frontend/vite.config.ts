@@ -73,6 +73,7 @@ export default defineConfig(async ({ command, mode }) => {
     plugins: [react()],
     test: {
       exclude: ["tests/**", "node_modules/**"],
+      testTimeout: 10_000,
     },
     resolve: {
       alias: {
@@ -103,19 +104,32 @@ export default defineConfig(async ({ command, mode }) => {
     build: {
       outDir: "dist",
       emptyOutDir: true,
-      chunkSizeWarningLimit: 5000,
+      chunkSizeWarningLimit: 1500,
       rollupOptions: {
         output: {
           manualChunks(id) {
-            if (id.includes("@xterm")) return "terminal";
-            if (id.includes("@monaco-editor/react") || id.includes("monaco-editor")) return "editor";
-            if (id.includes("react-syntax-highlighter")) return "syntax-highlighter";
-            if (id.includes("react-markdown") || id.includes("remark-gfm") || id.includes("unified") || id.includes("remark-") || id.includes("rehype-") || id.includes("mdast") || id.includes("hast") || id.includes("micromark")) return "markdown";
-            if (id.includes("@lobehub/icons-static-svg")) return "provider-icons";
-            if (id.includes("lucide-react")) return "ui-icons";
-            if (id.includes("node_modules/react-dom")) return "react-vendor";
-            if (id.includes("node_modules/react/") || id.includes("node_modules/scheduler")) return "react-vendor";
-            if (id.includes("node_modules/zustand") || id.includes("node_modules/immer")) return "state-vendor";
+            const normalized = id.replace(/\\/g, "/");
+            if (!normalized.includes("/node_modules/")) return undefined;
+            if (
+              normalized.includes("/react-markdown/")
+              || normalized.includes("/remark-")
+              || normalized.includes("/rehype-")
+              || normalized.includes("/unified/")
+              || normalized.includes("/micromark")
+              || normalized.includes("/mdast-")
+              || normalized.includes("/hast-")
+              || normalized.includes("/katex/")
+            ) {
+              return "markdown-vendor";
+            }
+            if (
+              normalized.includes("/@iconify/")
+              || normalized.includes("/@iconify-icons/")
+              || normalized.includes("/@lobehub/icons/")
+            ) {
+              return "icons-vendor";
+            }
+            if (normalized.includes("/@xterm/")) return "terminal-vendor";
             return undefined;
           },
         },

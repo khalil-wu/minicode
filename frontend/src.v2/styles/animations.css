@@ -123,47 +123,18 @@
 /* Status badge glow — for running/pending states */
 @keyframes status-glow {
   0%, 100% {
-    box-shadow: 0 0 0 0 currentColor;
-    opacity: 1;
+    opacity: 0;
+    transform: scale(0.96);
   }
   50% {
-    box-shadow: 0 0 0 2px color-mix(in oklch, currentColor 20%, transparent);
-    opacity: 0.8;
+    opacity: 0.22;
+    transform: scale(1.18);
   }
-}
-
-/* ════════════════════════════════════════════════════════
-   Utility animation classes (.anim-*)
-   ════════════════════════════════════════════════════════ */
-
-/* New message entrance — applied to the last N turns in MessageList */
-.anim-message-appear {
-  animation: message-appear var(--duration-fast, 150ms) ease-out;
-}
-
-/* Running tool pulse — applied to ToolCallCard when status === "running" */
-.anim-tool-running {
-  animation: tool-pulse 1.5s ease-in-out infinite;
-}
-
-/* Right panel slide-in — applied to SidebarRight on mount */
-.anim-slide-right {
-  animation: slide-in-right var(--duration-base, 200ms) ease-out;
-}
-
-/* Left panel slide-in — applied to SidebarLeft on mount */
-.anim-slide-left {
-  animation: slide-in-left var(--duration-base, 200ms) ease-out;
-}
-
-/* Generic fade-in — uses the @keyframes fade-in from reset.css */
-.anim-fade-in {
-  animation: fade-in var(--duration-fast, 150ms) ease-out;
 }
 
 /* Checkmark appear — when activity status changes to done */
 .anim-checkmark-appear {
-  animation: checkmark-appear var(--duration-fast, 150ms) var(--easing-spring);
+  animation: checkmark-appear var(--duration-fast, 150ms) cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 /* Error shake — when activity fails */
@@ -173,6 +144,19 @@
 
 /* Status glow — for running/pending status badges */
 .anim-status-glow {
+  position: relative;
+}
+
+.anim-status-glow::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: inherit;
+  background: currentColor;
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.96);
+  will-change: transform, opacity;
   animation: status-glow 2s ease-in-out infinite;
 }
 
@@ -194,7 +178,7 @@
 
 /* Smooth transform transition for interactive elements */
 .transition-transform {
-  transition: transform var(--duration-micro, 100ms) var(--easing-decelerate);
+  transition: transform var(--duration-micro, 100ms) cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 /* Combined transition for buttons and interactive elements */
@@ -203,7 +187,7 @@
     background-color var(--duration-micro, 100ms) ease,
     color var(--duration-micro, 100ms) ease,
     border-color var(--duration-micro, 100ms) ease,
-    transform var(--duration-micro, 100ms) var(--easing-decelerate),
+    transform var(--duration-micro, 100ms) cubic-bezier(0.2, 0.8, 0.2, 1),
     box-shadow var(--duration-micro, 100ms) ease;
 }
 
@@ -213,4 +197,87 @@
               border-width var(--duration-micro, 100ms) ease;
 }
 
+/* Rolling number — Codex-style odometer updates for live stats. */
+.rolling-number {
+  position: relative;
+  display: inline-grid;
+  grid-template-areas: "value";
+  min-width: max-content;
+  height: 1.15em;
+  overflow: hidden;
+  vertical-align: -0.12em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+}
 
+.rolling-number-value {
+  grid-area: value;
+  display: block;
+  will-change: transform, opacity;
+}
+
+.rolling-number[data-animating="true"][data-direction="up"] .rolling-number-old {
+  animation: rolling-number-old-up 180ms cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+}
+
+.rolling-number[data-animating="true"][data-direction="up"] .rolling-number-new {
+  animation: rolling-number-new-up 180ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.rolling-number[data-animating="true"][data-direction="down"] .rolling-number-old {
+  animation: rolling-number-old-down 180ms cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+}
+
+.rolling-number[data-animating="true"][data-direction="down"] .rolling-number-new {
+  animation: rolling-number-new-down 180ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@keyframes rolling-number-old-up {
+  to { opacity: 0; transform: translateY(-100%); }
+}
+
+@keyframes rolling-number-new-up {
+  from { opacity: 0; transform: translateY(100%); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes rolling-number-old-down {
+  to { opacity: 0; transform: translateY(100%); }
+}
+
+@keyframes rolling-number-new-down {
+  from { opacity: 0; transform: translateY(-100%); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rolling-number,
+  .rolling-number-value {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .rolling-number-old {
+    display: none;
+  }
+
+  /* Honor reduced-motion app-wide: stop infinite/decorative animations
+     (.animate-spin/.animate-pulse/.animate-ping/.animate-bounce and any
+     custom infinite animations defined elsewhere) and collapse transitions so
+     the UI doesn't run motion the user asked to reduce. */
+  .animate-spin,
+  .animate-ping,
+  .animate-pulse,
+  .animate-bounce {
+    animation: none !important;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -1,4 +1,3 @@
-import { Folder } from "lucide-react";
 import { useAppStore } from "../stores";
 import {
   type GitStatus,
@@ -16,6 +15,7 @@ import {
   isSameTreePath,
   iconColor,
   fileIcon,
+  folderIcon,
   workspaceLabel,
 } from "./fileTreeHelpers";
 
@@ -25,20 +25,26 @@ export const SearchResultRow = ({
   activeEditorPath,
   workingDirectory,
   onContextMenu,
+  onNavigate,
 }: {
   result: FileSearchResult;
   gitMap: Map<string, GitStatus>;
   activeEditorPath: string | null;
   workingDirectory: string;
   onContextMenu: (menu: ContextMenuState) => void;
+  onNavigate?: () => void;
 }) => {
   const selected = isSameTreePath(activeEditorPath, result.path);
   const isDir = result.kind === "folder";
   const gitStatus = gitMap.get(result.path);
   const parent = result.path.replace(/\\/g, "/").split("/").slice(0, -1).join("/");
   const openResult = () => {
-    if (isDir) return;
+    if (isDir) {
+      useAppStore.getState().requestFileTreeReveal(result.path, "folder");
+      return;
+    }
     useAppStore.getState().openEditorFile(result.path, result.name);
+    onNavigate?.();
   };
   return (
     <div
@@ -48,7 +54,7 @@ export const SearchResultRow = ({
       title={result.path}
       onClick={openResult}
       onKeyDown={(event) => {
-        if ((event.key === "Enter" || event.key === " ") && !isDir) {
+        if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
           openResult();
         }
@@ -62,11 +68,11 @@ export const SearchResultRow = ({
         background: selected ? "var(--surface-active)" : "transparent",
         borderColor: selected ? "color-mix(in oklch, var(--accent-primary) 32%, transparent)" : "transparent",
         boxShadow: selected ? "inset 2px 0 0 var(--accent-primary)" : "none",
-        cursor: isDir ? "default" : "pointer",
+        cursor: "pointer",
       }}
     >
-      <span style={{ ...treeIconStyle, color: isDir ? "var(--accent-primary)" : iconColor({ name: result.name, path: result.path, is_dir: false }) }}>
-        {isDir ? <Folder size={14} /> : fileIcon(result.name)}
+      <span style={{ ...treeIconStyle, color: isDir ? "var(--mc-icon-folder, var(--text-secondary))" : iconColor({ name: result.name, path: result.path, is_dir: false }) }} aria-hidden="true">
+        {isDir ? folderIcon(false) : fileIcon(result.name)}
       </span>
       <span style={{ minWidth: 0, flex: 1 }}>
         <span style={searchResultNameStyle}>{result.name}</span>

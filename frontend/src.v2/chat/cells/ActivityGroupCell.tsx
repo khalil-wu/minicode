@@ -1,22 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type React from "react";
-import { CheckCircle2, ChevronDown, ChevronRight, Loader2, TriangleAlert } from "lucide-react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import type { ActivityCellState } from "./cellTypes";
 import { ActivityCell } from "./ActivityCell";
+import { StatusIcon } from "../../components/icons";
 import {
   firstHttpUrl,
+  readFileLineInfoLabel,
   shortCommand,
   shortTarget,
   stringArg,
 } from "./activityCellHelpers";
-import {
-  activityCounts,
-  activityGroupStatus,
-  activityGroupTitle,
-  activityRecordCount,
-  activityRecordTotal,
-  activityTitleKind,
-} from "./activityGrouping";
 import type { ToolCallRecord } from "../../lib/tool-call-reducer";
 import "./cells.css";
 
@@ -38,10 +32,10 @@ export function ActivityGroupCell({
   const previewItems = useMemo(() => buildPreviewItems(cells), [cells]);
 
   const progress = useMemo(() => {
-    const completed = cells.filter(c => c.status === "done").reduce((sum, cell) => sum + activityRecordCount(cell), 0);
-    const failed = cells.filter(c => c.status === "failed" || c.status === "interrupted").reduce((sum, cell) => sum + activityRecordCount(cell), 0);
-    const running = cells.filter(c => c.status === "running").reduce((sum, cell) => sum + activityRecordCount(cell), 0);
-    const total = activityRecordTotal(cells);
+    const completed = cells.filter(c => c.status === "done").reduce((sum, cell) => sum + recordCount(cell), 0);
+    const failed = cells.filter(c => c.status === "failed" || c.status === "interrupted").reduce((sum, cell) => sum + recordCount(cell), 0);
+    const running = cells.filter(c => c.status === "running").reduce((sum, cell) => sum + recordCount(cell), 0);
+    const total = totalRecordCount(cells);
     return { completed, failed, running, total };
   }, [cells]);
 
@@ -63,7 +57,7 @@ export function ActivityGroupCell({
   if (cells.length === 0) return null;
 
   const kind = groupKind(cells);
-  const title = activityGroupTitle(cells, status);
+  const title = groupTitle(cells, status);
   const effectiveExpanded = expanded;
   const progressLabel = kind === "context"
     ? `${progress.total} 个来源`
@@ -140,24 +134,80 @@ export function ActivityGroupCell({
   );
 }
 
-function StatusIcon({ status }: { status: "running" | "done" | "failed" }) {
-  if (status === "running") {
-    return <Loader2 size={14} className="spinner" style={{ color: "#3B82F6" }} />;
-  }
-  if (status === "failed") {
-    return <TriangleAlert size={14} style={{ color: "var(--state-danger)" }} />;
-  }
-  return <CheckCircle2 size={14} style={{ color: "var(--text-muted)" }} />;
+function groupStatus(cells: ActivityCellState[], isActive: boolean): "running" | "done" | "failed" {
+  if (cells.some((cell) => cell.status === "failed" || cell.status === "interrupted")) return "failed";
+  if (isActive || cells.some((cell) => cell.status === "running")) return "running";
+  return "done";
 }
 
-function groupStatus(cells: ActivityCellState[], isActive: boolean): "running" | "done" | "failed" {
-  const status = activityGroupStatus(cells);
-  if (status === "done" && isActive) return "running";
-  return status;
+function groupTitle(cells: ActivityCellState[], status: "running" | "done" | "failed"): string {
+  const counts = activityCounts(cells);
+  const total = totalRecordCount(cells);
+  const fileRead = counts.fileRead ?? 0;
+  const workspaceSearch = counts.workspaceSearch ?? 0;
+  const webSearch = counts.webSearch ?? 0;
+  const mcpToolCall = counts.mcpToolCall ?? 0;
+  const commandExecution = counts.commandExecution ?? 0;
+  const fileChange = counts.fileChange ?? 0;
+  const isContextGroup = (
+    fileRead > 0 ||
+    workspaceSearch > 0 ||
+    webSearch > 0 ||
+    mcpToolCall > 0
+  ) && commandExecution === 0 && fileChange === 0;
+
+  if (isContextGroup) {
+    return status === "running"
+      ? "正在收集上下文"
+      : total === 1 ? "已收集上下文" : `已收集 ${total} 个上下文来源`;
+  }
+  if (commandExecution > 0 && commandExecution === total) {
+    return status === "running"
+      ? "正在运行命令"
+      : total === 1 ? "已运行命令" : `已运行 ${total} 条命令`;
+  }
+  if (fileChange > 0 && fileChange === total) {
+    return total === 1 ? "已编辑文件" : `已编辑 ${total} 个文件`;
+  }
+  if ((counts.genericTool ?? 0) > 0 && (counts.genericTool ?? 0) === total) {
+    const title = cells[0]?.title?.trim();
+    return total === 1 && title ? title : `已处理 ${total} 项`;
+  }
+
+  const firstKind = cells[0]?.activityKind;
+  switch (firstKind) {
+    case "fileRead":
+      return total === 1 ? "已读取文件" : `已读取 ${total} 个文件`;
+    case "workspaceSearch":
+      return total === 1 ? "已搜索工作区" : `已搜索 ${total} 次`;
+    case "webSearch":
+      return total === 1 ? "已搜索网页" : `已搜索网页 ${total} 次`;
+    case "commandExecution":
+      return total === 1 ? "已运行命令" : `已运行 ${total} 条命令`;
+    case "fileChange":
+      return total === 1 ? "已编辑文件" : `已编辑 ${total} 个文件`;
+    case "mcpToolCall":
+      return total === 1 ? "已调用 MCP" : `已调用 ${total} 个 MCP 工具`;
+    default:
+      return `已处理 ${total} 项`;
+  }
 }
 
 function groupKind(cells: ActivityCellState[]): "context" | "command" | "change" | "tool" | "mixed" {
-  return activityTitleKind(cells);
+  const counts = activityCounts(cells);
+  const total = totalRecordCount(cells);
+  const fileRead = counts.fileRead ?? 0;
+  const workspaceSearch = counts.workspaceSearch ?? 0;
+  const webSearch = counts.webSearch ?? 0;
+  const mcpToolCall = counts.mcpToolCall ?? 0;
+  const commandExecution = counts.commandExecution ?? 0;
+  const fileChange = counts.fileChange ?? 0;
+  const contextTotal = fileRead + workspaceSearch + webSearch + mcpToolCall;
+  if (contextTotal > 0 && commandExecution === 0 && fileChange === 0) return "context";
+  if (commandExecution > 0 && commandExecution === total) return "command";
+  if (fileChange > 0 && fileChange === total) return "change";
+  if ((counts.genericTool ?? 0) > 0 && (counts.genericTool ?? 0) === total) return "tool";
+  return "mixed";
 }
 
 function buildSummaryItems(cells: ActivityCellState[]): string[] {
@@ -230,12 +280,7 @@ function previewForCellWithoutRecords(cell: ActivityCellState): Omit<ActivityPre
     cell.activityKind === "providerReasoning" ||
     cell.activityKind === "processNote"
   ) {
-    const text = cell.status === "running" ? "正在思考" : "思考过程";
-    return {
-      label: cell.status === "running" ? "思考" : "推理",
-      text,
-      title: text,
-    };
+    return null;
   }
 
   const text = readableFallback(cell.subtitle || cell.title).trim();
@@ -287,7 +332,7 @@ function previewForRecord(
       label: url ? "读取" : "搜索",
       text: shortPreviewText(text, 78),
       title: url || query || displayText,
-      meta: record.provider || statusMeta(record),
+      meta: statusMeta(record),
     };
   }
 
@@ -311,11 +356,12 @@ function previewForRecord(
   if (cell.activityKind === "fileRead" || /read_file|read_artifact/i.test(name)) {
     const target = fileTarget(record);
     if (!target && !displayText) return null;
+    const lineInfo = readFileLineInfoLabel(record);
     return {
       label: "读取",
       text: target ? shortPath(target) : shortPreviewText(displayText, 74),
       title: target || displayText,
-      meta: statusMeta(record),
+      meta: lineInfo || statusMeta(record),
     };
   }
 
@@ -412,9 +458,24 @@ function labelForActivityKind(kind: ActivityCellState["activityKind"]): string {
   }
 }
 
+function totalRecordCount(cells: ActivityCellState[]): number {
+  return Math.max(1, cells.reduce((sum, cell) => sum + Math.max(1, cell.toolCallRecords?.length ?? 1), 0));
+}
+
+function recordCount(cell: ActivityCellState): number {
+  return Math.max(1, cell.toolCallRecords?.length ?? Number(firstNumber(cell.subtitle || cell.title) || 1));
+}
+
+function activityCounts(cells: ActivityCellState[]) {
+  return cells.reduce((counts, cell) => {
+    counts[cell.activityKind] = (counts[cell.activityKind] ?? 0) + recordCount(cell);
+    return counts;
+  }, {} as Partial<Record<ActivityCellState["activityKind"], number>>);
+}
+
 function summaryForCell(cell: ActivityCellState): string {
   const subtitle = cell.subtitle ?? "";
-  const count = String(activityRecordCount(cell));
+  const count = String(recordCount(cell));
   switch (cell.activityKind) {
     case "reasoning":
     case "planning":
@@ -441,6 +502,10 @@ function summaryForCell(cell: ActivityCellState): string {
     default:
       return readableFallback(cell.title);
   }
+}
+
+function firstNumber(text: string): string {
+  return text.match(/\d+/)?.[0] ?? "";
 }
 
 function readableFallback(value: string): string {

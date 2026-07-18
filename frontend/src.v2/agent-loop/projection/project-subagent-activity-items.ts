@@ -5,7 +5,7 @@ const firstLine = (value?: string): string =>
   String(value || "").trim().split(/\r?\n/).find(Boolean)?.trim() || "";
 
 const userVisibleLine = (value?: string): string => {
-  const line = firstLine(value);
+  const line = firstLine(value).replace(/^#{1,6}\s+/, "").trim();
   if (
     !line
     || /\bcall_[a-z0-9_-]{8,}\b/i.test(line)
@@ -26,7 +26,7 @@ const executionStatus = (status: SubagentState["status"]): ActivityItemStatus =>
     case "running": return "running";
     case "blocked": return "blocked";
     case "done": return "completed";
-    case "partial": return "completed";
+    case "partial": return "info";
     case "cancelled": return "cancelled";
     case "error": return "failed";
   }
@@ -87,7 +87,7 @@ export function projectSubagentActivityItems(agent: SubagentState): ActivityItem
     : agent.status === "error"
       ? "failed"
       : agent.status === "partial"
-        ? "completed"
+        ? "info"
         : agent.status === "cancelled"
           ? "cancelled"
           : "queued";

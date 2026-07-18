@@ -1,45 +1,50 @@
 import { useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, FileCode2, FileSearch, RotateCcw } from "lucide-react";
+import { ChevronDown, Code2, Copy, FileSearch, FileText, RotateCcw } from "lucide-react";
 import type { DiffCellState } from "../../chat/cells/cellTypes";
 import {
-  diffCellTitle,
-  diffChangeBreakdownLabel,
   diffFileChangeType,
-  diffFileChangeTypeLabel,
 } from "../../chat/cells/diffCellLabels";
-import { sendClientCommand } from "../../protocol/ws-outbox";
+import { RollingNumber } from "../../components/RollingNumber";
 import { useAppStore } from "../../stores";
+import { workspaceRelativeDiffPath } from "../../chat/diffPaths";
+import { initialDiffReviewPatch } from "../../chat/diffReviewState";
+import { sendClientCommand } from "../../protocol/ws-outbox";
 
 const FILE_LIMIT = 3;
 
 export function FileChangesCard({ cell }: { cell: DiffCellState }) {
-  const [expanded, setExpanded] = useState(!cell.collapsed);
   const [showAllFiles, setShowAllFiles] = useState(false);
+  const workingDirectory = useAppStore((state) => state.workingDirectory);
+  const files = useMemo(
+    () => cell.files.map((file) => ({
+      ...file,
+      path: workspaceRelativeDiffPath(file.path, workingDirectory) || file.path,
+    })),
+    [cell.files, workingDirectory],
+  );
+  const visibleFiles = showAllFiles ? files : files.slice(0, FILE_LIMIT);
+  const hiddenCount = files.length - visibleFiles.length;
+  const canCollapse = showAllFiles && files.length > FILE_LIMIT;
   const reviewableFiles = useMemo(
-    () => cell.files.filter((file) => file.patch),
-    [cell.files],
+    () => files.filter((file) => file.patch),
+    [files],
   );
-  const breakdownLabel = useMemo(
-    () => diffChangeBreakdownLabel(cell.files),
-    [cell.files],
-  );
-  const visibleFiles = showAllFiles ? cell.files : cell.files.slice(0, FILE_LIMIT);
-  const hiddenCount = cell.files.length - visibleFiles.length;
-
   const openReview = () => {
     if (reviewableFiles.length === 0) return;
     const store = useAppStore.getState();
+    const reviewFiles = reviewableFiles.map((file) => ({
+      path: file.path,
+      patch: file.patch ?? "",
+      additions: file.additions,
+      deletions: file.deletions,
+    }));
+    const selectedPath = reviewFiles[0]?.path;
     store.setDiffReviewState({
       requestId: `agent-loop-diff-${cell.id}`,
       toolName: "助手修改",
-      diff: reviewableFiles.map((file) => file.patch).filter(Boolean).join("\n\n"),
-      files: reviewableFiles.map((file) => ({
-        path: file.path,
-        patch: file.patch ?? "",
-        additions: file.additions,
-        deletions: file.deletions,
-      })),
-      selectedPath: reviewableFiles[0]?.path,
+      diff: initialDiffReviewPatch(reviewFiles, selectedPath),
+      files: reviewFiles,
+      selectedPath,
       status: "viewing",
       mode: "view",
       fileDecisions: {},
@@ -49,7 +54,7 @@ export function FileChangesCard({ cell }: { cell: DiffCellState }) {
   };
 
   const revertAll = async () => {
-    const revertable = cell.files.filter((file) => file.path);
+    const revertable = files.filter((file) => file.path);
     if (revertable.length === 0) return;
     const { showConfirm } = await import("../../overlays/DialogService");
     const ok = await showConfirm({
@@ -70,37 +75,35 @@ export function FileChangesCard({ cell }: { cell: DiffCellState }) {
   return (
     <section className="agent-loop-file-card">
       <div className="agent-loop-file-card-header">
-        <button
-          type="button"
-          className="agent-loop-file-card-toggle"
-          aria-label={expanded ? "收起文件更改" : "展开文件更改"}
-          aria-expanded={expanded}
-          onClick={() => setExpanded((value) => !value)}
-        >
-          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        <div className="agent-loop-file-card-main">
           <span className="agent-loop-file-icon" aria-hidden="true">
-            <FileCode2 size={15} />
+            <FileText size={15} />
           </span>
           <span className="agent-loop-file-card-title">
-            <span>{diffCellTitle(cell)}</span>
-            <span className="agent-loop-file-meta-row">
-              <span className="agent-loop-file-stats">
-                <span className="agent-loop-file-added">+{cell.summary.added}</span>
-                <span className="agent-loop-file-removed">-{cell.summary.deleted}</span>
-              </span>
-              {breakdownLabel && (
-                <span className="agent-loop-file-breakdown">{breakdownLabel}</span>
-              )}
+            <span>{fileChangesCardTitle(cell)}</span>
+            <span className="agent-loop-file-stats agent-loop-file-card-stats">
+              <RollingNumber value={cell.summary.added} prefix="+" className="agent-loop-file-added" animateOnMount />
+              <RollingNumber value={cell.summary.deleted} prefix="-" className="agent-loop-file-removed" animateOnMount />
             </span>
           </span>
-        </button>
+        </div>
         <div className="agent-loop-file-actions">
-          <button type="button" className="agent-loop-file-action" onClick={revertAll}>
+          <button
+            type="button"
+            className="agent-loop-file-action"
+            onClick={revertAll}
+            title="撤销这些更改"
+          >
             <RotateCcw size={12} />
             撤销
           </button>
           {reviewableFiles.length > 0 && (
-            <button type="button" className="agent-loop-file-action" onClick={openReview}>
+            <button
+              type="button"
+              className="agent-loop-file-action agent-loop-file-action-primary"
+              onClick={openReview}
+              title="在审核面板查看更改"
+            >
               <FileSearch size={12} />
               审核
             </button>
@@ -108,81 +111,215 @@ export function FileChangesCard({ cell }: { cell: DiffCellState }) {
         </div>
       </div>
 
-      {expanded && (
-        <div className="agent-loop-file-list">
-          {visibleFiles.map((file, index) => (
-            <FileChangeRow key={file.path || index} file={file} />
-          ))}
-          {hiddenCount > 0 && (
-            <button
-              type="button"
-              className="agent-loop-file-more"
-              onClick={() => setShowAllFiles(true)}
-            >
-              再显示 {hiddenCount} 个文件
-            </button>
-          )}
-        </div>
-      )}
+      <div className="agent-loop-file-list">
+        {visibleFiles.map((file, index) => (
+          <FileChangeRow key={file.path || index} file={file} />
+        ))}
+        {hiddenCount > 0 && (
+          <button
+            type="button"
+            className="agent-loop-file-more"
+            onClick={() => setShowAllFiles(true)}
+          >
+            再显示 {hiddenCount} 个文件
+            <ChevronDown size={14} />
+          </button>
+        )}
+        {canCollapse && (
+          <button
+            type="button"
+            className="agent-loop-file-more"
+            onClick={() => setShowAllFiles(false)}
+          >
+            收起文件列表
+            <ChevronDown size={14} className="rotated-180" />
+          </button>
+        )}
+      </div>
     </section>
   );
 }
 
 function FileChangeRow({ file }: { file: DiffCellState["files"][number] }) {
-  const changeType = diffFileChangeType(file);
-  const changeLabel = diffFileChangeTypeLabel(file);
-
   const openFile = () => {
     const store = useAppStore.getState();
-    const label = file.path.split(/[/\\]/).filter(Boolean).pop() ?? file.path;
-    const line = firstChangedLineFromPatch(file.patch);
-    store.openEditorFile(file.path, label, line ? { line } : undefined);
-  };
-
-  const openDiff = () => {
-    if (!file.patch) return;
-    const store = useAppStore.getState();
-    store.setDiffReviewState({
-      requestId: `agent-loop-file-${Date.now()}`,
-      toolName: "差异预览",
-      diff: file.patch,
-      files: [{
-        path: file.path,
-        patch: file.patch,
-        additions: file.additions,
-        deletions: file.deletions,
-      }],
-      selectedPath: file.path,
-      status: "viewing",
-      mode: "view",
-      fileDecisions: {},
-      lineComments: [],
-    });
-    store.setRightStackTab("diff");
+    store.openEditorFile(file.path, basename(file.path));
   };
 
   return (
     <div className="agent-loop-file-row" title={file.path}>
-      <button type="button" className="agent-loop-file-button" onClick={openFile}>
-        <FileCode2 size={12} />
+      <button
+        type="button"
+        className="agent-loop-file-button"
+        onClick={openFile}
+        aria-label={`打开 ${file.path}`}
+      >
         <span>{shortPath(file.path)}</span>
       </button>
-      <span className={`agent-loop-file-kind agent-loop-file-kind-${changeType}`}>
-        {changeLabel}
-      </span>
       <span className="agent-loop-file-row-stats">
-        <span className="agent-loop-file-added">+{file.additions}</span>
-        <span className="agent-loop-file-removed">-{file.deletions}</span>
+        <RollingNumber value={file.additions} prefix="+" className="agent-loop-file-added" animateOnMount />
+        <RollingNumber value={file.deletions} prefix="-" className="agent-loop-file-removed" animateOnMount />
       </span>
-      {file.patch ? (
-        <button type="button" className="agent-loop-file-row-action" onClick={openDiff}>
-          审核
-        </button>
-      ) : (
-        <span className="agent-loop-file-row-spacer" />
-      )}
     </div>
   );
+}
+
+function fileChangesCardTitle(cell: DiffCellState): string {
+  const count = cell.summary.modifiedFiles || cell.files.length;
+  const types = new Set(cell.files.map(diffFileChangeType));
+  const verb =
+    types.size === 1 && types.has("created")
+      ? "已创建"
+      : types.size === 1 && types.has("deleted")
+        ? "已删除"
+        : types.size === 1 && types.has("updated")
+          ? "已编辑"
+          : "已更改";
+  return `${verb} ${count} 个文件`;
+}
+
+export function InlineDiffPreview({
+  path,
+  patch,
+}: {
+  path: string;
+  patch: string;
+  additions?: number;
+  deletions?: number;
+}) {
+  const [showAll, setShowAll] = useState(false);
+  const preview = useMemo(() => buildPatchPreview(patch, showAll), [patch, showAll]);
+  const copyPatch = () => {
+    void navigator.clipboard?.writeText(patch);
+  };
+
+  return (
+    <div className="agent-loop-file-inline-diff" aria-label={`${path} diff`}>
+      <div className="agent-loop-file-inline-diff-header">
+        <div className="agent-loop-file-inline-diff-title">
+          <Code2 size={13} />
+          <span>{shortPath(path)}</span>
+          <span className="agent-loop-file-inline-diff-meta">
+            {preview.totalLines} 行
+          </span>
+        </div>
+        <div className="agent-loop-file-inline-diff-actions">
+          <button
+            type="button"
+            className="agent-loop-file-inline-diff-copy"
+            aria-label={`复制 ${path} diff`}
+            title="复制 diff"
+            onClick={copyPatch}
+          >
+            <Copy size={12} />
+          </button>
+        </div>
+      </div>
+      <div className="agent-loop-file-inline-diff-body">
+        {preview.lines.map((line, index) => (
+          <div
+            key={`${index}-${line.oldNumber ?? ""}-${line.newNumber ?? ""}-${line.content}`}
+            className="agent-loop-file-inline-diff-line"
+            data-kind={line.kind}
+          >
+            <span className="agent-loop-file-inline-diff-gutter">
+              <span>{line.oldNumber ?? ""}</span>
+              <span>{line.newNumber ?? ""}</span>
+            </span>
+            <code className="agent-loop-file-inline-diff-code">{line.content || " "}</code>
+          </div>
+        ))}
+        {preview.foldedCount > 0 && (
+          <button
+            type="button"
+            className="agent-loop-file-inline-diff-folded"
+            onClick={() => setShowAll(true)}
+          >
+            {preview.foldedCount} 行已折叠
+            <ChevronDown size={12} />
+          </button>
+        )}
+        {showAll && (
+          <button
+            type="button"
+            className="agent-loop-file-inline-diff-folded"
+            onClick={() => setShowAll(false)}
+          >
+            收起 diff
+            <ChevronDown size={12} className="rotated-180" />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+type PatchPreviewLine = {
+  kind: "meta" | "hunk" | "add" | "remove" | "context";
+  content: string;
+  oldNumber?: number;
+  newNumber?: number;
+};
+
+export function buildPatchPreview(patch: string, showAll = false): {
+  lines: PatchPreviewLine[];
+  totalLines: number;
+  foldedCount: number;
+} {
+  const lines = patch.split("\n");
+  const maxLines = 80;
+  const visible = showAll ? lines : lines.slice(0, maxLines);
+  let oldLine: number | undefined;
+  let newLine: number | undefined;
+
+  const parsed = visible.map((raw) => {
+    const hunk = /^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/.exec(raw);
+    if (hunk) {
+      oldLine = Number(hunk[1]);
+      newLine = Number(hunk[2]);
+      return { kind: "hunk", content: raw } satisfies PatchPreviewLine;
+    }
+
+    if (raw.startsWith("diff --git") || raw.startsWith("index ") || raw.startsWith("--- ") || raw.startsWith("+++ ")) {
+      return { kind: "meta", content: raw } satisfies PatchPreviewLine;
+    }
+
+    if (raw.startsWith("+") && !raw.startsWith("+++ ")) {
+      const row = {
+        kind: "add",
+        content: raw,
+        newNumber: newLine,
+      } satisfies PatchPreviewLine;
+      if (newLine !== undefined) newLine += 1;
+      return row;
+    }
+
+    if (raw.startsWith("-") && !raw.startsWith("--- ")) {
+      const row = {
+        kind: "remove",
+        content: raw,
+        oldNumber: oldLine,
+      } satisfies PatchPreviewLine;
+      if (oldLine !== undefined) oldLine += 1;
+      return row;
+    }
+
+    const row = {
+      kind: "context",
+      content: raw,
+      oldNumber: oldLine,
+      newNumber: newLine,
+    } satisfies PatchPreviewLine;
+    if (oldLine !== undefined) oldLine += 1;
+    if (newLine !== undefined) newLine += 1;
+    return row;
+  });
+
+  return {
+    lines: parsed,
+    totalLines: lines.length,
+    foldedCount: showAll ? 0 : Math.max(0, lines.length - visible.length),
+  };
 }
 
 function shortPath(path: string): string {
@@ -191,10 +328,6 @@ function shortPath(path: string): string {
   return value.length > 60 ? `${value.slice(0, 57)}...` : value;
 }
 
-function firstChangedLineFromPatch(patch?: string): number | undefined {
-  if (!patch) return undefined;
-  const match = /^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/m.exec(patch);
-  if (!match) return undefined;
-  const line = Number(match[1]);
-  return Number.isFinite(line) && line > 0 ? line : undefined;
+function basename(path: string): string {
+  return path.split(/[/\\]/).filter(Boolean).pop() ?? path;
 }

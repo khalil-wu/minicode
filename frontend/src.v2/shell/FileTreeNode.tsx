@@ -1,5 +1,5 @@
 import { memo, type MouseEvent as ReactMouseEvent } from "react";
-import { ChevronDown, ChevronRight, Folder, FolderOpen } from "lucide-react";
+import { ChevronDown, ChevronRight, LoaderCircle } from "lucide-react";
 import type { WorkspaceTreeNode } from "../protocol/workspace";
 import { useAppStore } from "../stores";
 import {
@@ -23,6 +23,7 @@ import {
   formatBytes,
   iconColor,
   fileIcon,
+  folderIcon,
 } from "./fileTreeHelpers";
 
 export const TreeNode = memo(({
@@ -37,6 +38,7 @@ export const TreeNode = memo(({
   density,
   onToggleExpanded,
   onContextMenu,
+  onNavigate,
 }: {
   node: WorkspaceTreeNode;
   depth: number;
@@ -49,6 +51,7 @@ export const TreeNode = memo(({
   density: ExplorerDensity;
   onToggleExpanded: (path: string, shouldLoad?: boolean) => void;
   onContextMenu: (menu: ContextMenuState) => void;
+  onNavigate?: () => void;
 }) => {
   const hasQuery = query.trim().length > 0;
   const expanded = expandedPaths.has(node.path) || (hasQuery && nodeMatchesQuery(node, query));
@@ -63,6 +66,7 @@ export const TreeNode = memo(({
   const openFile = () => {
     if (!node.is_dir) {
       useAppStore.getState().openEditorFile(node.path, node.name);
+      onNavigate?.();
     }
   };
 
@@ -94,6 +98,7 @@ export const TreeNode = memo(({
         data-selected={selected || undefined}
         aria-expanded={node.is_dir ? expanded : undefined}
         aria-selected={selected}
+        data-tree-path={node.path}
         onClick={node.is_dir ? toggle : openFile}
         onKeyDown={handleKeyDown}
         onContextMenu={handleContextMenu}
@@ -116,15 +121,19 @@ export const TreeNode = memo(({
           transition: "background 80ms ease, border-color 80ms ease, box-shadow 80ms ease",
         }}
       >
-        <span style={treeChevronStyle}>
+        <span className="file-tree-chevron" style={treeChevronStyle} aria-hidden="true">
           {node.is_dir ? (
             expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />
           ) : (
             <span style={{ width: 14 }} />
           )}
         </span>
-        <span style={{ ...treeIconStyle, color: iconColor(node) }}>
-          {node.is_dir ? (expanded ? <FolderOpen size={16} /> : <Folder size={16} />) : fileIcon(node.name)}
+        <span style={{ ...treeIconStyle, color: iconColor(node) }} aria-hidden="true">
+          {node.is_dir
+            ? expanded
+              ? folderIcon(true)
+              : folderIcon(false)
+            : fileIcon(node.name)}
         </span>
         <span style={{
           flex: 1,
@@ -151,8 +160,8 @@ export const TreeNode = memo(({
           </span>
         )}
         {loading && (
-          <span style={{ fontSize: 10, color: "var(--text-muted)", flexShrink: 0 }}>
-            ...
+          <span role="status" aria-label={`Loading ${node.name}`} style={{ color: "var(--text-muted)", flexShrink: 0, display: "inline-flex" }}>
+            <LoaderCircle size={14} className="animate-spin" aria-hidden="true" />
           </span>
         )}
       </div>
@@ -184,6 +193,7 @@ export const TreeNode = memo(({
               density={density}
               onToggleExpanded={onToggleExpanded}
               onContextMenu={onContextMenu}
+              onNavigate={onNavigate}
             />
           ))}
         </div>

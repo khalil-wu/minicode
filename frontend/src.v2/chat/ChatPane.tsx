@@ -16,23 +16,27 @@ export const ChatPane = () => {
   }, []);
 
   useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "f" && (e.ctrlKey || e.metaKey)) {
+      if (e.key.toLowerCase() === "f" && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         e.stopPropagation();
-        setShowSearch(true);
+        setShowSearch((current) => !current);
+        return;
+      }
+      if (e.key === "Escape") {
+        setShowSearch((current) => {
+          if (current) window.getSelection()?.removeAllRanges();
+          return false;
+        });
       }
     };
 
     const onRequestSearch = () => setShowSearch(true);
 
-    el.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("chat:request-search", onRequestSearch);
     return () => {
-      el.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("chat:request-search", onRequestSearch);
     };
   }, []);
@@ -40,7 +44,7 @@ export const ChatPane = () => {
   return (
     <div
       ref={containerRef}
-      className="flex flex-1 min-h-0 flex-col overflow-hidden w-full"
+      className="chat-pane flex flex-1 min-h-0 flex-col overflow-hidden w-full"
       style={{
         position: "relative",
         display: "flex",

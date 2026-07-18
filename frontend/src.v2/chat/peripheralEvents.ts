@@ -161,9 +161,7 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
         })));
         for (const srv of ev.servers) {
           const was = prev.find((p) => p.name === srv.name);
-          if (!was && srv.status === "connected") {
-            pushToast(`MCP: ${srv.name} connected`, "success");
-          } else if (was?.status !== "error" && srv.status === "error") {
+          if (was?.status !== "error" && srv.status === "error") {
             pushToast(`MCP: ${srv.name} error`, "error");
           }
         }
@@ -199,6 +197,7 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
       };
       const cmd = ev.command ?? "command";
       const shortCmd = cmd.length > 40 ? `${cmd.slice(0, 37)}...` : cmd;
+      const conversationId = String((e as unknown as { conversation_id?: string }).conversation_id || s.conversationId || "");
       pushToast(
         `${shortCmd} finished (exit ${ev.exit_code ?? 0})`,
         ev.exit_code === 0 ? "success" : "error",
@@ -211,6 +210,14 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
         duration: ev.duration,
         timestamp: Date.now(),
       });
+      const replayed = Boolean((e as unknown as { __replayed?: boolean }).__replayed);
+      if (!replayed && typeof document !== "undefined" && (document.hidden || !document.hasFocus())) {
+        void import("../desktop/runtime").then(({ desktop }) => desktop()?.notify({
+          title: ev.exit_code === 0 ? "Background command completed" : "Background command failed",
+          body: shortCmd,
+          ...(conversationId ? { target: { kind: "conversation" as const, conversationId } } : {}),
+        }));
+      }
       return true;
     }
     default:

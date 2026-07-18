@@ -35,6 +35,7 @@ export type CommonServerEventType =
   | "connectors.marketplace.list"
   // Session / control plane
   | "session.restored"
+  | "session.replay"
   | "session.synced"
   | "runtime.capabilities"
   | "client.command.ack"
@@ -96,11 +97,30 @@ export type CommonClientCommandType =
 export interface SkillActivatedEvent {
   type: "skill_activated";
   skill_name: string;
+  trigger_mode?: "explicit" | "implicit" | "model" | string;
+  data?: {
+    skill_name?: string;
+    trigger_mode?: "explicit" | "implicit" | "model" | string;
+  };
 }
 
 export interface SkillDeactivatedEvent {
   type: "skill_deactivated";
   skill_name: string;
+  trigger_mode?: "explicit" | "implicit" | "model" | string;
+  data?: {
+    skill_name?: string;
+    trigger_mode?: "explicit" | "implicit" | "model" | string;
+  };
+}
+
+export interface SkillUsageStatsPayload {
+  load_count?: number;
+  reuse_count?: number;
+  failure_count?: number;
+  unload_count?: number;
+  last_event?: string;
+  last_invoked_at?: string;
 }
 
 export interface McpStatusEvent {
@@ -155,7 +175,7 @@ export interface McpProgressEvent {
 
 export interface SchedulerListEvent {
   type: "scheduler.list";
-  tasks?: { id: string; name: string; prompt: string; schedule: string; permission_mode: string; enabled: boolean; last_run_at?: string | null; created_at?: string }[];
+  tasks?: { id: string; name: string; prompt: string; schedule: string; permission_mode: string; enabled: boolean; last_run_at?: string | null; next_run_at?: string | null; created_at?: string }[];
 }
 
 export interface ConnectorsMarketplaceListEvent {
@@ -184,11 +204,18 @@ export interface SkillsListEvent {
   skills: {
     name: string;
     description: string;
+    display_name?: string;
+    icon?: string;
     version?: string;
     triggers?: string[];
     tools_required?: string[];
+    mcp_required?: string[];
+    mcp_dependencies?: string[];
+    allow_implicit_invocation?: boolean;
+    default_prompt?: string;
     source_level?: string;
     active?: boolean;
+    usage?: SkillUsageStatsPayload;
   }[];
 }
 
@@ -207,6 +234,9 @@ export interface ClientCommandAckEvent {
   type: "client.command.ack";
   client_command_id: string;
   command_type: string;
+  duplicate?: boolean;
+  accepted?: boolean;
+  reason?: string;
 }
 
 export interface RuntimeCapabilitiesEvent {
@@ -246,10 +276,26 @@ export interface SessionRestoredEvent {
   model?: string | null;
   current_model?: string | null;
   provider?: string | null;
-  available_models?: string[];
+  provider_id?: string | null;
+  base_url?: string | null;
+  wire_api?: string | null;
+    available_models?: string[];
+  models_source?: string;
   messages?: ConversationTranscriptMessage[];
   error?: string | null;
+  missed_events?: boolean;
+  last_seq?: number;
+  current_seq?: number;
+  replayed_events?: number;
   session?: SessionSnapshotPayload | null;
+}
+
+export interface SessionReplayEvent {
+  type: "session.replay";
+  last_seq?: number;
+  current_seq?: number;
+  replayed_events?: number;
+  events?: Array<Record<string, unknown>>;
 }
 
 export interface SessionSyncedEvent {
@@ -266,7 +312,14 @@ export interface SessionSyncedEvent {
   model?: string | null;
   current_model?: string | null;
   provider?: string | null;
-  available_models?: string[];
+  provider_id?: string | null;
+  base_url?: string | null;
+  wire_api?: string | null;
+    available_models?: string[];
+  models_source?: string;
+  missed_events?: boolean;
+  last_seq?: number;
+  current_seq?: number;
   session?: SessionSnapshotPayload | null;
 }
 

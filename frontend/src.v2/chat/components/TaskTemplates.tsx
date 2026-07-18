@@ -1,5 +1,17 @@
 import { useState } from "react";
-import { FileText, ChevronRight, X } from "lucide-react";
+import {
+  Bug,
+  ChevronRight,
+  FileText,
+  FlaskConical,
+  Gauge,
+  RefreshCcw,
+  Rocket,
+  ScanSearch,
+  Sparkles,
+  X,
+} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { useAppStore } from "../../stores";
 import { createTodoItem } from "../../lib/todo-utils";
 import "./task-templates.css";
@@ -7,7 +19,7 @@ import "./task-templates.css";
 interface TaskTemplate {
   id: string;
   name: string;
-  icon: string;
+  icon: LucideIcon;
   description: string;
   tasks: string[];
 }
@@ -16,7 +28,7 @@ const TEMPLATES: TaskTemplate[] = [
   {
     id: "bug-fix",
     name: "Bug 修复",
-    icon: "🐛",
+    icon: Bug,
     description: "标准的 bug 修复流程",
     tasks: [
       "定位 bug 根因",
@@ -29,7 +41,7 @@ const TEMPLATES: TaskTemplate[] = [
   {
     id: "feature-dev",
     name: "功能开发",
-    icon: "✨",
+    icon: Sparkles,
     description: "新功能开发完整流程",
     tasks: [
       "分析需求",
@@ -42,7 +54,7 @@ const TEMPLATES: TaskTemplate[] = [
   {
     id: "refactor",
     name: "代码重构",
-    icon: "♻️",
+    icon: RefreshCcw,
     description: "安全重构代码",
     tasks: [
       "审查现有代码",
@@ -55,7 +67,7 @@ const TEMPLATES: TaskTemplate[] = [
   {
     id: "code-review",
     name: "代码审查",
-    icon: "👀",
+    icon: ScanSearch,
     description: "全面审查代码质量",
     tasks: [
       "检查代码风格",
@@ -68,7 +80,7 @@ const TEMPLATES: TaskTemplate[] = [
   {
     id: "optimization",
     name: "性能优化",
-    icon: "⚡",
+    icon: Gauge,
     description: "系统性能优化",
     tasks: [
       "性能分析和瓶颈定位",
@@ -81,7 +93,7 @@ const TEMPLATES: TaskTemplate[] = [
   {
     id: "documentation",
     name: "文档编写",
-    icon: "📝",
+    icon: FileText,
     description: "完整项目文档",
     tasks: [
       "编写 README",
@@ -94,7 +106,7 @@ const TEMPLATES: TaskTemplate[] = [
   {
     id: "testing",
     name: "测试覆盖",
-    icon: "🧪",
+    icon: FlaskConical,
     description: "提升测试覆盖率",
     tasks: [
       "分析测试覆盖情况",
@@ -107,7 +119,7 @@ const TEMPLATES: TaskTemplate[] = [
   {
     id: "deployment",
     name: "部署上线",
-    icon: "🚀",
+    icon: Rocket,
     description: "生产环境部署",
     tasks: [
       "代码审查",
@@ -157,7 +169,7 @@ export function TaskTemplates({ onApply }: TaskTemplatesProps) {
         <span>选择任务模板</span>
         <button
           type="button"
-          className="task-templates-close"
+          className="task-templates-close mc-icon-button mc-icon-button-compact"
           onClick={() => setExpanded(false)}
           title="关闭模板"
           aria-label="关闭模板选择"
@@ -167,20 +179,26 @@ export function TaskTemplates({ onApply }: TaskTemplatesProps) {
       </div>
 
       <div className="task-templates-grid">
-        {TEMPLATES.map((template) => (
-          <button
-            key={template.id}
-            className="task-template-card"
-            onClick={() => applyTemplate(template)}
-          >
-            <div className="task-template-icon">{template.icon}</div>
-            <div className="task-template-content">
-              <div className="task-template-name">{template.name}</div>
-              <div className="task-template-description">{template.description}</div>
-              <div className="task-template-count">{template.tasks.length} 个任务</div>
-            </div>
-          </button>
-        ))}
+        {TEMPLATES.map((template) => {
+          const TemplateIcon = template.icon;
+          return (
+            <button
+              key={template.id}
+              type="button"
+              className="task-template-card"
+              onClick={() => applyTemplate(template)}
+            >
+              <div className="task-template-icon" aria-hidden="true">
+                <TemplateIcon size={20} strokeWidth={1.75} />
+              </div>
+              <div className="task-template-content">
+                <div className="task-template-name">{template.name}</div>
+                <div className="task-template-description">{template.description}</div>
+                <div className="task-template-count">{template.tasks.length} 个任务</div>
+              </div>
+            </button>
+          );
+        })}
       </div>
     </div>
   );

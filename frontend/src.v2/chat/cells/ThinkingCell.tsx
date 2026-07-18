@@ -1,8 +1,15 @@
 import { useEffect, useState } from "react";
 import type React from "react";
+import { ChevronDown, ChevronRight, Sparkles } from "lucide-react";
 import { MarkdownRenderer } from "../messages/MarkdownRenderer";
 import type { ThinkingCellState } from "./cellTypes";
 import "./cells.css";
+
+function normalizeProviderReasoningSummary(content: string, cell: ThinkingCellState): string {
+  if (cell.source !== "provider" && cell.source !== "reasoning") return content;
+  if (cell.providerReasoningType !== "reasoning_summary_text") return content;
+  return content.replace(/\*\*([^*\n]+?)\*\*(\n{2,})/g, "$1$2");
+}
 
 export function ThinkingCell({ cell, isStreaming = false }: { cell: ThinkingCellState; isStreaming?: boolean }) {
   const [expanded, setExpanded] = useState(false);
@@ -12,9 +19,11 @@ export function ThinkingCell({ cell, isStreaming = false }: { cell: ThinkingCell
   }, [isStreaming]);
 
   const hasContent = Boolean(cell.content?.trim());
+  const renderedContent = hasContent ? normalizeProviderReasoningSummary(cell.content, cell) : cell.content;
   const renderAsProcessText = hasContent && (
     cell.source === "model_preamble" ||
     cell.source === "post_tool" ||
+    cell.source === "provider" ||
     cell.source === "runtime" ||
     cell.source === "reasoning"
   );
@@ -22,7 +31,7 @@ export function ThinkingCell({ cell, isStreaming = false }: { cell: ThinkingCell
     return (
       <div className="thinking-cell thinking-cell-process" data-source={cell.source}>
         <div className="thinking-cell-process-content">
-          <MarkdownRenderer content={cell.content} />
+          <MarkdownRenderer content={renderedContent} />
         </div>
       </div>
     );
@@ -34,17 +43,19 @@ export function ThinkingCell({ cell, isStreaming = false }: { cell: ThinkingCell
 
   const phaseLabel = cell.phase ? formatPhase(cell.phase) : "";
   const label = labelForSource(cell.source, isStreaming);
+  const charCount = hasContent ? cell.content.trim().length : 0;
 
   return (
-    <div className="thinking-cell">
+    <div className="thinking-cell" data-streaming={isStreaming ? "true" : "false"}>
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
         className="thinking-cell-header"
         aria-expanded={expanded}
       >
+        <Sparkles size={12} className="thinking-cell-icon" />
         <span className="thinking-cell-therefore">
-          {label}
+          {charCount ? `${label} · ${charCount} 字` : label}
         </span>
         {phaseLabel && (
           <span className="thinking-cell-phase">({phaseLabel})</span>
@@ -54,10 +65,15 @@ export function ThinkingCell({ cell, isStreaming = false }: { cell: ThinkingCell
             {" · "}{preview}
           </span>
         )}
+        <span className="thinking-cell-toggle">
+          {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+        </span>
       </button>
-      {expanded && hasContent && (
-        <div className="thinking-cell-content">
-          <MarkdownRenderer content={cell.content} />
+      {hasContent && (
+        <div className="thinking-cell-content-wrap" data-open={expanded ? "true" : "false"}>
+          <div className="thinking-cell-content">
+            <MarkdownRenderer content={renderedContent} />
+          </div>
         </div>
       )}
     </div>
@@ -65,11 +81,11 @@ export function ThinkingCell({ cell, isStreaming = false }: { cell: ThinkingCell
 }
 
 function labelForSource(source: ThinkingCellState["source"], isStreaming: boolean): string {
-  if (source === "model_preamble") return "过程";
-  if (source === "post_tool") return "过程";
-  if (source === "runtime") return "正在处理";
-  if (source === "provider") return isStreaming ? "正在思考" : "思考过程";
-  return isStreaming ? "正在思考" : "思考过程";
+  if (source === "model_preamble") return "";
+  if (source === "post_tool") return "";
+  if (source === "runtime") return "运行状态";
+  if (source === "provider") return "";
+  return "";
 }
 
 function compactPreview(value: string, max = 96): string {

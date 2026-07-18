@@ -1,5 +1,5 @@
 import { useAppStore } from "../stores";
-import type { RightStackTab } from "../stores/types";
+import type { InspectorTargetKind, RightStackTab } from "../stores/types";
 import { displayScopeOf, panelHintOf, requiresAttention, type DisplayRoutable } from "../lib/display-intent";
 
 export { normalizePanelHint } from "../lib/display-intent";
@@ -10,18 +10,20 @@ export function maybeAutoRoutePanel(event: DisplayRoutable, fallback?: RightStac
   const tab = panelHintOf(event) ?? fallback ?? null;
   if (!tab) return;
   const scope = displayScopeOf(event);
+  const attention = requiresAttention(event);
+  if ((tab === "subagents" || scope === "agents") && !attention) {
+    return;
+  }
   const shouldOpen =
-    requiresAttention(event) ||
-    scope === "agents" ||
-    scope === "inspector" ||
-    tab === "diff";
+    attention ||
+    scope === "inspector";
   if (shouldOpen) {
     state.setRightStackTab(tab, { automatic: true });
   }
 }
 
 export function addInspectorPayload(
-  targetKind: "message" | "tool_call" | "artifact" | "file" | "diff" | "subagent" | "budget" | "provider" | "cache",
+  targetKind: InspectorTargetKind,
   targetId: string,
   payload: Record<string, unknown>,
 ) {

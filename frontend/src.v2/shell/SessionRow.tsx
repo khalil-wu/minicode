@@ -1,4 +1,4 @@
-import { GitBranch, MoreHorizontal } from "lucide-react";
+import { Clock3, GitBranch, LoaderCircle, MoreHorizontal } from "lucide-react";
 import { useAppStore } from "../stores";
 import { isDesktop } from "../desktop/runtime";
 import { branchDisplayName } from "../lib/workspace-display";
@@ -24,7 +24,6 @@ export const SessionRow = ({
   renaming,
   renameValue,
   waitingLabelForConversation,
-  statusDot,
   relativeTime,
   onSwitch,
   onToggleSelected,
@@ -36,6 +35,7 @@ export const SessionRow = ({
   onArchive,
   onDelete,
   onCleanup,
+  onHandoff,
   onReveal,
   onCopy,
 }: {
@@ -47,7 +47,6 @@ export const SessionRow = ({
   renaming: string | null;
   renameValue: string;
   waitingLabelForConversation: (id: string) => string | null;
-  statusDot: (status: string) => React.ReactNode;
   relativeTime: (iso: string) => string;
   onSwitch: (id: string) => void;
   onToggleSelected: (id: string) => void;
@@ -59,6 +58,7 @@ export const SessionRow = ({
   onArchive: (id: string, archived: boolean) => void;
   onDelete: (id: string) => void;
   onCleanup: (id: string) => void;
+  onHandoff: (id: string, target: "local" | "worktree") => void;
   onReveal: (path?: string) => void;
   onCopy: (path?: string) => void;
 }) => {
@@ -101,7 +101,12 @@ export const SessionRow = ({
         }}
         style={sessionMainButtonStyle}
       >
-        {statusDot(c.sessionStatus || "idle")}
+        {c.sessionStatus === "running" && (
+          <LoaderCircle size={13} className="session-status-spinner" aria-label="Task running" style={{ color: "var(--state-info)", flexShrink: 0 }} />
+        )}
+        {c.sessionStatus === "waiting" && (
+          <Clock3 size={13} aria-label="Task waiting" style={{ color: "var(--state-warning)", flexShrink: 0 }} />
+        )}
         <div style={{ flex: 1, minWidth: 0 }}>
           {renaming === c.id ? (
             <input
@@ -153,12 +158,14 @@ export const SessionRow = ({
         </div>
       </button>
 
-      <IconAction
-        label="Session actions"
-        onClick={(e) => { e.stopPropagation(); onSetMenuFor(menuFor === c.id ? null : c.id); }}
-      >
-        <MoreHorizontal size={14} />
-      </IconAction>
+      <span className="session-row-actions" data-open={menuFor === c.id || undefined}>
+        <IconAction
+          label="Session actions"
+          onClick={(e) => { e.stopPropagation(); onSetMenuFor(menuFor === c.id ? null : c.id); }}
+        >
+          <MoreHorizontal size={14} />
+        </IconAction>
+      </span>
       {menuFor === c.id && (
         <ConversationMenu
           archived={Boolean(c.archived)}
@@ -171,6 +178,7 @@ export const SessionRow = ({
           onReveal={() => onReveal(c.worktreePath || c.workspaceRoot)}
           onCopy={() => onCopy(c.worktreePath || c.workspaceRoot)}
           onCleanup={() => { onSetMenuFor(null); onCleanup(c.id); }}
+          onHandoff={() => { onSetMenuFor(null); onHandoff(c.id, c.gitIsolated ? "local" : "worktree"); }}
           onArchive={() => { onSetMenuFor(null); onArchive(c.id, !c.archived); }}
           onDelete={() => { onSetMenuFor(null); onDelete(c.id); }}
         />

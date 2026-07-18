@@ -86,33 +86,43 @@ export const comingSoonStyle: React.CSSProperties = {
 export const bulkBarStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
+  flexWrap: "wrap",
   gap: 6,
-  margin: "0 6px 6px",
-  padding: "6px",
+  margin: "0 8px 8px",
+  padding: "5px 6px",
   background: "var(--surface-page)",
   border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 6px)",
+  borderRadius: "var(--radius-md, 8px)",
 };
 
 export const bulkActionStyle: React.CSSProperties = {
-  height: 24,
+  height: 28,
   padding: "0 8px",
   border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 4px)",
+  borderRadius: "var(--radius-sm, 6px)",
   background: "var(--surface-base)",
   color: "var(--text-secondary)",
   cursor: "pointer",
   fontSize: "var(--text-xs)",
-  fontWeight: 650,
+  fontWeight: 600,
+  lineHeight: 1,
+  whiteSpace: "nowrap",
 };
 
 export const bulkMetaStyle: React.CSSProperties = {
-  flex: 1,
-  minWidth: 0,
-  color: "var(--text-muted)",
+  flex: "1 1 auto",
+  color: "var(--text-secondary)",
   fontSize: "var(--text-xs)",
   fontFamily: "var(--font-mono)",
-  textAlign: "center",
+  fontVariantNumeric: "tabular-nums",
+  whiteSpace: "nowrap",
+};
+
+export const bulkActionsStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 4,
+  marginLeft: "auto",
 };
 
 export const sessionCheckboxStyle: React.CSSProperties = {
@@ -231,10 +241,9 @@ export const projectHeaderStyle: React.CSSProperties = {
   background: "transparent",
   border: 0,
   cursor: "pointer",
-  fontSize: 11,
+  fontSize: "var(--text-xs)",
   color: "var(--text-muted)",
-  fontWeight: 700,
-  textTransform: "uppercase",
+  fontWeight: 600,
   textAlign: "left",
 };
 
@@ -316,17 +325,4 @@ export const renameInputStyle: React.CSSProperties = {
   color: "var(--text-primary)",
   fontSize: "var(--text-sm)",
   outline: "none",
-};
-
-export const sessionFooterStyle: React.CSSProperties = {
-  padding: "8px 6px 0",
-  borderTop: "1px solid var(--border-subtle)",
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-  minWidth: 0,
-  overflow: "hidden",
-  fontSize: 11,
-  color: "var(--text-muted)",
-  background: "var(--surface-sidebar)",
 };

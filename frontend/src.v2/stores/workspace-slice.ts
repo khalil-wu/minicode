@@ -1,6 +1,7 @@
 import type { StateCreator } from "zustand";
 import type { AppStore, PanelKind, PanelSlot, UISlice, WorkspaceSlice } from "./types";
 import { clamp } from "../lib/clamp";
+import { isDesktop, openPath } from "../desktop/runtime";
 import {
   LS,
   LEFT_SIDEBAR_MAX_WIDTH,
@@ -14,6 +15,33 @@ import {
   preferredRightSidebarWidth,
 } from "./shared-helpers";
 
+const normalizeEditorOpenPath = (path: string, workingDirectory = ""): string => {
+  const raw = String(path || "").trim().replace(/\\/g, "/");
+  if (!raw) return raw;
+  const root = workingDirectory.replace(/\\/g, "/").replace(/\/+$/, "");
+  const rootLower = root.toLowerCase();
+  const rawLower = raw.toLowerCase();
+  if (rootLower && (rawLower === rootLower || rawLower.startsWith(`${rootLower}/`))) {
+    return raw.slice(root.length).replace(/^\/+/, "") || ".";
+  }
+  return raw.replace(/\/+/g, "/").replace(/^\.\/+/, "");
+};
+
+const DEFAULT_APP_EXTENSIONS = new Set(["doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp"]);
+
+const shouldOpenWithDefaultApp = (path: string): boolean => {
+  const extension = path.split(".").pop()?.toLowerCase() ?? "";
+  return DEFAULT_APP_EXTENSIONS.has(extension);
+};
+
+const resolveLocalOpenPath = (path: string, workingDirectory: string): string => {
+  const normalized = String(path || "").trim();
+  if (/^[a-zA-Z]:[\\/]/.test(normalized) || normalized.startsWith("\\\\") || !workingDirectory.trim()) {
+    return normalized;
+  }
+  return `${workingDirectory.replace(/[\\/]+$/, "")}\\${normalized.replace(/^[\\/]+/, "")}`;
+};
+
 export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice> = (set, get) => {
   const layout = loadInitialLayout();
   return {
@@ -22,6 +50,7 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
     terminalSessions: [],
     terminalSnapshots: {},
     backgroundTasks: [],
+    browserAnnotations: [],
     activeTerminalSessionId: null,
     editorOpenRequests: [],
     activeEditorPath: null,
@@ -60,7 +89,7 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
       set((s) => {
         const canonicalSlot: PanelSlot =
           slot.kind === "subagent"
-            ? { ...slot, kind: "subagents", label: slot.label ?? "Subagents" }
+            ? { ...slot, kind: "subagents", label: slot.label ?? "协作" }
             : slot;
         const rightStackByKind: Partial<Record<PanelKind, UISlice["rightStackTab"]>> = {
           preview: "preview",
@@ -69,6 +98,7 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
           plan: "plan",
           tasks: "tasks",
           subagents: "subagents",
+          artifacts: "artifacts",
           inspector: "inspector",
         };
         const rightTab = rightStackByKind[canonicalSlot.kind];
@@ -236,9 +266,15 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
         };
       }),
     setActiveTerminalSession: (id) => set({ activeTerminalSessionId: id }),
-    openEditorFile: (path, label, target) =>
+    openEditorFile: (path, label, target) => {
+      const current = get();
+      if (isDesktop() && shouldOpenWithDefaultApp(path)) {
+        void openPath(resolveLocalOpenPath(path, current.workingDirectory));
+        return;
+      }
       set((s) => {
-        const editorLabel = label ?? path.split(/[/\\]/).pop() ?? path;
+        const normalizedPath = normalizeEditorOpenPath(path, s.workingDirectory);
+        const editorLabel = label ?? normalizedPath.split(/[/\\]/).pop() ?? normalizedPath;
         const editorSlot = s.panelSlots.find((p) => p.kind === "editor");
         const baseSlots = s.panelSlots.filter((p) => p.kind === "chat" || p.kind === "editor");
         const line = Number.isFinite(target?.line) && Number(target?.line) > 0
@@ -261,15 +297,16 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
             ...s.editorOpenRequests,
             {
               id: `open-${Date.now().toString(36)}-${s.editorOpenRequests.length}`,
-              path,
+              path: normalizedPath,
               ...(line ? { line } : {}),
               ...(column ? { column } : {}),
             },
           ],
-          activeEditorPath: path,
+          activeEditorPath: normalizedPath,
           appMode: "code",
         };
-      }),
+      });
+    },
     consumeEditorOpenRequest: (path) =>
       set((s) => ({
         editorOpenRequests: s.editorOpenRequests.filter((request) =>
@@ -280,6 +317,26 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
     addBackgroundTask: (task) =>
       set((s) => ({
         backgroundTasks: [task, ...s.backgroundTasks.filter((t) => t.id !== task.id)].slice(0, 30),
+      })),
+    addBrowserAnnotation: (annotation) =>
+      set((s) => ({
+        browserAnnotations: [annotation, ...s.browserAnnotations.filter((item) => item.id !== annotation.id)].slice(0, 80),
+      })),
+    removeBrowserAnnotation: (id) =>
+      set((s) => ({
+        browserAnnotations: s.browserAnnotations.filter((item) => item.id !== id),
+      })),
+    clearBrowserAnnotations: (target) =>
+      set((s) => ({
+        browserAnnotations: target
+          ? s.browserAnnotations.filter((item) =>
+              target.targetId && item.targetId === target.targetId
+                ? false
+                : target.url && item.url === target.url
+                  ? false
+                  : true,
+            )
+          : [],
       })),
     prStatus: null,
     ciChecks: [],

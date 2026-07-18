@@ -20,6 +20,17 @@ export const handleDiffEvent = (e: ServerEvent): boolean => {
   switch (e.type) {
     case "diff.git_working_tree": {
       const ev = e as GitDiffWorkingTreeEvent;
+      if (ev.preview) {
+        s.setGitChanges({
+          live: {
+            files: (ev.files ?? []).map(toGitChange),
+            toolCallId: ev.tool_call_id,
+            progress: ev.progress,
+            updatedAt: Date.now(),
+          },
+        });
+        return true;
+      }
       s.setGitChanges({
         workingTree: (ev.files ?? []).map(toGitChange),
         untracked: ev.untracked ?? [],

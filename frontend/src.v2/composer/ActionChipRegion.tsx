@@ -1,4 +1,5 @@
-import { FileText, Folder, X } from "lucide-react";
+import { Folder, X } from "lucide-react";
+import { fileIcon } from "../shell/fileTreeHelpers";
 import { useAppStore } from "../stores";
 
 export const ContextChipRegion = () => {
@@ -23,25 +24,32 @@ export const ContextChipRegion = () => {
         </span>
       )}
       {selectedMentions.map((item) => (
-        <button
-          key={item.path}
-          type="button"
-          title={item.path}
-          onClick={() => item.kind === "file" && openEditorFile(item.path, item.name)}
-          style={tokenButtonStyle}
-        >
-          {item.kind === "folder" ? <Folder size={12} /> : <FileText size={12} />}
-          <span style={tokenNameStyle}>@{item.name}</span>
-          <span
-            onClick={(event) => {
-              event.stopPropagation();
-              removeSelectedMention(item.path);
-            }}
+        <span key={item.path} title={item.path} style={mentionTokenStyle}>
+          {item.kind === "file" ? (
+            <button
+              type="button"
+              aria-label={`Open ${item.name}`}
+              onClick={() => openEditorFile(item.path, item.name)}
+              style={mentionLabelButtonStyle}
+            >
+              {fileIcon(item.name || item.path || "file", { size: 12, className: "composer-context-icon-svg" })}
+              <span style={tokenNameStyle}>@{item.name}</span>
+            </button>
+          ) : (
+            <span style={mentionLabelStyle}>
+              <Folder size={12} />
+              <span style={tokenNameStyle}>@{item.name}</span>
+            </span>
+          )}
+          <button
+            type="button"
+            aria-label={`Remove ${item.name} from context`}
+            onClick={() => removeSelectedMention(item.path)}
             style={tokenRemoveStyle}
           >
             <X size={12} />
-          </span>
-        </button>
+          </button>
+        </span>
       ))}
       {mentionResults.length > 0 && (
         <>
@@ -125,6 +133,29 @@ const searchTokenStyle: React.CSSProperties = {
   borderColor: "var(--border-subtle)",
 };
 
+const mentionTokenStyle: React.CSSProperties = {
+  ...tokenButtonStyle,
+  padding: "0 3px 0 7px",
+  cursor: "default",
+};
+
+const mentionLabelStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 5,
+  minWidth: 0,
+};
+
+const mentionLabelButtonStyle: React.CSSProperties = {
+  ...mentionLabelStyle,
+  padding: 0,
+  border: 0,
+  background: "transparent",
+  color: "inherit",
+  cursor: "pointer",
+  font: "inherit",
+};
+
 const tokenNameStyle: React.CSSProperties = {
   overflow: "hidden",
   textOverflow: "ellipsis",
@@ -141,8 +172,17 @@ const tokenDetailStyle: React.CSSProperties = {
 };
 
 const tokenRemoveStyle: React.CSSProperties = {
+  width: 20,
+  height: 20,
   display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  padding: 0,
+  border: 0,
+  borderRadius: "50%",
+  background: "transparent",
   color: "var(--text-muted)",
+  cursor: "pointer",
 };
 
 const dismissStyle: React.CSSProperties = {

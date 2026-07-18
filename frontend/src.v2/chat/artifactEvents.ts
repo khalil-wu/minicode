@@ -14,6 +14,7 @@ interface ArtifactContentEvent {
   preview?: string;
   media_type?: string;
   url?: string;
+  purpose?: string;
 }
 
 export const handleArtifactEvent = (e: ServerEvent, conversationId?: string): boolean => {
@@ -22,14 +23,27 @@ export const handleArtifactEvent = (e: ServerEvent, conversationId?: string): bo
     case "artifact_content": {
       const ev = e as ArtifactContentEvent;
       if (ev.artifact_id) {
-        s.setPreviewArtifact({
-          artifactId: ev.artifact_id,
-          content: ev.content ?? "",
-          preview: ev.preview,
-          mediaType: ev.media_type,
-          url: ev.url,
-          loadedAt: Date.now(),
-        });
+        const shouldUpdatePreview = ev.purpose !== "image_preview" && ev.purpose !== "attachment";
+        if (shouldUpdatePreview) {
+          s.setPreviewArtifact({
+            artifactId: ev.artifact_id,
+            content: ev.content ?? "",
+            preview: ev.preview,
+            mediaType: ev.media_type,
+            url: ev.url,
+            loadedAt: Date.now(),
+          });
+        }
+        if (ev.media_type?.startsWith("image/") && ev.url) {
+          window.dispatchEvent(new CustomEvent("artifact:image-preview", {
+            detail: {
+              artifactId: ev.artifact_id,
+              url: ev.url,
+              mediaType: ev.media_type,
+              purpose: ev.purpose,
+            },
+          }));
+        }
       }
       return true;
     }
