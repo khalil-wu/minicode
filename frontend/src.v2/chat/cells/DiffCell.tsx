@@ -11,6 +11,13 @@ import {
 } from "./diffCellLabels";
 import { useAppStore } from "../../stores";
 import { sendClientCommand } from "../../protocol/ws-outbox";
+
+// Monotonic id so rapid clicks can't collide (Date.now() repeats within 1ms).
+let diffReviewRequestSeq = 0;
+const nextDiffReviewRequestId = (): string => {
+  diffReviewRequestSeq += 1;
+  return `diff-cell-${diffReviewRequestSeq}`;
+};
 import { RollingNumber } from "../../components/RollingNumber";
 import { initialDiffReviewPatch } from "../diffReviewState";
 import { workspaceRelativeDiffPath } from "../diffPaths";
@@ -202,7 +209,7 @@ function DiffFileRow({
     if (!file.patch) return;
     const store = useAppStore.getState();
     store.setDiffReviewState({
-      requestId: `diff-cell-${Date.now()}`,
+      requestId: nextDiffReviewRequestId(),
       toolName: "差异预览",
       diff: file.patch,
       files: [{

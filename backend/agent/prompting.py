@@ -644,13 +644,16 @@ def build_git_status_context(workspace_root: Path | None = None) -> str:
                 cwd=str(root),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=5,
             )
         except (OSError, subprocess.SubprocessError):
             return None
         if result.returncode != 0:
             return None
-        return result.stdout.strip()
+        stdout = getattr(result, "stdout", "")
+        return stdout.strip() if isinstance(stdout, str) else ""
 
     branch = _git("branch", "--show-current")
     if branch is None:

@@ -215,6 +215,21 @@ function focusMainWindow() {
   return true;
 }
 
+function isTrustedRendererUrl(target, candidateUrl) {
+  try {
+    const expected = target.type === "url"
+      ? new URL(target.value)
+      : new URL(`file:///${path.resolve(target.value).replace(/\\/g, "/")}`);
+    const candidate = new URL(candidateUrl);
+    if (expected.protocol === "file:") {
+      return candidate.protocol === "file:" && candidate.pathname === expected.pathname;
+    }
+    return candidate.origin === expected.origin;
+  } catch {
+    return false;
+  }
+}
+
 async function createMainWindow() {
   const { app } = require("electron");
   const target = getFrontendTarget();
@@ -307,6 +322,12 @@ async function createMainWindow() {
     return { action: "deny" };
   });
 
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    if (isTrustedRendererUrl(target, url)) return;
+    appendDesktopLog(`[desktop] blocked renderer navigation to ${url || "unknown URL"}`);
+    event.preventDefault();
+  });
+
   if (target.type === "url") {
     await mainWindow.loadURL(target.value);
   } else {
@@ -375,4 +396,5 @@ module.exports = {
 
   // Frontend target
   getFrontendTarget,
+  isTrustedRendererUrl,
 };

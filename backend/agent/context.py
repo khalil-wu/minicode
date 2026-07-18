@@ -476,22 +476,34 @@ class ContextBuilder:
         """Append hook or runtime context after the active user turn."""
         self.append_user(content)
 
-    async def build(self, state: AgentState) -> list[LLMMessage]:
+    async def build(
+        self,
+        user_message: str | AgentState,
+        state: AgentState | None = None,
+    ) -> list[LLMMessage]:
+        if isinstance(user_message, AgentState):
+            active_state = user_message
+        else:
+            if state is None:
+                raise TypeError("state is required when build() receives a user message")
+            active_state = state
+            await self.start_turn(user_message, active_state)
+
         messages: list[LLMMessage] = []
         if not self._prefer_stateful_history:
             self._compact_old_tool_results_for_cache()
             self._enforce_per_message_tool_budget()
             self._maybe_time_based_microcompact()
 
-        workspace_root = self._workspace_root_for_state(state)
-        if self._prepared_prompt_state is state and self._prepared_prompt_parts is not None:
+        workspace_root = self._workspace_root_for_state(active_state)
+        if self._prepared_prompt_state is active_state and self._prepared_prompt_parts is not None:
             prompt_parts = self._prepared_prompt_parts
         else:
-            prompt_parts = self._build_prompt_parts(state, workspace_root)
+            prompt_parts = self._build_prompt_parts(active_state, workspace_root)
         self._prepared_prompt_parts = None
         self._prepared_prompt_state = None
         system_content = prompt_parts.render_system()
-        runtime_context_prefix = self._build_runtime_context_prefix(state)
+        runtime_context_prefix = self._build_runtime_context_prefix(active_state)
         self._append_runtime_context_update_if_changed(runtime_context_prefix)
         self._compact_old_user_runtime_context_for_cache()
 

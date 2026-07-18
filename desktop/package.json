@@ -14,6 +14,8 @@
     "build:frontend:desktop": "chcp 65001 > nul && set MINICODE_VITE_RELATIVE_BASE=1&& npm --prefix ../frontend run build",
     "start:client": "npm run build:frontend:desktop && chcp 65001 > nul && set PYTHONUTF8=1&& set PYTHONIOENCODING=utf-8&& set ELECTRON_RUN_AS_NODE=&& electron .",
     "start:client:devfrontend": "chcp 65001 > nul && set PYTHONUTF8=1&& set PYTHONIOENCODING=utf-8&& set MINICODE_FRONTEND_URL=http://127.0.0.1:5173&& set ELECTRON_RUN_AS_NODE=&& electron .",
+    "test": "npm run test:unit && npm run test:e2e",
+    "test:unit": "node --test cdp-bridge.test.js pty-manager.test.js security.test.js updater.test.js window-manager.test.js",
     "test:e2e": "node electron-smoke.test.js",
     "version:check": "python ../scripts/version_sync.py --check",
     "version:sync": "python ../scripts/version_sync.py",

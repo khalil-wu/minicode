@@ -7,7 +7,7 @@ const { ipcMain, dialog, shell, app } = require("electron");
 
 const {
   isHttpUrl,
-  decodeTextBuffer,
+  isProbablyTextBuffer,
   hashFileContent,
   countDirEntries,
   isSamePath,
@@ -254,6 +254,7 @@ function registerIpcHandlers() {
     const isTrusted =
       Boolean(webContents) &&
       event?.sender === webContents &&
+      event?.senderFrame === webContents.mainFrame &&
       Boolean(expectedUrl) &&
       actualUrl === expectedUrl;
     if (isTrusted) {
@@ -556,9 +557,10 @@ function registerIpcHandlers() {
       throw new Error(`File too large (${(stat.size / 1024 / 1024).toFixed(1)}MB). Max ${MAX_READ_SIZE / 1024 / 1024}MB.`);
     }
     const raw = await fs.promises.readFile(fullPath);
-    const decoded = decodeTextBuffer(raw, fullPath);
-    if (!decoded) throw new Error("Only text files are supported.");
-    const { content, encoding } = decoded;
+    if (!isProbablyTextBuffer(raw, fullPath)) {
+      throw new Error("Only UTF-8 text files are supported.");
+    }
+    const content = raw.toString("utf8");
     return {
       workspace_root: path.dirname(fullPath),
       path: fullPath,
@@ -566,7 +568,7 @@ function registerIpcHandlers() {
       content,
       content_hash: hashFileContent(content),
       size_bytes: stat.size,
-      encoding,
+      encoding: "utf-8",
       modified_at: stat.mtime.toISOString(),
       language_hint: path.extname(fullPath).slice(1) || "text",
     };
@@ -610,9 +612,10 @@ function registerIpcHandlers() {
     let currentHash = "";
     if (currentStat) {
       const raw = await fs.promises.readFile(fullPath);
-      const decoded = decodeTextBuffer(raw, fullPath);
-      if (!decoded) throw new Error("Only text files are supported.");
-      currentHash = hashFileContent(decoded.content);
+      if (!isProbablyTextBuffer(raw, fullPath)) {
+        throw new Error("Only UTF-8 text files are supported.");
+      }
+      currentHash = hashFileContent(raw.toString("utf8"));
     }
 
     const normalizedExpected = String(expectedHash || "").trim().toLowerCase();

@@ -620,11 +620,12 @@ const trustedWorkspaceRoots = new Set([
   path.resolve(process.cwd()),
   getAppRoot(),
 ]);
-
-// Restore the last workspace before the renderer starts requesting files.
-// Without this, the first editor read races workspace activation: the IPC
-// read is rejected as untrusted, then the renderer falls back to the backend
-// while its full workspace index is still being built.
+const trustedWorkspaceLedgerPath = path.join(
+  app.getPath("userData"),
+  "data",
+  "trusted_workspaces.json",
+);
+let legacyActiveWorkspaceRoot = "";
 try {
   const activeWorkspacePath = path.join(
     app.getPath("userData"),
@@ -632,20 +633,22 @@ try {
     "active_workspace.json",
   );
   const activeWorkspace = JSON.parse(fs.readFileSync(activeWorkspacePath, "utf8"));
-  const restoredRoot = typeof activeWorkspace?.root === "string"
-    ? path.resolve(activeWorkspace.root)
+  legacyActiveWorkspaceRoot = typeof activeWorkspace?.root === "string"
+    ? activeWorkspace.root
     : "";
-  if (restoredRoot && fs.statSync(restoredRoot).isDirectory()) {
-    trustedWorkspaceRoots.add(restoredRoot);
-  }
 } catch {
   // A missing or stale workspace is normal on first launch.
 }
 
 security.init({
   initialRoots: trustedWorkspaceRoots,
+  approvedRoots: legacyActiveWorkspaceRoot ? [legacyActiveWorkspaceRoot] : [],
+  trustedRootsFile: trustedWorkspaceLedgerPath,
   logger: appendDesktopLog,
 });
+if (legacyActiveWorkspaceRoot) {
+  security.restoreTrustedWorkspaceRoot(legacyActiveWorkspaceRoot);
+}
 
 backendSidecar.init({
   writeStdout,

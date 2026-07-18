@@ -10,10 +10,28 @@ const { normalizeWithTrailingSeparator, isSamePath } = require("./utils");
 // ---------------------------------------------------------------------------
 
 let trustedWorkspaceRoots = new Set();
+let approvedWorkspaceRoots = new Set();
 let appendDesktopLog = () => {};
+let trustedRootsFile = "";
 
-function init({ initialRoots, logger }) {
-  trustedWorkspaceRoots = initialRoots || new Set();
+function init({ initialRoots, approvedRoots, logger, trustedRootsFile: rootsFile }) {
+  trustedWorkspaceRoots = new Set(
+    Array.from(initialRoots || [], (root) => canonicalizePath(root)).filter(isSafeWorkspacePath),
+  );
+  trustedRootsFile = typeof rootsFile === "string" ? rootsFile : "";
+  approvedWorkspaceRoots = readApprovedWorkspaceRoots();
+  for (const root of approvedRoots || []) {
+    const canonical = canonicalizePath(root);
+    if (!isSafeWorkspacePath(canonical)) continue;
+    try {
+      if (fs.statSync(canonical).isDirectory()) approvedWorkspaceRoots.add(canonical);
+    } catch {
+      // Ignore stale roots during migration from the legacy active workspace.
+    }
+  }
+  if (approvedRoots && approvedWorkspaceRoots.size > 0) {
+    persistApprovedWorkspaceRoots();
+  }
   if (typeof logger === "function") {
     appendDesktopLog = logger;
   }
@@ -47,21 +65,80 @@ function isSafeWorkspacePath(resolved) {
   return true;
 }
 
+function canonicalizePath(targetPath) {
+  const resolved = path.resolve(targetPath);
+  try {
+    return fs.realpathSync.native(resolved);
+  } catch {
+    const suffix = [];
+    let cursor = resolved;
+    while (!fs.existsSync(cursor)) {
+      const parent = path.dirname(cursor);
+      if (parent === cursor) break;
+      suffix.unshift(path.basename(cursor));
+      cursor = parent;
+    }
+    const canonicalParent = fs.existsSync(cursor) ? fs.realpathSync.native(cursor) : cursor;
+    return path.resolve(canonicalParent, ...suffix);
+  }
+}
+
+function readApprovedWorkspaceRoots() {
+  const roots = new Set();
+  if (!trustedRootsFile) return roots;
+  try {
+    const payload = JSON.parse(fs.readFileSync(trustedRootsFile, "utf8"));
+    const values = Array.isArray(payload) ? payload : payload?.roots;
+    if (!Array.isArray(values)) return roots;
+    for (const value of values) {
+      if (typeof value !== "string" || !value.trim()) continue;
+      const canonical = canonicalizePath(value);
+      if (!isSafeWorkspacePath(canonical)) continue;
+      try {
+        if (fs.statSync(canonical).isDirectory()) roots.add(canonical);
+      } catch {
+        // Ignore stale workspace entries.
+      }
+    }
+  } catch {
+    // A missing ledger is normal before the first native folder selection.
+  }
+  return roots;
+}
+
+function persistApprovedWorkspaceRoots() {
+  if (!trustedRootsFile) return;
+  const directory = path.dirname(trustedRootsFile);
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(
+    trustedRootsFile,
+    `${JSON.stringify({ version: 1, roots: Array.from(approvedWorkspaceRoots).sort() }, null, 2)}\n`,
+    "utf8",
+  );
+}
+
 function rememberTrustedWorkspaceRoot(targetPath) {
   if (typeof targetPath !== "string" || !targetPath.trim()) {
     return "";
   }
-  const resolved = path.resolve(targetPath);
+  const resolved = canonicalizePath(targetPath);
   if (!isSafeWorkspacePath(resolved)) {
     appendDesktopLog(`[desktop] rejected unsafe workspace path: ${resolved}`);
     return "";
   }
+  try {
+    if (!fs.statSync(resolved).isDirectory()) return "";
+  } catch {
+    return "";
+  }
   trustedWorkspaceRoots.add(resolved);
+  approvedWorkspaceRoots.add(resolved);
+  persistApprovedWorkspaceRoots();
   return resolved;
 }
 
 function isTrustedWorkspaceRootPath(targetPath) {
-  const resolved = path.resolve(targetPath);
+  const resolved = canonicalizePath(targetPath);
   for (const root of trustedWorkspaceRoots) {
     if (isSamePath(resolved, root)) return true;
   }
@@ -69,7 +146,7 @@ function isTrustedWorkspaceRootPath(targetPath) {
 }
 
 function isWithinTrustedWorkspace(targetPath) {
-  const resolved = path.resolve(targetPath);
+  const resolved = canonicalizePath(targetPath);
   const isWindows = process.platform === "win32";
   for (const root of trustedWorkspaceRoots) {
     if (isWindows) {
@@ -87,12 +164,63 @@ function isWithinTrustedWorkspace(targetPath) {
   return false;
 }
 
+function restoreTrustedWorkspaceRoot(targetPath) {
+  if (typeof targetPath !== "string" || !targetPath.trim() || !trustedRootsFile) {
+    return "";
+  }
+  try {
+    const requestedRoot = canonicalizePath(targetPath);
+    if (!isSafeWorkspacePath(requestedRoot) || !fs.statSync(requestedRoot).isDirectory()) {
+      return "";
+    }
+    const persistedRoots = readApprovedWorkspaceRoots();
+    const approvedRoot = Array.from(persistedRoots).find((root) => isSamePath(root, requestedRoot));
+    if (!approvedRoot) {
+      appendDesktopLog(`[desktop] rejected non-authoritative restored workspace: ${requestedRoot}`);
+      return "";
+    }
+    approvedWorkspaceRoots.add(approvedRoot);
+    trustedWorkspaceRoots.add(approvedRoot);
+    return approvedRoot;
+  } catch {
+    return "";
+  }
+}
+
 function trustedPathCandidates(targetPath) {
   const rawPath = targetPath.trim();
   if (path.isAbsolute(rawPath)) {
-    return [path.resolve(rawPath)];
+    return [canonicalizePath(rawPath)];
   }
-  return Array.from(trustedWorkspaceRoots, (root) => path.resolve(root, rawPath));
+  return Array.from(trustedWorkspaceRoots, (root) => canonicalizePath(path.resolve(root, rawPath)));
+}
+
+const IPC_CAPABILITIES = new Set([
+  "minicode:browser:captureScreenshot", "minicode:browser:click", "minicode:browser:discover",
+  "minicode:browser:navigate", "minicode:browser:type", "minicode:deepLink:ack",
+  "minicode:deepLink:open", "minicode:diagnostics:export", "minicode:env:detect",
+  "minicode:fs:compareWriteFile", "minicode:fs:createDirectory", "minicode:fs:deletePath",
+  "minicode:fs:listTree", "minicode:fs:readFile", "minicode:fs:renamePath",
+  "minicode:fs:searchFiles", "minicode:fs:writeFile", "minicode:notify",
+  "minicode:openExternal", "minicode:openPath", "minicode:pickDirectory",
+  "minicode:pty:ackExit", "minicode:pty:kill", "minicode:pty:list",
+  "minicode:pty:resize", "minicode:pty:snapshot", "minicode:pty:spawn",
+  "minicode:pty:write", "minicode:revealPath", "minicode:startup:getState",
+  "minicode:startup:openLogs", "minicode:startup:quit", "minicode:startup:retry",
+  "minicode:update:check", "minicode:update:download", "minicode:update:install",
+  "minicode:window:close", "minicode:window:maximize", "minicode:window:minimize",
+  "minicode:workspace:trust",
+]);
+
+function assertIpcCapability(channel, { logger } = {}) {
+  if (typeof channel === "string" && IPC_CAPABILITIES.has(channel)) {
+    return channel;
+  }
+  const writeLog = typeof logger === "function" ? logger : appendDesktopLog;
+  writeLog(`[desktop] blocked undeclared IPC capability: ${String(channel || "unknown")}`);
+  const error = new Error(`Undeclared IPC capability: ${String(channel || "unknown")}`);
+  error.code = "ERR_UNDECLARED_IPC_CAPABILITY";
+  throw error;
 }
 
 function assertTrustedPath(targetPath, label = "Path") {
@@ -174,12 +302,16 @@ module.exports = {
   init,
   getTrustedWorkspaceRoots,
   isSafeWorkspacePath,
+  canonicalizePath,
   rememberTrustedWorkspaceRoot,
+  restoreTrustedWorkspaceRoot,
   isTrustedWorkspaceRootPath,
   isWithinTrustedWorkspace,
   assertTrustedPath,
   assertMutableTrustedPath,
   isProtectedWritePath,
+  assertIpcCapability,
+  IPC_CAPABILITIES,
   PROTECTED_WRITE_FILE_NAMES,
   PROTECTED_WRITE_PATH_PARTS,
 };
