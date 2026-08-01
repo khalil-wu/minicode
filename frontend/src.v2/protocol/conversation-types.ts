@@ -49,11 +49,13 @@ export type ConversationClientCommandType =
   | "ping"
   // Approval flow
   | "approval"
-  | "approval.respond"
   | "approval.file_diff"
   | "read_artifact"
   // Conversation lifecycle
   | "conversation.create"
+  | "conversation.clone"
+  | "conversation.merge"
+  | "conversation.export"
   | "conversation.switch"
   | "conversation.list"
   | "conversation.clear"
@@ -166,6 +168,12 @@ export interface ConversationSummaryPayload {
   worktree_path?: string | null;
   git_isolated?: boolean;
   goal?: GoalInfo | null;
+  parent_conversation_id?: string | null;
+  parent_message_index?: number | null;
+  fork_id?: string | null;
+  branch_kind?: string | null;
+  merged_into_conversation_id?: string | null;
+  merged_at?: string | null;
 }
 
 export interface ConversationRecordPayload extends ConversationSummaryPayload {
@@ -217,6 +225,8 @@ export interface UserMessageQueueUpdatedEvent {
   user_message_id?: string;
   position?: number;
   reason?: string;
+  target_message_id?: string;
+  turn_mode?: "follow_up" | "steer";
 }
 
 export interface UserMessageCommand {
@@ -227,8 +237,10 @@ export interface UserMessageCommand {
   primaryFile?: string;
   activeTabPath?: string;
   permission_mode?: "default" | "plan" | "confirm" | "bypass" | "auto" | "accept_edits";
-  agent_mode?: "build" | "plan" | "review" | "explore" | "coordinator" | "subagent" | string;
+  agent_mode?: "build" | "plan" | "review" | "explore" | "subagent" | string;
   attachments?: Record<string, unknown>[];
+  skills?: { name: string; path: string }[];
+  plugins?: { config_name: string; path: string }[];
   assistant_message_id?: string;
   user_message_id?: string;
   queue_if_busy?: boolean;
@@ -303,6 +315,41 @@ export interface ConversationTruncateCommand {
   retained_message_ids?: string[];
 }
 
+export interface ConversationCloneCommand {
+  type: "conversation.clone";
+  conversation_id: string;
+  title?: string;
+  activate?: boolean;
+}
+
+export interface ConversationMergeCommand {
+  type: "conversation.merge";
+  conversation_id: string;
+  target_conversation_id?: string;
+}
+
+export interface ConversationExportCommand {
+  type: "conversation.export";
+  conversation_id: string;
+  include_descendants?: boolean;
+}
+
+/**
+ * Fork a conversation from a visible transcript message.
+ *
+ * `message_id` is the authoritative selector. `message_index` is retained
+ * only as a compatibility hint for older clients and test fixtures; the
+ * backend resolves the stable id against the persisted transcript before
+ * choosing the model-context boundary.
+ */
+export interface ContextForkCommand {
+  type: "context.fork";
+  message_id?: string;
+  message_index?: number;
+  create_branch?: boolean;
+  activate?: boolean;
+}
+
 export interface ConversationDeleteCommand {
   type: "conversation.delete";
   conversation_id: string;
@@ -320,6 +367,7 @@ export interface ConversationWorktreeHandoffPreflightCommand {
   type: "conversation.worktree.handoff.preflight";
   conversation_id: string;
   target: "local" | "worktree";
+  dirty_action?: "block" | "stash";
 }
 
 export interface ConversationWorktreeHandoffExecuteCommand {
@@ -327,6 +375,7 @@ export interface ConversationWorktreeHandoffExecuteCommand {
   conversation_id: string;
   target: "local" | "worktree";
   fingerprint: string;
+  dirty_action?: "block" | "stash";
 }
 
 export interface ConversationArchiveCommand {

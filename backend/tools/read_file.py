@@ -25,6 +25,47 @@ from backend.workspace.path_filters import is_windows_reserved_path
 
 from backend.tools.file_tools_common import *  # shared helpers (validation/diff/cache/etc.)
 
+
+def _file_version(path: Path, stat_result: os.stat_result) -> str:
+    return f"{path}:{stat_result.st_size}:{stat_result.st_mtime_ns}"
+
+
+def _range_already_returned(
+    context: ToolExecutionContext | None,
+    *,
+    path: Path,
+    version: str,
+    start_line: int,
+    end_line: int,
+    record: bool,
+) -> bool:
+    if context is None or end_line < start_line:
+        return False
+    states = context.metadata.setdefault("_read_file_ranges", {})
+    path_key = str(path)
+    state = states.get(path_key)
+    if not isinstance(state, dict) or state.get("version") != version:
+        state = {"version": version, "ranges": []}
+        states[path_key] = state
+    ranges = [
+        (int(item[0]), int(item[1]))
+        for item in state.get("ranges", [])
+        if isinstance(item, (list, tuple)) and len(item) == 2
+    ]
+    covered = any(start_line >= lower and end_line <= upper for lower, upper in ranges)
+    if covered or not record:
+        return covered
+
+    ranges.append((start_line, end_line))
+    merged: list[list[int]] = []
+    for lower, upper in sorted(ranges):
+        if merged and lower <= merged[-1][1] + 1:
+            merged[-1][1] = max(merged[-1][1], upper)
+        else:
+            merged.append([lower, upper])
+    state["ranges"] = merged
+    return False
+
 class ReadFileTool(BaseTool):
     """
     Read text file content.
@@ -38,15 +79,19 @@ class ReadFileTool(BaseTool):
     result_kind = "file"
     activity_kind = "fileRead"
     display_label = "Read"
-    panel_hint = "inspector"
-    # Self-bounds via READ_FILE_TOKEN_LIMIT and artifacts large files; the global
+    # Self-bounds via Pi's 2000-line/50-KiB contract and artifacts large files; the global
     # backstop would only re-truncate an already-compact preview.
     max_result_chars = None
     description = (
         "Read a text file from the workspace. Returns content with line numbers and a content_hash for safe edits. "
-        "Use before modifying files. Supports optional line ranges; large files are saved as artifacts."
+        "Use before modifying files. Supports optional line ranges; focused reads also return a current full-file "
+        "content_hash when it can be computed, so a narrow read can be followed by a guarded edit. Large files are "
+        "saved as artifacts."
     )
     permission = PermissionLevel.AUTO
+    workspace_path_fields = ("file_path",)
+    allow_workspace_root_path = True
+    allow_tool_result_path = True
 
     def __init__(self, artifact_store: ArtifactStore) -> None:
         self._artifact_store = artifact_store
@@ -61,9 +106,14 @@ class ReadFileTool(BaseTool):
             parameters={
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string"},
-                    "start_line": {"type": "integer"},
-                    "end_line": {"type": "integer"},
+                    "file_path": {"type": "string", "description": "Workspace file path."},
+                    "start_line": {
+                        "type": "integer",
+                        "description": "Optional first line for a focused range. A focused read still returns a current full-file content_hash when available.",
+                    },
+                    "end_line": {"type": "integer", "description": "Optional inclusive last line."},
+                    "offset": {"type": "integer", "description": "Optional 1-indexed line to start reading from (Claude Code alias for start_line)."},
+                    "limit": {"type": "integer", "description": "Optional number of lines to read (Claude Code alias; derives end_line)."},
                 },
                 "required": ["file_path"],
             },
@@ -77,11 +127,6 @@ class ReadFileTool(BaseTool):
             name=self.name,
             capability="workspace.read",
             required_args=("file_path",),
-            arg_roles={"file_path": "workspace_file", "path": "workspace_file"},
-            arg_sources={"file_path": ("recent_list_files", "workspace_context", "primary_file")},
-            repair_policy={"file_path": "resource_resolver"},
-            accepted_resource_types=("workspace_file",),
-            empty_args_policy="repair_or_ask",
         )
 
     def get_schema(self) -> ToolSchema:
@@ -97,11 +142,19 @@ class ReadFileTool(BaseTool):
                     },
                     "start_line": {
                         "type": "integer",
-                        "description": "Optional 1-indexed start line.",
+                        "description": "Optional 1-indexed start line. Focused reads include a current full-file content_hash when available.",
                     },
                     "end_line": {
                         "type": "integer",
                         "description": "Optional 1-indexed inclusive end line.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Optional 1-indexed line to start reading from (Claude Code alias for start_line).",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Optional number of lines to read (Claude Code alias; derives end_line).",
                     },
                 },
                 "required": ["file_path"],
@@ -109,10 +162,85 @@ class ReadFileTool(BaseTool):
             strict=True,
         )
 
+    def _read_pdf_text(self, path: Path, file_path: str, file_size: int) -> ToolResult:
+        """Extract text from a PDF via PyMuPDF (cc FileReadTool readPDF).
+
+        cc returns PDF page text capped at PDF_MAX_PAGES_PER_READ. PDFs aren't
+        editable via edit_file, so no content_hash for editing is included.
+        """
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            return self._error_result(
+                f"Cannot read PDF {file_path}: PyMuPDF (fitz) is not installed."
+            )
+        try:
+            doc = fitz.open(path)
+        except Exception as exc:
+            return self._error_result(f"Failed to open PDF {file_path}: {exc}")
+        try:
+            page_count = doc.page_count
+            max_pages = min(page_count, 20)  # cc PDF_MAX_PAGES_PER_READ
+            pages: list[str] = []
+            for index in range(max_pages):
+                text = (doc.load_page(index).get_text("text") or "").rstrip()
+                pages.append(f"--- Page {index + 1} ---\n{text}")
+            doc.close()
+        except Exception as exc:
+            doc.close()
+            return self._error_result(f"Failed to extract PDF text: {exc}")
+        body = "\n\n".join(pages)
+        if page_count > max_pages:
+            body += f"\n\n... ({page_count - max_pages} more page(s); showing first {max_pages})"
+        return self._success_result(
+            f"PDF {file_path} ({page_count} page(s), {file_size // 1024}KB):\n\n{body}"
+        )
+
+    def _read_image(self, path: Path, file_path: str, file_size: int) -> ToolResult:
+        """Return an image as a base64 tool_result image block (cc FileReadTool).
+
+        cc returns an image content block so the model can actually see the
+        image; the adapter renders ToolResult.images as Anthropic image blocks.
+        """
+        ext = path.suffix.lower()
+        media_type = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+        }.get(ext, "image/png")
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            return self._error_result(f"Failed to read image {file_path}: {exc}")
+        import base64
+
+        return ToolResult(
+            content=f"Image {file_path} ({ext.lstrip('.')}, {file_size // 1024}KB).",
+            images=[
+                {
+                    "media_type": media_type,
+                    "data": base64.b64encode(raw).decode("ascii"),
+                }
+            ],
+        )
+
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
         file_path = _path_arg(args)
         start_line_arg = args.get("start_line")
         end_line_arg = args.get("end_line")
+        # Accept Claude Code's offset (1-indexed line to start from) / limit
+        # (line count) as aliases for start_line/end_line, so a model trained on
+        # cc's FileRead params pages a large file instead of silently receiving
+        # the whole thing. start_line/end_line win if both spellings are given.
+        if start_line_arg is None and args.get("offset") is not None:
+            start_line_arg = args.get("offset")
+        if end_line_arg is None and args.get("limit") is not None:
+            _limit = _coerce_line_number(args.get("limit"))
+            if _limit:
+                _start = _coerce_line_number(start_line_arg, default=1)
+                end_line_arg = _start + _limit - 1
         has_line_range = start_line_arg is not None or end_line_arg is not None
         start_line = _coerce_line_number(start_line_arg, default=1)
         end_line = _coerce_line_number(end_line_arg)
@@ -121,7 +249,13 @@ class ReadFileTool(BaseTool):
             return self._error_result("Missing file_path argument")
 
         try:
-            path = _resolve_path(file_path, context, allow_workspace_escape=_is_bypass_mode(context))
+            path = _resolve_path(
+                file_path,
+                context,
+                allow_workspace_escape=_is_bypass_mode(context),
+                allow_tool_result_root=True,
+                allow_declared_read_root=True,
+            )
         except PathTraversalError as exc:
             return self._error_result(str(exc))
 
@@ -138,13 +272,22 @@ class ReadFileTool(BaseTool):
             )
         # Refuse very large direct reads to avoid memory pressure.
         try:
-            file_size = path.stat().st_size
+            stat_result = path.stat()
+            file_size = stat_result.st_size
         except OSError as exc:
             return self._error_result(f"Unable to read file metadata: {exc}")
         if file_size > MAX_FILE_READ_BYTES and not has_line_range:
             return self._error_result(
                 f"File is too large ({file_size // 1024 // 1024}MB); limit is {MAX_FILE_READ_BYTES // 1024 // 1024}MB"
             )
+
+        # PDF: extract text via PyMuPDF (cc FileReadTool readPDF). Binary PDFs
+        # cannot be read as UTF-8, so without this read_file errors out.
+        if path.suffix.lower() == ".pdf":
+            return self._read_pdf_text(path, file_path, file_size)
+
+        if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+            return self._read_image(path, file_path, file_size)
 
         line_offset = 0
         if has_line_range:
@@ -209,49 +352,117 @@ class ReadFileTool(BaseTool):
                 except OSError as exc:
                     return self._error_result(f"Failed to read file: {exc}")
 
-        # Store oversized content as an artifact while returning a usable preview.
-        estimated_tokens = len(content) // 4
+        # Apply Pi's line/UTF-8-byte contract before adding display line numbers.
         file_hash = content_hash(content)
+        returned_line_count = len(content.splitlines())
+        returned_start_line = (line_offset + 1) if line_offset else 1
+        returned_end_line = returned_start_line + returned_line_count - 1
+        version = _file_version(path, stat_result)
 
-        # FILE_UNCHANGED_STUB: if this file was already read with the same hash
-        # in this conversation, return a stub instead of the full content (ClaudeCode pattern).
+        # A focused read is normally the right way to inspect a large source
+        # file, but writes still need an optimistic full-file hash.  Compute it
+        # privately (without returning the omitted content) so the model can
+        # read a small range and immediately issue a guarded edit.  Reuse the
+        # file-state cache when possible; files above the direct-read limit stay
+        # range-only because loading their complete text would defeat the
+        # bounded-read contract.
+        write_safe_hash = ""
+        if has_line_range and file_size <= MAX_FILE_READ_BYTES:
+            try:
+                cache = get_global_file_cache()
+                cached_full = cache.get(path)
+                if cached_full is not None:
+                    full_content = cached_full.content
+                else:
+                    full_content = path.read_text(encoding="utf-8")
+                    language_hint = path.suffix.lstrip(".") if path.suffix else ""
+                    cache.put(path, full_content, language_hint)
+                write_safe_hash = content_hash(full_content)
+            except (UnicodeDecodeError, OSError):
+                # The requested range remains useful even when a full-file
+                # hash cannot be produced (for example, a concurrently
+                # changing or oversized/non-text file).
+                write_safe_hash = ""
+
+        if context is not None and write_safe_hash:
+            seen = context.metadata.setdefault("_read_file_hashes", {})
+            path_key = str(path)
+            seen.pop(path_key, None)
+            seen[path_key] = write_safe_hash
+
+        # Keep the latest full-file hash for optimistic edit guards. Do not
+        # replace an explicit read with an "already returned" stub: context
+        # compaction may have removed the earlier tool result, and a subagent
+        # then has no way to recover the evidence it is asking for. The file
+        # state cache already avoids repeat disk I/O.
         if context is not None and not has_line_range:
             seen = context.metadata.setdefault("_read_file_hashes", {})
             path_key = str(path)
-            if seen.get(path_key) == file_hash:
-                return ToolResult(
-                    content=f"File unchanged since last read. The content_hash {file_hash} is still current — refer to the earlier read_file result instead of re-reading.",
-                    extraction_status="ok",
-                )
+            seen.pop(path_key, None)
             seen[path_key] = file_hash
 
-        if estimated_tokens <= READ_FILE_TOKEN_LIMIT:
-            content = _add_line_numbers(content, start_line=(line_offset + 1) if line_offset else 1)
-            hash_label = "range_hash" if has_line_range else "content_hash"
-            range_note = "\n[range only; read the full file to obtain a write-safe content_hash]" if has_line_range else ""
-            return self._success_result(f"{content}\n\n[{hash_label}: {file_hash}]{range_note}")
+        _range_already_returned(
+            context,
+            path=path,
+            version=version,
+            start_line=returned_start_line,
+            end_line=returned_end_line,
+            record=True,
+        )
+        numbered = _add_line_numbers(content, start_line=(line_offset + 1) if line_offset else 1)
+        from backend.tools.base import truncate_text_head
 
-        # Large files are saved as artifacts; the preview remains actionable.
-        # The artifact can be opened later with read_artifact if needed.
+        truncation = truncate_text_head(
+            numbered,
+            max_lines=READ_FILE_MAX_LINES,
+            max_bytes=READ_FILE_MAX_BYTES,
+        )
+        hash_label = "range_hash" if has_line_range else "content_hash"
+        hash_lines = [f"[{hash_label}: {file_hash}]"]
+        if has_line_range and write_safe_hash:
+            hash_lines.append(f"[content_hash: {write_safe_hash}; write-safe full-file version]")
+        elif has_line_range:
+            hash_lines.append("[range only; a write-safe full-file content_hash was unavailable]")
+
+        if not truncation.truncated:
+            return self._success_result(f"{numbered}\n\n" + "\n".join(hash_lines))
+
+        # Preserve the complete file for explicit artifact reads while making
+        # the inline result resumable with offset/limit.
         artifact_id = self._artifact_store.save(
             content=content,
             source=f"read_file({file_path})",
             type="code" if path.suffix in ('.py', '.js', '.ts', '.tsx', '.jsx', '.go', '.rs') else "text",
         )
-        total_lines = len(content.split("\n"))
-        preview = content[:READ_FILE_CONTEXT_PREVIEW_CHARS]
-        if len(content) > READ_FILE_CONTEXT_PREVIEW_CHARS:
-            preview += (
-                f"\n... [truncated {len(content) - READ_FILE_CONTEXT_PREVIEW_CHARS} chars; "
-                f"use read_artifact('{artifact_id}') only if the omitted tail is needed] ..."
+        if truncation.first_line_exceeds_limit:
+            preview = (
+                f"[Line {returned_start_line} exceeds {READ_FILE_MAX_BYTES} byte limit. "
+                f"Use read_artifact('{artifact_id}') or a focused offset/limit read.]"
             )
-        preview = _add_line_numbers(preview, start_line=(line_offset + 1) if line_offset else 1)
-
-        hash_label = "range_hash" if has_line_range else "content_hash"
-        range_note = "\nrange only; read the full file to obtain a write-safe content_hash." if has_line_range else ""
+        else:
+            preview = truncation.content
+            end_line = returned_start_line + truncation.output_lines - 1
+            next_offset = end_line + 1
+            if truncation.truncated_by == "lines":
+                preview += (
+                    f"\n\n[Showing lines {returned_start_line}-{end_line} of {returned_end_line}. "
+                    f"Use offset={next_offset} to continue.]"
+                )
+            else:
+                preview += (
+                    f"\n\n[Showing lines {returned_start_line}-{end_line} of {returned_end_line} "
+                    f"({READ_FILE_MAX_BYTES} byte limit). Use offset={next_offset} to continue.]"
+                )
+        preview += f"\n\n[Full content available via read_artifact('{artifact_id}').]"
         return self._success_result(
-            content=f"File {file_path} ({total_lines} lines, approx {estimated_tokens} tokens) was saved as an artifact.\n{hash_label}: {file_hash}{range_note}",
+            content=f"{preview}\n\n" + "\n".join(hash_lines),
             artifact_id=artifact_id,
             artifact_preview=preview,
         )
 
+    def streamed_input_preview(self, args: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: args[key]
+            for key in ("file_path", "start_line", "end_line")
+            if key in args and isinstance(args[key], (str, int))
+        }

@@ -1,15 +1,5 @@
 {
   "mcpServers": {
-    "websearch": {
-      "command": "python",
-      "args": [
-        "-m",
-        "backend.mcp.servers.websearch"
-      ],
-      "env": {},
-      "autoStart": true,
-      "transport": "stdio"
-    },
     "docparse": {
       "command": "python",
       "args": [
@@ -18,16 +8,6 @@
       ],
       "env": {},
       "autoStart": true,
-      "transport": "stdio"
-    },
-    "code-index": {
-      "command": "python",
-      "args": [
-        "-m",
-        "backend.mcp.servers.code_index"
-      ],
-      "env": {},
-      "autoStart": false,
       "transport": "stdio"
     },
     "sequential-thinking": {

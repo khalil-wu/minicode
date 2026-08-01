@@ -115,6 +115,9 @@ def build_session_synced_payload(
     base_url: str = "",
     wire_api: str = "",
     models_source: str = "",
+    replayed_events: int = 0,
+    event_log_gap: bool = False,
+    snapshot_required: bool = False,
 ) -> dict[str, Any]:
     active_is_visible = active_conversation is not None and not getattr(active_conversation, "archived", False)
     return {
@@ -122,8 +125,6 @@ def build_session_synced_payload(
         "protocol_version": protocol_version,
         "session_id": result["session_id"],
         "synced": result["synced"],
-        "incremental": result["incremental"],
-        "changes": result.get("changes", []),
         "session": result["session"],
         "active_conversation_id": active_conversation_id if active_is_visible else None,
         "active_conversation": active_conversation.to_dict() if active_is_visible else None,
@@ -136,7 +137,12 @@ def build_session_synced_payload(
         "wire_api": wire_api,
         "available_models": available_models,
         "models_source": models_source,
-        "missed_events": bool(last_seq and last_seq < current_seq),
+        # ``last_seq`` is a real event cursor.  Seeing a newer cursor does not
+        # itself mean data was lost: the server may replay the exact window.
+        "missed_events": bool(event_log_gap),
         "last_seq": last_seq,
         "current_seq": current_seq,
+        "replayed_events": max(0, int(replayed_events or 0)),
+        "event_log_gap": bool(event_log_gap),
+        "snapshot_required": bool(snapshot_required),
     }

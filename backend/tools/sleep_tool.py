@@ -13,13 +13,16 @@ class SleepTool(BaseTool):
     """Wait briefly without occupying a shell process."""
 
     name = "sleep"
+    should_defer = True
     description = (
         "Wait for a short period before checking background work or external state. "
         "Prefer monitor for background command status; use sleep only when a real delay is needed."
     )
     permission = PermissionLevel.AUTO
     read_only = True
-    timeout_seconds = 65.0
+    # The explicit 60-second argument bound is the only sleep contract; do not
+    # add a second one-second runtime watchdog.
+    timeout_seconds = None
     result_kind = "status"
     display_label = "Sleep"
     max_result_chars = None
@@ -33,10 +36,6 @@ class SleepTool(BaseTool):
             toolset="core",
             exposure="core",
             required_args=("seconds",),
-            arg_roles={"seconds": "control"},
-            repair_policy={"seconds": "runtime_control"},
-            empty_args_policy="block",
-            blocked_guidance="Missing seconds. Use a small delay such as 1, 2, or 5.",
         )
 
     def get_schema(self) -> ToolSchema:

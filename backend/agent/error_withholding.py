@@ -117,7 +117,6 @@ class WithheldError:
             error_type=self.error_type,
         )
 
-
 class ErrorWithholdingController:
     """Manages error withholding and recovery across the agent loop.
 
@@ -132,8 +131,8 @@ class ErrorWithholdingController:
                 RecoveryStrategy("reactive_compact", "Emergency compaction", ...),
             ])
             for strategy in withheld.recovery_strategies:
-                if await strategy.try_recover(state, ctx):
-                    # Recovery succeeded -- continue the loop without yielding the error
+                if await strategy.try_recover():
+                    # Recovery succeeded. The raw provider body remains withheld.
                     state.mark_transition(f"recovered_{strategy.name}")
                     break
             else:
@@ -149,6 +148,7 @@ class ErrorWithholdingController:
     # go through the stream retry/backoff ladder instead (cc only reactive-
     # compacts prompt-too-long / media-size errors).
     WITHHOLDABLE_ERROR_TYPES = {
+        "content_filter",
         "prompt_too_long",
         "context_overflow",
         "media_size",

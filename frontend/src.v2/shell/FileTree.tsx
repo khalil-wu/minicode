@@ -145,7 +145,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
         }
         if (isCurrent()) setTree(nextTree);
       } else {
-        const result = await listWorkspaceTree(".");
+        const result = await listWorkspaceTree(workingDirectory, ".");
         if (result) {
           let nextTree: WorkspaceTreeNode = { ...result, children: sortNodes(result.children ?? []) };
           const persistedExpanded = Array.from(readExpandedPaths(workingDirectory || "."))
@@ -153,7 +153,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
             .sort((a, b) => a.split(/[/\\]/).length - b.split(/[/\\]/).length);
           for (const path of persistedExpanded) {
             try {
-              const node = await listWorkspaceTree(path);
+              const node = await listWorkspaceTree(workingDirectory, path);
               if (node) nextTree = replaceNodeChildren(nextTree, path, sortNodes(node.children ?? []));
             } catch {
               /* Ignore folders that disappeared since the last session. */
@@ -191,7 +191,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
     try {
       const children = isDesktop()
         ? nodesFromEntries(await fsListTree(path))
-        : visibleChildren(await listWorkspaceTree(path) ?? { name: path, path, is_dir: true, children: [] });
+        : visibleChildren(await listWorkspaceTree(workingDirectory, path) ?? { name: path, path, is_dir: true, children: [] });
       setTree((current) => current ? replaceNodeChildren(current, path, sortNodes(children)) : current);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load file tree");
@@ -202,7 +202,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
         return next;
       });
     }
-  }, []);
+  }, [workingDirectory]);
 
   const refreshChangedPaths = useCallback(async (changes: { path: string; event: string; timestamp: number }[]) => {
     const parents = Array.from(new Set(changes.map((change) => parentTreePath(change.path, workingDirectory))));
@@ -370,7 +370,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
     const timer = window.setTimeout(() => {
       const search = isDesktop()
         ? fsSearchFiles(workingDirectory || "", trimmed, 60, "all")
-        : searchWorkspaceFiles(trimmed, 60, "all");
+        : searchWorkspaceFiles(workingDirectory, trimmed, 60, "all");
       search
         .then((results) => {
           if (epoch === searchEpochRef.current && directory === useAppStore.getState().workingDirectory) {
@@ -394,7 +394,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
     const targetPath = isDesktop() ? joinWorkspacePath(workingDirectory, path) : path;
     try {
       if (isDesktop()) await desktop()?.fs.writeFile(targetPath, "");
-      else if (!(await writeWorkspaceFile(targetPath, ""))) {
+      else if (!(await writeWorkspaceFile(targetPath, "", workingDirectory))) {
         await showAlert({ title: "Error", message: `Could not create ${path}` });
         return;
       }
@@ -409,7 +409,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
     const targetPath = isDesktop() ? joinWorkspacePath(workingDirectory, path) : path;
     try {
       if (isDesktop()) await desktop()?.fs.createDirectory(targetPath);
-      else if (!(await createWorkspaceDirectory(targetPath))) {
+      else if (!(await createWorkspaceDirectory(targetPath, workingDirectory))) {
         await showAlert({ title: "Error", message: `Could not create ${path}` });
         return;
       }
@@ -427,7 +427,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
               Large workspaces can take longer on the first scan. You can wait, retry, or switch to a smaller folder.
             </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <button onClick={refresh} style={refreshBtn}>Retry</button>
+              <button onClick={refresh} style={refreshBtn}>重试</button>
               {isDesktop() && <button onClick={() => void openWorkspaceFolder()} style={refreshBtn}>Switch folder</button>}
             </div>
           </>
@@ -442,8 +442,8 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
       <div style={{ padding: 12, fontSize: "var(--text-sm)" }}>
         <div style={{ color: "var(--text-muted)", marginBottom: 8 }}>{error}</div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {isDesktop() && <button onClick={() => void openWorkspaceFolder()} style={refreshBtn}>Open folder</button>}
-          {!isMissingWorkspace && <button onClick={refresh} style={refreshBtn}>Retry</button>}
+          {isDesktop() && <button onClick={() => void openWorkspaceFolder()} style={refreshBtn}>打开文件夹</button>}
+          {!isMissingWorkspace && <button onClick={refresh} style={refreshBtn}>重试</button>}
         </div>
       </div>
     );
@@ -459,7 +459,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
 
   const renderToolbarMenu = () => (
     <div style={toolbarMenuWrapStyle}>
-      <button type="button" title="More file actions" aria-label="More file actions"
+      <button type="button" title="更多文件操作" aria-label="更多文件操作"
         aria-controls="file-tree-actions-menu" aria-expanded={toolbarMenuOpen}
         onClick={(event) => { event.stopPropagation(); setToolbarMenuOpen((open) => !open); }}
         className="mc-icon-button mc-icon-button-compact file-tree-action">
@@ -469,14 +469,14 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
         <div id="file-tree-actions-menu" style={toolbarMenuStyle} onClick={(event) => event.stopPropagation()}>
           {isDesktop() && (
             <button type="button" className="btn-ghost" onClick={() => { setToolbarMenuOpen(false); void openWorkspaceFolder(); }} style={toolbarMenuItemStyle}>
-              <FolderOpen size={14} /><span>Open folder</span>
+              <FolderOpen size={14} /><span>打开文件夹</span>
             </button>
           )}
           <button type="button" className="btn-ghost" onClick={() => { setToolbarMenuOpen(false); void createFile(); }} style={toolbarMenuItemStyle}>
-            <FilePlus2 size={14} /><span>New file</span>
+            <FilePlus2 size={14} /><span>新建文件</span>
           </button>
           <button type="button" className="btn-ghost" onClick={() => { setToolbarMenuOpen(false); void createFolder(); }} style={toolbarMenuItemStyle}>
-            <FolderPlus size={14} /><span>New folder</span>
+            <FolderPlus size={14} /><span>新建文件夹</span>
           </button>
         </div>
       )}
@@ -493,9 +493,9 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
       <div style={fileTreeToolbarStyle}>
         <div style={fileTreeSearchStyle}>
           <Search size={14} aria-hidden="true" />
-          <input aria-label="Search workspace files" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search files" style={fileTreeSearchInputStyle} />
+          <input aria-label="搜索工作区文件" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索文件" style={fileTreeSearchInputStyle} />
         </div>
-        <button type="button" title="Refresh files" aria-label="Refresh files" onClick={() => void refresh()} disabled={loading} className="mc-icon-button mc-icon-button-compact file-tree-action">
+        <button type="button" title="刷新文件" aria-label="刷新文件" onClick={() => void refresh()} disabled={loading} className="mc-icon-button mc-icon-button-compact file-tree-action">
           <RefreshCw size={14} className={loading ? "animate-spin" : undefined} />
         </button>
         {renderToolbarMenu()}
@@ -503,7 +503,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
       <div
         ref={listRef}
         role="tree"
-        aria-label="File explorer"
+        aria-label="文件资源管理器"
         className={`file-tree-scroll${isListScrolling ? " is-scrolling" : ""}`}
         style={fileTreeListStyle}
         onScroll={(event) => {
@@ -553,9 +553,9 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
         ))
       ) : !hasQuery ? (
         <div style={fileTreeEmptyStyle}>
-          {workingDirectory ? "Empty workspace" : "Open a workspace folder to browse files."}
+          {workingDirectory ? "工作区为空" : "打开一个工作区文件夹以浏览文件。"}
           {!workingDirectory && isDesktop() && (
-            <button type="button" onClick={() => void openWorkspaceFolder()} style={openWorkspaceButtonStyle}>Open folder</button>
+            <button type="button" onClick={() => void openWorkspaceFolder()} style={openWorkspaceButtonStyle}>打开文件夹</button>
           )}
         </div>
       ) : null}

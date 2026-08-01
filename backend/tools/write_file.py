@@ -33,17 +33,16 @@ class WriteFileTool(BaseTool):
 
     name = "write_file"
     mutates_workspace = True
-    timeout_seconds = 30.0
     result_kind = "edit"
     activity_kind = "fileChange"
     display_label = "Write"
-    panel_hint = "diff"
     description = (
         "Create a new UTF-8 text file or replace a whole file. Use edit_file for small targeted changes. "
         "Read existing files first and pass the latest content_hash as expected_hash. "
         "Do not create sibling output copies or unsolicited docs/README files."
     )
     permission = PermissionLevel.DIFF_REVIEW
+    workspace_path_fields = ("file_path",)
 
     def model_description(self) -> str:
         return (
@@ -65,6 +64,10 @@ class WriteFileTool(BaseTool):
             strict=True,
         )
 
+    def streamed_input_preview(self, args: dict[str, Any]) -> dict[str, Any]:
+        file_path = args.get("file_path")
+        return {"file_path": file_path} if isinstance(file_path, str) else {}
+
     def get_spec(self):
         from backend.tools.contracts import ToolSpec
 
@@ -72,29 +75,6 @@ class WriteFileTool(BaseTool):
             name=self.name,
             capability="workspace.write",
             required_args=("file_path", "content"),
-            arg_roles={
-                "file_path": "workspace_output_path",
-                "path": "workspace_output_path",
-                "content": "generated_content",
-                "expected_hash": "write_guard",
-            },
-            arg_sources={
-                "file_path": ("user_message", "model"),
-                "content": ("model_generation",),
-                "expected_hash": ("runtime", "model"),
-            },
-            repair_policy={
-                "file_path": "resource_resolver",
-                "content": "needs_model_generation",
-                "expected_hash": "runtime_control",
-            },
-            accepted_resource_types=("workspace_output",),
-            rejected_resource_types=("uploaded_document", "web_url"),
-            empty_args_policy="repair_or_block",
-            blocked_guidance=(
-                "write_file requires both a workspace output path and complete generated content. "
-                "If content is missing, generate the full file body first, then retry write_file with file_path and content."
-            ),
         )
 
     def get_schema(self) -> ToolSchema:
@@ -181,24 +161,25 @@ class WriteFileTool(BaseTool):
                 except (UnicodeDecodeError, OSError):
                     pass
 
-            await _emit_write_preview_progress(
-                context,
-                file_path=file_path,
-                old_content=old_content or "",
-                new_content=content,
-                display_path=_workspace_display_path(path, file_path, context),
-            )
-
             _atomic_write_text(path, content)
 
             # Invalidate file caches after writing.
             cache = get_global_file_cache()
             cache.invalidate(path)
             clear_list_files_cache()
+            await _emit_write_diff(
+                context,
+                file_path=file_path,
+                old_content=old_content or "",
+                new_content=content,
+                display_path=_workspace_display_path(path, file_path, context),
+            )
         except PermissionError:
             return self._error_result(f"No permission to write file: {file_path}")
         except OSError as exc:
-            return self._error_result(f"Failed to write file: {exc}")
+            return self._error_result(
+                f"Failed to write file ({type(exc).__name__}, errno={exc.errno})."
+            )
 
         total_lines = len(content.split("\n"))
         result_msg = f"Wrote {file_path} ({total_lines} lines, {len(content)} chars). content_hash: {content_hash(content)}"

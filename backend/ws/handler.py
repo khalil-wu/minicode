@@ -15,9 +15,15 @@ from starlette.websockets import WebSocketState
 from websockets.exceptions import ConnectionClosed
 
 from backend.agent.context import ContextBuilder
-from backend.agent.loop import run_agent_loop, _mcp_registry_version
+from backend.agent.loop import run_agent_loop
+from backend.agent.loop_session import mcp_registry_version
 from backend.agent.query_engine import QueryEngine
 from backend.agent.message import AgentEvent, UserCommand
+from backend.async_cleanup import (
+    CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+    await_with_deadline,
+    cancel_and_drain,
+)
 from backend.attachments.store import AttachmentStore
 from backend.artifact.store import ArtifactStore
 from backend.checkpoint import CheckpointManager
@@ -32,16 +38,21 @@ from backend.tasks.manager import TaskManager
 from backend.terminal.session import TerminalSessionManager
 from backend.terminal.manager import BackgroundCommandManager, BackgroundCommand
 from backend.tools.registry import ToolRegistry
-from backend.ws.agent_runner import SessionAgentRunnerMixin, _TURN_MESSAGE_SCOPED_EVENT_TYPES
+from backend.ws.agent_runner import (
+    SessionAgentRunnerMixin,
+    _TURN_MESSAGE_SCOPED_EVENT_TYPES,
+    _llm_adapter_cache_key,
+)
 from backend.ws.approval_runtime import SessionApprovalRuntimeMixin
 from backend.ws.client_command_log import ClientCommandDedupStore, _clean_command_id
 from backend.ws.command_handlers import SessionCommandHandlersMixin
 from backend.ws.conversation_errors import emit_conversation_not_found
 from backend.ws.conversation_runtime import ConversationRuntime
 from backend.ws.event_log import WebSocketReplayEventStore, sanitize_ws_replay_payload
+from backend.ws.fork_registry import ForkRegistry
 from backend.ws.permission_runtime import SessionPermissionRuntimeMixin
 from backend.ws.run_manager import SessionRunManager
-from backend.ws.stream_state import append_stream_text
+from backend.ws.stream_state import apply_stream_event
 from backend.ws.utils import (
     build_effective_transcript_content,
     build_effective_user_message,
@@ -69,7 +80,6 @@ RECENT_CLIENT_COMMAND_IDS_MAX = 1024
 
 COMMAND_BACKLOG_BYPASS_TYPES = {
     "approval",
-    "approval.respond",
     "answer",
     "control_response",
     "control_cancel_request",
@@ -115,8 +125,9 @@ def _invalidate_runtime_status_cache() -> None:
 
 
 CONVERSATION_SCOPED_EVENT_TYPES = {
-    "text_chunk",
-    "text_replace",
+    "item.started",
+    "agent_message.delta",
+    "item.completed",
     "image_chunk",
     "thinking_delta",
     "thinking",
@@ -174,9 +185,7 @@ class WebSocketSession(
         config: AppConfig,
         skill_manager: Any | None = None,
         skill_executor: Any | None = None,
-        rag_pipeline: Any | None = None,
         memory_manager: Any | None = None,
-        vector_memory: Any | None = None,
         use_control_protocol: bool = False,
     ) -> None:
         self.session_id = session_id
@@ -197,20 +206,26 @@ class WebSocketSession(
             f"ws_event_generation_{session_id}",
             default=None,
         )
+        self._client_command_context: ContextVar[str] = ContextVar(
+            f"ws_client_command_{session_id}",
+            default="",
+        )
         self.llm = llm
         self.artifact_store = artifact_store
         self.tool_registry = tool_registry
         # Snapshot of the MCP registry generation this tool_registry reflects.
         # Used to hot-reload MCP tools into a live session (see
         # refresh_tool_registry_if_mcp_changed) without restarting the backend.
-        self._mcp_registry_version_snapshot = _mcp_registry_version()
+        self._mcp_registry_version_snapshot = mcp_registry_version()
         self.permission_checker = permission_checker
         self.config = config
         self.skill_executor = skill_executor
         self.memory_manager = memory_manager
-        self.vector_memory = vector_memory
         self._pending_approvals: dict[str, asyncio.Future] = {}
         self._pending_approval_payloads: dict[str, dict[str, Any]] = {}
+        # Client responses can arrive immediately after a request is sent,
+        # before _approval_handler has installed its Future.
+        self._pending_approval_responses: dict[str, dict[str, Any]] = {}
         self._approval_diff_cache: dict[str, dict[str, Any]] = {}
         self._active_run_task: asyncio.Task[None] | None = None
         self._active_task_id: str | None = None
@@ -232,6 +247,7 @@ class WebSocketSession(
         self._conversation_lifecycle_lock = asyncio.Lock()
         self._command_semaphore = asyncio.Semaphore(20)  # max 20 concurrent commands
         self._command_tasks: set[asyncio.Task[Any]] = set()
+        self._active_client_command_ids: set[str] = set()
         self._max_command_tasks = MAX_PENDING_COMMAND_TASKS
         self._last_command_backlog_error_at = 0.0
         self._recent_client_command_ids: list[str] = self._load_recent_client_command_ids()
@@ -246,6 +262,7 @@ class WebSocketSession(
         self._resolve_available_models = get_available_models
         self._resolve_models_source = get_models_source
         self._llm_adapter_cache: dict[tuple[Any, ...], LLMAdapter] = {}
+        self._llm_close_tasks: set[asyncio.Task[Any]] = set()
         self.provider = self._resolve_llm_provider()
         self.available_models = list(self._resolve_available_models(self.provider))
         self.models_source = self._resolve_models_source(self.provider)
@@ -254,16 +271,23 @@ class WebSocketSession(
             self.selected_model = ""
         if not self.selected_model and self.available_models:
             self.selected_model = self.available_models[0]
+        self._llm_adapter_cache[
+            _llm_adapter_cache_key(
+                config=config,
+                provider=self.provider,
+                model=self.selected_model,
+            )
+        ] = llm
         self._model_override_active = False
 
         if skill_manager is not None:
+            from backend.skills.loader import SkillLoader
             from backend.skills.manager import SkillManager
 
             self.skill_manager = SkillManager(
-                loader=skill_manager._loader,
-                usage_store_path=getattr(skill_manager, "_usage_store_path", None),
+                loader=SkillLoader(project_root=get_active_workspace_root()),
             )
-            self.skill_manager._discovered = skill_manager._discovered
+            self.skill_manager.discover()
         else:
             self.skill_manager = None
 
@@ -271,17 +295,19 @@ class WebSocketSession(
             token_budget=config.token_budget,
             agent_settings=config.agent,
             skill_executor=skill_executor,
-            rag_pipeline=rag_pipeline,
             memory_manager=memory_manager,
             llm=llm,
             skill_manager=self.skill_manager,
-            vector_memory=vector_memory,
         )
         self.attachment_store = AttachmentStore()
         self.checkpoint_manager = CheckpointManager()
         self.conversation_repo = ConversationRepository(CONVERSATION_DATA_DIR)
         self.query_engine = QueryEngine(runner=run_agent_loop)
+        from backend.agent.diagnostic_store import DiagnosticPayloadStore
+
+        self._diagnostic_store = DiagnosticPayloadStore()
         self.task_manager = TaskManager(on_change=self._schedule_task_runtime_update)
+        self._task_runtime_update_task: asyncio.Task[None] | None = None
         self.permission_context = self.permission_checker.build_context(
             mode=DEFAULT_CONVERSATION_PERMISSION_MODE,
             workspace_scope="computer",
@@ -308,7 +334,12 @@ class WebSocketSession(
         self.terminal_manager = TerminalSessionManager()
         self.active_terminal_session_id: str | None = None
         self.background_manager = BackgroundCommandManager(
-            on_completed=self._on_background_command_completed
+            on_completed=self._on_background_command_completed,
+            on_started=self._on_background_command_started,
+        )
+        self._fork_registry = ForkRegistry(
+            session_id=session_id,
+            root_dir=Path(CONVERSATION_DATA_DIR).parent / "session-forks",
         )
         self._workspace_context = None
         self._start_file_watcher()
@@ -318,7 +349,6 @@ class WebSocketSession(
         from backend.ws.session_state import (
             ConnectionState,
             ConversationState,
-            StreamState,
             WorkspaceState,
         )
 
@@ -331,9 +361,6 @@ class WebSocketSession(
             active_id=None,
             run_tasks=self._conversation_run_tasks,
             run_task_ids=self._conversation_run_task_ids,
-        )
-        self._stream_state = StreamState(
-            streams=self._conversation_streams,
         )
         default_workspace = get_active_workspace_root()
         self._workspace_state = WorkspaceState(
@@ -368,26 +395,28 @@ class WebSocketSession(
             return
         self._workspace_context_task = loop.create_task(self._init_workspace_context())
 
-    async def _on_terminal_output(self, session_id: str, data: str) -> None:
+    async def _on_terminal_output(self, session_id: str, data: str, conversation_id: str = "") -> None:
         try:
             await self._send_ws_payload(
                 {
                     "type": "terminal.output",
                     "session_id": session_id,
                     "data": data,
+                    "conversation_id": str(conversation_id or ""),
                 },
                 log_context="terminal.output",
             )
         except Exception:
             logger.exception("Failed to send terminal.output for session %s", session_id)
 
-    async def _on_terminal_exit(self, session_id: str, exit_code: int) -> None:
+    async def _on_terminal_exit(self, session_id: str, exit_code: int, conversation_id: str = "") -> None:
         try:
             await self._send_ws_payload(
                 {
                     "type": "terminal.exit",
                     "session_id": session_id,
                     "exit_code": exit_code,
+                    "conversation_id": str(conversation_id or ""),
                 },
                 log_context="terminal.exit",
             )
@@ -397,6 +426,7 @@ class WebSocketSession(
     async def _on_background_command_completed(self, bg_cmd: BackgroundCommand) -> None:
         try:
             output_preview = bg_cmd.output[:2000] if bg_cmd.output else ""
+            lifecycle = bg_cmd.to_dict()
             await self._send_ws_payload(
                 {
                     "type": "background.completed",
@@ -409,11 +439,43 @@ class WebSocketSession(
                     "duration": round(bg_cmd.completed_at - bg_cmd.started_at, 1)
                     if bg_cmd.completed_at
                     else 0,
+                    "started_at": bg_cmd.started_at,
+                    "completed_at": bg_cmd.completed_at,
+                    "conversation_id": bg_cmd.conversation_id,
+                    **{key: lifecycle[key] for key in (
+                        "run_id", "task_id", "parent_run_id", "incarnation", "seq",
+                        "kind", "phase", "updated_at", "started_at_ms", "completed_at_ms",
+                        "result", "error",
+                    )},
                 },
                 log_context="background.completed",
             )
         except Exception as exc:
             logger.debug("Failed to send background.completed for %s: %s", bg_cmd.command_id, exc)
+
+    async def _on_background_command_started(self, bg_cmd: BackgroundCommand) -> None:
+        try:
+            lifecycle = bg_cmd.to_dict()
+            await self._send_ws_payload(
+                {
+                    "type": "background.started",
+                    "command_id": bg_cmd.command_id,
+                    "command": bg_cmd.command[:100],
+                    "description": bg_cmd.description,
+                    "cwd": bg_cmd.cwd,
+                    "status": bg_cmd.status,
+                    "started_at": bg_cmd.started_at,
+                    "conversation_id": bg_cmd.conversation_id,
+                    **{key: lifecycle[key] for key in (
+                        "run_id", "task_id", "parent_run_id", "incarnation", "seq",
+                        "kind", "phase", "updated_at", "started_at_ms", "completed_at_ms",
+                        "result", "error",
+                    )},
+                },
+                log_context="background.started",
+            )
+        except Exception as exc:
+            logger.debug("Failed to send background.started for %s: %s", bg_cmd.command_id, exc)
 
     def _start_file_watcher(self):
         workspace_root = self._workspace_root_for_conversation()
@@ -526,13 +588,18 @@ class WebSocketSession(
 
             from backend.preview.launcher import running_preview_processes
 
-            active_previews = running_preview_processes()
+            active_previews = running_preview_processes(
+                session_id=self.session_id,
+                conversation_id=str(self.active_conversation_id or ""),
+                workspace_root=workspace_root,
+            )
             if active_previews:
                 await self._send_ws_payload(
                     {
                         "type": "preview.refreshed",
                         "path": relative_path,
                         "url": active_previews[0].effective_url,
+                        "conversation_id": str(self.active_conversation_id or ""),
                     },
                     log_context="preview.refreshed",
                 )
@@ -630,12 +697,14 @@ class WebSocketSession(
             if task.status in {"pending", "running"}
         ]
         running_tasks.sort(key=lambda item: item.get("updated_at", ""), reverse=True)
-        invoked_skill_names = (
-            sorted(self.skill_manager.get_active_names())
-            if self.skill_manager is not None
-            else []
-        )
+        # Explicit Skills belong to an AgentState turn, never to the session.
+        invoked_skill_names: list[str] = []
         pending_approvals = self._pending_approval_runtime_items()
+        fork_records = self._fork_registry.list(
+            parent_conversation_id=str(self.active_conversation_id or ""),
+        )
+        queued_user_messages = self._run_manager.queued_user_message_snapshot()
+        pending_turn_inputs = self._run_manager.pending_turn_input_snapshot()
         active_stream_conversation_ids = sorted(
             str(conversation_id)
             for conversation_id, task in getattr(self, "_conversation_run_tasks", {}).items()
@@ -684,6 +753,9 @@ class WebSocketSession(
             "running_tasks": running_tasks[:5],
             "pending_approval_count": len(pending_approvals),
             "pending_approvals": pending_approvals[:5],
+            "forks": [record.to_dict() for record in fork_records[-20:]],
+            "queued_user_messages": queued_user_messages[:20],
+            "pending_turn_inputs": pending_turn_inputs[:20],
         }
 
     def _runtime_permission_payload(
@@ -726,7 +798,7 @@ class WebSocketSession(
                 "skills": 0,
                 "mcp_resource_bridge": False,
                 "deferred_bridge": False,
-                "skill_bridge": False,
+                "skill_catalog": False,
             }
         return {
             "version": self.tool_registry.version,
@@ -865,6 +937,7 @@ class WebSocketSession(
         command.data["_queued_user_message_dispatch"] = True
 
         async def _dispatch() -> None:
+            succeeded = False
             try:
                 await self._send_event(
                     AgentEvent.user_message_queue_updated(
@@ -872,10 +945,18 @@ class WebSocketSession(
                         conversation_id=conversation_id,
                         message_id=str(command.data.get("assistant_message_id") or ""),
                         user_message_id=str(command.data.get("user_message_id") or ""),
+                        target_message_id=str(command.data.get("assistant_message_id") or ""),
+                        turn_mode="follow_up",
                     )
                 )
                 await self._handle_command(command)
+                succeeded = True
             finally:
+                self._run_manager.finish_user_message_dispatch(
+                    conversation_id,
+                    command,
+                    succeeded=succeeded,
+                )
                 self._run_manager.finish_queue_dispatch(conversation_id)
                 if not self._running_agent_task_for(conversation_id):
                     self._schedule_next_queued_user_message(conversation_id)
@@ -929,7 +1010,7 @@ class WebSocketSession(
 
         Returns True iff a rebuild happened.
         """
-        current_version = _mcp_registry_version()
+        current_version = mcp_registry_version()
         if current_version == self._mcp_registry_version_snapshot:
             return False
         if not allow_when_busy and self._has_active_run():
@@ -955,7 +1036,24 @@ class WebSocketSession(
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        loop.create_task(self._send_task_runtime_update())
+        existing = self._task_runtime_update_task
+        if existing is not None and not existing.done():
+            return
+        coroutine = self._send_task_runtime_update()
+        try:
+            task = loop.create_task(coroutine)
+        except RuntimeError:
+            # Event-loop teardown can race a final TaskManager callback. Close
+            # the already-created coroutine explicitly instead of leaking it.
+            coroutine.close()
+            return
+        self._task_runtime_update_task = task
+
+        def _clear_runtime_update(finished: asyncio.Task[None]) -> None:
+            if self._task_runtime_update_task is finished:
+                self._task_runtime_update_task = None
+
+        task.add_done_callback(_clear_runtime_update)
 
     async def _send_task_runtime_update(self) -> None:
         try:
@@ -1043,6 +1141,7 @@ class WebSocketSession(
             mcp_status = get_mcp_status() or []
             await self._send_event(AgentEvent(type="mcp_status", data={"servers": mcp_status}))
             await self._send_llm_state()
+            await self._replay_pending_client_commands(active_generation)
 
             while True:
                 if active_generation != self._connection_generation:
@@ -1097,20 +1196,42 @@ class WebSocketSession(
                             )
                         continue
 
-                    self._mark_client_command_seen(command)
-                    await self._send_client_command_ack(command)
-
-                    async def _guarded_handle(command, connection_generation):
-                        async with self._command_semaphore:
-                            return await self._handle_command(
-                                command,
-                                connection_generation=connection_generation,
+                    command_id = self._client_command_id(command)
+                    durable_queue = self._run_manager.durable_queue
+                    if command_id and durable_queue is not None:
+                        if durable_queue.has_client_command(command_id):
+                            await self._send_client_command_ack(command, duplicate=True)
+                            self._schedule_durable_client_command(command_id, active_generation)
+                            continue
+                        try:
+                            persisted = durable_queue.persist_client_command(command)
+                        except Exception:
+                            logger.exception(
+                                "Failed to persist client command %s in session %s",
+                                command_id,
+                                self.session_id,
                             )
+                            await self._send_client_command_ack(
+                                command,
+                                accepted=False,
+                                reason="command.persistence",
+                                envelope=False,
+                            )
+                            continue
+                        if not persisted:
+                            await self._send_client_command_ack(
+                                command,
+                                accepted=False,
+                                reason="command.not_serializable",
+                            )
+                            continue
+                        # ACK means the server durably owns the command. A crash
+                        # before task creation leaves it pending for replay.
+                        await self._send_client_command_ack(command)
+                        self._schedule_durable_client_command(command_id, active_generation)
+                        continue
 
-                    task = asyncio.create_task(
-                        _guarded_handle(command, active_generation)
-                    )
-                    self._track_command_task(task)
+                    self._schedule_transient_client_command(command, active_generation)
 
         except WebSocketDisconnect:
             logger.info("session %s disconnected", self.session_id)
@@ -1118,7 +1239,186 @@ class WebSocketSession(
             logger.error("session %s failed: %s", self.session_id, exc, exc_info=True)
         finally:
             if active_generation == self._connection_generation:
+                await self.artifact_store.flush()
                 self.artifact_store.clear()
+
+    async def shutdown(self, *, reason: str = "session_shutdown") -> None:
+        """Cancel and drain every resource owned by this websocket session."""
+        self._is_connected = False
+        self._run_manager.clear_all_user_message_queues()
+        try:
+            await self._cancel_agent_runs(reason=reason)
+        except Exception:
+            logger.debug("Failed to cancel agent runs during session shutdown", exc_info=True)
+        try:
+            from backend.agent.runtime import default_runtime
+
+            runtime = default_runtime()
+            cancel_session_children = getattr(runtime, "cancel_subagent_tasks_for_session", None)
+            if callable(cancel_session_children):
+                cancel_session_children(self.session_id, reason=reason)
+        except Exception:
+            logger.debug("Failed to cancel subagents during session shutdown", exc_info=True)
+
+        current = asyncio.current_task()
+        command_tasks = [
+            task
+            for task in list(self._command_tasks)
+            if task is not current and not task.done()
+        ]
+        if command_tasks:
+            await cancel_and_drain(
+                command_tasks,
+                timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                label="websocket command tasks",
+            )
+        self._command_tasks.clear()
+
+        try:
+            await await_with_deadline(
+                self.task_manager.cancel_all_and_wait(),
+                timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                label="managed task shutdown",
+            )
+        except Exception:
+            logger.debug("Failed to drain managed tasks during session shutdown", exc_info=True)
+        runtime_update_task = self._task_runtime_update_task
+        if runtime_update_task is not None and runtime_update_task is not current:
+            await cancel_and_drain(
+                [runtime_update_task],
+                timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                label="runtime update task",
+            )
+        self._task_runtime_update_task = None
+        if self.file_watcher and self.file_watcher.is_running():
+            self.file_watcher.stop()
+        try:
+            await await_with_deadline(
+                self.terminal_manager.destroy_all(),
+                timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                label="terminal shutdown",
+            )
+        except Exception:
+            logger.debug("Failed to destroy terminals during session shutdown", exc_info=True)
+        try:
+            from backend.preview import stop_preview_launches_for_session
+
+            await await_with_deadline(
+                stop_preview_launches_for_session(self.session_id),
+                timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                label="preview shutdown",
+            )
+        except Exception:
+            logger.debug("Failed to stop previews during session shutdown", exc_info=True)
+        try:
+            await await_with_deadline(
+                self.background_manager.shutdown(),
+                timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                label="background command shutdown",
+            )
+        except Exception:
+            logger.debug("Failed to stop background commands during session shutdown", exc_info=True)
+        try:
+            from backend.ws.agent_runner import _clear_session_llm_cache
+
+            _clear_session_llm_cache(self)
+            if self._llm_close_tasks:
+                await cancel_and_drain(
+                    tuple(self._llm_close_tasks),
+                    timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                    label="LLM adapter close tasks",
+                )
+                self._llm_close_tasks.clear()
+        except Exception:
+            logger.debug("Failed to close session LLM adapters", exc_info=True)
+        await self.artifact_store.flush()
+        self.artifact_store.shutdown()
+        self.artifact_store.clear()
+
+    async def _replay_pending_client_commands(self, connection_generation: int) -> None:
+        durable_queue = self._run_manager.durable_queue
+        if durable_queue is None:
+            return
+        for command in durable_queue.pending_client_commands():
+            command_id = self._client_command_id(command)
+            if not command_id or self._client_command_seen(command):
+                continue
+            await self._send_client_command_ack(command, duplicate=True)
+            self._schedule_durable_client_command(command_id, connection_generation)
+
+    def _schedule_transient_client_command(
+        self,
+        command: UserCommand,
+        connection_generation: int,
+    ) -> None:
+        async def _guarded_handle() -> None:
+            async with self._command_semaphore:
+                token = self._client_command_context.set(self._client_command_id(command))
+                try:
+                    await self._handle_command(
+                        command,
+                        connection_generation=connection_generation,
+                    )
+                finally:
+                    self._client_command_context.reset(token)
+
+        self._track_command_task(asyncio.create_task(_guarded_handle()))
+
+    def _schedule_durable_client_command(
+        self,
+        client_command_id: str,
+        connection_generation: int,
+    ) -> None:
+        command_id = _clean_command_id(client_command_id)
+        if not command_id or command_id in self._active_client_command_ids:
+            return
+        self._active_client_command_ids.add(command_id)
+        task = asyncio.create_task(
+            self._run_durable_client_command(command_id, connection_generation)
+        )
+
+        def _release_active(_task: asyncio.Task[Any]) -> None:
+            self._active_client_command_ids.discard(command_id)
+
+        task.add_done_callback(_release_active)
+        self._track_command_task(task)
+
+    async def _run_durable_client_command(
+        self,
+        client_command_id: str,
+        connection_generation: int,
+    ) -> None:
+        durable_queue = self._run_manager.durable_queue
+        if durable_queue is None:
+            return
+        command = durable_queue.claim_client_command(client_command_id)
+        if command is None:
+            return
+        try:
+            async with self._command_semaphore:
+                token = self._client_command_context.set(client_command_id)
+                try:
+                    await self._handle_command(
+                        command,
+                        connection_generation=connection_generation,
+                    )
+                finally:
+                    self._client_command_context.reset(token)
+        except asyncio.CancelledError:
+            try:
+                durable_queue.release_client_command(client_command_id)
+            except Exception:
+                logger.exception("Failed to release cancelled client command %s", client_command_id)
+            raise
+        except Exception:
+            try:
+                durable_queue.release_client_command(client_command_id)
+            except Exception:
+                logger.exception("Failed to release failed client command %s", client_command_id)
+            raise
+        else:
+            durable_queue.complete_client_command(client_command_id)
+            self._mark_client_command_seen(command)
 
     def _prune_command_tasks(self) -> None:
         for task in list(self._command_tasks):
@@ -1192,6 +1492,7 @@ class WebSocketSession(
         duplicate: bool = False,
         accepted: bool = True,
         reason: str = "",
+        envelope: bool = True,
     ) -> None:
         client_command_id = self._client_command_id(command)
         if not client_command_id:
@@ -1206,6 +1507,7 @@ class WebSocketSession(
                 **({"reason": reason} if reason else {}),
             },
             log_context="client.command.ack",
+            envelope=envelope,
         )
 
     async def _handle_command(
@@ -1255,10 +1557,12 @@ class WebSocketSession(
             self._ensure_active_conversation()
         if self.active_conversation_id:
             workspace_path = str(self._current_workspace_root())
-            self.conversation_repo.update_workspace_binding(
+            git_branch = await asyncio.to_thread(self._git_branch_for, Path(workspace_path))
+            await asyncio.to_thread(
+                self.conversation_repo.update_workspace_binding,
                 str(self.active_conversation_id),
                 workspace_root=workspace_path,
-                git_branch=self._git_branch_for(Path(workspace_path)),
+                git_branch=git_branch,
                 worktree_path="",
                 git_isolated=False,
             )
@@ -1324,10 +1628,12 @@ class WebSocketSession(
             updated_target = self.active_conversation_id or ""
 
         if updated_target:
-            self.conversation_repo.update_workspace_binding(
+            git_branch = await asyncio.to_thread(self._git_branch_for, requested_workspace_path)
+            await asyncio.to_thread(
+                self.conversation_repo.update_workspace_binding,
                 str(updated_target),
                 workspace_root=str(requested_workspace_path),
-                git_branch=self._git_branch_for(requested_workspace_path),
+                git_branch=git_branch,
                 worktree_path="",
                 git_isolated=False,
             )
@@ -1407,27 +1713,51 @@ class WebSocketSession(
             )
             await self._handle_user_message_permission(requested_permission_mode, target_conversation_id)
 
-            message_metadata = {
+            message_metadata: dict[str, Any] = {
                 key: str(command.data.get(key) or "").strip()
                 for key in ("primaryFile", "primary_file", "activeTabPath", "active_tab_path")
                 if str(command.data.get(key) or "").strip()
             }
+            selected_skills = [
+                {
+                    "name": str(item.get("name") or "").strip(),
+                    "path": str(item.get("path") or "").strip(),
+                }
+                for item in (command.data.get("skills") or [])
+                if isinstance(item, dict)
+                and str(item.get("name") or "").strip()
+                and str(item.get("path") or "").strip()
+            ]
+            if selected_skills:
+                message_metadata["selected_skills"] = selected_skills
+            selected_plugins = [
+                {
+                    "config_name": str(
+                        item.get("config_name")
+                        or item.get("configName")
+                        or item.get("name")
+                        or ""
+                    ).strip(),
+                    "path": str(item.get("path") or "").strip(),
+                }
+                for item in (command.data.get("plugins") or [])
+                if isinstance(item, dict)
+                and (
+                    str(item.get("config_name") or item.get("configName") or item.get("name") or "").strip()
+                    or str(item.get("path") or "").strip().startswith("plugin://")
+                )
+            ]
+            if selected_plugins:
+                message_metadata["selected_plugins"] = selected_plugins
             for source_key, target_key in (
                 ("agent_mode", "agent_mode"),
                 ("agentMode", "agent_mode"),
-                ("swarm_mode", "swarm_mode"),
-                ("swarmMode", "swarm_mode"),
                 ("agent_role", "agent_role"),
                 ("agentRole", "agent_role"),
             ):
                 value = str(command.data.get(source_key) or "").strip()
                 if value:
                     message_metadata[target_key] = value
-            if any(
-                str(command.data.get(key) or "").strip().lower() in {"1", "true", "yes", "on", "enabled"}
-                for key in ("coordinator", "coordinator_mode", "coordinatorMode")
-            ):
-                message_metadata["coordinator"] = True
             assistant_message_id = str(
                 command.data.get("assistant_message_id")
                 or command.data.get("assistantMessageId")
@@ -1435,6 +1765,13 @@ class WebSocketSession(
             ).strip() or f"assistant_{uuid.uuid4().hex}"
             message_metadata["assistant_message_id"] = assistant_message_id
             command.data["assistant_message_id"] = assistant_message_id
+            user_message_id = str(
+                command.data.get("user_message_id")
+                or command.data.get("userMessageId")
+                or ""
+            ).strip() or f"user_{uuid.uuid4().hex}"
+            message_metadata["user_message_id"] = user_message_id
+            command.data["user_message_id"] = user_message_id
 
             stripped = content.lstrip()
             if stripped.startswith("/") and not stripped.startswith("//"):
@@ -1527,6 +1864,11 @@ class WebSocketSession(
                             error_event
                         )
                         return
+                # Install the turn-local queue before creating the task. A
+                # steer can arrive immediately after the user command is
+                # accepted; pre-installing removes the narrow race that used
+                # to fall back to cancelling the whole run.
+                self._run_manager.turn_input_queue(target_conversation_id)
                 run_cancel_event = asyncio.Event()
                 event_generation_token = self._event_connection_generation.set(None)
                 try:
@@ -1559,8 +1901,8 @@ class WebSocketSession(
                         logging.error("Chat run failed: %s", e, exc_info=True)
                         error_event = AgentEvent.error(
                             f"Chat run failed: {e}",
-                            recoverable=True,
-                            error_type="api",
+                            recoverable=False,
+                            error_type="runtime",
                         )
                         if target_conversation_id:
                             error_event.data["conversation_id"] = target_conversation_id
@@ -1577,7 +1919,8 @@ class WebSocketSession(
 
                 event_generation_token = self._event_connection_generation.set(None)
                 try:
-                    asyncio.create_task(_wait_and_cleanup())
+                    cleanup_task = asyncio.create_task(_wait_and_cleanup())
+                    self._track_command_task(cleanup_task)
                 finally:
                     self._event_connection_generation.reset(event_generation_token)
             return
@@ -1642,6 +1985,7 @@ class WebSocketSession(
         *,
         connection_generation: int | None = None,
         log_context: str,
+        envelope: bool = True,
     ) -> bool:
         generation = self._resolve_event_connection_generation() if connection_generation is None else connection_generation
         persist_task: asyncio.Task[None] | None = None
@@ -1651,7 +1995,7 @@ class WebSocketSession(
                 # replay order and wire order cannot diverge. Disk persistence is
                 # chained separately; a slow filesystem must not hold up live or
                 # terminal websocket events.
-                enveloped = self._envelope_ws_payload(payload)
+                enveloped = self._envelope_ws_payload(payload) if envelope else dict(payload)
                 if self._is_replayable_ws_payload(enveloped):
                     replay_payload, rewrite_events = self._stage_ws_event(enveloped)
                     persist_task = asyncio.create_task(
@@ -1822,7 +2166,73 @@ class WebSocketSession(
             log_context="conversation.list",
         )
 
-    async def _send_event(self, event: AgentEvent) -> None:
+    async def _send_event(self, event: AgentEvent | dict[str, Any]) -> None:
+        # A few declarative conversation handlers historically emitted the
+        # lightweight ``{"type": ..., "data": ...}`` shape directly. Normalize
+        # it at the transport boundary so those handlers receive the same
+        # conversation scoping, notification hooks, replay envelope, and
+        # flattened wire payload as regular AgentEvent producers.
+        if isinstance(event, dict):
+            event_type = str(event.get("type") or "error")
+            raw_data = event.get("data")
+            if isinstance(raw_data, dict):
+                event_data = dict(raw_data)
+                event_data.update({
+                    key: value
+                    for key, value in event.items()
+                    if key not in {"type", "data"}
+                })
+            else:
+                event_data = {
+                    key: value
+                    for key, value in event.items()
+                    if key != "type"
+                }
+            event = AgentEvent(type=event_type, data=event_data)  # type: ignore[arg-type]
+        if event.type == "command.result":
+            command_id = self._client_command_context.get()
+            details = event.data.get("data")
+            result_data = dict(details) if isinstance(details, dict) else {}
+            if command_id:
+                result_data.setdefault("client_command_id", command_id)
+            conversation_id = str(
+                event.data.get("conversation_id")
+                or result_data.get("conversation_id")
+                or self.active_conversation_id
+                or ""
+            ).strip()
+            if conversation_id:
+                event.data.setdefault("conversation_id", conversation_id)
+                result_data.setdefault("conversation_id", conversation_id)
+            if result_data:
+                event.data["data"] = result_data
+        # Raw provider/tool traces are retained server-side and fetched only
+        # when the user opens a concrete Inspector entry. This keeps the live
+        # chat stream and client store compact without losing diagnostics.
+        if event.type == "inspector.update" and not event.data.get("diagnostics_loaded"):
+            target_kind = str(event.data.get("target_kind") or "message")
+            target_id = str(event.data.get("target_id") or "").strip()
+            diagnostic_payload = event.data.get("payload")
+            if target_id and isinstance(diagnostic_payload, dict):
+                event.data["payload"] = self._diagnostic_store.put(
+                    target_kind,
+                    target_id,
+                    diagnostic_payload,
+                    conversation_id=str(event.data.get("conversation_id") or ""),
+                )
+        elif event.type == "done":
+            provider_raw = event.data.get("providerRaw")
+            if isinstance(provider_raw, dict) and provider_raw:
+                trace_id = str(
+                    provider_raw.get("trace_id")
+                    or f"{event.data.get('message_id') or event.data.get('conversation_id') or 'provider'}:provider:done"
+                )
+                event.data["providerRaw"] = self._diagnostic_store.put(
+                    "provider",
+                    trace_id,
+                    provider_raw,
+                    conversation_id=str(event.data.get("conversation_id") or ""),
+                )
         target_conversation_id = str(event.data.get("conversation_id") or "").strip()
         if event.type in CONVERSATION_SCOPED_EVENT_TYPES and not target_conversation_id:
             logger.warning(
@@ -1832,13 +2242,12 @@ class WebSocketSession(
                 sorted(event.data.keys()),
             )
             return
-        if event.type == "text_chunk":
-            chunk = str(event.data.get("content", ""))
-            append_stream_text(
-                getattr(self, "_conversation_streams", {}),
-                str(target_conversation_id or ""),
-                chunk,
-            )
+        apply_stream_event(
+            getattr(self, "_conversation_streams", {}),
+            target_conversation_id,
+            event.type,
+            event.data,
+        )
 
         payload = self._build_ws_payload(event)
         if target_conversation_id:
@@ -1906,9 +2315,7 @@ class WebSocketManager:
         config: AppConfig,
         skill_manager: Any | None = None,
         skill_executor: Any | None = None,
-        rag_pipeline: Any | None = None,
         memory_manager: Any | None = None,
-        vector_memory: Any | None = None,
     ) -> tuple[WebSocketSession, int]:
         await websocket.accept(subprotocol=_websocket_accept_subprotocol(websocket))
 
@@ -1950,9 +2357,7 @@ class WebSocketManager:
             config=config,
             skill_manager=skill_manager,
             skill_executor=skill_executor,
-            rag_pipeline=rag_pipeline,
             memory_manager=memory_manager,
-            vector_memory=vector_memory,
             use_control_protocol=use_control_protocol,
         )
         self._sessions[session_id] = session
@@ -2036,6 +2441,25 @@ class WebSocketManager:
             old_task.cancel()
         self._disconnect_tasks[session_id] = asyncio.create_task(delayed_cleanup())
 
+    async def shutdown(self, *, reason: str = "application_shutdown") -> None:
+        """Drain disconnect timers and all live sessions before loop teardown."""
+        cleanup_tasks = list(self._disconnect_tasks.values())
+        self._disconnect_tasks.clear()
+        for task in cleanup_tasks:
+            if not task.done():
+                task.cancel()
+        if cleanup_tasks:
+            await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+
+        sessions = list(self._sessions.values())
+        self._sessions.clear()
+        if sessions:
+            await asyncio.gather(
+                *(session.shutdown(reason=reason) for session in sessions),
+                return_exceptions=True,
+            )
+        _invalidate_runtime_status_cache()
+
     async def broadcast_event(self, event: AgentEvent) -> None:
         sessions = [session for session in self._sessions.values() if session._is_connected]
         for session in sessions:
@@ -2098,6 +2522,7 @@ class WebSocketManager:
                     future.cancel()
             getattr(session, "_pending_approvals", {}).clear()
             getattr(session, "_pending_approval_payloads", {}).clear()
+            getattr(session, "_pending_approval_responses", {}).clear()
             getattr(session, "_approval_diff_cache", {}).clear()
 
             if session.file_watcher and session.file_watcher.is_running():

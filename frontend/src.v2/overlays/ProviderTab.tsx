@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { Check, KeyRound, Pencil, Play, Plus, Trash2 } from "lucide-react";
+import { Check, Copy, KeyRound, Pencil, Play, Plus, Trash2 } from "lucide-react";
 import { pushToast } from "./ToastContainer";
 import { apiBase, authHeaders } from "../protocol/api";
 import { sendClientCommand } from "../protocol/ws-outbox";
-import { ModelProviderIcon } from "../components/ModelProviderIcon";
+import { ModelBrandIcon } from "../components/ModelBrandIcon";
 import {
   type ProviderId,
   type CustomWireApi,
@@ -25,7 +25,6 @@ import {
   canChooseApiFormat,
   defaultPromptCacheRetention,
   defaultResponsesStatefulContinuation,
-  shouldShowResponsesFastPathHint,
   providerDisplayName,
   formatProviderError,
   formatProviderCheckSummary,
@@ -38,19 +37,9 @@ import {
   secondaryActionStyle,
 } from "./settingsShared";
 
-const cardIdentityForDraft = (provider: ProviderId, section: Pick<ProviderSection, "base_url" | "model" | "wire_api">): string =>
-  [
-    provider,
-    backendProvider(provider),
-    String(section.base_url || "").trim().toLowerCase().replace(/\/+$/, ""),
-    String(section.wire_api || (provider === "anthropic" ? "anthropic" : "chat")).trim(),
-    String(section.model || "").trim(),
-  ].join("::");
-
-const shouldUseSavedModelChoices = (provider: ProviderId, section?: Pick<ProviderSection, "base_url">): boolean => {
-  if (provider === "openai" || provider === "anthropic" || provider === "deepseek" || provider === "openrouter") return true;
-  const host = String(section?.base_url || "").trim().toLowerCase();
-  return host.includes("api.openai.com") || host.includes("api.deepseek.com") || host.includes("openrouter.ai");
+const cardIdentityForDraft = (provider: ProviderId, section: Pick<ProviderSection, "base_url">): string => {
+  const endpoint = String(section.base_url || "").trim().toLowerCase().replace(/\/+$/, "");
+  return endpoint ? `endpoint::${endpoint}` : `provider::${provider}`;
 };
 
 type ProviderDraft = {
@@ -97,12 +86,12 @@ export const ProviderTab = ({
   const [provider, setProvider] = useState<ProviderId>(selectedProvider);
   const [displayName, setDisplayName] = useState("");
   const [apiKey, setApiKey] = useState("");
-  const [baseUrl, setBaseUrl] = useState("https://api.deepseek.com/v1");
-  const [modelName, setModelName] = useState("deepseek-chat");
-  const [availableModelList, setAvailableModelList] = useState<string[]>(["deepseek-chat"]);
+  const [baseUrl, setBaseUrl] = useState("");
+  const [modelName, setModelName] = useState("");
+  const [availableModelList, setAvailableModelList] = useState<string[]>([]);
   const [customWireApi, setCustomWireApi] = useState<CustomWireApi>("chat");
   const [thinkingBudget, setThinkingBudget] = useState(0);
-  const [responsesReasoningSummary, setResponsesReasoningSummary] = useState("off");
+  const [responsesReasoningSummary, setResponsesReasoningSummary] = useState("auto");
   const [responsesStatefulContinuation, setResponsesStatefulContinuation] = useState(true);
   const [promptCacheRetention, setPromptCacheRetention] = useState("24h");
   const [saving, setSaving] = useState(false);
@@ -120,7 +109,6 @@ export const ProviderTab = ({
   const providerConfig = PROVIDERS.find((p) => p.id === provider)!;
   const effectiveWireApi = effectiveCustomWireApi(provider, baseUrl, customWireApi);
   const responsesFastPathEnabled = effectiveWireApi === "responses";
-  const showResponsesFastPathHint = shouldShowResponsesFastPathHint(provider, baseUrl, modelName, effectiveWireApi);
   const showApiFormat = canChooseApiFormat(provider, baseUrl);
   const showFixedAnthropicFormat = backendProvider(provider) === "anthropic";
   const modelChoices = buildModelChoices(availableModelList, modelName);
@@ -145,9 +133,7 @@ export const ProviderTab = ({
     setApiKey(section?.api_key ?? "");
     setBaseUrl(section?.base_url ?? fallback.base_url ?? "");
     setModelName(section?.model ?? fallback.model ?? "");
-        const savedModels = shouldUseSavedModelChoices(nextProvider, section)
-      ? section?.available_models ?? fallback.available_models ?? []
-      : [];
+    const savedModels = section?.available_models ?? fallback.available_models ?? [];
     const models = buildModelChoices(savedModels, section?.model ?? fallback.model ?? "");
     setAvailableModelList(models);
     setModelsSource(section?.models_source ?? "");
@@ -158,7 +144,7 @@ export const ProviderTab = ({
       setCustomWireApi(effectiveCustomWireApi(nextProvider, section?.base_url ?? fallback.base_url ?? "", wire as CustomWireApi));
     }
     setThinkingBudget(Number(section?.thinking_budget ?? fallback.thinking_budget ?? 0) || 0);
-    setResponsesReasoningSummary(section?.responses_reasoning_summary ?? fallback.responses_reasoning_summary ?? "off");
+    setResponsesReasoningSummary(section?.responses_reasoning_summary ?? fallback.responses_reasoning_summary ?? "auto");
     const rawWire = section?.wire_api === "anthropic" || section?.wire_api === "responses" ? section.wire_api : "chat";
     const effectiveWire = effectiveCustomWireApi(nextProvider, section?.base_url ?? fallback.base_url ?? "", rawWire as CustomWireApi);
     setResponsesStatefulContinuation(Boolean(section?.responses_stateful_continuation ?? defaultResponsesStatefulContinuation(effectiveWire)));
@@ -208,7 +194,7 @@ export const ProviderTab = ({
       available_models: [],
       wire_api: "chat",
       thinking_budget: 0,
-      responses_reasoning_summary: "off",
+      responses_reasoning_summary: "auto",
       responses_stateful_continuation: false,
       prompt_cache_retention: "",
     });
@@ -228,11 +214,8 @@ export const ProviderTab = ({
   const providerForHistoryEntry = (entry: ProviderHistoryEntry): ProviderId => {
     const rawProvider = String(entry.provider || "").trim().toLowerCase();
     const providerId = String(entry.provider_id || "").trim().toLowerCase();
-    const host = String(entry.base_url || "").trim().toLowerCase();
-    if (rawProvider === "anthropic" || providerId === "anthropic_off") return "anthropic";
-    if (rawProvider === "openai" || providerId === "openai_official") return "openai";
-    if (host.includes("deepseek.com") || providerId === "deepseek") return "deepseek";
-    if (host.includes("openrouter.ai") || providerId === "openrouter") return "openrouter";
+    if (rawProvider === "anthropic" || providerId === "anthropic") return "anthropic";
+    if (rawProvider === "openai" || providerId === "openai") return "openai";
     return "custom";
   };
 
@@ -273,9 +256,9 @@ export const ProviderTab = ({
       onSettingsPayloadChange?.(savedPayload);
       applyProviderSection(provider, savedOrHistorySectionForUiProvider(savedPayload, provider));
       setPendingDeleteKey("");
-      pushToast("Provider configuration removed", "success");
+      pushToast("提供商配置已删除", "success");
     } catch (error) {
-      pushToast(`Provider delete failed: ${formatProviderError(error)}`, "error");
+      pushToast(`提供商删除失败：${formatProviderError(error)}`, "error");
     } finally {
       setDeletingHistoryKey("");
     }
@@ -355,8 +338,6 @@ export const ProviderTab = ({
             if (options.activate) {
         setActiveIdentityOverride(cardIdentityForDraft(draft.provider, {
           base_url: section?.base_url || draft.baseUrl,
-          model: section?.model || active || draft.modelName,
-          wire_api: appliedWireApi || (draft.provider === "anthropic" ? "anthropic" : draft.customWireApi),
         }));
         sendClientCommand({
           type: "llm.config.set",
@@ -374,14 +355,14 @@ export const ProviderTab = ({
       if (!options.quiet) {
         pushToast(
           options.activate
-            ? `Provider active - model: ${active || draft.modelName}`
-            : `Provider saved - model: ${active || draft.modelName}`,
+            ? `提供商已启用 · 模型：${active || draft.modelName}`
+            : `提供商已保存 · 模型：${active || draft.modelName}`,
           "success",
         );
       }
     } catch (error) {
       setConnectionStatus("error");
-      pushToast(`Provider save failed: ${String(error)}`, "error");
+      pushToast(`提供商保存失败：${String(error)}`, "error");
     } finally {
       setSaving(false);
     }
@@ -391,9 +372,7 @@ export const ProviderTab = ({
     const fallback = defaultSectionForProvider(nextProvider);
     const nextBaseUrl = section?.base_url ?? fallback.base_url ?? "";
     const nextModel = section?.model ?? fallback.model ?? "";
-    const savedModels = shouldUseSavedModelChoices(nextProvider, section)
-      ? section?.available_models ?? fallback.available_models ?? []
-      : [];
+    const savedModels = section?.available_models ?? fallback.available_models ?? [];
     const nextModels = buildModelChoices(savedModels, nextModel);
     const wire = backendProvider(nextProvider) === "anthropic"
       ? "anthropic"
@@ -411,7 +390,7 @@ export const ProviderTab = ({
       availableModelList: nextModels,
       customWireApi: wire,
       thinkingBudget: Number(section?.thinking_budget ?? fallback.thinking_budget ?? 0) || 0,
-      responsesReasoningSummary: section?.responses_reasoning_summary ?? fallback.responses_reasoning_summary ?? "off",
+      responsesReasoningSummary: section?.responses_reasoning_summary ?? fallback.responses_reasoning_summary ?? "auto",
       responsesStatefulContinuation: Boolean(section?.responses_stateful_continuation ?? defaultResponsesStatefulContinuation(wire)),
       promptCacheRetention: section?.prompt_cache_retention ?? defaultPromptCacheRetention(wire),
     };
@@ -462,7 +441,7 @@ export const ProviderTab = ({
       pushToast(formatProviderCheckSummary(data), data.ok ? "success" : "error");
     } catch (error) {
       setConnectionStatus("error");
-      pushToast(`Connection failed: ${formatProviderError(error)}`, "error");
+      pushToast(`连接失败：${formatProviderError(error)}`, "error");
     }
   };
 
@@ -487,15 +466,15 @@ export const ProviderTab = ({
           setModelName(nextModel);
         }
         setModelsStatus("success");
-        pushToast(`Discovered ${models.length} models`, "success");
+        pushToast(`已发现 ${models.length} 个模型`, "success");
       } else {
         setModelsStatus("error");
         setModelsSource("");
-        pushToast("Live model discovery returned no provider model list; keeping the manual model entry.", "info");
+        pushToast("实时发现未返回模型列表，已保留手动输入的模型。", "info");
       }
     } catch (error) {
       setModelsStatus("error");
-      pushToast(`Model discovery failed: ${formatProviderError(error)}`, "error");
+      pushToast(`模型发现失败：${formatProviderError(error)}`, "error");
     }
   };
 
@@ -504,9 +483,9 @@ export const ProviderTab = ({
     if (name) return name;
     try {
       const url = new URL(String(entry.base_url || ""));
-      return url.host || entry.base_url || entry.model || "Saved config";
+      return url.host || entry.base_url || entry.model || "已保存配置";
     } catch {
-      return entry.base_url || entry.model || "Saved config";
+      return entry.base_url || entry.model || "已保存配置";
     }
   };
 
@@ -515,14 +494,14 @@ export const ProviderTab = ({
       const url = new URL(value);
       return url.host || value;
     } catch {
-      return value || "No endpoint";
+      return value || "未配置接口";
     }
   };
 
   const providerTypeLabel = (nextProvider: ProviderId) =>
     nextProvider === "custom"
-      ? "Custom gateway"
-      : PROVIDERS.find((item) => item.id === nextProvider)?.label ?? "Provider";
+      ? "自定义网关"
+      : PROVIDERS.find((item) => item.id === nextProvider)?.label ?? "提供商";
 
   const wireApiLabel = (wireApi: string) => {
     const normalized = wireApi.trim().toLowerCase();
@@ -541,7 +520,7 @@ export const ProviderTab = ({
   const fallbackCardTitle = (nextProvider: ProviderId, section: ProviderSection) => {
     if (nextProvider === "custom") {
       const host = section.base_url ? hostLabel(section.base_url) : "";
-      return host && host !== "No endpoint" ? host : "Custom gateway";
+      return host && host !== "未配置接口" ? host : "自定义网关";
     }
     return providerTypeLabel(nextProvider);
   };
@@ -552,14 +531,7 @@ export const ProviderTab = ({
   const draftTitle = displayName.trim() || fallbackCardTitle(provider, { base_url: baseUrl });
 
   const cardKeyFor = (nextProvider: ProviderId, section: ProviderSection, suffix: string) =>
-    [
-      nextProvider,
-      backendProvider(nextProvider),
-      String(section.base_url || "").trim().toLowerCase().replace(/\/+$/, ""),
-      String(section.wire_api || (nextProvider === "anthropic" ? "anthropic" : "chat")).trim(),
-      String(section.model || "").trim(),
-      suffix,
-    ].join("::");
+    `${cardIdentityForDraft(nextProvider, section)}::${suffix}`;
 
   const providerCards = (() => {
     const cards: ProviderCard[] = [];
@@ -576,8 +548,12 @@ export const ProviderTab = ({
         provider: entryProvider,
         title: historyLabel(entry),
         subtitle: providerTypeLabel(entryProvider),
-        model: section.model || "Select model",
-        wireApi: section.wire_api || (entryProvider === "anthropic" ? "anthropic" : "chat"),
+        model: section.model || "选择模型",
+        wireApi: effectiveCustomWireApi(
+          entryProvider,
+          section.base_url || "",
+          (section.wire_api === "responses" || section.wire_api === "anthropic" ? section.wire_api : "chat") as CustomWireApi,
+        ),
         hasApiKey: Boolean(entry.has_api_key || entry.api_key),
         section,
         entry,
@@ -595,19 +571,17 @@ export const ProviderTab = ({
   })();
   const draftCardIdentity = cardIdentityForDraft(provider, {
     base_url: baseUrl,
-    model: modelName,
-    wire_api: effectiveWireApi,
   });
 
   const providerList = (
     <>
       <div style={providerListHeaderStyle}>
         <div style={{ minWidth: 0 }}>
-          <div style={providerListTitleStyle}>Providers</div>
+          <div style={providerListTitleStyle}>模型提供商</div>
         </div>
         <button type="button" onClick={addProvider} style={addProviderButtonStyle}>
           <Plus size={14} />
-          <span>Add provider</span>
+          <span>添加提供商</span>
         </button>
       </div>
 
@@ -625,10 +599,16 @@ export const ProviderTab = ({
                 style={providerCardMainStyle}
                 title={[card.subtitle, card.section.base_url, card.model, wireApiLabel(card.wireApi)].filter(Boolean).join(" · ")}
               >
-                <ModelProviderIcon model={card.model} provider={`${card.provider} ${card.title} ${card.section.base_url || ""}`} size={21} framed />
+                <ModelBrandIcon
+                  model={card.model}
+                  provider={`${card.provider} ${card.title} ${card.section.base_url || ""}`}
+                  websiteUrl={card.section.base_url}
+                  size={21}
+                  framed
+                />
                 <span style={{ minWidth: 0, display: "grid", gap: 3 }}>
                   <span style={providerCardTitleStyle}>{card.title}</span>
-                  <span style={providerCardUrlStyle}>{card.section.base_url || "No endpoint configured"}</span>
+                  <span style={providerCardUrlStyle}>{card.section.base_url || "未配置接口地址"}</span>
                   <span style={providerCardMetaStyle}>
                     <span style={metaTextStyle}>{card.subtitle}</span>
                     <span style={dotStyle}>·</span>
@@ -636,8 +616,8 @@ export const ProviderTab = ({
                     <span style={dotStyle}>·</span>
                     {card.model}
                     <span style={dotStyle}>·</span>
-                    <KeyRound size={12} />
-                    {card.hasApiKey ? "Key" : "No key"}
+                    <KeyRound size={14} />
+                    {card.hasApiKey ? "已配置密钥" : "无密钥"}
                   </span>
                 </span>
               </button>
@@ -646,8 +626,8 @@ export const ProviderTab = ({
                   type="button"
                   onClick={() => editProviderCard(card)}
                   style={iconActionStyle}
-                  aria-label={`Edit ${card.title}`}
-                  title="Edit"
+                  aria-label={`编辑 ${card.title}`}
+                  title="编辑"
                 >
                   <Pencil size={14} />
                 </button>
@@ -656,11 +636,11 @@ export const ProviderTab = ({
                   onClick={() => void useProviderCard(card)}
                   disabled={saving && editing}
                   style={useActionStyle(active)}
-                  aria-label={active ? `${card.title} is active` : `Use ${card.title}`}
-                  title={active ? "Active" : "Use provider"}
+                  aria-label={active ? `${card.title} 已启用` : `使用 ${card.title}`}
+                  title={active ? "已启用" : "使用提供商"}
                 >
                   {active ? <Check size={14} /> : <Play size={14} />}
-                  <span>{active ? "Active" : "Use"}</span>
+                  <span>{active ? "已启用" : "使用"}</span>
                 </button>
                 {card.entry && card.historyIndex != null && (
                   pendingDeleteKey === historyEntryKey(card.entry, card.historyIndex) ? (
@@ -669,14 +649,14 @@ export const ProviderTab = ({
                       disabled={deletingHistoryKey === historyEntryKey(card.entry, card.historyIndex)}
                       style={historyDeleteConfirmStyle}
                     >
-                      {deletingHistoryKey === historyEntryKey(card.entry, card.historyIndex) ? "Deleting..." : "Delete"}
+                      {deletingHistoryKey === historyEntryKey(card.entry, card.historyIndex) ? "正在删除…" : "删除"}
                     </button>
                   ) : (
                     <button
                       onClick={() => deleteHistoryEntry(card.entry!, card.historyIndex!)}
                       style={deleteIconActionStyle}
-                      title="Remove saved provider"
-                      aria-label={`Remove saved provider ${card.title}`}
+                      title="删除已保存的提供商"
+                      aria-label={`删除已保存的提供商 ${card.title}`}
                     >
                       <Trash2 size={14} />
                     </button>
@@ -689,16 +669,16 @@ export const ProviderTab = ({
         </div>
       ) : (
         <div style={emptyProviderListStyle}>
-          <div style={emptyProviderTitleStyle}>No providers yet</div>
-          <div>Add a provider profile to choose an endpoint, API key, model, and API format.</div>
+          <div style={emptyProviderTitleStyle}>尚未配置提供商</div>
+          <div>添加提供商配置，以选择接口地址、API 密钥、模型和 API 格式。</div>
         </div>
       )}
 
       {connectionStatus !== "idle" && (
         <div style={statusStyle(connectionStatus)}>
-          {connectionStatus === "testing" && "Applying provider..."}
-          {connectionStatus === "success" && "Provider ready"}
-          {connectionStatus === "error" && "Provider apply failed"}
+          {connectionStatus === "testing" && "正在应用提供商…"}
+          {connectionStatus === "success" && "提供商已就绪"}
+          {connectionStatus === "error" && "提供商应用失败"}
         </div>
       )}
     </>
@@ -707,25 +687,25 @@ export const ProviderTab = ({
   const providerDetails = (
     <>
       <div style={detailHeaderStyle}>
-        <button type="button" onClick={openProviderList} style={backButtonStyle}>Back</button>
+        <button type="button" onClick={openProviderList} style={backButtonStyle}>返回</button>
         <div style={{ minWidth: 0 }}>
           <div style={detailTitleStyle}>{draftTitle}</div>
         </div>
       </div>
 
-      <Section title="Display Name">
+      <Section title="显示名称">
         <input
           type="text"
-          aria-label="Provider display name"
+          aria-label="提供商显示名称"
           value={displayName}
           onChange={(e) => setDisplayName(e.target.value)}
-          placeholder={provider === "custom" && baseUrl ? hostLabel(baseUrl) : `${providerConfig.label} profile`}
+          placeholder={provider === "custom" && baseUrl ? hostLabel(baseUrl) : `${providerConfig.label} 配置`}
           spellCheck={false}
           style={{ ...inputStyle, fontFamily: "var(--font-ui)" }}
         />
       </Section>
 
-      <Section title="Provider Type">
+      <Section title="提供商类型">
         <div style={presetGridStyle}>
           {PROVIDERS.map((item) => (
             <button
@@ -734,34 +714,51 @@ export const ProviderTab = ({
               onClick={() => selectProviderPreset(item.id)}
               style={presetButtonStyle(provider === item.id)}
             >
-              <ModelProviderIcon model={item.defaultModel} provider={item.id} size={19} framed />
+              <ModelBrandIcon model={item.defaultModel} provider={item.id} size={19} framed />
               <span style={presetTitleStyle}>{item.label}</span>
             </button>
           ))}
         </div>
       </Section>
 
-      <Section title="API Key">
-        <input
-          type="text"
-          value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
-          placeholder={providerConfig.placeholder}
-          spellCheck={false}
-          style={inputStyle}
-        />
+      <Section title="API 密钥">
+        <div style={{ display: "flex", gap: 8 }}>
+          <input
+            type="text"
+            aria-label="API 密钥"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            placeholder={providerConfig.placeholder}
+            spellCheck={false}
+            style={inputStyle}
+          />
+          <button
+            type="button"
+            aria-label="复制 API 密钥"
+            title="复制 API 密钥"
+            disabled={!apiKey}
+            onClick={() => {
+              if (!apiKey) return;
+              void navigator.clipboard?.writeText(apiKey);
+              pushToast("API 密钥已复制", "success");
+            }}
+            style={{ ...iconActionStyle, width: 38, height: 38, flexShrink: 0, opacity: apiKey ? 1 : 0.45 }}
+          >
+            <Copy size={15} />
+          </button>
+        </div>
       </Section>
 
       {providerConfig.hasBaseUrl && (
-        <Section title="Base URL">
+        <Section title="接口地址">
           <input type="text" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://api.example.com/v1" style={inputStyle} />
         </Section>
       )}
 
       {showApiFormat && (
-        <Section title="API Format">
+        <Section title="API 格式">
           <select
-            aria-label="API format"
+            aria-label="API 格式"
             value={customWireApi}
             onChange={(e) => updateWireApi(e.target.value as CustomWireApi)}
             style={selectInputStyle}
@@ -770,50 +767,40 @@ export const ProviderTab = ({
             <option value="responses">OpenAI Responses</option>
             {backendProvider(provider) === "custom" && <option value="anthropic">Anthropic Messages</option>}
           </select>
-          {showResponsesFastPathHint && (
-            <div style={fastPathWarningStyle}>
-              <span>
-                GPT-like models are faster across turns on OpenAI Responses because MiniCode can use provider-side continuation and prompt-cache retention.
-              </span>
-              <button type="button" onClick={() => updateWireApi("responses")} style={inlineSwitchButtonStyle}>
-                Use Responses
-              </button>
-            </div>
-          )}
         </Section>
       )}
 
       {showFixedAnthropicFormat && (
-        <Section title="API Format">
+        <Section title="API 格式">
           <div style={readOnlyFormatStyle}>Anthropic Messages</div>
         </Section>
       )}
 
       {responsesFastPathEnabled && (
-        <Section title="Responses Fast Path">
+        <Section title="Responses 快速路径">
           <label style={checkboxRowStyle}>
             <input
               type="checkbox"
               checked={responsesStatefulContinuation}
               onChange={(event) => setResponsesStatefulContinuation(event.target.checked)}
             />
-            <span>Stateful continuation</span>
+            <span>有状态续接</span>
           </label>
           <SettingSelect
-            label="Prompt cache"
+            label="提示词缓存"
             value={promptCacheRetention || "off"}
             onChange={(value) => setPromptCacheRetention(value === "off" ? "" : value)}
             options={[
-              { value: "24h", label: "24h retention" },
-              { value: "in_memory", label: "In-memory" },
-              { value: "off", label: "Off" },
+              { value: "24h", label: "保留 24 小时" },
+              { value: "in_memory", label: "仅内存" },
+              { value: "off", label: "关闭" },
             ]}
           />
         </Section>
       )}
 
       {(backendProvider(provider) === "anthropic" || effectiveWireApi === "anthropic") && (
-        <Section title="Thinking Budget">
+        <Section title="思考预算">
           <input
             type="number"
             min={0}
@@ -826,7 +813,7 @@ export const ProviderTab = ({
         </Section>
       )}
 
-      <Section title="Model">
+      <Section title="模型">
         <input type="text" value={modelName} onChange={(e) => setModelName(e.target.value)} placeholder={providerConfig.defaultModel || "model-name"} style={inputStyle} />
         {modelChoices.length > 0 && (
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
@@ -839,16 +826,16 @@ export const ProviderTab = ({
         )}
         {modelsStatus !== "idle" && (
           <div style={{ ...statusStyle(modelsStatus === "error" ? "error" : modelsStatus === "loading" ? "testing" : "success"), marginTop: 8 }}>
-            {modelsStatus === "loading" && "Discovering models..."}
+            {modelsStatus === "loading" && "正在发现模型…"}
             {modelsStatus === "success" && modelsResult && (
               <span>
-                Live model list loaded
+                已加载实时模型列表
                 {modelsResult.source_message ? ` · ${modelsResult.source_message}` : ""}
               </span>
             )}
             {modelsStatus === "error" && (
               <span>
-                {modelsResult ? "No live model list returned; keeping the manual model entry" : "Model discovery failed"}
+                {modelsResult ? "未返回实时模型列表，已保留手动输入的模型" : "模型发现失败"}
                 {modelsResult?.source_message ? ` · ${modelsResult.source_message}` : ""}
               </span>
             )}
@@ -862,17 +849,17 @@ export const ProviderTab = ({
           {connectionStatus !== "testing" && connectionResult && (
             <ProviderCheckPanel result={connectionResult} />
           )}
-          {connectionStatus === "success" && !connectionResult && "Provider ready"}
-          {connectionStatus === "error" && !connectionResult && "Provider check failed"}
+          {connectionStatus === "success" && !connectionResult && "提供商已就绪"}
+          {connectionStatus === "error" && !connectionResult && "提供商检查失败"}
         </div>
       )}
 
       <div style={actionBarStyle}>
         <button onClick={discoverModels} disabled={modelsStatus === "loading"} style={secondaryActionStyle}>
-          {modelsStatus === "loading" ? "Discovering..." : "Discover models"}
+          {modelsStatus === "loading" ? "正在发现…" : "发现模型"}
         </button>
-        <button onClick={testConnection} disabled={connectionStatus === "testing"} style={secondaryActionStyle}>Check auth</button>
-        <button onClick={() => void saveProvider()} disabled={saving} style={primaryActionStyle}>{saving ? "Saving..." : "Save"}</button>
+        <button onClick={testConnection} disabled={connectionStatus === "testing"} style={secondaryActionStyle}>检查鉴权</button>
+        <button onClick={() => void saveProvider()} disabled={saving} style={primaryActionStyle}>{saving ? "正在保存…" : "保存"}</button>
       </div>
     </>
   );
@@ -885,12 +872,7 @@ const toActiveUiProvider = (payload: LLMSettingsPayload | null): ProviderId | ""
   const active = String(payload.provider || "").trim().toLowerCase();
   if (active === "anthropic") return "anthropic";
   if (active === "openai") return "openai";
-  if (active === "custom") {
-    const host = String(payload.custom?.base_url || "").toLowerCase();
-    if (host.includes("deepseek.com")) return "deepseek";
-    if (host.includes("openrouter.ai")) return "openrouter";
-    return "custom";
-  }
+  if (active === "custom") return "custom";
   return "";
 };
 
@@ -1120,7 +1102,7 @@ const providerCardMetaStyle: CSSProperties = {
   gap: 5,
   minWidth: 0,
   color: "var(--text-muted)",
-  fontSize: 11,
+  fontSize: "var(--text-2xs)",
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
@@ -1191,35 +1173,7 @@ const historyDeleteConfirmStyle: CSSProperties = {
   backgroundColor: "rgba(239, 68, 68, 0.12)",
   color: "var(--state-danger)",
   padding: 0,
-  fontSize: 11,
+  fontSize: "var(--text-2xs)",
   fontWeight: 600,
-  cursor: "pointer",
-};
-
-const fastPathWarningStyle: CSSProperties = {
-  marginTop: 8,
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  gap: 10,
-  padding: "8px 10px",
-  borderRadius: "var(--radius-sm, 6px)",
-  border: "1px solid color-mix(in oklch, var(--state-warning) 38%, var(--border-subtle))",
-  backgroundColor: "color-mix(in oklch, var(--state-warning) 9%, var(--surface-base))",
-  color: "var(--text-secondary)",
-  fontSize: "var(--text-xs)",
-  lineHeight: 1.4,
-};
-
-const inlineSwitchButtonStyle: CSSProperties = {
-  flexShrink: 0,
-  height: 28,
-  padding: "0 10px",
-  borderRadius: "var(--radius-sm, 6px)",
-  border: "1px solid var(--accent-primary)",
-  backgroundColor: "var(--accent-primary)",
-  color: "var(--text-on-accent, var(--text-primary))",
-  fontSize: "var(--text-xs)",
-  fontWeight: 700,
   cursor: "pointer",
 };

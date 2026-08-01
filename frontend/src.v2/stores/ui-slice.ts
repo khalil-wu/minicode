@@ -105,6 +105,19 @@ function storeConversationWorkbenchState(
   };
 }
 
+function panelSlotsEqual(left: AppStore["panelSlots"], right: AppStore["panelSlots"]): boolean {
+  return left.length === right.length && left.every((slot, index) => {
+    const candidate = right[index];
+    if (!candidate) return false;
+    return slot.id === candidate.id
+      && slot.kind === candidate.kind
+      && slot.label === candidate.label
+      && slot.size === candidate.size
+      && Boolean(slot.focused) === Boolean(candidate.focused)
+      && Boolean(slot.maximized) === Boolean(candidate.maximized);
+  });
+}
+
 export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get) => ({
   themeMode: initialTheme(),
   textScale: initialTextScale(),
@@ -152,8 +165,6 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   skillsMarketplaceOpen: false,
   liveArtifactsOpen: false,
   agentEditorOpen: false,
-  pluginCommandPanelOpen: false,
-  pluginCommandPanelPayload: null,
   toggleAgentEditor: () =>
     set((s) => {
       if (s.agentEditorOpen) {
@@ -168,26 +179,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         skillsMarketplaceOpen: false,
         liveArtifactsOpen: false,
         quickOpenVisible: false,
-        pluginCommandPanelOpen: false,
       };
-    }),
-  openPluginCommandPanel: (payload) =>
-    set({
-      pluginCommandPanelOpen: true,
-      pluginCommandPanelPayload: payload,
-      commandPaletteOpen: false,
-      settingsOpen: false,
-      automationsOpen: false,
-      shortcutsHelpOpen: false,
-      skillsMarketplaceOpen: false,
-      liveArtifactsOpen: false,
-      quickOpenVisible: false,
-      agentEditorOpen: false,
-    }),
-  closePluginCommandPanel: () =>
-    set({
-      pluginCommandPanelOpen: false,
-      pluginCommandPanelPayload: null,
     }),
   setThemeMode: (mode) => {
     writeLS(LS.theme, mode);
@@ -206,24 +198,37 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
       if (m !== "code") {
         if (m === "cowork" && s.editorTabs.length === 0 && s.panelSlots.some((slot) => slot.kind === "editor")) {
           const panelSlots = normalizePanelSlots(s.panelSlots.filter((slot) => slot.kind !== "editor"));
-          persistPanelSlots(panelSlots);
-          return { appMode: m, panelSlots };
+          if (!panelSlotsEqual(s.panelSlots, panelSlots)) {
+            persistPanelSlots(panelSlots);
+            return { appMode: m, panelSlots };
+          }
         }
+        if (s.appMode === m) return s;
         return { appMode: m };
       }
       const panelSlots = ensureCodePanelSlots(s.panelSlots);
-      persistPanelSlots(panelSlots);
-      return { appMode: m, panelSlots };
+      const layoutChanged = !panelSlotsEqual(s.panelSlots, panelSlots);
+      if (!layoutChanged && s.appMode === m) return s;
+      if (layoutChanged) persistPanelSlots(panelSlots);
+      return layoutChanged ? { appMode: m, panelSlots } : { appMode: m };
     }),
   ensureCodeLayout: () =>
     set((s) => {
       const panelSlots = ensureCodePanelSlots(s.panelSlots);
+      if (panelSlotsEqual(s.panelSlots, panelSlots)) return s;
       persistPanelSlots(panelSlots);
       return { panelSlots };
     }),
   setRightStackTab: (t, options) =>
     set((s) => {
-      if (t === "terminal") writeLS(LS.layout.dockCollapsed, "1");
+      if (t === "terminal") {
+        writeLS(LS.layout.dockTab, "terminal");
+        writeLS(LS.layout.dockCollapsed, "0");
+        return {
+          activeBottomTab: "terminal",
+          dockCollapsed: false,
+        };
+      }
       const rightSidebarWidth = preferredRightSidebarWidth(t, s.rightSidebarWidth);
       if (rightSidebarWidth !== s.rightSidebarWidth) {
         writeLS(LS.layout.rightWidth, String(rightSidebarWidth));
@@ -234,7 +239,6 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         rightStackTabLocked: options?.automatic ? s.rightStackTabLocked : true,
         rightPanelOpen: true,
         rightSidebarWidth,
-        dockCollapsed: t === "terminal" ? true : s.dockCollapsed,
       };
     }),
   setRightStackTabLocked: (locked) => set({ rightStackTabLocked: locked }),
@@ -266,7 +270,6 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         liveArtifactsOpen: false,
         quickOpenVisible: false,
         agentEditorOpen: false,
-        pluginCommandPanelOpen: false,
       };
     }),
   toggleSettings: () =>
@@ -284,7 +287,6 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         liveArtifactsOpen: false,
         quickOpenVisible: false,
         agentEditorOpen: false,
-        pluginCommandPanelOpen: false,
       };
     }),
   toggleAutomations: () =>
@@ -301,7 +303,6 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         liveArtifactsOpen: false,
         quickOpenVisible: false,
         agentEditorOpen: false,
-        pluginCommandPanelOpen: false,
       };
     }),
   toggleShortcutsHelp: () =>
@@ -319,7 +320,6 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         liveArtifactsOpen: false,
         quickOpenVisible: false,
         agentEditorOpen: false,
-        pluginCommandPanelOpen: false,
       };
     }),
   toggleSkillsMarketplace: () =>
@@ -337,7 +337,6 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         liveArtifactsOpen: false,
         quickOpenVisible: false,
         agentEditorOpen: false,
-        pluginCommandPanelOpen: false,
       };
     }),
   toggleLiveArtifacts: () =>
@@ -355,7 +354,6 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         skillsMarketplaceOpen: false,
         quickOpenVisible: false,
         agentEditorOpen: false,
-        pluginCommandPanelOpen: false,
       };
     }),
   toggleQuickOpen: () =>
@@ -373,7 +371,6 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         skillsMarketplaceOpen: false,
         liveArtifactsOpen: false,
         agentEditorOpen: false,
-        pluginCommandPanelOpen: false,
       };
     }),
   setCurrentModel: (m) => set({ currentModel: m }),
@@ -422,7 +419,9 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         : undefined;
       const next = cloneConversationWorkbenchState(stored ?? emptyConversationWorkbenchState());
       const activeTerminalSessionId = next.activeTerminalSessionId &&
-        s.terminalSessions.some((session) => session.id === next.activeTerminalSessionId)
+        s.terminalSessions.some((session) => (
+          session.id === next.activeTerminalSessionId && session.conversationId === targetId
+        ))
           ? next.activeTerminalSessionId
           : null;
       return {
@@ -549,6 +548,21 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     }));
   },
   setPreviewArtifact: (artifact) => set({ previewArtifact: artifact }),
+  setConversationPreviewArtifact: (conversationId, artifact) =>
+    set((s) => {
+      const targetId = String(conversationId || "").trim();
+      if (!targetId) return s;
+      const nextWorkbench = {
+        ...(s.conversationWorkbenchStates ?? {}),
+        [targetId]: {
+          ...(s.conversationWorkbenchStates?.[targetId] ?? emptyConversationWorkbenchState()),
+          previewArtifact: cloneArtifactState(artifact),
+        },
+      };
+      return targetId === s.conversationId
+        ? { previewArtifact: cloneArtifactState(artifact), conversationWorkbenchStates: nextWorkbench }
+        : { conversationWorkbenchStates: nextWorkbench };
+    }),
   setLivePreviewUrl: (url) => set({ livePreviewUrl: url }),
   openLivePreview: (url) =>
     set((s) => {

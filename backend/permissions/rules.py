@@ -57,7 +57,7 @@ class PermissionRuleMatcher:
         allowed_paths: list[str] | None = None,
         denied_paths: list[str] | None = None,
     ) -> None:
-        self.workspace_root = workspace_root or Path.cwd()
+        self.workspace_root = (workspace_root or Path.cwd()).resolve()
         self.allowed_paths = allowed_paths or []
         self.denied_paths = denied_paths or []
 
@@ -126,12 +126,28 @@ class PermissionRuleMatcher:
                 return part
         return ""
 
+    def _relative_posix(self, path: Path) -> str | None:
+        """Workspace-relative posix path, or None if it cannot be classified.
+
+        Malformed inputs (e.g. Windows ``\\\\?\\`` device paths that resolve to
+        drive-relative forms) make ``relative_to`` raise ValueError; returning
+        None lets callers fail closed (deny) instead of crashing the run.
+        """
+        try:
+            return path.relative_to(self.workspace_root).as_posix()
+        except ValueError:
+            return None
+
     def _matches_denied_paths(self, path: Path) -> bool:
-        rel_path = path.relative_to(self.workspace_root).as_posix()
+        rel_path = self._relative_posix(path)
+        if rel_path is None:
+            return True  # unclassifiable -> deny
         return any(fnmatch.fnmatch(rel_path, pattern.replace("\\", "/")) for pattern in self.denied_paths)
 
     def _matches_allowed_paths(self, path: Path) -> bool:
-        rel_path = path.relative_to(self.workspace_root).as_posix()
+        rel_path = self._relative_posix(path)
+        if rel_path is None:
+            return False  # unclassifiable -> not allowed
         return any(fnmatch.fnmatch(rel_path, pattern.replace("\\", "/")) for pattern in self.allowed_paths)
 
     def should_ignore_in_search(self, path: Path) -> bool:

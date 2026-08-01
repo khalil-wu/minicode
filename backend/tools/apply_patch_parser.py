@@ -26,6 +26,7 @@ model can correct the call, matching Codex's parser behavior.
 """
 from __future__ import annotations
 
+import difflib
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -62,6 +63,7 @@ class PatchHunk:
     old_lines: list[str] = field(default_factory=list)
     new_lines: list[str] = field(default_factory=list)
     is_eof: bool = False
+    change_context: str | None = None
 
 
 @dataclass
@@ -199,9 +201,12 @@ def _parse_update_hunks(
     while i < n and not _is_section_header(body[i]):
         row = body[i]
         if row.startswith(CHANGE_MARKER):
-            # New change block. The text after @@ is an orientation hint only.
+            # New change block. Codex treats text after @@ as an orientation
+            # anchor (for example ``@@ class Media:``), then searches for the
+            # hunk after that line. Keeping the anchor materially improves
+            # patches against files with repeated short blocks.
             flush()
-            current = PatchHunk()
+            current = PatchHunk(change_context=row[len(CHANGE_MARKER):].strip() or None)
             i += 1
             continue
         if row.strip() == END_OF_FILE:
@@ -246,16 +251,37 @@ def apply_update_hunks(original: str, hunks: list[PatchHunk], path: str) -> str:
     cursor = 0  # index into orig_lines already consumed into result
 
     for hunk in hunks:
+        if hunk.change_context:
+            context_at = _find_block(orig_lines, [hunk.change_context], cursor)
+            if context_at < 0:
+                raise ApplyPatchError(
+                    _missing_context_message(
+                        path=path,
+                        lines=orig_lines,
+                        expected=[hunk.change_context],
+                        start=cursor,
+                        label="change context",
+                    )
+                )
+            # Match the hunk after the orientation line, matching Codex's
+            # change-context semantics. Preserve everything through the anchor.
+            anchor_end = context_at + 1
+            result.extend(orig_lines[cursor:anchor_end])
+            cursor = anchor_end
+
         old_block = hunk.old_lines
         if not old_block:
-            # No context lines: only valid as an explicit end-of-file append.
-            # A context-less insertion elsewhere is ambiguous — Codex requires
-            # context to locate a hunk. Reject rather than silently inserting at
-            # the cursor (which, for a leading hunk, means the top of the file).
+            # A pure insertion is safe when @@ supplied an orientation anchor;
+            # insert immediately after it. Without an anchor, require an explicit
+            # EOF marker rather than guessing a location.
+            if hunk.change_context:
+                result.extend(hunk.new_lines)
+                continue
             if not hunk.is_eof:
                 raise ApplyPatchError(
                     f"Update File '{path}': a hunk has no context lines to locate it. "
-                    "Add surrounding context lines, or mark it '*** End of File' for an append."
+                    "Add surrounding context lines, use '@@ <exact anchor>', or mark it "
+                    "'*** End of File' for an append."
                 )
             result.extend(orig_lines[cursor:])
             cursor = len(orig_lines)
@@ -270,11 +296,14 @@ def apply_update_hunks(original: str, hunks: list[PatchHunk], path: str) -> str:
             )
         match_at = _find_block(orig_lines, old_block, cursor)
         if match_at < 0:
-            preview = old_block[0] if old_block else ""
             raise ApplyPatchError(
-                f"Update File '{path}': could not locate context for a hunk "
-                f"(starting near {preview!r}). The file may have changed; "
-                "read it again and regenerate the patch."
+                _missing_context_message(
+                    path=path,
+                    lines=orig_lines,
+                    expected=old_block,
+                    start=cursor,
+                    label="hunk",
+                )
             )
         # Emit untouched lines before the match, then the replacement.
         result.extend(orig_lines[cursor:match_at])
@@ -288,14 +317,126 @@ def apply_update_hunks(original: str, hunks: list[PatchHunk], path: str) -> str:
 def _find_block(haystack: list[str], block: list[str], start: int) -> int:
     """Return the index where ``block`` matches in ``haystack`` at/after ``start``.
 
-    Whitespace-exact, like Codex: a context mismatch returns -1 (and the caller
-    raises ApplyPatchError) so the model re-reads and regenerates, rather than
-    silently applying the hunk at the wrong location. No fuzzy/rstrip fallback.
+    Match with the same descending strictness used by Codex apply_patch: exact,
+    trailing-whitespace-insensitive, fully stripped, then common Unicode
+    punctuation/space normalization. The search remains ordered and bounded by
+    ``start``; this is context location, not approximate edit generation.
     """
     if not block:
         return start
     blen = len(block)
-    for idx in range(start, len(haystack) - blen + 1):
-        if haystack[idx:idx + blen] == block:
-            return idx
+    if blen > len(haystack):
+        return -1
+    last = len(haystack) - blen
+
+    def seek(normalize) -> int:
+        normalized_block = [normalize(line) for line in block]
+        for idx in range(max(0, start), last + 1):
+            if [normalize(line) for line in haystack[idx:idx + blen]] == normalized_block:
+                return idx
+        return -1
+
+    for normalizer in (
+        lambda value: value,
+        lambda value: value.rstrip(),
+        lambda value: value.strip(),
+        _normalize_patch_context,
+    ):
+        found = seek(normalizer)
+        if found >= 0:
+            return found
     return -1
+
+
+_PATCH_PUNCTUATION_MAP = str.maketrans(
+    {
+        "‐": "-",
+        "‑": "-",
+        "‒": "-",
+        "–": "-",
+        "—": "-",
+        "―": "-",
+        "−": "-",
+        "‘": "'",
+        "’": "'",
+        "‚": "'",
+        "‛": "'",
+        "“": '"',
+        "”": '"',
+        "„": '"',
+        "‟": '"',
+        "\u00a0": " ",
+        "\u2002": " ",
+        "\u2003": " ",
+        "\u2004": " ",
+        "\u2005": " ",
+        "\u2006": " ",
+        "\u2007": " ",
+        "\u2008": " ",
+        "\u2009": " ",
+        "\u200a": " ",
+        "\u202f": " ",
+        "\u205f": " ",
+        "\u3000": " ",
+    }
+)
+
+
+def _normalize_patch_context(value: str) -> str:
+    return value.strip().translate(_PATCH_PUNCTUATION_MAP)
+
+
+def _missing_context_message(
+    *,
+    path: str,
+    lines: list[str],
+    expected: list[str],
+    start: int,
+    label: str,
+) -> str:
+    """Return a compact, actionable mismatch with the closest real file lines."""
+
+    preview = expected[0] if expected else ""
+    message = (
+        f"Update File '{path}': could not locate context for a {label} "
+        f"(starting near {preview!r}). The file may have changed."
+    )
+    if not lines or not expected:
+        return f"{message} Read it again and regenerate the patch."
+
+    anchor = next((line for line in expected if line.strip()), expected[0])
+    anchor_normalized = _normalize_patch_context(anchor)
+    candidate_index = -1
+    for index in range(max(0, start), len(lines)):
+        if _normalize_patch_context(lines[index]) == anchor_normalized:
+            candidate_index = index
+            break
+
+    if candidate_index < 0 and anchor_normalized:
+        best_ratio = 0.0
+        # Diagnostics only: cap work on generated or vendored mega-files.
+        search_end = min(len(lines), max(0, start) + 20_000)
+        for index in range(max(0, start), search_end):
+            candidate = _normalize_patch_context(lines[index])
+            if not candidate:
+                continue
+            ratio = difflib.SequenceMatcher(None, anchor_normalized, candidate).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                candidate_index = index
+        if best_ratio < 0.35:
+            candidate_index = -1
+
+    if candidate_index < 0:
+        return f"{message} Read it again and regenerate a smaller patch hunk."
+
+    excerpt_start = max(0, candidate_index - 1)
+    excerpt_size = min(12, max(4, len(expected) + 2))
+    excerpt_end = min(len(lines), excerpt_start + excerpt_size)
+    excerpt = "\n".join(lines[excerpt_start:excerpt_end])
+    return (
+        f"{message}\n"
+        f"Closest current file excerpt (lines {excerpt_start + 1}-{excerpt_end}):\n"
+        f"{excerpt}\n"
+        "Regenerate a minimal hunk from this exact content; do not repeat unchanged blocks."
+    )

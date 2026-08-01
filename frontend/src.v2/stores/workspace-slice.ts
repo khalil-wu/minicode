@@ -4,8 +4,10 @@ import { clamp } from "../lib/clamp";
 import { isDesktop, openPath } from "../desktop/runtime";
 import {
   LS,
+  LEFT_SIDEBAR_DEFAULT_WIDTH,
   LEFT_SIDEBAR_MAX_WIDTH,
   LEFT_SIDEBAR_MIN_WIDTH,
+  RIGHT_SIDEBAR_DEFAULT_WIDTH,
   RIGHT_SIDEBAR_MAX,
   writeLS,
   normalizePanelSlots,
@@ -81,6 +83,15 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
         writeLS(LS.layout.dockCollapsed, next ? "1" : "0");
         return { dockCollapsed: next };
       }),
+    openBottomTab: (t) => {
+      writeLS(LS.layout.dockTab, t);
+      writeLS(LS.layout.dockCollapsed, "0");
+      set({ activeBottomTab: t, dockCollapsed: false });
+    },
+    closeBottomDock: () => {
+      writeLS(LS.layout.dockCollapsed, "1");
+      set({ dockCollapsed: true });
+    },
     setActiveBottomTab: (t) => {
       writeLS(LS.layout.dockTab, t);
       set({ activeBottomTab: t });
@@ -93,7 +104,6 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
             : slot;
         const rightStackByKind: Partial<Record<PanelKind, UISlice["rightStackTab"]>> = {
           preview: "preview",
-          terminal: "terminal",
           diff: "diff",
           plan: "plan",
           tasks: "tasks",
@@ -101,6 +111,14 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
           artifacts: "artifacts",
           inspector: "inspector",
         };
+        if (canonicalSlot.kind === "terminal") {
+          writeLS(LS.layout.dockTab, "terminal");
+          writeLS(LS.layout.dockCollapsed, "0");
+          return {
+            activeBottomTab: "terminal",
+            dockCollapsed: false,
+          };
+        }
         const rightTab = rightStackByKind[canonicalSlot.kind];
         if (rightTab) {
           const rightSidebarWidth = preferredRightSidebarWidth(rightTab, s.rightSidebarWidth);
@@ -212,30 +230,41 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
       persistPanelSlots(next);
       set({
         panelSlots: next,
-        leftSidebarWidth: 320,
-        rightSidebarWidth: 440,
+        leftSidebarWidth: LEFT_SIDEBAR_DEFAULT_WIDTH,
+        rightSidebarWidth: RIGHT_SIDEBAR_DEFAULT_WIDTH,
         rightPanelOpen: false,
         dockHeight: 240,
         dockCollapsed: true,
         activeBottomTab: "terminal",
       });
-      writeLS(LS.layout.leftWidth, "320");
-      writeLS(LS.layout.rightWidth, "440");
+      writeLS(LS.layout.leftWidth, String(LEFT_SIDEBAR_DEFAULT_WIDTH));
+      writeLS(LS.layout.rightWidth, String(RIGHT_SIDEBAR_DEFAULT_WIDTH));
       writeLS(LS.layout.rightOpen, "0");
       writeLS(LS.layout.dockHeight, "240");
       writeLS(LS.layout.dockCollapsed, "1");
       writeLS(LS.layout.dockTab, "terminal");
     },
     setTerminalSessions: (sessions) =>
-      set((s) => ({
-        terminalSessions: sessions,
-        activeTerminalSessionId:
-          s.activeTerminalSessionId && sessions.some((session) => session.id === s.activeTerminalSessionId)
-            ? s.activeTerminalSessionId
-            : sessions[0]?.id ?? null,
-      })),
+      set((s) => {
+        const currentConversationId = s.conversationId || "";
+        const ownedSessions = currentConversationId
+          ? sessions.filter((session) => session.conversationId === currentConversationId)
+          : [];
+        const savedActiveTerminalSessionId = currentConversationId
+          ? s.conversationWorkbenchStates?.[currentConversationId]?.activeTerminalSessionId ?? null
+          : null;
+        const activeTerminalSessionId = [s.activeTerminalSessionId, savedActiveTerminalSessionId]
+          .find((sessionId) => sessionId && ownedSessions.some((session) => session.id === sessionId))
+          ?? ownedSessions[0]?.id
+          ?? null;
+        return {
+          terminalSessions: ownedSessions,
+          activeTerminalSessionId,
+        };
+      }),
     upsertTerminalSession: (session) =>
       set((s) => {
+        if (!s.conversationId || session.conversationId !== s.conversationId) return s;
         const exists = s.terminalSessions.some((item) => item.id === session.id);
         const terminalSessions = exists
           ? s.terminalSessions.map((item) => (item.id === session.id ? { ...item, ...session } : item))
@@ -316,7 +345,14 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
     toggleSideChat: () => set((s) => ({ sideChatOpen: !s.sideChatOpen })),
     addBackgroundTask: (task) =>
       set((s) => ({
-        backgroundTasks: [task, ...s.backgroundTasks.filter((t) => t.id !== task.id)].slice(0, 30),
+        backgroundTasks: [
+          {
+            ...s.backgroundTasks.find((item) => item.id === task.id),
+            ...task,
+            timestamp: s.backgroundTasks.find((item) => item.id === task.id)?.timestamp ?? task.timestamp,
+          },
+          ...s.backgroundTasks.filter((item) => item.id !== task.id),
+        ].slice(0, 30),
       })),
     addBrowserAnnotation: (annotation) =>
       set((s) => ({
@@ -343,6 +379,8 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
     setPrStatus: (pr, checks) => set({ prStatus: pr, ciChecks: checks }),
     scheduledTasks: [],
     setScheduledTasks: (tasks) => set({ scheduledTasks: tasks }),
+    scheduledTaskRuns: [],
+    setScheduledTaskRuns: (runs) => set({ scheduledTaskRuns: runs }),
     marketplaceConnectors: [],
     setMarketplaceConnectors: (connectors) => set({ marketplaceConnectors: connectors }),
   };

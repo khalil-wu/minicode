@@ -22,9 +22,6 @@ import type {
 } from "./conversation-types";
 
 export type CommonServerEventType =
-  // Skills
-  | "skill_activated"
-  | "skill_deactivated"
   // MCP
   | "mcp_status"
   | "mcp.lifecycle"
@@ -56,8 +53,6 @@ export type CommonClientCommandType =
   | "control_response"
   | "control_cancel_request"
   // Skills
-  | "load_skill"
-  | "unload_skill"
   | "skills.list"
   | "skills.install"
   | "skills.marketplace.list"
@@ -68,11 +63,15 @@ export type CommonClientCommandType =
   | "mcp.add"
   | "mcp.remove"
   | "mcp.restart"
+  | "mcp.oauth.login"
   // Scheduler
   | "scheduler.list"
   | "scheduler.add"
   | "scheduler.remove"
   | "scheduler.toggle"
+  | "scheduler.run_now"
+  | "scheduler.retry"
+  | "scheduler.cancel"
   // Connectors marketplace
   | "connectors.marketplace.list"
   | "connectors.marketplace.install"
@@ -93,35 +92,6 @@ export type CommonClientCommandType =
 // ──────────────────────────────────────────────────────────────────
 // Server event payload types
 // ──────────────────────────────────────────────────────────────────
-
-export interface SkillActivatedEvent {
-  type: "skill_activated";
-  skill_name: string;
-  trigger_mode?: "explicit" | "implicit" | "model" | string;
-  data?: {
-    skill_name?: string;
-    trigger_mode?: "explicit" | "implicit" | "model" | string;
-  };
-}
-
-export interface SkillDeactivatedEvent {
-  type: "skill_deactivated";
-  skill_name: string;
-  trigger_mode?: "explicit" | "implicit" | "model" | string;
-  data?: {
-    skill_name?: string;
-    trigger_mode?: "explicit" | "implicit" | "model" | string;
-  };
-}
-
-export interface SkillUsageStatsPayload {
-  load_count?: number;
-  reuse_count?: number;
-  failure_count?: number;
-  unload_count?: number;
-  last_event?: string;
-  last_invoked_at?: string;
-}
 
 export interface McpStatusEvent {
   type: "mcp_status";
@@ -175,7 +145,8 @@ export interface McpProgressEvent {
 
 export interface SchedulerListEvent {
   type: "scheduler.list";
-  tasks?: { id: string; name: string; prompt: string; schedule: string; permission_mode: string; enabled: boolean; last_run_at?: string | null; next_run_at?: string | null; created_at?: string }[];
+  tasks?: { id: string; name: string; prompt: string; schedule: string; timezone?: string; isolation?: "worktree" | "workspace"; conversation_id?: string; permission_mode: string; enabled: boolean; last_run_at?: string | null; next_run_at?: string | null; created_at?: string; workspace_root?: string; last_run_id?: string | null; last_run_status?: string | null; last_error?: string | null }[];
+  runs?: { id: string; task_id: string; scheduled_at: string; started_at?: string; finished_at?: string | null; status: string; conversation_id?: string; workspace_root?: string; result_summary?: string; error?: string }[];
 }
 
 export interface ConnectorsMarketplaceListEvent {
@@ -204,18 +175,18 @@ export interface SkillsListEvent {
   skills: {
     name: string;
     description: string;
+    path?: string;
     display_name?: string;
+    short_description?: string;
     icon?: string;
+    icon_large?: string;
+    brand_color?: string;
     version?: string;
-    triggers?: string[];
-    tools_required?: string[];
-    mcp_required?: string[];
     mcp_dependencies?: string[];
     allow_implicit_invocation?: boolean;
     default_prompt?: string;
     source_level?: string;
     active?: boolean;
-    usage?: SkillUsageStatsPayload;
   }[];
 }
 
@@ -302,8 +273,6 @@ export interface SessionSyncedEvent {
   type: "session.synced";
   session_id?: string;
   synced?: boolean;
-  incremental?: boolean;
-  changes?: unknown[];
   active_conversation_id?: string | null;
   active_conversation?: ConversationRecordPayload | null;
   working_directory?: string | null;
@@ -345,6 +314,9 @@ export interface SchedulerAddCommand {
   name: string;
   prompt: string;
   schedule: string;
+  timezone?: string;
+  isolation?: "worktree" | "workspace";
+  conversation_id?: string;
 }
 
 export interface SchedulerRemoveCommand {
@@ -356,6 +328,21 @@ export interface SchedulerToggleCommand {
   type: "scheduler.toggle";
   task_id: string;
   enabled: boolean;
+}
+
+export interface SchedulerRunNowCommand {
+  type: "scheduler.run_now";
+  task_id: string;
+}
+
+export interface SchedulerRetryCommand {
+  type: "scheduler.retry";
+  run_id: string;
+}
+
+export interface SchedulerCancelCommand {
+  type: "scheduler.cancel";
+  run_id: string;
 }
 
 export interface ConnectorsMarketplaceListCommand {

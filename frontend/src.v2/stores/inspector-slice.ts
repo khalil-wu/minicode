@@ -6,7 +6,12 @@ export const createInspectorSlice: StateCreator<AppStore, [], [], InspectorSlice
   inspectorFocus: null,
   addInspectorEntry: (entry) =>
     set((s) => ({
-      inspectorEntries: [...s.inspectorEntries.slice(-49), entry],
+      inspectorEntries: [
+        ...s.inspectorEntries.filter((candidate) => !(
+          candidate.targetKind === entry.targetKind && candidate.targetId === entry.targetId
+        )).slice(-49),
+        entry,
+      ],
     })),
   setInspectorFocus: (focus) => set({ inspectorFocus: focus }),
   clearInspector: () => set({ inspectorEntries: [], inspectorFocus: null }),

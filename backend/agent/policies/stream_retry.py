@@ -73,8 +73,12 @@ class DefaultStreamRetryPolicy:
             any(p in error_lower for p in self._settings.stream_retryable_substrings)
             or is_retryable_llm_error(error_message)
         )
+        # A delay is an explicit host/provider setting. The policy must not
+        # invent an exponential schedule or a hidden upper bound; provider
+        # Retry-After and the configured value are resolved by the caller.
+        delay_seconds = max(0.0, float(self._settings.stream_retry_delay_seconds))
         return StreamRetryDecision(
             should_retry=should_retry,
-            delay_seconds=self._settings.stream_retry_delay_seconds,
+            delay_seconds=delay_seconds,
             max_attempts=self._settings.stream_max_attempts,
         )

@@ -28,6 +28,8 @@ export interface FsFileResponse {
   size_bytes?: number;
   modifiedAt?: string;
   modified_at?: string;
+  readOnly?: boolean;
+  read_only?: boolean;
   encoding?: "utf-8" | "utf-8-bom" | "utf-16le" | "utf-16be" | "gb18030" | string;
 }
 
@@ -36,8 +38,13 @@ export type FsCompareWriteResult =
   | { ok: false; conflict: true; message: string }
   | { ok: false; conflict: false; message: string };
 
+export type FsDeletePathResult =
+  | { needsConfirmation: true; path: string; entryCount: number }
+  | { deleted: true; path: string; is_dir?: boolean; isDirectory?: boolean };
+
 export interface PtySession {
   sessionId: string;
+  conversationId: string;
   pid?: number;
   shell: string;
   cwd: string;
@@ -50,6 +57,7 @@ export interface PtySession {
   isAlive?: boolean;
   exitCode?: number;
   exitedAt?: number;
+  terminalMode: "pty";
 }
 
 export interface DesktopEnvInfo {
@@ -104,6 +112,41 @@ export interface BrowserActionResult {
   screenshot: BrowserScreenshotResult;
 }
 
+export interface EmbeddedBrowserState {
+  id: string;
+  type: "page" | "loading" | "updated" | "error" | "new-tab-request";
+  url: string;
+  title: string;
+  faviconUrl?: string;
+  loading: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  active?: boolean;
+  error?: string;
+  requestedUrl?: string;
+}
+
+export interface EmbeddedBrowserBounds {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface EmbeddedBrowserInspectionResult {
+  ok: boolean;
+  action?: string;
+  value?: unknown;
+  error?: string;
+}
+
+export interface EmbeddedBrowserSettings {
+  downloadPolicy: "block" | "ask" | "allow";
+  origin: string;
+  permissions: string[];
+}
+
 interface MiniCodeDesktop {
   platformInfo: { isDesktop: boolean; platform: string; arch: string };
   windowControls: {
@@ -125,7 +168,8 @@ interface MiniCodeDesktop {
     check(): Promise<boolean>;
     download(): Promise<boolean>;
     install(): Promise<boolean>;
-    onStatus(callback: (payload: { status: string; version?: string; percent?: number; message?: string }) => void): (() => void) | void;
+    getStatus(): Promise<{ status: string; version?: string; previousVersion?: string; failedVersion?: string; percent?: number; message?: string }>;
+    onStatus(callback: (payload: { status: string; version?: string; previousVersion?: string; failedVersion?: string; percent?: number; message?: string }) => void): (() => void) | void;
   };
   pickDirectory(): Promise<string | null>;
   trustWorkspace(path: string): Promise<string | null>;
@@ -148,18 +192,21 @@ interface MiniCodeDesktop {
     compareWriteFile?(path: string, expectedHash: string, content: string): Promise<FsFileResponse>;
     createDirectory(path: string): Promise<void>;
     renamePath(oldPath: string, newPath: string): Promise<void>;
-    deletePath(path: string, recursive?: boolean): Promise<void>;
+    deletePath(path: string, recursive?: boolean, confirm?: boolean): Promise<FsDeletePathResult>;
   };
   pty: {
-    spawn(cwd?: string): Promise<{ sessionId?: string; session_id?: string; pid?: number; shell?: string; cwd?: string }>;
-    write(sessionId: string, data: string): Promise<void>;
-    resize(sessionId: string, cols: number, rows: number): Promise<void>;
-    kill(sessionId: string): Promise<void>;
-    list(): Promise<Record<string, unknown>[]>;
-    snapshot(sessionId: string, maxChars?: number): Promise<Record<string, unknown> | null>;
-    ackExit(sessionId: string): Promise<boolean>;
-    onData(cb: (data: { sessionId: string; data: string; startCursor?: number; endCursor?: number }) => void): (() => void) | void;
-    onExit(cb: (data: { sessionId: string; exitCode: number }) => void): (() => void) | void;
+    spawn(cwd: string | undefined, conversationId?: string): Promise<{ sessionId?: string; session_id?: string; conversationId?: string; conversation_id?: string; pid?: number; shell?: string; cwd?: string }>;
+    spawnOwned?(cwd: string | undefined, conversationId: string): Promise<{ sessionId?: string; session_id?: string; conversationId?: string; conversation_id?: string; pid?: number; shell?: string; cwd?: string }>;
+    write(sessionId: string, data: string, conversationId: string): Promise<void>;
+    resize(sessionId: string, cols: number, rows: number, conversationId: string): Promise<void>;
+    kill(sessionId: string, conversationId: string): Promise<boolean>;
+    killConversation(conversationId: string): Promise<number>;
+    list(conversationId?: string): Promise<Record<string, unknown>[]>;
+    listOwned?(conversationId: string): Promise<Record<string, unknown>[]>;
+    snapshot(sessionId: string, maxChars: number | undefined, conversationId: string): Promise<Record<string, unknown> | null>;
+    ackExit(sessionId: string, conversationId: string): Promise<boolean>;
+    onData(cb: (data: { sessionId: string; conversationId: string; data: string; startCursor?: number; endCursor?: number }) => void): (() => void) | void;
+    onExit(cb: (data: { sessionId: string; conversationId: string; exitCode: number }) => void): (() => void) | void;
   };
   env: {
     detect(): Promise<Partial<DesktopEnvInfo>>;
@@ -170,6 +217,20 @@ interface MiniCodeDesktop {
     navigate(endpoint: string | undefined, targetId: string, url: string): Promise<BrowserActionResult>;
     click(endpoint: string | undefined, targetId: string, selector: string): Promise<BrowserActionResult>;
     type(endpoint: string | undefined, targetId: string, selector: string, text: string): Promise<BrowserActionResult>;
+  };
+  embeddedBrowser: {
+    create(payload: { id: string; url: string }): Promise<EmbeddedBrowserState>;
+    list(): Promise<EmbeddedBrowserState[]>;
+    activate(id: string): Promise<boolean>;
+    setBounds(payload: EmbeddedBrowserBounds): Promise<boolean>;
+    navigate(payload: { id: string; url: string }): Promise<EmbeddedBrowserState>;
+    runAction(payload: { id: string; action: "back" | "forward" | "reload" | "stop" | "focus" }): Promise<boolean>;
+    inspect(payload: { id: string; kind: "console" | "network" | "element" | "region" }): Promise<EmbeddedBrowserInspectionResult>;
+    getSettings(payload: { url: string }): Promise<EmbeddedBrowserSettings>;
+    setSettings(payload: { downloadPolicy?: "block" | "ask" | "allow"; origin?: string; permission?: string; allowed?: boolean }): Promise<EmbeddedBrowserSettings>;
+    clearSiteData(id: string): Promise<boolean>;
+    close(id: string): Promise<boolean>;
+    onEvent(callback: (payload: EmbeddedBrowserState) => void): (() => void) | void;
   };
 }
 
@@ -418,8 +479,15 @@ const normalizePtySession = (session: unknown, fallbackCwd = ""): PtySession | n
     : typeof value.exited_at === "number"
       ? value.exited_at
       : undefined;
+  const conversationId = typeof value.conversationId === "string"
+    ? value.conversationId.trim()
+    : typeof value.conversation_id === "string"
+      ? value.conversation_id.trim()
+      : "";
+  if (!conversationId) return null;
   return {
     sessionId,
+    conversationId,
     pid: typeof value.pid === "number" ? value.pid : undefined,
     shell: typeof value.shell === "string" ? value.shell : "shell",
     cwd: typeof value.cwd === "string" ? value.cwd : fallbackCwd,
@@ -432,33 +500,50 @@ const normalizePtySession = (session: unknown, fallbackCwd = ""): PtySession | n
     ...(isAlive !== undefined ? { isAlive } : {}),
     ...(exitCode !== undefined ? { exitCode } : {}),
     ...(exitedAt !== undefined ? { exitedAt } : {}),
+    terminalMode: "pty",
   };
 };
 
-export const ptySpawn = async (cwd?: string): Promise<PtySession | null> => {
+export const ptySpawn = async (cwd: string | undefined, conversationId: string): Promise<PtySession | null> => {
+  const owner = conversationId.trim();
+  if (!owner) return null;
   try {
-    return normalizePtySession(await desktop()?.pty.spawn(cwd), cwd ?? "");
+    const pty = desktop()?.pty;
+    if (!pty) return null;
+    const raw = pty.spawnOwned
+      ? await pty.spawnOwned(cwd, owner)
+      : await pty.spawn(cwd, owner);
+    const session = normalizePtySession(raw, cwd ?? "");
+    return session?.conversationId === owner ? session : null;
   } catch {
     return null;
   }
 };
-export const ptyWrite = (sessionId: string, data: string) => desktop()?.pty.write(sessionId, data);
-export const ptyResize = (sessionId: string, cols: number, rows: number) => desktop()?.pty.resize(sessionId, cols, rows);
-export const ptyKill = (sessionId: string) => desktop()?.pty.kill(sessionId);
-export const ptyAckExit = (sessionId: string) => desktop()?.pty.ackExit(sessionId);
-export const ptyList = async (): Promise<PtySession[]> => {
+export const ptyWrite = (sessionId: string, data: string, conversationId: string) => desktop()?.pty.write(sessionId, data, conversationId);
+export const ptyResize = (sessionId: string, cols: number, rows: number, conversationId: string) => desktop()?.pty.resize(sessionId, cols, rows, conversationId);
+export const ptyKill = (sessionId: string, conversationId: string) => desktop()?.pty.kill(sessionId, conversationId);
+export const ptyKillConversation = (conversationId: string) => desktop()?.pty.killConversation(conversationId);
+export const ptyAckExit = (sessionId: string, conversationId: string) => desktop()?.pty.ackExit(sessionId, conversationId);
+export const ptyList = async (conversationId: string): Promise<PtySession[]> => {
+  const owner = conversationId.trim();
+  if (!owner) return [];
   try {
-    const sessions = await desktop()?.pty.list();
+    const pty = desktop()?.pty;
+    if (!pty) return [];
+    const sessions = pty.listOwned ? await pty.listOwned(owner) : await pty.list(owner);
     return (sessions ?? [])
       .map((session) => normalizePtySession(session))
-      .filter((session): session is PtySession => session != null);
+      .filter((session): session is PtySession => session?.conversationId === owner);
   } catch {
     return [];
   }
 };
-export const ptySnapshot = async (sessionId: string, maxChars = 80_000): Promise<PtySession | null> => {
+export const ptySnapshot = async (sessionId: string, conversationId: string, maxChars = 80_000): Promise<PtySession | null> => {
+  const owner = conversationId.trim();
+  if (!owner) return null;
   try {
-    return normalizePtySession(await desktop()?.pty.snapshot(sessionId, maxChars));
+    const session = normalizePtySession(await desktop()?.pty.snapshot(sessionId, maxChars, owner));
+    return session?.conversationId === owner ? session : null;
   } catch {
     return null;
   }
@@ -524,6 +609,35 @@ export const browserType = async (
     return null;
   }
 };
+
+export const embeddedBrowserCreate = (id: string, url: string) =>
+  desktop()?.embeddedBrowser.create({ id, url });
+export const embeddedBrowserList = () =>
+  desktop()?.embeddedBrowser.list();
+export const embeddedBrowserActivate = (id: string) =>
+  desktop()?.embeddedBrowser.activate(id);
+export const embeddedBrowserSetBounds = (bounds: EmbeddedBrowserBounds) =>
+  desktop()?.embeddedBrowser.setBounds(bounds);
+export const embeddedBrowserNavigate = (id: string, url: string) =>
+  desktop()?.embeddedBrowser.navigate({ id, url });
+export const embeddedBrowserRunAction = (
+  id: string,
+  action: "back" | "forward" | "reload" | "stop" | "focus",
+) => desktop()?.embeddedBrowser.runAction({ id, action });
+export const embeddedBrowserInspect = (id: string, kind: "console" | "network" | "element" | "region") =>
+  desktop()?.embeddedBrowser.inspect({ id, kind });
+export const embeddedBrowserGetSettings = (url: string) => desktop()?.embeddedBrowser.getSettings({ url });
+export const embeddedBrowserSetSettings = (payload: {
+  downloadPolicy?: "block" | "ask" | "allow";
+  origin?: string;
+  permission?: string;
+  allowed?: boolean;
+}) => desktop()?.embeddedBrowser.setSettings(payload);
+export const embeddedBrowserClearSiteData = (id: string) => desktop()?.embeddedBrowser.clearSiteData(id);
+export const embeddedBrowserClose = (id: string) =>
+  desktop()?.embeddedBrowser.close(id);
+export const onEmbeddedBrowserEvent = (callback: (payload: EmbeddedBrowserState) => void) =>
+  desktop()?.embeddedBrowser.onEvent(callback);
 
 // --- Environment ---
 

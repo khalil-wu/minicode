@@ -1,26 +1,35 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
 
 from backend.agent.context import ContextBuilder
-from backend.agent.coordinator import maybe_enable_coordinator_from_user_message
 from backend.agent.event_envelope import EventEnvelope
 from backend.agent.loop import AgentLoopSessionContext, run_agent_loop
 from backend.agent.message import AgentEvent
-from backend.agent.prompting import clear_loaded_prompt_packs
+from backend.agent.loop_session import prepare_turn_state
+from backend.agent.iteration_budget import resolve_turn_max_iterations
 from backend.agent.run_events import should_emit_event
-from backend.agent.runtime import AgentRunRecord, AgentRunStatus, AgentRuntime, default_runtime
+from backend.agent.runtime import AgentRunStatus
+from backend.agent.query_recovery import prepare_query_recovery
 from backend.agent.state import AgentState
+from backend.agent.turn_budget import TurnBudgetController
+from backend.agent.turn_input import TurnInputQueue
+from backend.agent.turn_kernel import TurnKernel
 from backend.artifact.store import ArtifactStore
 from backend.config import AgentSettings, TokenBudget
 from backend.llm.base import LLMAdapter
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext
 from backend.tools.registry import ToolRegistry
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -42,12 +51,58 @@ class QuerySubmission:
     """One turn's input and runtime overrides."""
 
     user_message: str
-    session: AgentSession
+    session: AgentSession | None = None
     state: AgentState | None = None
     runtime: AgentLoopSessionContext = field(default_factory=AgentLoopSessionContext)
+    # Compatibility fields for callers that predate AgentSession.  Keeping
+    # these here lets SDK extensions and older integrations migrate without
+    # bypassing QueryEngine's lifecycle owner.
+    llm: LLMAdapter | None = None
+    tool_registry: ToolRegistry | None = None
+    artifact_store: ArtifactStore | None = None
+    permission_checker: PermissionChecker | None = None
+    agent_settings: AgentSettings | None = None
+    token_budget: TokenBudget | None = None
+    context_builder: ContextBuilder | None = None
+    approval_handler: Callable[[str], Any] | None = None
+    workspace_root: Any | None = None
+
+    def __post_init__(self) -> None:
+        if self.session is None:
+            missing = [
+                name
+                for name, value in (
+                    ("llm", self.llm),
+                    ("tool_registry", self.tool_registry),
+                    ("artifact_store", self.artifact_store),
+                    ("permission_checker", self.permission_checker),
+                    ("agent_settings", self.agent_settings),
+                    ("token_budget", self.token_budget),
+                )
+                if value is None
+            ]
+            if missing:
+                raise TypeError(
+                    "QuerySubmission requires session=AgentSession(...) or legacy fields: "
+                    + ", ".join(missing)
+                )
+            self.session = AgentSession(
+                llm=self.llm,
+                tool_registry=self.tool_registry,
+                artifact_store=self.artifact_store,
+                permission_checker=self.permission_checker,
+                agent_settings=self.agent_settings,
+                token_budget=self.token_budget,
+                context_builder=self.context_builder,
+                approval_handler=self.approval_handler,
+            )
+        if self.workspace_root is not None and self.runtime.workspace_root is None:
+            from pathlib import Path
+
+            self.runtime.workspace_root = Path(self.workspace_root).resolve()
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class QueryTurnContext:
     """Prepared state for a single query turn, built by QueryEngine._setup_query.
 
@@ -66,7 +121,6 @@ class QueryTurnContext:
     budget: TokenBudget
     context_builder: ContextBuilder
     skill_manager: Any | None = None
-    vector_memory: Any | None = None
     permission_context: PermissionContext | None = None
     session_id: str = ""
     task_id: str = ""
@@ -75,8 +129,8 @@ class QueryTurnContext:
     cancel_event: asyncio.Event | None = None
     stream_callback: Any | None = None
     emit_event: Any | None = None
-    agent_runtime: AgentRuntime | None = None
-    run_record: AgentRunRecord | None = None
+    turn_kernel: TurnKernel | None = None
+    startup_events: tuple[AgentEvent, ...] = ()
 
 
 class QueryEngine:
@@ -91,6 +145,19 @@ class QueryEngine:
         # The runner is the private loop kernel.  External code should not
         # import or call it directly.
         self._runner = runner or run_agent_loop
+
+    async def submit_filtered(self, submission: QuerySubmission) -> AsyncIterator[AgentEvent]:
+        """Compatibility stream containing only the legacy public events.
+
+        ``submit`` now includes durable run lifecycle events.  Older SDK
+        consumers used ``submit_filtered`` and expect those bookkeeping
+        records to stay internal, so retain that narrow adapter while routing
+        all execution through the canonical lifecycle.
+        """
+        hidden = {"agent.run.started", "agent.run.completed"}
+        async for event in self.submit(submission):
+            if event.type not in hidden:
+                yield event
 
     async def submit(self, submission: QuerySubmission) -> AsyncIterator[AgentEvent]:
         """Run one query and emit one public terminal event.
@@ -124,7 +191,6 @@ class QueryEngine:
             state=turn_ctx.state,
             approval_handler=session.approval_handler,
             skill_manager=turn_ctx.skill_manager,
-            vector_memory=turn_ctx.vector_memory,
             permission_context=turn_ctx.permission_context,
             session_id=turn_ctx.session_id,
             task_id=turn_ctx.task_id,
@@ -134,22 +200,34 @@ class QueryEngine:
             emit_event=turn_ctx.emit_event,
             metadata=turn_ctx.metadata,
             session_context=submission.runtime,
+            turn_kernel=turn_ctx.turn_kernel,
+            state_prepared=True,
+            initial_max_iterations_limit=turn_ctx.state.max_iterations,
+            turn_budget_controller=TurnBudgetController.from_settings(
+                turn_ctx.settings,
+                max_iterations=turn_ctx.state.max_iterations,
+            ),
         )
-        if turn_ctx.run_record is not None:
-            started_event = AgentEvent.agent_run_started(turn_ctx.run_record)
-            envelope.stamp(started_event)
-            yield started_event
-            phase_event = AgentEvent.agent_phase_updated(
-                turn_ctx.run_record.run_id,
-                "plan",
-                summary="Preparing agent context",
-                role=turn_ctx.run_record.role,
-                conversation_id=turn_ctx.run_record.conversation_id,
-            )
-            envelope.stamp(phase_event)
-            yield phase_event
+        query_finalized = False
+        try:
+            if turn_ctx.turn_kernel is not None:
+                for started_event in turn_ctx.turn_kernel.start_events():
+                    envelope.stamp(started_event)
+                    yield started_event
+                for startup_event in turn_ctx.startup_events:
+                    envelope.stamp(startup_event)
+                    yield startup_event
+        finally:
+            if sys.exc_info()[0] is GeneratorExit and not query_finalized:
+                self._finalize_query(turn_ctx, "cancelled", "consumer_closed")
+                query_finalized = True
+                close = getattr(runner, "aclose", None)
+                if callable(close):
+                    with suppress(Exception):
+                        await close()
+                if isinstance(submission.runtime.metadata, dict):
+                    submission.runtime.metadata.update(turn_ctx.metadata)
         terminal_event: AgentEvent | None = None
-        published_error_message = ""
         try:
             async for event in runner:
                 if event.type in {"agent.run.started", "agent.run.completed"}:
@@ -158,32 +236,42 @@ class QueryEngine:
                     continue
                 if event.type == "done":
                     terminal_event = event
+                    event_status = str(event.data.get("status") or "completed")
+                    if event_status in {"completed", "partial", "cancelled", "failed"}:
+                        turn_ctx.state.terminal_status = event_status
                     # Drain the generator: checkpoint persistence and terminal
                     # cleanup run after the loop yields its done event.
                     continue
-                if event.type == "error":
-                    published_error_message = str(event.data.get("message") or "run_error")
+                # Error events are evidence, not terminal authority. The
+                # loop's explicit done status decides whether recovery
+                # produced a completed or partial result.
                 envelope.stamp(event)
                 yield event
         except asyncio.CancelledError:
             terminal_event = AgentEvent.done(status="cancelled", reason="user_interrupted")
             completed = self._finalize_query(turn_ctx, "cancelled", "user_interrupted")
+            query_finalized = True
             if completed is not None:
                 envelope.stamp(completed)
                 yield completed
             envelope.stamp(terminal_event)
             yield terminal_event
             raise
-        except Exception as exc:
+        except Exception:
+            logger.exception("Agent runtime failed outside provider recovery")
             err_event = AgentEvent.error(
-                f"Agent run failed: {exc}",
-                recoverable=True,
-                error_type="api",
+                "MiniCode internal runtime processing failed. The turn was stopped "
+                "without retrying it as a model API error.",
+                recoverable=False,
+                error_type="runtime",
             )
             envelope.stamp(err_event)
             yield err_event
-            terminal_event = AgentEvent.done(status="failed", reason="run_error")
+            terminal_event = AgentEvent.done(status="failed", reason="runtime_error")
         finally:
+            if sys.exc_info()[0] is GeneratorExit and not query_finalized:
+                self._finalize_query(turn_ctx, "cancelled", "consumer_closed")
+                query_finalized = True
             close = getattr(runner, "aclose", None)
             if callable(close):
                 with suppress(Exception):
@@ -193,12 +281,17 @@ class QueryEngine:
 
         if terminal_event is None:
             reason = turn_ctx.state.stopped_reason
-            has_usable_reply = bool(turn_ctx.state.reply.strip())
+            has_usable_result = bool(turn_ctx.state.reply.strip())
             status = (
-                "cancelled"
+                turn_ctx.state.terminal_status
+                if turn_ctx.state.terminal_status is not None
+                else "cancelled"
                 if reason == "interrupted"
                 else "partial"
-                if reason == "max_iterations" and has_usable_reply
+                if (
+                    (reason in {"max_iterations", "max_tool_calls", "max_turn_seconds", "max_turn_tokens", "max_turn_cost_usd", "budget_exceeded", "incomplete_tool_stream"} and has_usable_result)
+                    or str(reason or "").startswith(("partial_", "recovered_"))
+                )
                 else "completed"
                 if reason in {None, "completed"}
                 else "failed"
@@ -206,19 +299,19 @@ class QueryEngine:
             terminal_event = AgentEvent.done(status=status, reason=str(reason or ""))
         status = str(terminal_event.data.get("status") or "completed")
         reason = str(terminal_event.data.get("reason") or "")
-        if published_error_message and status == "completed":
-            status = "failed"
-            reason = reason or "run_error"
-            terminal_event.data["status"] = status
-            terminal_event.data["reason"] = reason
+        if status in {"completed", "partial", "cancelled", "failed"}:
+            turn_ctx.state.terminal_status = status
+        has_usable_result = bool(turn_ctx.state.reply.strip())
         if (
-            reason == "max_iterations"
-            and turn_ctx.state.reply.strip()
+            reason in {"max_iterations", "max_tool_calls", "max_turn_seconds", "max_turn_tokens", "max_turn_cost_usd", "budget_exceeded", "incomplete_tool_stream"}
+            and has_usable_result
             and status != "cancelled"
         ):
             status = "partial"
             terminal_event.data["status"] = "partial"
+            turn_ctx.state.terminal_status = "partial"
         completed = self._finalize_query(turn_ctx, status, reason)
+        query_finalized = True
         if completed is not None:
             envelope.stamp(completed)
             yield completed
@@ -233,18 +326,17 @@ class QueryEngine:
         """Prepare all turn-level state before invoking the runner.
 
         This consolidates the session-context unpacking, metadata merge,
-        settings/budget resolution, coordinator mode detection, state
+        settings/budget resolution, state
         initialization, and per-turn ephemeral clearing that was previously
         the first phase of ``run_agent_loop``.
         """
-        from backend.agent.loop import _resolve_turn_max_iterations
-
         session = submission.session
+        if session is None:  # guarded by QuerySubmission.__post_init__
+            raise TypeError("QuerySubmission session was not initialized")
         sc = submission.runtime
 
         # Unpack session_context — the loop kernel no longer needs to do this.
         skill_manager = sc.skill_manager
-        vector_memory = sc.vector_memory
         permission_context = sc.permission_context
         session_id = sc.session_id
         task_id = sc.task_id
@@ -256,16 +348,15 @@ class QueryEngine:
 
         # Build metadata from session_context.
         metadata: dict[str, Any] = dict(sc.metadata or {})
+        # Every execution path, including SDK and subagent turns, receives the
+        # same atomic turn/mailbox owner. WebSocket sessions inject their
+        # conversation-scoped instance; other callers get a turn-scoped owner.
+        metadata.setdefault("turn_input_queue", TurnInputQueue())
         if session_id:
             metadata.setdefault("session_id", session_id)
             metadata.setdefault("minicode_session_id", session_id)
         if sc.workspace_root:
             metadata.setdefault("workspace_root", str(sc.workspace_root))
-
-        # Coordinator mode detection (plan §8.3 — move metadata normalization
-        # out of loop).  This was previously the first metadata mutation in
-        # run_agent_loop.
-        metadata = maybe_enable_coordinator_from_user_message(metadata, submission.user_message)
 
         # Resolve cancel_event from metadata if not already set.
         if cancel_event is None:
@@ -282,35 +373,22 @@ class QueryEngine:
         ctx = session.context_builder or ContextBuilder(
             token_budget=budget,
             agent_settings=settings,
-            vector_memory=vector_memory,
         )
 
         # Resolve max iterations and create/reuse state.
-        max_iterations_limit = _resolve_turn_max_iterations(submission.user_message, settings)
+        max_iterations_limit = resolve_turn_max_iterations(settings)
         state = submission.state or AgentState(
             user_message=submission.user_message,
             max_iterations=max_iterations_limit,
         )
 
-        # Clear per-turn ephemeral state that should not leak across user
-        # messages (plan §8.3 — move state initialization out of loop).
-        # Only touch real AgentState instances; tests may pass mock objects.
+        # Clear per-turn ephemeral state in the lifecycle owner. Only touch
+        # real AgentState instances; compatibility tests may pass mock objects.
         if isinstance(state, AgentState):
-            state.max_total_retries = max(0, int(settings.turn_error_budget))
-            state.loop_guidance.clear()
-            state.disabled_tools.clear()
-            state.blocked_repeat_calls = 0
-            state.empty_reply_retries = 0
-            state.stop_hook_feedback_used = False
-            state.verify_attempts = 0
-            state.max_output_recovery_count = 0
-            state.max_output_recovered_text = ""
-            state.heal_attempts = 0
-            state.clear_transition()
-            if not isinstance(getattr(state, "prompt_context", None), dict):
-                state.prompt_context = {}
-            clear_loaded_prompt_packs(state.prompt_context)
-
+            prepare_turn_state(
+                state,
+                settings=settings,
+            )
         # Permission checker with workspace root.
         permission_checker = session.permission_checker
         if sc.workspace_root:
@@ -327,24 +405,36 @@ class QueryEngine:
             approval_handler=session.approval_handler,
         )
 
-        agent_runtime = metadata.get("agent_runtime")
-        if not isinstance(agent_runtime, AgentRuntime):
-            agent_runtime = default_runtime()
-        run_record = agent_runtime.start_run(
-            conversation_id=str(getattr(state, "conversation_id", "") or metadata.get("conversation_id", "") or ""),
-            parent_run_id=str(metadata.get("parent_run_id", "") or ""),
-            role=str(metadata.get("agent_role", "main") or "main"),
+        turn_kernel = TurnKernel.create(
+            metadata=metadata,
+            state=state,
+            budget=budget,
             task_id=task_id,
             session_id=session_id,
-            budget=budget,
-            run_id=str(metadata.get("run_id", "") or "") or None,
+            emit_event=emit_event,
+            initial_user_message=submission.user_message,
         )
-        metadata["run_id"] = run_record.run_id
-        metadata["agent_runtime"] = agent_runtime
-        metadata["_query_engine_lifecycle"] = True
-        metadata["_query_engine_run_record"] = run_record
+        run_record = turn_kernel.run_record
         if run_record.conversation_id:
             metadata.setdefault("conversation_id", run_record.conversation_id)
+
+        recovery = prepare_query_recovery(
+            session_id=session_id,
+            conversation_id=str(
+                run_record.conversation_id
+                or getattr(state, "conversation_id", "")
+                or metadata.get("conversation_id", "")
+                or ""
+            ),
+            metadata=metadata,
+            state=state,
+            context_builder=ctx,
+            max_iterations_budget=max_iterations_limit,
+            current_run_id=run_record.run_id,
+            skill_manager=skill_manager,
+        )
+        if recovery.restored:
+            turn_kernel.discard_scheduled_user_input()
 
         return QueryTurnContext(
             user_message=submission.user_message,
@@ -355,7 +445,6 @@ class QueryEngine:
             budget=budget,
             context_builder=ctx,
             skill_manager=skill_manager,
-            vector_memory=vector_memory,
             permission_context=permission_context,
             session_id=session_id,
             task_id=task_id,
@@ -364,8 +453,8 @@ class QueryEngine:
             cancel_event=cancel_event,
             stream_callback=stream_callback,
             emit_event=emit_event,
-            agent_runtime=agent_runtime,
-            run_record=run_record,
+            turn_kernel=turn_kernel,
+            startup_events=recovery.startup_events,
         )
 
     def _finalize_query(
@@ -375,7 +464,7 @@ class QueryEngine:
         reason: str,
     ) -> AgentEvent | None:
         """Complete the durable run exactly once after the loop kernel exits."""
-        if turn_ctx.agent_runtime is None or turn_ctx.run_record is None:
+        if turn_ctx.turn_kernel is None:
             return None
         run_status: AgentRunStatus = (
             "cancelled" if status == "cancelled"
@@ -383,13 +472,17 @@ class QueryEngine:
             else "partial" if status == "partial"
             else "completed"
         )
-        record = turn_ctx.agent_runtime.complete_run(
-            turn_ctx.run_record.run_id,
+        turn_ctx.state.terminal_status = (
+            "cancelled"
+            if run_status in {"cancelled", "interrupted"}
+            else run_status
+        )
+        event = turn_ctx.turn_kernel.complete_run_record(
             run_status,
             summary=reason,
             error=reason if run_status == "failed" else "",
         )
-        return AgentEvent.agent_run_completed(record or turn_ctx.run_record)
+        return event or turn_ctx.turn_kernel.completion_event
 
     def _prepare_session(self, submission: QuerySubmission) -> AgentSession:
         """Backward-compatible session preparation (delegates to _setup_query)."""

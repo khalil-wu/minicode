@@ -167,7 +167,7 @@ export const ActivitySection = ({
         onClick={() => { if (canExpand) setExpanded((value) => !value) }}
       >
         <span className="activity-sidebar-section-caret" style={activitySectionCaretStyle}>
-          {canExpand ? (expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />) : <span />}
+          {canExpand ? (expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />) : <span />}
         </span>
         <span style={activitySectionTitleStyle}>{title}</span>
         <span style={activitySectionCountStyle}>{childCount}</span>
@@ -180,7 +180,7 @@ export const ActivitySection = ({
           style={activitySectionMoreStyle}
           onClick={() => setExpanded(true)}
         >
-          {`+${childCount - previewCount} more`}
+          {`再显示 ${childCount - previewCount} 项`}
         </button>
       )}
     </section>
@@ -312,7 +312,7 @@ const activitySectionCountStyle: React.CSSProperties = {
   borderRadius: 'var(--radius-sm, 5px)',
   color: 'var(--text-muted)',
   fontFamily: 'var(--font-mono)',
-  fontSize: 10,
+  fontSize: "var(--text-3xs)",
 }
 
 const activitySectionMoreStyle: React.CSSProperties = {
@@ -324,7 +324,7 @@ const activitySectionMoreStyle: React.CSSProperties = {
   color: 'var(--text-muted)',
   cursor: 'pointer',
   fontFamily: 'var(--font-mono)',
-  fontSize: 10,
+  fontSize: "var(--text-3xs)",
 }
 
 const activityButtonRowStyle = (interactive: boolean): React.CSSProperties => ({

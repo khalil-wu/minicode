@@ -7,6 +7,7 @@ from typing import Any
 
 from backend.agent.message import AgentEvent
 from backend.tools.base import PermissionLevel
+from backend.ws.stream_state import get_stream_content_blocks
 
 APPROVAL_INLINE_PATCH_LIMIT_BYTES = 100_000
 APPROVAL_INLINE_FILE_LIMIT = 10
@@ -23,25 +24,76 @@ class SessionApprovalRuntimeMixin:
             self._session_approval_cache: OrderedDict[str, None] = OrderedDict()
             self._approval_cache_max = 500
 
-    def _approval_cache_key(self, tool_name: str, args: dict[str, Any]) -> str:
-        """Build a stable cache key from tool name + sorted args."""
+    async def _emit_approval_cancelled_once(
+        self,
+        request_ids: list[str],
+        *,
+        reason: str,
+        conversation_id: str = "",
+    ) -> list[str]:
+        """Emit at most one terminal notification per approval request."""
+        notified = getattr(self, "_settled_approval_notifications", None)
+        if not isinstance(notified, set):
+            notified = self._settled_approval_notifications = set()
+        fresh = [
+            request_id
+            for request_id in dict.fromkeys(request_ids)
+            if request_id and request_id not in notified
+        ]
+        if not fresh:
+            return []
+        notified.update(fresh)
+        event = AgentEvent.approval_cancelled(fresh, reason=reason)
+        if conversation_id:
+            event.data["conversation_id"] = conversation_id
+        try:
+            await self._send_event(event)
+        except Exception as exc:
+            logger.debug("approval cancellation emit failed: %s", exc)
+        return fresh
+
+    def _approval_cache_key(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        *,
+        payload: dict[str, Any] | None = None,
+    ) -> str:
+        """Build a policy-scoped key from the immutable approval request."""
         try:
             args_str = json.dumps(args, sort_keys=True, ensure_ascii=False)
         except (TypeError, ValueError):
             args_str = str(sorted(args.items())) if isinstance(args, dict) else ""
         session_id = str(getattr(self, "session_id", "") or "").strip()
-        conversation_id = str(getattr(self, "active_conversation_id", "") or "").strip()
-        return f"{session_id}::{conversation_id}::{tool_name}::{args_str}"
+        request_payload = payload or {}
+        conversation_id = str(
+            request_payload.get("conversation_id")
+            or getattr(self, "active_conversation_id", "")
+            or ""
+        ).strip()
+        workspace_root = str(request_payload.get("workspace_root") or "").strip()
+        permission_mode = str(request_payload.get("permission_mode") or "").strip()
+        workspace_scope = str(request_payload.get("workspace_scope") or "").strip()
+        raw_escalation = args.get("with_escalated_permissions")
+        escalation_requested = raw_escalation is True or (
+            isinstance(raw_escalation, str)
+            and raw_escalation.strip().lower() in {"1", "true", "yes", "on"}
+        )
+        capability = "escalated" if escalation_requested else "ordinary"
+        return (
+            f"{session_id}::{conversation_id}::{workspace_root}::{permission_mode}::"
+            f"{workspace_scope}::{capability}::{tool_name}::{args_str}"
+        )
 
-    def _is_session_approved(self, tool_name: str, args: dict[str, Any]) -> bool:
+    def _is_session_approved(self, tool_name: str, args: dict[str, Any], *, payload: dict[str, Any] | None = None) -> bool:
         """Check if this tool+args was already approved for the session."""
         self._init_approval_cache()
-        return self._approval_cache_key(tool_name, args) in self._session_approval_cache
+        return self._approval_cache_key(tool_name, args, payload=payload) in self._session_approval_cache
 
-    def _mark_session_approved(self, tool_name: str, args: dict[str, Any]) -> None:
+    def _mark_session_approved(self, tool_name: str, args: dict[str, Any], *, payload: dict[str, Any] | None = None) -> None:
         """Remember this tool+args as approved for the session."""
         self._init_approval_cache()
-        key = self._approval_cache_key(tool_name, args)
+        key = self._approval_cache_key(tool_name, args, payload=payload)
         self._session_approval_cache[key] = None
         self._session_approval_cache.move_to_end(key)
         # Evict oldest if over limit
@@ -60,6 +112,15 @@ class SessionApprovalRuntimeMixin:
         future = self._pending_approvals.pop(request_key, None)
         if future and not future.done():
             future.set_result(payload)
+            return True
+        # The request is emitted before the waiter is registered. Keep a valid
+        # response that races with that hand-off instead of dropping it.
+        if request_key in self._pending_approval_payloads:
+            queued_responses = getattr(self, "_pending_approval_responses", None)
+            if not isinstance(queued_responses, dict):
+                queued_responses = {}
+                self._pending_approval_responses = queued_responses
+            queued_responses[request_key] = payload
             return True
         return False
 
@@ -125,8 +186,20 @@ class SessionApprovalRuntimeMixin:
         context = getattr(self, "permission_context", None)
         if checker is None:
             return False
+        registry = getattr(self, "tool_registry", None)
+        tool = None
+        if registry is not None:
+            try:
+                tool = registry.get_tool(tool_name)
+            except Exception:
+                tool = None
         try:
-            return checker.check(tool_name, args, context=context) == PermissionLevel.AUTO
+            return checker.check(
+                tool_name,
+                args,
+                context=context,
+                tool=tool,
+            ) == PermissionLevel.AUTO
         except Exception as exc:
             logger.debug("pending approval auto-check failed for %s: %s", tool_name, exc)
             return False
@@ -183,9 +256,13 @@ class SessionApprovalRuntimeMixin:
         payload = self._pending_approval_payloads.get(tool_call_id, {})
         tool_name = str(payload.get("tool_name") or payload.get("request", {}).get("tool_name") or "").strip()
         args = payload.get("args") or payload.get("request", {}).get("input") or {}
-        if tool_name and self._is_session_approved(tool_name, args):
+        if tool_name and self._is_session_approved(tool_name, args, payload=payload):
             logger.debug("Session-approved: %s %s", tool_name, tool_call_id)
             return {"action": "approve", "session_approved": True}
+
+        queued_response = getattr(self, "_pending_approval_responses", {}).pop(tool_call_id, None)
+        if queued_response is not None:
+            return queued_response
 
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending_approvals[tool_call_id] = future
@@ -194,27 +271,31 @@ class SessionApprovalRuntimeMixin:
             # Remember approval for session if user opted in
             if isinstance(result, dict) and result.get("action") == "approve":
                 if result.get("remember_for_session") and tool_name:
-                    self._mark_session_approved(tool_name, args)
+                    self._mark_session_approved(tool_name, args, payload=payload)
             return result
         except asyncio.TimeoutError:
             if not future.done():
                 future.cancel()
-            event = AgentEvent.approval_cancelled([tool_call_id], reason="approval_timeout")
             conversation_id = str(payload.get("conversation_id") or "").strip()
-            if conversation_id:
-                event.data["conversation_id"] = conversation_id
-            try:
-                await self._send_event(event)
-            except Exception as exc:
-                logger.debug("approval timeout cancellation emit failed: %s", exc)
+            await self._emit_approval_cancelled_once(
+                [tool_call_id],
+                reason="approval_timeout",
+                conversation_id=conversation_id,
+            )
             return {"action": "reject", "guidance": "approval timed out after 5 minutes"}
         except asyncio.CancelledError:
             if not future.done():
                 future.cancel()
+            await self._emit_approval_cancelled_once(
+                [tool_call_id],
+                reason="approval_wait_cancelled",
+                conversation_id=str(payload.get("conversation_id") or "").strip(),
+            )
             raise
         finally:
             self._pending_approvals.pop(tool_call_id, None)
             self._pending_approval_payloads.pop(tool_call_id, None)
+            getattr(self, "_pending_approval_responses", {}).pop(tool_call_id, None)
             self._approval_diff_cache.pop(tool_call_id, None)
 
     async def _cancel_pending_approvals(
@@ -234,6 +315,7 @@ class SessionApprovalRuntimeMixin:
             request_ids = list(dict.fromkeys([
                 *getattr(self, "_pending_approvals", {}).keys(),
                 *pending_payloads.keys(),
+                *getattr(self, "_pending_approval_responses", {}).keys(),
             ]))
         for request_id in request_ids:
             future = getattr(self, "_pending_approvals", {}).get(request_id)
@@ -243,12 +325,55 @@ class SessionApprovalRuntimeMixin:
             getattr(self, "_pending_approvals", {}).pop(request_id, None)
         for request_id in request_ids:
             self._pending_approval_payloads.pop(request_id, None)
+            getattr(self, "_pending_approval_responses", {}).pop(request_id, None)
             self._approval_diff_cache.pop(request_id, None)
         if request_ids:
-            event = AgentEvent.approval_cancelled(request_ids, reason=reason)
-            if target_conversation_id:
-                event.data["conversation_id"] = target_conversation_id
-            await self._send_event(event)
+            await self._emit_approval_cancelled_once(
+                request_ids,
+                reason=reason,
+                conversation_id=target_conversation_id,
+            )
+        return request_ids
+
+    async def _reject_pending_approvals(
+        self,
+        *,
+        reason: str,
+        guidance: str,
+        conversation_id: str | None = None,
+    ) -> list[str]:
+        """Resolve approval waits without cancelling the owning agent task.
+
+        A user steer supersedes the action that is waiting for approval, but it
+        must not propagate ``CancelledError`` through the tool batch and abort
+        the entire run. Resolve the waiters as explicit rejections so the
+        current batch can finish and the turn-local input is consumed at the
+        normal tool boundary.
+        """
+        pending_payloads = getattr(self, "_pending_approval_payloads", {})
+        target_conversation_id = str(conversation_id or "").strip()
+        request_ids: list[str] = []
+        for request_id, payload in list(pending_payloads.items()):
+            payload_conversation_id = str(payload.get("conversation_id") or "").strip()
+            if target_conversation_id and payload_conversation_id != target_conversation_id:
+                continue
+            if self._resolve_pending_approval(
+                request_id,
+                {
+                    "action": "reject",
+                    "guidance": guidance,
+                    "reason": reason,
+                    "superseded": True,
+                },
+            ):
+                request_ids.append(request_id)
+
+        if request_ids:
+            await self._emit_approval_cancelled_once(
+                request_ids,
+                reason=reason,
+                conversation_id=target_conversation_id,
+            )
         return request_ids
 
     async def _reemit_pending_state(
@@ -282,14 +407,26 @@ class SessionApprovalRuntimeMixin:
             if not stream_state:
                 continue
             tool_calls = stream_state.get("tool_calls")
+            all_tool_states = list(tool_calls.values()) if isinstance(tool_calls, dict) else []
+            pending_tool_calls = [
+                item
+                for item in all_tool_states
+                if str(item.get("status") or "running").lower()
+                not in {"success", "completed", "failed", "error", "blocked", "cancelled", "timeout"}
+            ]
             await self._send_ws_payload(
                 {
                     "type": "stream_resume",
                     "conversation_id": stream_conversation_id,
                     "message_id": stream_state.get("message_id") or "",
                     "turn_id": stream_state.get("turn_id") or "",
-                    "accumulated_text": stream_state.get("accumulated_text") or "",
-                    "tool_calls_pending": list(tool_calls.values()) if isinstance(tool_calls, dict) else [],
+                    "content_blocks": get_stream_content_blocks(stream_state),
+                    "phase": stream_state.get("phase") or "",
+                    "stream_status": stream_state.get("status") or "running",
+                    "event_seq": int(stream_state.get("event_seq") or 0),
+                    "last_event_type": stream_state.get("last_event_type") or "",
+                    "tool_calls_pending": pending_tool_calls,
+                    "tool_states": all_tool_states,
                 },
                 log_context="reemit:stream_resume",
             )
@@ -348,6 +485,27 @@ class SessionApprovalRuntimeMixin:
                 payload[key] = value
         if conversation_id:
             payload["conversation_id"] = conversation_id
+        conversation = None
+        repository = getattr(self, "conversation_repo", None)
+        if conversation_id and repository is not None:
+            try:
+                conversation = repository.get_conversation(conversation_id)
+            except Exception:
+                conversation = None
+        workspace_root = str(
+            getattr(conversation, "worktree_path", "")
+            or getattr(conversation, "workspace_root", "")
+            or ""
+        ).strip()
+        if workspace_root:
+            payload["workspace_root"] = workspace_root
+        payload["permission_mode"] = str(
+            getattr(conversation, "permission_mode", "")
+            or getattr(getattr(self, "permission_context", None), "mode", "")
+        ).strip()
+        payload["workspace_scope"] = str(
+            getattr(getattr(self, "permission_context", None), "workspace_scope", "")
+        ).strip()
         diff = self._sanitize_approval_diff_for_client(request_id, event.data.get("diff"))
         if isinstance(diff, str) and diff.strip():
             payload["diff"] = diff
@@ -376,5 +534,8 @@ class SessionApprovalRuntimeMixin:
         }
         if conversation_id:
             control_payload["conversation_id"] = conversation_id
+        for key in ("workspace_root", "permission_mode", "workspace_scope"):
+            if key in payload:
+                control_payload[key] = payload[key]
         self._pending_approval_payloads[request_id] = control_payload
         return control_payload

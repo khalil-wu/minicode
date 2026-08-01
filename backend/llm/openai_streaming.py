@@ -113,7 +113,9 @@ class _ToolCallAccumulator:
                 "id": call_id,
                 "name": name,
                 "arguments": "",
+                "_arguments_complete": False,
                 "_delta_bytes": 0,
+                "_start_emitted": False,
             }
             self._order.append(key)
 
@@ -122,11 +124,40 @@ class _ToolCallAccumulator:
             slot["id"] = call_id
         if name:
             slot["name"] = name
-        if function.get("arguments"):
-            slot["arguments"] += str(function["arguments"])
-            slot["_delta_bytes"] += len(str(function["arguments"]))
+        argument_delta = str(function.get("arguments") or "")
+        if argument_delta:
+            # A function call owns one JSON argument document. A few compatible
+            # gateways replay the completed snapshot in their finish chunk;
+            # bytes after a complete object belong to that replay, not a second
+            # document. A real second call must arrive in a new id/index slot.
+            if not bool(slot.get("_arguments_complete")):
+                slot["arguments"] = str(slot.get("arguments") or "") + argument_delta
+                slot["_delta_bytes"] += len(argument_delta)
+                if argument_delta.rstrip().endswith("}"):
+                    slot["_arguments_complete"] = self._is_complete_json_object(
+                        str(slot["arguments"])
+                    )
 
-        return is_new, key, slot
+        # Some OpenAI-compatible providers split id and function.name across
+        # separate deltas. Emit START exactly once when both fields first
+        # become available, rather than tying it to slot creation.
+        should_start = bool(
+            slot.get("id")
+            and slot.get("name")
+            and not slot.get("_start_emitted")
+        )
+        if should_start:
+            slot["_start_emitted"] = True
+        return should_start, key, slot
+
+    @staticmethod
+    def _is_complete_json_object(value: str) -> bool:
+        if not value:
+            return False
+        try:
+            return isinstance(json.loads(value), dict)
+        except (json.JSONDecodeError, TypeError):
+            return False
 
     def finalize(self) -> list[ToolCallEvent]:
         events: list[ToolCallEvent] = []
@@ -165,5 +196,10 @@ class _ToolCallAccumulator:
                 raw_arg_len,
                 parse_status,
             )
-            events.append(ToolCallEvent(id=call_id, name=name, arguments=arguments))
+            events.append(ToolCallEvent(
+                id=call_id,
+                name=name,
+                arguments=arguments,
+                arguments_repaired=parse_status != "ok",
+            ))
         return events

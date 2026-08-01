@@ -4,7 +4,6 @@ import type {
   ChatSlice,
   ContentBlock,
   ConversationGoal,
-  FileContextRef,
   MessageContextRef,
   MessageAttachmentRef,
   SkillContextRef,
@@ -13,8 +12,9 @@ import { canonicalWorkspacePath } from "../lib/workspace-display";
 import { promptCacheEffectivePromptTokens } from "../chat/cacheUsage";
 import { desktop } from "../desktop/runtime";
 import { toBackendPermissionMode } from "../protocol/permissions";
-import { sendClientCommand } from "../protocol/ws-outbox";
+import { sendClientCommand, sendConversationDeleteCommand } from "../protocol/ws-outbox";
 import {
+  getAnswerTextFromBlocks,
   getContentBlocks,
   getThinkingFromMessage,
   getToolCallsFromMessage,
@@ -51,7 +51,14 @@ function stripDisplayContextSuffix(content: string, refs: MessageContextRef[]): 
 }
 
 type ProcessBlock = Extract<ContentBlock, { type: "process" }>;
-type TextBlock = Extract<ContentBlock, { type: "text" }>;
+
+function findAgentMessageBlockIndex(blocks: ContentBlock[], itemId: string): number {
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const block = blocks[index];
+    if (block.type === "text" && block.itemId === itemId) return index;
+  }
+  return -1;
+}
 
 function normalizeProcessContent(content: string | undefined): string {
   return (content || "").trim().replace(/\s+/g, " ");
@@ -72,176 +79,6 @@ function isDuplicateRuntimeAction(block: ContentBlock, item: ProcessBlock): bloc
     item.source === "runtime" &&
     normalizeProcessContent(block.content) === normalizeProcessContent(item.content)
   );
-}
-
-function textMetadataMatches(
-  block: TextBlock,
-  source: string,
-  metadata?: Partial<Omit<TextBlock, "type" | "content" | "source">>,
-): boolean {
-  if (block.sealed) return false;
-  const incomingSegmentId = metadata?.segmentId;
-  if (incomingSegmentId || block.segmentId) {
-    return (
-      (block.source || "stream") === source &&
-      block.segmentId === incomingSegmentId &&
-      block.visibility === metadata?.visibility &&
-      block.role === metadata?.role &&
-      block.phase === metadata?.phase
-    );
-  }
-  return (
-    (block.source || "stream") === source &&
-    block.visibility === metadata?.visibility &&
-    block.role === metadata?.role &&
-    block.phase === metadata?.phase
-  );
-}
-
-function mergeProviderRaw(
-  left: TextBlock["providerRaw"] | undefined,
-  right: TextBlock["providerRaw"] | undefined,
-): TextBlock["providerRaw"] | undefined {
-  if (!left) return right;
-  if (!right) return left;
-  return { ...left, ...right };
-}
-
-function isTimelineTextSource(source: string | undefined): boolean {
-  return source === "model_preamble" || source === "post_tool" || source === "runtime";
-}
-
-function isFinalTextPhase(phase: string | undefined): boolean {
-  return phase === "final" || phase === "final_answer";
-}
-
-function isCommentaryTextPhase(phase: string | undefined): boolean {
-  return phase === "commentary";
-}
-
-function isFinalTextMetadata(
-  metadata?: Partial<Omit<TextBlock, "type" | "content" | "source">>,
-): boolean {
-  return metadata?.visibility === "final" || isFinalTextPhase(metadata?.phase);
-}
-
-function isTimelineTextMetadata(
-  source: string | undefined,
-  metadata?: Partial<Omit<TextBlock, "type" | "content" | "source">>,
-): boolean {
-  return (
-    !isFinalTextMetadata(metadata) &&
-    (
-    metadata?.visibility === "timeline" ||
-    metadata?.visibility === "debug" ||
-    metadata?.role === "runtime" ||
-    isCommentaryTextPhase(metadata?.phase) ||
-    isTimelineTextSource(source)
-    )
-  );
-}
-
-function isUnsealedTextMetadata(
-  metadata?: Partial<Omit<TextBlock, "type" | "content" | "source">>,
-): boolean {
-  return metadata?.visibility === "unsealed" || metadata?.visibility === "draft";
-}
-
-function isReplaceableTextBlock(block: TextBlock): boolean {
-  return !block.sealed && !isTimelineTextMetadata(block.source, block);
-}
-
-function isNarrationTextBlock(block: ContentBlock): block is TextBlock {
-  return (
-    block.type === "text" &&
-    block.source === "model_narration" &&
-    block.sealed !== true
-  );
-}
-
-function findTargetNarrationBlockIndex(
-  blocks: ContentBlock[],
-  metadata?: Partial<Omit<TextBlock, "type" | "content" | "source">>,
-): number {
-  const segmentId = metadata?.segmentId;
-  for (let i = blocks.length - 1; i >= 0; i -= 1) {
-    const block = blocks[i];
-    if (!isNarrationTextBlock(block)) continue;
-    if (segmentId && block.segmentId !== segmentId) continue;
-    if (!segmentId && block.visibility !== "timeline") continue;
-    return i;
-  }
-  return -1;
-}
-
-function findFinalizableTextBlockIndex(
-  blocks: ContentBlock[],
-  source?: string,
-  metadata?: Partial<Omit<TextBlock, "type" | "content" | "source">>,
-): number {
-  const narrationIndex = findTargetNarrationBlockIndex(blocks, metadata);
-  if (narrationIndex >= 0) return narrationIndex;
-  for (let i = blocks.length - 1; i >= 0; i -= 1) {
-    const block = blocks[i];
-    if (block.type !== "text" || !isReplaceableTextBlock(block)) continue;
-    if (source === "model_narration" && block.source !== "model_narration") continue;
-    return i;
-  }
-  return -1;
-}
-
-function isExplicitFinalTextBlock(block: ContentBlock): block is TextBlock {
-  return (
-    block.type === "text" &&
-    Boolean(block.content.trim()) &&
-    (
-      block.visibility === "final" ||
-      isFinalTextPhase(block.phase) ||
-      block.source === "reply" ||
-      block.source === "model_final" ||
-      block.source === "fallback" ||
-      block.source === "partial"
-    )
-  );
-}
-
-function findDuplicateFinalTextBlockIndex(
-  blocks: ContentBlock[],
-  content: string,
-): number {
-  const normalized = content.trim();
-  if (!normalized) return -1;
-  for (let index = blocks.length - 1; index >= 0; index -= 1) {
-    const block = blocks[index];
-    if (!isExplicitFinalTextBlock(block)) continue;
-    if (block.content.trim() === normalized) return index;
-  }
-  return -1;
-}
-
-function isActivityContentBlock(block: ContentBlock): boolean {
-  return block.type === "tool_call" || block.type === "progress" || block.type === "thinking" || block.type === "process";
-}
-
-function lastAutoFinalizableUnsealedIndex(blocks: ContentBlock[]): number {
-  if (blocks.some(isExplicitFinalTextBlock)) return -1;
-  for (let index = blocks.length - 1; index >= 0; index -= 1) {
-    const block = blocks[index];
-    if (block.type !== "text" || !block.content.trim()) continue;
-    if (!isUnsealedTextMetadata(block) || !isReplaceableTextBlock(block)) return -1;
-    const hasActivityAfter = blocks.slice(index + 1).some(isActivityContentBlock);
-    return hasActivityAfter ? -1 : index;
-  }
-  return -1;
-}
-
-function contributesToAnswerText(
-  source: string | undefined,
-  metadata?: Partial<Omit<TextBlock, "type" | "content" | "source">>,
-): boolean {
-  if (isFinalTextMetadata(metadata)) return true;
-  if (isCommentaryTextPhase(metadata?.phase)) return false;
-  return !isTimelineTextMetadata(source, metadata) && !isUnsealedTextMetadata(metadata);
 }
 
 function applyRecallTruncation(
@@ -271,14 +108,15 @@ function persistActiveConversationId(conversationId: string | null | undefined) 
 }
 
 function completeRunWorkState(state: AppStore, terminalStatus: "completed" | "partial" | "failed" | "interrupted") {
-  if (terminalStatus === "failed" || terminalStatus === "interrupted") {
+  if (terminalStatus === "failed" || terminalStatus === "interrupted" || terminalStatus === "partial") {
+    const unfinishedLabel = terminalStatus === "partial" ? "运行部分完成" : "运行已停止";
     return {
       plan: state.plan?.status === "executing"
         ? { ...state.plan, status: "cancelled" as const }
         : state.plan,
       todos: state.todos.map((todo) =>
         todo.status === "in_progress"
-          ? { ...todo, status: "blocked" as const, activeForm: todo.activeForm || "运行已停止" }
+          ? { ...todo, status: "blocked" as const, activeForm: todo.activeForm || unfinishedLabel }
           : todo,
       ),
     };
@@ -430,10 +268,8 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       const recalled = s.messages[turnStart] ?? target;
       const nextMessages = s.messages.slice(0, turnStart);
       const contextRefs = recalled.contextRefs ?? target.contextRefs ?? [];
-      const fileRefs: FileContextRef[] = contextRefs.flatMap((ref) =>
-        ref.kind === "skill"
-          ? []
-          : [{ path: ref.path, name: ref.name, kind: ref.kind }],
+      const mentionRefs = contextRefs.filter(
+        (ref): ref is Exclude<MessageContextRef, SkillContextRef> => ref.kind !== "skill",
       );
       const skillRefs: SkillContextRef[] = contextRefs.filter((ref): ref is SkillContextRef => ref.kind === "skill");
       const attachmentRefs = recalled.attachmentRefs ?? target.attachmentRefs ?? [];
@@ -445,7 +281,6 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         status: "ready" as const,
         artifactId: attachment.artifactId,
         docId: attachment.docId,
-        indexedChunks: attachment.indexedChunks,
         inputSource: attachment.inputSource,
         sourceCharCount: attachment.sourceCharCount,
         attachment: {
@@ -455,7 +290,6 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
           media_type: attachment.mediaType,
           artifact_id: attachment.artifactId,
           doc_id: attachment.docId,
-          indexed_chunks: attachment.indexedChunks ?? 0,
           size_bytes: attachment.sizeBytes ?? 0,
           ...(attachment.inputSource ? { input_source: attachment.inputSource } : {}),
           ...(attachment.sourceCharCount ? { source_char_count: attachment.sourceCharCount } : {}),
@@ -480,7 +314,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       return {
         messages: nextMessages,
         draft: restoredDraft,
-        selectedMentions: fileRefs,
+        selectedMentions: mentionRefs,
         selectedSkills: skillRefs,
         attachments: restoredAttachments,
         actionChip: null,
@@ -562,10 +396,6 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     }),
   interrupt: () => {
     get().finishStreaming(undefined, undefined, "interrupted");
-  },
-  pauseStreaming: () => {
-    // Streaming pause is intentionally unavailable until the server exposes
-    // a real backpressure/resume contract.
   },
   requestConversationSwitch: (id) => {
     const targetId = id.trim();
@@ -743,7 +573,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       get().snapshotWorkbenchState(state.conversationId);
       state = get();
     }
-    sendClientCommand({ type: "conversation.delete", conversation_id: id });
+    void sendConversationDeleteCommand({ type: "conversation.delete", conversation_id: id });
     const remaining = state.conversations.filter((conversation) => conversation.id !== id);
     const nextActive = remaining.find((conversation) => !conversation.archived);
     const conversationMessages = Object.fromEntries(
@@ -907,66 +737,44 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       return next;
     }));
   },
-  appendTextChunk: (content, conversationId, source, metadata, messageId) =>
+  startAgentMessage: (itemId, conversationId, messageId) =>
     set((s) => {
       return updateMessagesForConversation(s, conversationId, (messages) => {
         const idx = findStreamingIndexForMessage(messages, messageId);
         if (idx < 0) return null;
         const next = messages.slice();
         const msg = next[idx];
-        const blocks = msg.blocks ? msg.blocks.slice() : [];
-        const last = blocks[blocks.length - 1];
-        const nextSource = source || "stream";
-        const contributesToAnswer = contributesToAnswerText(nextSource, metadata);
-        const streamingTextMetadata = nextSource === "model_narration" && metadata?.visibility === "timeline"
-          ? { isStreaming: true }
-          : {};
-        if (contributesToAnswer && isFinalTextMetadata(metadata)) {
-          const duplicateFinalIndex = findDuplicateFinalTextBlockIndex(blocks, content);
-          if (duplicateFinalIndex >= 0) {
-            const duplicate = blocks[duplicateFinalIndex];
-            if (duplicate.type === "text") {
-              blocks[duplicateFinalIndex] = {
-                ...duplicate,
-                source: nextSource || duplicate.source,
-                ...metadata,
-                providerRaw: mergeProviderRaw(duplicate.providerRaw, metadata?.providerRaw),
-                finishReason: metadata?.finishReason ?? duplicate.finishReason,
-              };
-            }
-            next[idx] = {
-              ...msg,
-              content: msg.content || content,
-              isThinkingStreaming: false,
-              blocks,
-            };
-            return next;
-          }
-        }
-        if (last && last.type === "text" && textMetadataMatches(last, nextSource, metadata)) {
-          // Preserve the existing attribution when appending to an open text
-          // block — only freshly opened blocks carry an explicit source (e.g.
-          // the "reply" BriefTool reply), so a streaming reply is not
-          // relabeled by a later chunk.
-          blocks[blocks.length - 1] = {
-            ...last,
-            content: last.content + content,
-            providerRaw: mergeProviderRaw(last.providerRaw, metadata?.providerRaw),
-            finishReason: metadata?.finishReason ?? last.finishReason,
-            ...streamingTextMetadata,
-          };
-        } else {
-          blocks.push({ type: "text", content, source: nextSource, ...metadata, ...streamingTextMetadata });
-        }
+        const blocks = (msg.blocks ? msg.blocks.slice() : []).filter((block) =>
+          block.type !== "text" || block.itemId !== itemId,
+        );
+        blocks.push({ type: "text", itemId, content: "", status: "in_progress", isStreaming: true });
         next[idx] = {
           ...msg,
-          content: contributesToAnswer ? msg.content + content : msg.content,
           isThinkingStreaming: false,
           blocks,
         };
         return next;
       });
     }),
+  appendAgentMessageDelta: (itemId, delta, conversationId, messageId) =>
+    set((s) => updateMessagesForConversation(s, conversationId, (messages) => {
+      const idx = findStreamingIndexForMessage(messages, messageId);
+      if (idx < 0 || !delta) return null;
+      const next = messages.slice();
+      const msg = next[idx];
+      const blocks = msg.blocks ? msg.blocks.slice() : [];
+      const blockIndex = findAgentMessageBlockIndex(blocks, itemId);
+      if (blockIndex >= 0) {
+        const block = blocks[blockIndex];
+        if (block.type === "text") {
+          blocks[blockIndex] = { ...block, content: block.content + delta, status: "in_progress", isStreaming: true };
+        }
+      } else {
+        blocks.push({ type: "text", itemId, content: delta, status: "in_progress", isStreaming: true });
+      }
+      next[idx] = { ...msg, isThinkingStreaming: false, blocks };
+      return next;
+    })),
   setFinalAnswerAttachments: (conversationId, attachments, messageId) =>
     set((s) => {
       return updateMessagesForConversation(s, conversationId, (messages) => {
@@ -977,7 +785,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         return next;
       });
     }),
-  finalizeStreamingText: (conversationId, source, metadata, messageId) =>
+  completeAgentMessage: (item, conversationId, metadata, messageId) =>
     set((s) => {
       return updateMessagesForConversation(s, conversationId, (messages) => {
         const idx = findStreamingIndexForMessage(messages, messageId);
@@ -985,66 +793,22 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         const next = messages.slice();
         const msg = next[idx];
         const blocks: ContentBlock[] = msg.blocks ? msg.blocks.slice() : [];
-        const targetIndex = findFinalizableTextBlockIndex(blocks, source, metadata);
-        if (targetIndex < 0) return null;
-        const block = blocks[targetIndex];
-        if (block.type !== "text") return null;
-        const nextVisibility = metadata?.visibility || "final";
-        const promotedToFinal = nextVisibility === "final";
-        if (promotedToFinal && metadata?.promoteAllUnsealedNarration) {
-          const narrationIndexes = blocks.flatMap((candidate, index) =>
-            candidate.type === "text" &&
-            candidate.source === "model_narration" &&
-            candidate.visibility === "timeline" &&
-            candidate.sealed !== true
-              ? [index]
-              : [],
-          );
-          if (narrationIndexes.length > 0) {
-            const firstIndex = narrationIndexes[0];
-            const narrationContent = narrationIndexes
-              .map((index) => {
-                const candidate = blocks[index];
-                return candidate.type === "text" ? candidate.content : "";
-              })
-              .join("");
-            const firstBlock = blocks[firstIndex];
-            const rewritten = blocks.filter((_, index) => !narrationIndexes.includes(index) || index === firstIndex);
-            const rewrittenIndex = rewritten.findIndex((candidate) => candidate === firstBlock);
-            if (firstBlock.type === "text" && rewrittenIndex >= 0) {
-              rewritten[rewrittenIndex] = {
-                ...firstBlock,
-                source: source || "model_final",
-                ...metadata,
-                visibility: "final",
-                phase: metadata?.phase || "final",
-                content: narrationContent,
-                sealed: true,
-                isStreaming: false,
-              } as ContentBlock;
-              next[idx] = {
-                ...msg,
-                content: msg.content && msg.content !== narrationContent ? `${narrationContent}${msg.content}` : narrationContent,
-                blocks: rewritten,
-              };
-              return next;
-            }
-          }
-        }
-        blocks[targetIndex] = {
-          ...block,
-          source: source || block.source || (promotedToFinal ? "model_final" : "stream"),
-          ...metadata,
-          visibility: nextVisibility,
-          phase: metadata?.phase || (promotedToFinal ? "final" : block.phase),
-          sealed: true,
+        const targetIndex = findAgentMessageBlockIndex(blocks, item.id);
+        const completed: ContentBlock = {
+          type: "text",
+          itemId: item.id,
+          content: item.text,
+          source: item.source || "model_final",
+          status: item.status || "completed",
           isStreaming: false,
-        } as ContentBlock;
+          ...metadata,
+        };
+        if (targetIndex >= 0) blocks[targetIndex] = completed;
+        else blocks.push(completed);
         next[idx] = {
           ...msg,
-          content: promotedToFinal
-            ? (msg.content && msg.content !== block.content ? `${block.content}${msg.content}` : block.content)
-            : msg.content,
+          content: getAnswerTextFromBlocks(blocks),
+          isThinkingStreaming: false,
           blocks,
         };
         return next;
@@ -1102,76 +866,9 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         }
         next[idx] = {
           ...msg,
-          isThinkingStreaming: item.status === "running" || msg.isThinkingStreaming,
+          isThinkingStreaming: false,
           blocks,
         };
-        return next;
-      });
-    }),
-  appendProgress: (progress, conversationId, messageId) =>
-    set((s) => {
-      return updateMessagesForConversation(s, conversationId, (messages) => {
-        const idx = findStreamingIndexForMessage(messages, messageId);
-        if (idx < 0) return null;
-        const next = messages.slice();
-        const msg = next[idx];
-        const blocks = msg.blocks ? msg.blocks.slice() : [];
-        const progressBlock = {
-          ...progress,
-          type: "progress" as const,
-          timestamp: Date.now(),
-        };
-        const existingIdx = blocks.findIndex((block) =>
-          block.type === "progress" && block.id === progress.id,
-        );
-        if (existingIdx >= 0) {
-          blocks[existingIdx] = progressBlock;
-        } else {
-          blocks.push(progressBlock);
-        }
-        next[idx] = { ...msg, blocks };
-        return next;
-      });
-    }),
-  replaceEphemeralProgress: (progress, conversationId, messageId) =>
-    set((s) => {
-      return updateMessagesForConversation(s, conversationId, (messages) => {
-        const idx = findStreamingIndexForMessage(messages, messageId);
-        if (idx < 0) return null;
-        const next = messages.slice();
-        const msg = next[idx];
-        const blocks = msg.blocks ? msg.blocks.slice() : [];
-        const progressBlock = {
-          ...progress,
-          type: "progress" as const,
-          timestamp: Date.now(),
-        };
-        // Replace the last ephemeral progress block in the same group
-        const groupId = progress.groupId;
-        if (groupId) {
-          for (let i = blocks.length - 1; i >= 0; i--) {
-            const block = blocks[i];
-            if (
-              block.type === "progress" &&
-              block.groupId === groupId &&
-              (block as unknown as Record<string, unknown>).ephemeral === true
-            ) {
-              blocks[i] = progressBlock;
-              next[idx] = { ...msg, blocks };
-              return next;
-            }
-          }
-        }
-        // No previous ephemeral found — fall back to ID-based upsert, then append
-        const existingIdx = blocks.findIndex((block) =>
-          block.type === "progress" && block.id === progress.id,
-        );
-        if (existingIdx >= 0) {
-          blocks[existingIdx] = progressBlock;
-        } else {
-          blocks.push(progressBlock);
-        }
-        next[idx] = { ...msg, blocks };
         return next;
       });
     }),
@@ -1185,7 +882,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         const blocks = msg.blocks ? msg.blocks.slice() : [];
         blocks.push({ type: "tool_call", record: tc });
         const baseMsg = stripLegacyContentFields(msg);
-        next[idx] = { ...baseMsg, blocks };
+        next[idx] = { ...baseMsg, isThinkingStreaming: false, blocks };
         return next;
       });
       const targetId = conversationId || s.conversationId;
@@ -1194,10 +891,13 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       }
       return result;
     }),
-  updateToolCall: (id, patch, conversationId, scope) =>
+  updateToolCall: (id, patch, conversationId, scope, messageId) =>
     set((s) => {
       const matchesScope = (record: ReturnType<typeof getToolCallsFromMessage>[number]) => {
         if (record.id !== id) return false;
+        // messageId already scopes this reducer to one assistant turn. The
+        // provider tool-use ID is authoritative within that turn.
+        if (messageId) return true;
         if (scope?.turnId && record.turnId && record.turnId !== scope.turnId) return false;
         if (scope?.iterationId && record.iterationId && record.iterationId !== scope.iterationId) return false;
         if (scope?.stepId && record.stepId && record.stepId !== scope.stepId) return false;
@@ -1205,7 +905,8 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       };
       return updateMessagesForConversation(s, conversationId, (messages) => {
         const idx = messages.findIndex((m) =>
-          getToolCallsFromMessage(m).some(matchesScope),
+          (!messageId || m.id === messageId)
+          && getToolCallsFromMessage(m).some(matchesScope),
         );
         if (idx < 0) return null;
         const next = messages.slice();
@@ -1222,7 +923,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         return next;
       });
     }),
-  finishStreaming: (conversationId, usage, terminalStatus = "completed", messageId, failureMessage) =>
+  finishStreaming: (conversationId, usage, terminalStatus = "completed", messageId, failureMessage, durationMs) =>
     set((s) => {
       const finishedAt = Date.now();
       const normalizedFailureMessage = terminalStatus === "failed" ? String(failureMessage || "").trim() : "";
@@ -1239,25 +940,61 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
             if (targetMessageId && m.id !== targetMessageId) return m;
             matchedStreamingMessage = true;
             const baseMessage = stripLegacyContentFields(m);
-            let blocks = getContentBlocks(m);
-            let content = baseMessage.content;
-            const unsealedIndex = lastAutoFinalizableUnsealedIndex(blocks);
-            if (unsealedIndex >= 0) {
-              const unsealedBlock = blocks[unsealedIndex];
-              if (unsealedBlock.type === "text") {
-                content = unsealedBlock.content;
-                blocks = blocks.map((block, index) =>
-                  index === unsealedIndex && block.type === "text"
-                    ? {
-                        ...block,
-                        source: terminalStatus === "completed" ? "model_final" : "partial",
-                        visibility: "final",
-                        phase: "final",
-                      }
-                    : block,
-                );
+            const blocks = getContentBlocks(m);
+            const terminalBlocks = blocks.map((block) => {
+              if (block.type === "text" && block.isStreaming === true) {
+                const hasContent = Boolean(block.content.trim());
+                return {
+                  ...block,
+                  source: hasContent ? "partial" : "cancelled",
+                  status: hasContent ? "partial" : "cancelled",
+                  isStreaming: false,
+                };
               }
-            }
+              if (block.type === "tool_call" && (block.record.status === "running" || block.record.status === "pending")) {
+                // A tool call still running/pending at turn end never received
+                // its result (lost tool_result / missed terminal event). Do not
+                // fabricate "success". User interruption is partial rather
+                // than failed; other terminal paths remain failures.
+                return {
+                  ...block,
+                  record: {
+                    ...block.record,
+                    status: terminalStatus === "interrupted" || terminalStatus === "partial"
+                      ? "partial" as const
+                      : "failed" as const,
+                    finishedAt,
+                  },
+                };
+              }
+              if (block.type === "progress" && block.status === "running") {
+                const progressStatus = terminalStatus === "failed"
+                  ? "failed" as const
+                  : terminalStatus === "partial" || terminalStatus === "interrupted"
+                    ? "partial" as const
+                    : "completed" as const;
+                return {
+                  ...block,
+                  status: progressStatus,
+                  label: terminalStatus === "interrupted" ? "\u5DF2\u4E2D\u65AD" : block.label,
+                  summary: terminalStatus === "interrupted" ? "\u7528\u6237\u5DF2\u4E2D\u65AD" : block.summary,
+                  timestamp: finishedAt,
+                };
+              }
+              if (block.type === "process" && block.status === "running") {
+                return {
+                  ...block,
+                  status: terminalStatus === "failed"
+                    ? "failed" as const
+                    : terminalStatus === "partial" || terminalStatus === "interrupted"
+                      ? "partial" as const
+                      : "completed" as const,
+                  timestamp: finishedAt,
+                };
+              }
+              return block;
+            });
+            const content = getAnswerTextFromBlocks(terminalBlocks);
             return {
               ...baseMessage,
               content,
@@ -1268,40 +1005,8 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
               failureMessage: normalizedFailureMessage || undefined,
               usage,
               completedAt: finishedAt,
-              blocks: blocks.map((block) => {
-                if (block.type === "tool_call" && (block.record.status === "running" || block.record.status === "pending")) {
-                  // A tool call still running/pending at turn end never received
-                  // its result (lost tool_result / missed terminal event). Do not
-                  // fabricate "success". User interruption is partial rather
-                  // than failed; other terminal paths remain failures.
-                  return {
-                    ...block,
-                    record: {
-                      ...block.record,
-                      status: terminalStatus === "interrupted" ? "partial" as const : "failed" as const,
-                      finishedAt,
-                    },
-                  };
-                }
-                if (block.type === "progress" && block.status === "running") {
-                  const progressStatus = terminalStatus === "failed" ? "failed" as const : "completed" as const;
-                  return {
-                    ...block,
-                    status: progressStatus,
-                    label: terminalStatus === "interrupted" ? "\u5DF2\u4E2D\u65AD" : block.label,
-                    summary: terminalStatus === "interrupted" ? "\u7528\u6237\u5DF2\u4E2D\u65AD" : block.summary,
-                    timestamp: finishedAt,
-                  };
-                }
-                if (block.type === "process" && block.status === "running") {
-                  return {
-                    ...block,
-                    status: terminalStatus === "failed" ? "failed" as const : "completed" as const,
-                    timestamp: finishedAt,
-                  };
-                }
-                return block;
-              }),
+              durationMs: Number.isFinite(durationMs) ? Math.max(0, Number(durationMs)) : undefined,
+              blocks: terminalBlocks,
             };
           });
           return targetMessageId && !matchedStreamingMessage ? null : nextMessages;
@@ -1331,7 +1036,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         ...(targetId ? { conversationAgentStates: nextConversationAgentStates } : {}),
       };
     }),
-  resumeStreaming: (conversationId, toolCallsPending, messageId, turnId) =>
+  resumeStreaming: (conversationId, toolCallsPending, messageId, turnId, snapshotBlocks) =>
     set((s) => {
       const targetId = conversationId || s.conversationId;
       const sourceMessages = targetId && targetId !== s.conversationId
@@ -1344,28 +1049,36 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       const targetMessage = targetIndex >= 0 && sourceMessages[targetIndex]?.role === "assistant"
         ? sourceMessages[targetIndex]
         : null;
+      const hasStructuredSnapshot = snapshotBlocks !== undefined;
+      const resumedBlocks = (existingBlocks: ContentBlock[]) => mergeResumeToolCalls(
+        snapshotBlocks ?? existingBlocks,
+        toolCallsPending,
+        hasStructuredSnapshot,
+      );
 
       let nextMessages: typeof sourceMessages;
       if (targetMessage) {
         nextMessages = sourceMessages.slice();
         const baseMessage = stripLegacyContentFields(targetMessage);
+        const blocks = resumedBlocks(getContentBlocks(targetMessage));
         nextMessages[targetIndex] = {
           ...baseMessage,
-          content: "",
+          content: hasStructuredSnapshot ? getAnswerTextFromBlocks(blocks) : "",
           ...(turnId ? { turnId } : {}),
           isStreaming: true,
           resumeState: "resumed",
-          blocks: mergeResumeToolCalls(getContentBlocks(targetMessage), toolCallsPending),
+          blocks,
         };
       } else {
+        const blocks = resumedBlocks([]);
         nextMessages = [
           ...sourceMessages,
           {
             id: targetMessageId || uniqueMessageId("resume"),
             ...(turnId ? { turnId } : {}),
             role: "assistant" as const,
-            content: "",
-            blocks: mergeResumeToolCalls([], toolCallsPending),
+            content: hasStructuredSnapshot ? getAnswerTextFromBlocks(blocks) : "",
+            blocks,
             artifacts: [],
             timestamp: Date.now(),
             isStreaming: true,
@@ -1385,40 +1098,9 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         messages: nextMessages,
         isPaused: false,
         isStreaming: true,
-        toolCallCount: s.toolCallCount + (toolCallsPending?.length ?? 0),
+        toolCallCount: computeToolCallCount(nextMessages),
         ...cacheMessagesForConversation(s, targetId, nextMessages, true),
       };
-    }),
-  replaceStreamingText: (conversationId, fullText, source, metadata, messageId) =>
-    set((s) => {
-      return updateMessagesForConversation(s, conversationId, (messages) => {
-        const idx = findStreamingIndexForMessage(messages, messageId);
-        if (idx < 0) return null;
-        const next = messages.slice();
-        const msg = next[idx];
-        if (source === "model_narration") {
-          const targetSegmentId = metadata?.segmentId;
-          const blocks: ContentBlock[] = (msg.blocks ? msg.blocks.slice() : []).filter((block) =>
-            !(
-              block.type === "text"
-              && block.source === "model_narration"
-              && block.sealed !== true
-              && (!targetSegmentId || block.segmentId === targetSegmentId)
-            ),
-          );
-          if (fullText) {
-            blocks.push({ type: "text", content: fullText, source, ...metadata });
-          }
-          next[idx] = { ...msg, blocks };
-          return next;
-        }
-        const blocks: ContentBlock[] = (msg.blocks ? msg.blocks.slice() : []).filter((block) =>
-          block.type !== "text" || !isReplaceableTextBlock(block),
-        );
-        if (fullText) blocks.push({ type: "text", content: fullText, source: source || "stream", ...metadata });
-        next[idx] = { ...msg, content: fullText, blocks };
-        return next;
-      });
     }),
   setConnected: (c) => set({ isConnected: c }),
   setLastUsage: (u) =>
@@ -1471,7 +1153,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       if (!thread) return s;
       return { sideChats: { ...s.sideChats, [id]: { ...thread, draft } } };
     }),
-  startSideChatMessage: (id, content) =>
+  startSideChatMessage: (id, content, messageIds) =>
     set((s) => {
       const thread = s.sideChats[id];
       if (!thread) return s;
@@ -1486,14 +1168,14 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
             messages: [
               ...thread.messages,
               {
-                id: uniqueMessageId("su"),
+                id: messageIds.userMessageId,
                 role: "user",
                 content,
                 artifacts: [],
                 timestamp: t,
               },
               {
-                id: uniqueMessageId("sa"),
+                id: messageIds.assistantMessageId,
                 role: "assistant",
                 content: "",
                 blocks: [],

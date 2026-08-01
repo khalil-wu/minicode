@@ -84,8 +84,10 @@ const portFromUrl = (url: string): number | null => {
   }
 };
 
-const shellName = (session: TerminalSessionInfo, index: number): string =>
-  session.shell?.split(/[/\\]/).pop()?.replace(/\.(exe|cmd|ps1)$/i, "") || `shell ${index + 1}`;
+const shellName = (session: TerminalSessionInfo, index: number): string => {
+  const name = session.shell?.split(/[/\\]/).pop()?.replace(/\.(exe|cmd|ps1)$/i, "") || `shell ${index + 1}`;
+  return session.terminalMode === "pipe" ? `${name} (basic)` : name;
+};
 
 const terminalTheme = (isLight: boolean): Record<string, string> => (
   isLight
@@ -148,8 +150,10 @@ export const TerminalPanel = () => {
   const webLineRef = useRef("");
   const mountedRef = useRef(true);
   const createSessionRef = useRef<() => Promise<void>>(async () => {});
+  const refreshSessionsRef = useRef<() => Promise<void>>(async () => {});
   const terminalSessions = useAppStore((s) => s.terminalSessions);
   const activeTerminalSessionId = useAppStore((s) => s.activeTerminalSessionId);
+  const conversationId = useAppStore((s) => s.conversationId);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const themeMode = useAppStore((s) => s.themeMode);
   const terminalSnapshots = useAppStore((s) => s.terminalSnapshots);
@@ -160,25 +164,30 @@ export const TerminalPanel = () => {
   const [detectedUrls, setDetectedUrls] = useState<string[]>([]);
   const autoCreateAttemptedRef = useRef(false);
 
-  const activeSession = terminalSessions.find((session) => session.id === activeTerminalSessionId) ?? null;
+  const activeSession = terminalSessions.find((session) => (
+    session.id === activeTerminalSessionId && session.conversationId === conversationId
+  )) ?? null;
   const liveUrl = detectedUrls[0];
 
   const mirrorTerminalCreated = (session: TerminalSessionInfo) => {
-    if (!isDesktop()) return;
+    if (!isDesktop() || !session.conversationId) return;
     sendClientCommand({
       type: "terminal.mirror.created",
+      conversation_id: session.conversationId,
       session_id: session.id,
       pid: session.pid,
       shell: session.shell,
       cwd: session.cwd,
+      is_alive: session.status !== "exited",
     });
   };
 
-  const mirrorTerminalOutput = (sessionId: string, data: string) => {
-    if (!isDesktop() || !data) return;
+  const mirrorTerminalOutput = (sessionId: string, conversationOwner: string, data: string) => {
+    if (!isDesktop() || !conversationOwner || !data) return;
     const session = useAppStore.getState().terminalSessions.find((item) => item.id === sessionId);
     sendClientCommand({
       type: "terminal.mirror.output",
+      conversation_id: conversationOwner,
       session_id: sessionId,
       data,
       pid: session?.pid,
@@ -187,10 +196,11 @@ export const TerminalPanel = () => {
     });
   };
 
-  const mirrorTerminalExit = (sessionId: string, exitCode?: number) => {
-    if (!isDesktop()) return;
+  const mirrorTerminalExit = (sessionId: string, conversationOwner: string, exitCode?: number) => {
+    if (!isDesktop() || !conversationOwner) return;
     sendClientCommand({
       type: "terminal.mirror.exit",
+      conversation_id: conversationOwner,
       session_id: sessionId,
       exit_code: exitCode,
     });
@@ -287,7 +297,6 @@ export const TerminalPanel = () => {
   }, []);
 
   useEffect(() => {
-    void refreshSessions();
     const ws = getWebSocket();
     const unsub = ws?.subscribe((msg) => {
       const e = msg as {
@@ -302,7 +311,14 @@ export const TerminalPanel = () => {
         result_kind?: string;
         status?: string;
         summary?: string;
+        conversation_id?: string;
       };
+      const eventOwner = e.conversation_id?.trim() || "";
+      const activeOwner = useAppStore.getState().conversationId || "";
+      if (
+        e.type?.startsWith("terminal.")
+        && (!eventOwner || !activeOwner || eventOwner !== activeOwner)
+      ) return;
       if (e.type === "terminal.output" && e.session_id && e.data) {
         appendOutput(e.session_id, e.data);
       } else if (e.type === "terminal.output" && e.output != null) {
@@ -318,14 +334,18 @@ export const TerminalPanel = () => {
     let desktopExitCleanup: (() => void) | undefined;
     if (isDesktop()) {
       const d = desktop();
-      desktopDataCleanup = d?.pty.onData(({ sessionId, data, startCursor, endCursor }) => {
+      desktopDataCleanup = d?.pty.onData(({ sessionId, conversationId: owner, data, startCursor, endCursor }) => {
+        if (!owner) return;
         appendOutput(sessionId, data, startCursor, endCursor);
-        mirrorTerminalOutput(sessionId, data);
+        mirrorTerminalOutput(sessionId, owner, data);
       }) as (() => void) | undefined;
-      desktopExitCleanup = d?.pty.onExit(({ sessionId, exitCode }) => {
-        mirrorTerminalExit(sessionId, exitCode);
+      desktopExitCleanup = d?.pty.onExit(({ sessionId, conversationId: owner, exitCode }) => {
+        if (!owner) return;
+        mirrorTerminalExit(sessionId, owner, exitCode);
         const current = useAppStore.getState().terminalSessions.find((session) => session.id === sessionId);
-        if (current) useAppStore.getState().upsertTerminalSession({ ...current, status: "exited", exitCode, exitedAt: Date.now() });
+        if (current?.conversationId === owner) {
+          useAppStore.getState().upsertTerminalSession({ ...current, status: "exited", exitCode, exitedAt: Date.now() });
+        }
       }) as (() => void) | undefined;
     }
 
@@ -335,6 +355,12 @@ export const TerminalPanel = () => {
       desktopExitCleanup?.();
     };
   }, []);
+
+  useEffect(() => {
+    autoCreateAttemptedRef.current = false;
+    useAppStore.getState().setTerminalSessions([]);
+    void refreshSessionsRef.current();
+  }, [conversationId]);
 
   useEffect(() => {
     if (!activeTerminalSessionId && terminalSessions.length > 0) {
@@ -385,16 +411,26 @@ export const TerminalPanel = () => {
 
   const refreshSessions = async () => {
     const refreshEpoch = ++refreshEpochRef.current;
+    const ownerConversationId = useAppStore.getState().conversationId || "";
     setBooting(true);
     setStatusMessage("");
     let waitForBackendList = false;
     try {
+      if (!ownerConversationId) {
+        useAppStore.getState().setTerminalSessions([]);
+        setStatusMessage("Select a conversation before opening a terminal.");
+        return;
+      }
       if (isDesktop()) {
-        const listedSessions = await ptyList();
+        const listedSessions = await ptyList(ownerConversationId);
         const sessions = await Promise.all(listedSessions.map(async (session) => (
-          await ptySnapshot(session.sessionId, TERMINAL_OUTPUT_BUFFER_CHARS) ?? session
+          await ptySnapshot(session.sessionId, ownerConversationId, TERMINAL_OUTPUT_BUFFER_CHARS) ?? session
         )));
-        if (!mountedRef.current || refreshEpoch !== refreshEpochRef.current) return;
+        if (
+          !mountedRef.current
+          || refreshEpoch !== refreshEpochRef.current
+          || useAppStore.getState().conversationId !== ownerConversationId
+        ) return;
         for (const session of sessions) {
           if (!session.output) continue;
           const merged = mergeTerminalOutputByCursor(
@@ -409,14 +445,18 @@ export const TerminalPanel = () => {
         }
         const normalized: TerminalSessionInfo[] = sessions.map((session) => ({
           id: session.sessionId,
+          conversationId: session.conversationId,
           pid: session.pid,
           shell: session.shell,
           cwd: session.cwd,
           status: session.isAlive === false ? "exited" : "running",
           exitCode: session.exitCode,
           exitedAt: session.exitedAt,
+          terminalMode: "pty",
         }));
-        useAppStore.getState().setTerminalSessions(normalized);
+        useAppStore.getState().setTerminalSessions(
+          normalized.filter((session) => session.conversationId === ownerConversationId),
+        );
         for (const session of normalized) mirrorTerminalCreated(session);
         redrawActiveSession();
       } else {
@@ -431,15 +471,21 @@ export const TerminalPanel = () => {
       if (mountedRef.current && refreshEpoch === refreshEpochRef.current && !waitForBackendList) setBooting(false);
     }
   };
+  refreshSessionsRef.current = refreshSessions;
 
   const createSession = async () => {
     if (autoCreating) return;
+    const ownerConversationId = useAppStore.getState().conversationId || "";
+    if (!ownerConversationId) {
+      setStatusMessage("Select a conversation before opening a terminal.");
+      return;
+    }
     setAutoCreating(true);
     setStatusMessage("");
     const cwd = workingDirectory || undefined;
     try {
       if (isDesktop()) {
-        const session = await ptySpawn(cwd);
+        const session = await ptySpawn(cwd, ownerConversationId);
         if (!session) {
           setStatusMessage("Command Runner ready. Type a command and press Enter.");
           if (!outputBufferRef.current["web-fallback"]) {
@@ -450,22 +496,19 @@ export const TerminalPanel = () => {
           requestAnimationFrame(() => termRef.current?.focus?.());
           return;
         }
-        useAppStore.getState().upsertTerminalSession({
+        const terminalSession: TerminalSessionInfo = {
           id: session.sessionId,
+          conversationId: session.conversationId,
           pid: session.pid,
           shell: session.shell,
           cwd: session.cwd,
           status: "running",
           createdAt: Date.now(),
-        });
-        mirrorTerminalCreated({
-          id: session.sessionId,
-          pid: session.pid,
-          shell: session.shell,
-          cwd: session.cwd,
-          status: "running",
-          createdAt: Date.now(),
-        });
+          terminalMode: "pty",
+        };
+        mirrorTerminalCreated(terminalSession);
+        if (useAppStore.getState().conversationId !== ownerConversationId) return;
+        useAppStore.getState().upsertTerminalSession(terminalSession);
         useAppStore.getState().setActiveTerminalSession(session.sessionId);
         requestAnimationFrame(() => {
           safeFit();
@@ -519,8 +562,9 @@ export const TerminalPanel = () => {
     hydratedSnapshotRef.current.delete(sessionId);
     if (isDesktop()) {
       const session = useAppStore.getState().terminalSessions.find((item) => item.id === sessionId);
-      if (session?.status === "exited") void ptyAckExit(sessionId);
-      else void ptyKill(sessionId);
+      if (!session?.conversationId) return;
+      if (session.status === "exited") void ptyAckExit(sessionId, session.conversationId);
+      else void ptyKill(sessionId, session.conversationId);
       useAppStore.getState().removeTerminalSession(sessionId);
     } else {
       sendClientCommand({ type: "terminal.kill", session_id: sessionId });
@@ -646,6 +690,7 @@ export const TerminalPanel = () => {
     if (!terminalReady) return;
     let activeSnapshotWasApplied = false;
     for (const snapshot of Object.values(terminalSnapshots)) {
+      if (snapshot.conversationId !== conversationId) continue;
       if (!snapshot.output) continue;
       const current = outputBufferRef.current[snapshot.id] ?? "";
       outputBufferRef.current[snapshot.id] = mergeTerminalOutputSnapshot(snapshot.output, current);
@@ -653,7 +698,7 @@ export const TerminalPanel = () => {
       if (activeRef.current === snapshot.id) activeSnapshotWasApplied = true;
     }
     if (activeSnapshotWasApplied) redrawActiveSession();
-  }, [terminalSnapshots, terminalReady]);
+  }, [terminalSnapshots, terminalReady, conversationId]);
 
   const writeToSession = (sessionId: string, data: string) => {
     const session = useAppStore.getState().terminalSessions.find((item) => item.id === sessionId);
@@ -664,7 +709,7 @@ export const TerminalPanel = () => {
       writeWebFallbackInput(data);
       return;
     }
-    if (isDesktop()) void ptyWrite(sessionId, data);
+    if (isDesktop()) void ptyWrite(sessionId, data, session.conversationId);
     else sendClientCommand({ type: "terminal.input", session_id: sessionId, data });
   };
 
@@ -677,8 +722,10 @@ export const TerminalPanel = () => {
   };
 
   const resizeSession = (sessionId: string, cols: number, rows: number) => {
-    if (isDesktop()) void ptyResize(sessionId, cols, rows);
-    else sendClientCommand({ type: "terminal.resize", session_id: sessionId, cols, rows });
+    if (isDesktop()) {
+      const session = useAppStore.getState().terminalSessions.find((item) => item.id === sessionId);
+      if (session?.conversationId) void ptyResize(sessionId, cols, rows, session.conversationId);
+    } else sendClientCommand({ type: "terminal.resize", session_id: sessionId, cols, rows });
   };
 
   const copyTerminalSelection = async (term = termRef.current) => {
@@ -733,28 +780,28 @@ export const TerminalPanel = () => {
               fontFamily: "var(--font-mono)",
             }}
           >
-            <Globe size={13} />
+            <Globe size={14} />
             <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
               {liveUrl.replace(/^https?:\/\//, "")}
             </span>
-            <ExternalLink size={12} />
+            <ExternalLink size={14} />
           </button>
         )}
         <IconButton label="Refresh terminal list" onClick={() => void refreshSessions()}>
-          <RotateCcw size={13} />
+          <RotateCcw size={14} />
         </IconButton>
         <IconButton label="Copy selected terminal text" onClick={() => void copyTerminalSelection()}>
-          <Copy size={13} />
+          <Copy size={14} />
         </IconButton>
         <IconButton label="Clear terminal" onClick={() => termRef.current?.clear()}>
-          <Square size={12} />
+          <Square size={14} />
         </IconButton>
         {activeSession && (
           <IconButton
             label={activeSession.status === "exited" ? "Restart terminal" : "Kill terminal"}
             onClick={() => activeSession.status === "exited" ? void restartSession(activeSession.id) : killSession(activeSession.id)}
           >
-            {activeSession.status === "exited" ? <RotateCcw size={13} /> : <Trash2 size={13} />}
+            {activeSession.status === "exited" ? <RotateCcw size={14} /> : <Trash2 size={14} />}
           </IconButton>
         )}
       </div>

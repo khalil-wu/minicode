@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 from ipaddress import ip_address
 from typing import Any
 from urllib.parse import urlparse
@@ -39,10 +40,8 @@ class BrowserControlTool(BaseTool):
     permission = PermissionLevel.AUTO
     read_only = True
     open_world = True
-    timeout_seconds = 30.0
     result_kind = "browser"
     activity_kind = "genericTool"
-    panel_hint = "browser"
     display_label = "Browser"
     max_result_chars = None
 
@@ -56,6 +55,7 @@ class BrowserControlTool(BaseTool):
         "get_dom",
         "wait_for_element",
         "get_console_logs",
+        "get_network_logs",
     }
     _WRITE_ACTIONS = {"navigate", "click", "type", "press_key", "scroll", "evaluate"}
     _ACTIONS = _READ_ACTIONS | _WRITE_ACTIONS
@@ -69,22 +69,6 @@ class BrowserControlTool(BaseTool):
             toolset="browser",
             exposure="deferred",
             required_args=("action",),
-            arg_roles={
-                "action": "control",
-                "url": "latest_url",
-                "target_id": "control",
-                "selector": "control",
-                "text": "input",
-                "key": "control",
-                "expression": "input",
-                "x": "control",
-                "y": "control",
-                "delta_x": "control",
-                "delta_y": "control",
-            },
-            repair_policy={"action": "runtime_control", "url": "resource_resolver"},
-            empty_args_policy="block",
-            blocked_guidance="Missing action. Use discover or list_targets before browser navigation.",
         )
 
     def get_schema(self) -> ToolSchema:
@@ -109,7 +93,10 @@ class BrowserControlTool(BaseTool):
                     },
                     "url": {
                         "type": "string",
-                        "description": "URL to navigate to when action='navigate'.",
+                        "description": (
+                            "HTTP or HTTPS URL to navigate to when action='navigate'. "
+                            "Serve workspace HTML first with preview_server(action='start', path='<file>.html')."
+                        ),
                     },
                     "selector": {
                         "type": "string",
@@ -182,8 +169,11 @@ class BrowserControlTool(BaseTool):
             if not raw_url:
                 return "Missing url for navigate"
             parsed = urlparse(raw_url)
-            if parsed.scheme not in {"http", "https", "file"}:
-                return "navigate url must use http, https, or file"
+            if parsed.scheme not in {"http", "https"}:
+                return (
+                    "navigate url must use http or https. Serve a workspace HTML file first with "
+                    "preview_server(action='start', path='<file>.html')."
+                )
         elif action == "click":
             selector = str(payload.get("selector") or "").strip()
             has_xy = payload.get("x") not in (None, "") and payload.get("y") not in (None, "")
@@ -239,6 +229,9 @@ class BrowserControlTool(BaseTool):
         action = str(args.get("action") or "").strip().lower()
         endpoint = _normalize_endpoint(str(args.get("cdp_endpoint") or DEFAULT_CDP_ENDPOINT))
         try:
+            embedded_endpoint = str(os.environ.get("MINICODE_EMBEDDED_BROWSER_ENDPOINT") or "").strip()
+            if embedded_endpoint and not str(args.get("cdp_endpoint") or "").strip():
+                return await self._execute_embedded(embedded_endpoint, action, args, context)
             if action == "discover":
                 version, targets = await self._discover(endpoint)
                 return ToolResult(
@@ -269,6 +262,8 @@ class BrowserControlTool(BaseTool):
                 return await self._wait_for_element(endpoint, args)
             if action == "get_console_logs":
                 return await self._get_console_logs(endpoint, args)
+            if action == "get_network_logs":
+                return await self._get_network_logs(endpoint, args)
             if action == "click":
                 return await self._click(endpoint, args)
             if action == "type":
@@ -290,8 +285,90 @@ class BrowserControlTool(BaseTool):
 
         return self._error_result(f"Unsupported action: {action}")
 
+    async def _execute_embedded(
+        self,
+        endpoint: str,
+        action: str,
+        args: dict[str, Any],
+        context: ToolExecutionContext | None,
+    ) -> ToolResult:
+        token = str(os.environ.get("MINICODE_EMBEDDED_BROWSER_TOKEN") or "")
+        payload = {key: value for key, value in args.items() if key != "cdp_endpoint"}
+        async with httpx.AsyncClient(timeout=None, follow_redirects=False, trust_env=False) as client:
+            response = await client.post(
+                f"{endpoint.rstrip('/')}/v1/command",
+                headers={"authorization": f"Bearer {token}"},
+                json=payload,
+            )
+        result = _json_dict(response.json())
+        if response.status_code >= 400 or result.get("ok") is False:
+            return self._error_result(str(result.get("error") or f"Embedded browser command failed: HTTP {response.status_code}"))
+
+        targets = _json_list(result.get("targets"))
+        target = _json_dict(result.get("target"))
+        if action == "discover":
+            lines = [
+                f"Browser: {result.get('browser') or 'MiniCode Embedded Browser'}",
+                f"Targets: {len(targets)}",
+                *_format_targets(targets).splitlines(),
+            ]
+            return ToolResult(content=truncate_tool_result("\n".join(lines), self._MAX_RESULT_CHARS), result_kind=self.result_kind, display_summary=f"内置浏览器：{len(targets)} 个页面")
+        if action == "list_targets":
+            return ToolResult(content=truncate_tool_result(_format_targets(targets), self._MAX_RESULT_CHARS), result_kind=self.result_kind, display_summary=f"浏览器页面：{len(targets)}")
+        if action == "screenshot":
+            data = str(result.get("data") or "")
+            if not data:
+                return self._error_result("Embedded browser returned no screenshot data")
+            raw_size = len(base64.b64decode(data, validate=True))
+            artifact_store = getattr(context, "artifact_store", None) if context else None
+            artifact_id = artifact_store.save(
+                f"data:{result.get('mimeType') or 'image/png'};base64,{data}",
+                source="browser_control.embedded_screenshot",
+                type="image_base64",
+                preview_lines=1,
+            ) if artifact_store is not None else None
+            content = [
+                "Screenshot captured.",
+                f"Target: {target.get('id') or ''} {target.get('title') or ''}".rstrip(),
+                f"URL: {target.get('url') or ''}",
+                f"PNG bytes: {raw_size}",
+            ]
+            if artifact_id:
+                content.append(f"Artifact: {artifact_id}")
+            return ToolResult(content="\n".join(content), artifact_id=artifact_id, artifact_preview=f"PNG screenshot, {raw_size} bytes" if artifact_id else None, result_kind=self.result_kind, display_summary="浏览器截图")
+        if action == "navigate":
+            return ToolResult(content=f"Navigation requested.\nTarget: {target.get('id') or ''} {target.get('title') or ''}\nURL: {target.get('url') or args.get('url') or ''}", result_kind=self.result_kind, display_summary="浏览器已导航")
+        if action == "get_url":
+            return ToolResult(content=f"Target: {target.get('id') or ''}\nTitle: {target.get('title') or ''}\nURL: {target.get('url') or ''}", result_kind=self.result_kind, display_summary="浏览器地址")
+        if action == "wait_for_element":
+            if not result.get("value"):
+                return self._error_result(str(result.get("error") or "Element was not found"))
+            return ToolResult(content=f"Element found: {args.get('selector') or ''}", result_kind=self.result_kind, display_summary="已找到页面元素")
+        if action == "click":
+            return ToolResult(content=f"Clicked {result.get('value') or args.get('selector') or 'coordinates'}", result_kind=self.result_kind, display_summary="浏览器点击")
+        if action == "type":
+            return ToolResult(content=f"Typed {result.get('value') or 0} character(s)", result_kind=self.result_kind, display_summary="浏览器输入")
+        if action == "press_key":
+            return ToolResult(content=f"Pressed key: {result.get('value') or args.get('key') or ''}", result_kind=self.result_kind, display_summary="浏览器按键")
+        value = result.get("value")
+        content = json.dumps(value, ensure_ascii=False, indent=2) if isinstance(value, (dict, list)) else _stringify_value(value)
+        labels = {
+            "get_text": "浏览器文本",
+            "get_html": "浏览器 HTML",
+            "get_dom": "浏览器 DOM",
+            "get_console_logs": "浏览器控制台",
+            "get_network_logs": "浏览器网络记录",
+            "scroll": "浏览器滚动",
+            "evaluate": "浏览器执行结果",
+        }
+        return ToolResult(
+            content=truncate_tool_result(content, _max_chars(args, self._MAX_RESULT_CHARS)),
+            result_kind=self.result_kind,
+            display_summary=labels.get(action, "浏览器操作完成"),
+        )
+
     async def _discover(self, endpoint: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        async with httpx.AsyncClient(timeout=3.0, follow_redirects=False, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=None, follow_redirects=False, trust_env=False) as client:
             version_resp = await client.get(_endpoint_url(endpoint, "/json/version"))
             version_resp.raise_for_status()
             targets_resp = await client.get(_endpoint_url(endpoint, "/json/list"))
@@ -301,7 +378,7 @@ class BrowserControlTool(BaseTool):
         return version, targets[: self._MAX_TARGETS]
 
     async def _list_targets(self, endpoint: str) -> list[dict[str, Any]]:
-        async with httpx.AsyncClient(timeout=3.0, follow_redirects=False, trust_env=False) as client:
+        async with httpx.AsyncClient(timeout=None, follow_redirects=False, trust_env=False) as client:
             response = await client.get(_endpoint_url(endpoint, "/json/list"))
             response.raise_for_status()
         return _json_list(response.json())[: self._MAX_TARGETS]
@@ -454,6 +531,22 @@ class BrowserControlTool(BaseTool):
             display_summary=f"Console logs: {len(events)}",
         )
 
+    async def _get_network_logs(self, endpoint: str, args: dict[str, Any]) -> ToolResult:
+        target = await self._select_target(endpoint, str(args.get("target_id") or "").strip())
+        target_ws = _validate_ws_url(str(target.get("webSocketDebuggerUrl") or ""))
+        wait_ms = int(args.get("wait_ms") or 250)
+        async with _cdp_session(target_ws) as session:
+            await session.call("Network.enable")
+            if wait_ms > 0:
+                await session.drain_events(wait_ms / 1000)
+            events = session.events()
+        content, count = _format_network_events(events)
+        return ToolResult(
+            content=truncate_tool_result(content, _max_chars(args, self._MAX_RESULT_CHARS)),
+            result_kind=self.result_kind,
+            display_summary=f"Network requests: {count}",
+        )
+
     async def _click(self, endpoint: str, args: dict[str, Any]) -> ToolResult:
         selector = str(args.get("selector") or "").strip()
         target = await self._select_target(endpoint, str(args.get("target_id") or "").strip())
@@ -564,7 +657,7 @@ class _CDPSession:
         self._next_id += 1
         await self._websocket.send(json.dumps({"id": call_id, "method": method, "params": params or {}}))
         while True:
-            raw = await asyncio.wait_for(self._websocket.recv(), timeout=10.0)
+            raw = await self._websocket.recv()
             message = json.loads(raw)
             if message.get("id") != call_id:
                 self._remember_event(message)
@@ -749,6 +842,32 @@ def _format_console_events(events: list[dict[str, Any]]) -> str:
             location = f" ({url}:{line})" if url and line is not None else ""
             lines.append(f"[{level}] {text}{location}")
     return "\n".join(lines) if lines else "No console log entries found."
+
+
+def _format_network_events(events: list[dict[str, Any]]) -> tuple[str, int]:
+    """Format request metadata without exposing headers, cookies, or bodies."""
+
+    methods: dict[str, str] = {}
+    lines: list[str] = []
+    for event in events:
+        method = str(event.get("method") or "")
+        params = event.get("params") if isinstance(event.get("params"), dict) else {}
+        request_id = str(params.get("requestId") or "")
+        if method == "Network.requestWillBeSent":
+            request = params.get("request") if isinstance(params.get("request"), dict) else {}
+            methods[request_id] = str(request.get("method") or "GET")
+        elif method == "Network.responseReceived":
+            response = params.get("response") if isinstance(params.get("response"), dict) else {}
+            status = int(response.get("status") or 0)
+            url = str(response.get("url") or "")
+            resource_type = str(params.get("type") or "other")
+            lines.append(f"[{status or 'ERR'}] {methods.get(request_id, 'GET')} {resource_type} {url}".rstrip())
+        elif method == "Network.loadingFailed":
+            error = str(params.get("errorText") or "request failed")
+            lines.append(f"[ERR] {methods.get(request_id, 'GET')} {error}")
+    if not lines:
+        return "No network requests captured during the wait window.", 0
+    return "\n".join(lines[-100:]), len(lines)
 
 
 def _remote_arg_text(arg: dict[str, Any]) -> str:

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from uuid import uuid4
 
+from backend.agent.checkpoint import validate_storage_id
 from backend.config import DATA_ROOT
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,8 @@ def _lock_for(path: Path) -> threading.Lock:
 
 def get_journal_dir(agent_id: str, *, base_dir: Path | None = None) -> Path:
     root = base_dir or JOURNAL_ROOT
-    path = root / str(agent_id or "").strip()
+    clean_agent_id = validate_storage_id(agent_id, field_name="agent_id")
+    path = root / clean_agent_id
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -98,9 +100,7 @@ class ExecutionJournal:
     """Per-agent append-only JSONL journal."""
 
     def __init__(self, agent_id: str, *, base_dir: Path | None = None) -> None:
-        self.agent_id = str(agent_id or "").strip()
-        if not self.agent_id:
-            raise ValueError("agent_id is required")
+        self.agent_id = validate_storage_id(agent_id, field_name="agent_id")
         self.base_dir = base_dir
         self.path = get_journal_path(self.agent_id, base_dir=base_dir)
         self._seq = self._load_last_seq()

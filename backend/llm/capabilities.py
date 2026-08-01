@@ -1,17 +1,14 @@
-"""Provider/model capability helpers.
+"""Provider capability helpers.
 
-The matrix is intentionally conservative: unknown OpenAI-compatible gateways
-stay permissive, while known unsupported model/API combinations fail before the
-agent enters a tool-dependent loop.
+Capabilities come from the selected adapter or an explicit wire contract.
+Unknown model and gateway capabilities remain unknown; this module never
+infers support from hostnames or model-name patterns.
 """
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 from typing import Any
-from urllib.parse import urlsplit
-
 from backend.config import LLMSettings, normalize_custom_wire_api
-from backend.services.llm_provider_helpers import _resolve_openai_provider_id
 from backend.llm.reasoning_effort import reasoning_effort_levels
 
 
@@ -22,16 +19,19 @@ class ProviderCapabilities:
     wire_api: str = ""
     provider_id: str = ""
     base_url: str = ""
-    streaming: bool = True
-    tool_calling: bool = True
-    parallel_tool_calls: bool = True
-    json_mode: bool = False
-    reasoning_effort: bool = False
+    streaming: bool | None = None
+    tool_calling: bool | None = None
+    parallel_tool_calls: bool | None = None
+    json_mode: bool | None = None
+    reasoning_effort: bool | None = None
     reasoning_effort_levels: tuple[str, ...] = ()
-    vision: bool = True
-    native_pdf: bool = False
-    image_generation: bool = False
-    stateful_continuation: bool = False
+    vision: bool | None = None
+    native_pdf: bool | None = None
+    image_generation: bool | None = None
+    stateful_continuation: bool | None = None
+    prompt_caching: bool | None = None
+    native_cache_editing: bool | None = None
+    cache_deleted_usage: bool | None = None
     confidence: str = "unknown"
     limitations: tuple[str, ...] = ()
     adapters: tuple["ProviderCapabilities", ...] = ()
@@ -51,44 +51,6 @@ class CapabilityCheck:
     capabilities: ProviderCapabilities | None = None
 
 
-_VISION_MODEL_MARKERS = (
-    "gpt-4o",
-    "gpt-4.1",
-    "gpt-5",
-    "o3",
-    "o4",
-    "claude",
-    "gemini",
-    "vision",
-    "visual",
-    "-vl",
-    "vl-",
-    "qwen-vl",
-    "qwen2-vl",
-    "qwen2.5-vl",
-    "qwen3-vl",
-    "omni",
-    "qvq",
-    "glm-4v",
-    "glm-4.5v",
-    "doubao-vision",
-    "doubao-seed-vision",
-    "pixtral",
-    "llava",
-    "internvl",
-    "minicpm-v",
-    "grok-vision",
-)
-
-
-def _normalized_model(model: str) -> str:
-    return str(model or "").strip().replace("_", "-").lower()
-
-
-def _host(settings: LLMSettings) -> str:
-    return urlsplit(str(settings.base_url or "")).netloc.lower()
-
-
 def _normalized_base_url(settings: LLMSettings, wire_api: str) -> str:
     base_url = str(settings.base_url or "").strip()
     if not base_url:
@@ -99,43 +61,13 @@ def _normalized_base_url(settings: LLMSettings, wire_api: str) -> str:
 
 
 def _provider_id(provider: str, settings: LLMSettings, wire_api: str) -> str:
+    del settings
     normalized_provider = str(provider or "").strip().lower()
     if normalized_provider == "anthropic":
-        return "anthropic_off"
+        return "anthropic"
     if normalized_provider == "custom" and wire_api == "anthropic":
         return "custom_anthropic"
-    return _resolve_openai_provider_id(str(settings.base_url or ""))
-
-
-def _is_image_generation_model(model: str) -> bool:
-    normalized = _normalized_model(model)
-    return normalized.startswith("gpt-image-") or normalized in {"image-2", "image2"}
-
-
-def _is_gpt_like_model(model: str) -> bool:
-    normalized = _normalized_model(model)
-    return (
-        normalized.startswith("gpt-")
-        or "/gpt-" in normalized
-        or normalized.startswith("codex")
-        or "/codex" in normalized
-    )
-
-
-def _model_declares_vision_support(model: str) -> bool:
-    normalized = _normalized_model(model)
-    return any(marker in normalized for marker in _VISION_MODEL_MARKERS)
-
-
-def _is_known_text_only_image_provider(host: str, model: str) -> bool:
-    normalized = _normalized_model(model)
-    if "deepseek" in host or "deepseek" in normalized:
-        return True
-    if ("dashscope" in host or "aliyuncs.com" in host or "qwen" in normalized) and not _model_declares_vision_support(normalized):
-        return True
-    if "siliconflow" in host and not _model_declares_vision_support(normalized):
-        return True
-    return False
+    return normalized_provider or "unknown"
 
 
 def capabilities_from_openai_settings(settings: LLMSettings, *, provider: str = "openai") -> ProviderCapabilities:
@@ -145,7 +77,6 @@ def capabilities_from_openai_settings(settings: LLMSettings, *, provider: str = 
         wire_api = normalize_custom_wire_api(str(settings.base_url or ""), raw_wire_api, "chat")
     else:
         wire_api = raw_wire_api
-    host = _host(settings)
     base_url = _normalized_base_url(settings, wire_api)
     provider_id = _provider_id(provider, settings, wire_api)
     effort_levels = reasoning_effort_levels(
@@ -153,33 +84,14 @@ def capabilities_from_openai_settings(settings: LLMSettings, *, provider: str = 
         wire_api,
         getattr(settings, "reasoning_effort_levels", ()),
     )
-    image_generation = wire_api == "responses" and _is_image_generation_model(model)
     limitations: list[str] = []
 
-    tool_calling = wire_api in {"chat", "responses"}
-    if _is_image_generation_model(model) and wire_api != "responses":
-        tool_calling = False
-        limitations.append("image_generation_model_requires_responses_api")
-
+    tool_calling: bool | None = None
     if wire_api not in {"chat", "responses"}:
         tool_calling = False
         limitations.append(f"unsupported_openai_wire_api:{wire_api}")
     if bool(settings.responses_stateful_continuation) and wire_api != "responses":
         limitations.append("stateful_continuation_requires_responses_api")
-    if _is_gpt_like_model(model) and wire_api == "chat":
-        limitations.append("gpt_like_chat_completions_no_stateful_continuation")
-
-    if _is_known_text_only_image_provider(host, model):
-        vision = False
-        limitations.append("known_text_only_image_provider")
-    elif host.endswith("api.openai.com") or "api.openai.com" in host:
-        vision = True
-    else:
-        # Unknown compatible gateways are allowed by default. If they reject
-        # images, the adapter reports the provider error instead of silently
-        # dropping pixels.
-        vision = _model_declares_vision_support(model) or wire_api in {"chat", "responses"}
-
     return ProviderCapabilities(
         provider=provider,
         model=model,
@@ -188,15 +100,16 @@ def capabilities_from_openai_settings(settings: LLMSettings, *, provider: str = 
         base_url=base_url,
         streaming=True,
         tool_calling=tool_calling,
-        parallel_tool_calls=tool_calling and wire_api == "chat",
-        json_mode=wire_api == "chat",
+        parallel_tool_calls=None,
+        json_mode=None,
         reasoning_effort=bool(effort_levels),
         reasoning_effort_levels=effort_levels,
-        vision=vision,
-        native_pdf=wire_api == "responses",
-        image_generation=image_generation,
+        vision=None,
+        native_pdf=None,
+        image_generation=None,
         stateful_continuation=wire_api == "responses" and bool(settings.responses_stateful_continuation),
-        confidence="known" if provider == "openai" or limitations else "assumed",
+        prompt_caching=None,
+        confidence="api_contract" if not limitations else "configured",
         limitations=tuple(limitations),
     )
 
@@ -204,11 +117,15 @@ def capabilities_from_openai_settings(settings: LLMSettings, *, provider: str = 
 def capabilities_from_anthropic_adapter(adapter: Any) -> ProviderCapabilities:
     model = str(getattr(adapter, "_model", "") or "").strip()
     base_url = str(getattr(adapter, "_base_url", "") or "").strip()
+    cache_editing = bool(
+        getattr(adapter, "_cache_editing_beta_header", "")
+        and not getattr(adapter, "_cache_editing_disabled_reason", "")
+    )
     return ProviderCapabilities(
         provider="anthropic",
         model=model,
         wire_api="anthropic",
-        provider_id="anthropic_off",
+        provider_id="anthropic",
         base_url=base_url,
         streaming=True,
         tool_calling=True,
@@ -216,9 +133,12 @@ def capabilities_from_anthropic_adapter(adapter: Any) -> ProviderCapabilities:
         json_mode=False,
         reasoning_effort=bool(getattr(adapter, "_thinking_budget", None)),
         reasoning_effort_levels=(),
-        vision=True,
-        native_pdf=True,
+        vision=None,
+        native_pdf=None,
         image_generation=False,
+        prompt_caching=True,
+        native_cache_editing=cache_editing,
+        cache_deleted_usage=cache_editing,
         confidence="known",
     )
 
@@ -227,20 +147,31 @@ def combine_fallback_capabilities(adapters: list[Any]) -> ProviderCapabilities:
     children = tuple(capabilities_for_adapter(adapter) for adapter in adapters if adapter is not None)
     if not children:
         return ProviderCapabilities(provider="fallback", tool_calling=False, confidence="unknown", limitations=("no_adapters",))
+    def supported(attribute: str) -> bool | None:
+        values = [getattr(child, attribute) for child in children]
+        if any(value is True for value in values):
+            return True
+        if values and all(value is False for value in values):
+            return False
+        return None
+
     return ProviderCapabilities(
         provider="fallback",
         model=children[0].model,
         wire_api=children[0].wire_api,
-        streaming=any(child.streaming for child in children),
-        tool_calling=any(child.tool_calling for child in children),
-        parallel_tool_calls=any(child.parallel_tool_calls for child in children),
-        json_mode=any(child.json_mode for child in children),
-        reasoning_effort=any(child.reasoning_effort for child in children),
+        streaming=supported("streaming"),
+        tool_calling=supported("tool_calling"),
+        parallel_tool_calls=supported("parallel_tool_calls"),
+        json_mode=supported("json_mode"),
+        reasoning_effort=supported("reasoning_effort"),
         reasoning_effort_levels=next((child.reasoning_effort_levels for child in children if child.reasoning_effort_levels), ()),
-        vision=any(child.vision for child in children),
-        native_pdf=any(child.native_pdf for child in children),
-        image_generation=any(child.image_generation for child in children),
-        stateful_continuation=any(child.stateful_continuation for child in children),
+        vision=supported("vision"),
+        native_pdf=supported("native_pdf"),
+        image_generation=supported("image_generation"),
+        stateful_continuation=supported("stateful_continuation"),
+        prompt_caching=supported("prompt_caching"),
+        native_cache_editing=supported("native_cache_editing"),
+        cache_deleted_usage=supported("cache_deleted_usage"),
         confidence="mixed",
         limitations=tuple(
             sorted({limitation for child in children for limitation in child.limitations})
@@ -260,22 +191,15 @@ def capabilities_for_adapter(adapter: Any) -> ProviderCapabilities:
 
     settings = getattr(adapter, "_settings", None)
     if isinstance(settings, LLMSettings):
-        provider = "custom"
-        host = _host(settings)
-        if "api.openai.com" in host:
-            provider = "openai"
+        provider = str(getattr(settings, "provider", "custom") or "custom")
         return capabilities_from_openai_settings(settings, provider=provider)
 
-    class_name = adapter.__class__.__name__.lower() if adapter is not None else ""
-    if "anthropic" in class_name:
-        return capabilities_from_anthropic_adapter(adapter)
-
-    return ProviderCapabilities(provider=class_name or "unknown", confidence="unknown")
+    return ProviderCapabilities(provider="unknown", confidence="unknown")
 
 
 def require_tool_calling(adapter: Any, *, tool_count: int) -> CapabilityCheck:
     capabilities = capabilities_for_adapter(adapter)
-    if tool_count <= 0 or capabilities.tool_calling:
+    if tool_count <= 0 or capabilities.tool_calling is not False:
         return CapabilityCheck(ok=True, capabilities=capabilities)
 
     detail = f"{capabilities.provider}/{capabilities.model or 'unknown model'} via {capabilities.wire_api or 'unknown API'}"

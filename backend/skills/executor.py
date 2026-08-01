@@ -1,19 +1,8 @@
-"""
-Skill 注入 Context 执行器（DESIGN.md §3.2 动态注入）。
-
-将激活的 Skill 内容注入 Context 的 cinstr 部分。
-
-职责：
-  - 将 SkillManager 的 Layer 2 内容拼入 system prompt
-  - 管理 token 预算分配（active_skills 预算默认 4K）
-  - 多个 Skill 时按优先级裁剪
-  - 注入格式化，确保 LLM 能正确理解 Skill 边界
-"""
+"""Render the always-on Codex-style Skill catalog."""
 
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from backend.skills.manager import SkillManager
 
@@ -23,59 +12,18 @@ logger = logging.getLogger(__name__)
 # so selecting one skill can still load its full SKILL.md later.
 LAYER1_SUMMARY_MAX_CHARS = 8000
 
-# Skill 注入模板
-SKILL_SECTION_HEADER = """
-## Selected Skills
-
-The following SKILL.md instructions were selected for this turn. Follow them
-for the current task. If multiple skills conflict, prefer the most recently
-selected one.
-"""
-
-
 class SkillExecutor:
-    """
-    将 Skills 内容注入 Context。
-
-    使用示例：
-        executor = SkillExecutor(skill_manager)
-        cinstr_addition = executor.build_skill_context(budget=4000)
-        # 将 cinstr_addition 拼接到 system prompt
-    """
+    """Keep lightweight Skill discovery separate from turn-scoped injection."""
 
     def __init__(self, skill_manager: SkillManager) -> None:
         self._manager = skill_manager
-
-    def build_skill_context(self, budget: int = 4000, *, consume: bool = False) -> str:
-        """
-        构建 Skill 注入内容。
-
-        Args:
-            budget: Skill 内容的 token 预算上限
-
-        Returns:
-            需要拼入 system prompt 的 Skill 文本。
-            空字符串表示无激活的 Skill。
-        """
-        active_names = self._manager.get_active_names()
-        if not active_names:
-            return ""
-
-        if consume and hasattr(self._manager, "consume_active_content"):
-            content = self._manager.consume_active_content(budget=budget)
-        else:
-            content = self._manager.get_active_content(budget=budget)
-        if not content:
-            return ""
-
-        return SKILL_SECTION_HEADER + content
 
     def build_layer1_summary(self, max_chars: int = LAYER1_SUMMARY_MAX_CHARS) -> str:
         """
         构建 Layer 1 摘要（始终注入）。
 
-        让 LLM 知道有哪些 Skill 可用（即使未激活），
-        便于推荐用户激活或 auto_detect 使用。
+        Let the model discover available Skills before an exact SKILL.md is
+        selected and injected as contextual user input.
 
         Args:
             max_chars: Layer 1 metadata budget. Defaults to the Codex-like
@@ -90,22 +38,16 @@ class SkillExecutor:
 
         summary = _cap_layer1_summary(summary, max_chars=max_chars)
         return (
-            "\n\n## Available Skills\n"
-            "Skills are reusable SKILL.md workflows. If one clearly helps, call load_skill before substantive work. "
-            "Users can also invoke $skill-name or /skill-name. Do not claim a skill was used unless it was loaded.\n\n"
+            "\n\n## Skills\n"
+            "A skill is a set of instructions provided through a `SKILL.md` source. Below is the list of skills that can be used. Each entry includes a name, description, and source locator.\n"
+            "### Available skills\n"
             + summary
+            + "\n### How to use skills\n"
+            "- Trigger rules: If the user names a skill (with `$SkillName` or plain text) OR the task clearly matches a skill's description shown above, you must use that skill for that turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.\n"
+            "- After deciding to use a skill, read its `SKILL.md` completely before taking task actions. Resolve referenced files relative to that skill directory and load only the references needed for the task.\n"
+            "- Prefer provided scripts, assets, and templates over recreating them. Normal tool permissions still apply.\n"
+            "- If a named skill is missing or cannot be read, say so briefly and continue with the best fallback."
         )
-
-    def get_injection_stats(self) -> dict[str, Any]:
-        """获取注入统计（供 Context Budget 面板使用）。"""
-        active = self._manager.get_active_names()
-        content = self._manager.get_active_content()
-        return {
-            "active_count": len(active),
-            "active_names": active,
-            "estimated_tokens": len(content) // 4 if content else 0,
-        }
-
 
 def _cap_layer1_summary(summary: str, *, max_chars: int) -> str:
     """Cap the always-injected skill index without splitting mid-entry."""
@@ -114,7 +56,7 @@ def _cap_layer1_summary(summary: str, *, max_chars: int) -> str:
     if len(summary) <= max_chars:
         return summary
 
-    notice_template = "\n- ... {omitted} more skill entries omitted by context budget; use list_skills/load_skill if needed."
+    notice_template = "\n- ... {omitted} more skill entries omitted by context budget."
     lines = [line for line in summary.splitlines() if line.strip()]
     kept: list[str] = []
     used = 0

@@ -14,18 +14,54 @@ from backend.version import __version__
 
 
 def build_health_payload(*, bootstrap: Any | None, active_sessions: int) -> dict[str, Any]:
+    core_ready = bootstrap is not None and getattr(bootstrap, "config", None) is not None
+    components: dict[str, Any] = {
+        "core": {"status": "ok" if core_ready else "starting"},
+        "memory": {
+            "status": "ok" if bootstrap is not None and getattr(bootstrap, "file_memory", None) is not None else "degraded"
+        },
+        "skills": {
+            "status": "ok" if bootstrap is not None and getattr(bootstrap, "skill_manager", None) is not None else "degraded"
+        },
+    }
+    mcp_servers: list[dict[str, Any]] = []
+    if bootstrap is not None and getattr(bootstrap, "mcp_manager", None):
+        mcp_servers = bootstrap.mcp_manager.get_all_status()
+    failed_mcp = sum(
+        1
+        for server in mcp_servers
+        if str(server.get("phase") or server.get("status") or "").lower()
+        in {"failed", "error", "auth_required", "expired"}
+    )
+    components["mcp"] = {
+        "status": "degraded" if failed_mcp else "ok",
+        "configured": len(mcp_servers),
+        "failed": failed_mcp,
+    }
+    llm = add_llm_secret_status(build_llm_status_payload())
+    components["llm"] = {
+        "status": "configured" if str(llm.get("active_model") or "").strip() else "degraded",
+        "provider": llm.get("provider") or "",
+        "model": llm.get("active_model") or "",
+        "has_api_key": llm.get("has_api_key"),
+    }
+    degraded = any(
+        component.get("status") == "degraded"
+        for component in components.values()
+        if isinstance(component, dict)
+    )
     result: dict[str, Any] = {
-        "status": "ok",
+        "status": "starting" if not core_ready else "degraded" if degraded else "ok",
+        "ready": core_ready,
         "version": __version__,
         "active_sessions": active_sessions,
+        "components": components,
     }
     if bootstrap is not None:
-        if bootstrap.mcp_manager:
-            result["mcp_servers"] = bootstrap.mcp_manager.get_all_status()
+        if mcp_servers:
+            result["mcp_servers"] = mcp_servers
         if bootstrap.skill_manager:
             result["skills_count"] = len(bootstrap.skill_manager.list_all())
-        if bootstrap.rag_pipeline:
-            result["rag"] = bootstrap.rag_pipeline.stats
     return result
 
 
@@ -38,7 +74,6 @@ def build_status_payload(
     mcp_mgr = bootstrap.mcp_manager if bootstrap else None
     skill_mgr = bootstrap.skill_manager if bootstrap else None
     file_mem = bootstrap.file_memory if bootstrap else None
-    rag = bootstrap.rag_pipeline if bootstrap else None
     return {
         "mcp": mcp_mgr.get_all_status() if mcp_mgr else [],
         "skills": skill_mgr.list_all() if skill_mgr else [],
@@ -47,7 +82,6 @@ def build_status_payload(
             "available": file_mem is not None,
             "files": file_mem.list_files() if file_mem else [],
         },
-        "rag": rag.stats if rag else {"available": False},
         "capabilities": capability_payload,
     }
 

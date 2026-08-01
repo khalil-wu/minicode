@@ -78,6 +78,7 @@ class ParentNotification:
     parent_run_id: str
     conversation_id: str
     subagent_id: str
+    mailbox_epoch: int = 0
     kind: str = "subagent_completed"
     payload: dict[str, Any] = field(default_factory=dict)
     status: NotificationStatus = "pending"
@@ -102,6 +103,7 @@ class ParentNotification:
             parent_run_id=str(data.get("parent_run_id") or ""),
             conversation_id=str(data.get("conversation_id") or ""),
             subagent_id=str(data.get("subagent_id") or ""),
+            mailbox_epoch=int(data.get("mailbox_epoch") or 0),
             kind=str(data.get("kind") or "subagent_completed"),
             payload=dict(data.get("payload") or {}),
             status=status,  # type: ignore[arg-type]
@@ -200,6 +202,7 @@ class ParentNotificationOutbox:
         kind: str = "subagent_completed",
         idempotency_key: str = "",
         notification_id: str | None = None,
+        mailbox_epoch: int = 0,
     ) -> ParentNotification:
         clean_subagent_id = str(subagent_id or "").strip()
         if not clean_subagent_id:
@@ -225,6 +228,7 @@ class ParentNotificationOutbox:
                 parent_run_id=self.parent_run_id,
                 conversation_id=self.conversation_id,
                 subagent_id=clean_subagent_id,
+                mailbox_epoch=max(0, int(mailbox_epoch or 0)),
                 kind=str(kind or "subagent_completed"),
                 payload=dict(payload or {}),
                 status="pending",
@@ -293,7 +297,7 @@ class ParentNotificationOutbox:
         return [
             item
             for item in self.list_notifications()
-            if item.status in {"pending", "failed"}
+            if item.status in {"pending", "failed", "delivered"}
         ]
 
 
@@ -306,6 +310,7 @@ def enqueue_parent_notification(
     kind: str = "subagent_completed",
     idempotency_key: str = "",
     base_dir: Path | None = None,
+    mailbox_epoch: int = 0,
 ) -> ParentNotification:
     outbox = ParentNotificationOutbox(
         parent_run_id=parent_run_id,
@@ -317,6 +322,7 @@ def enqueue_parent_notification(
         payload=payload,
         kind=kind,
         idempotency_key=idempotency_key,
+        mailbox_epoch=mailbox_epoch,
     )
 
 

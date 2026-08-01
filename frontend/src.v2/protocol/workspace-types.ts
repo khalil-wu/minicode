@@ -58,6 +58,7 @@ export type WorkspaceClientCommandType =
   | "env.set"
   | "env.delete"
   | "git.pr_status"
+  | "git.pr_automation.set"
   | "checkpoint.list"
   | "checkpoint.rewind"
   | "checkpoint.run.list"
@@ -99,6 +100,7 @@ export interface GitPrStatusEvent {
   pr?: { number: number; title: string; state: string; url: string; branch: string } | null;
   checks?: { name: string; status: string; url: string }[];
   error?: string;
+  automation?: { auto_fix?: boolean; auto_merge?: boolean };
 }
 
 export interface GitDiffFilePayload {
@@ -184,6 +186,12 @@ export interface EnvSetCommand {
 export interface EnvDeleteCommand {
   type: "env.delete";
   name: string;
+}
+
+export interface GitPrAutomationSetCommand {
+  type: "git.pr_automation.set";
+  auto_fix?: boolean;
+  auto_merge?: boolean;
 }
 
 export interface RunCheckpointListCommand {

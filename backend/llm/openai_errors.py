@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 
 _TRANSIENT_ERROR_SUBSTRINGS = (
     "concurrency limit exceeded",
@@ -160,6 +162,35 @@ def _is_request_metadata_unsupported_error(exc: Exception) -> bool:
     return bool(status_code in {400, 422} and mentions_request_metadata and mentions_incompatibility)
 
 
+def _is_stream_options_unsupported_error(exc: Exception) -> bool:
+    text = _error_text(exc)
+    status_code = _error_status_code(exc)
+    mentions_stream_options = any(
+        token in text
+        for token in ("stream_options", "stream options", "include_usage")
+    )
+    mentions_incompatibility = any(
+        token in text
+        for token in (
+            "invalid",
+            "unsupported",
+            "not supported",
+            "not support",
+            "unrecognized",
+            "unknown parameter",
+            "unknown field",
+            "extra inputs",
+            "badrequest",
+            "bad request",
+        )
+    )
+    return bool(
+        status_code in {400, 422}
+        and mentions_stream_options
+        and mentions_incompatibility
+    )
+
+
 def _is_prompt_cache_retention_unsupported_error(exc: Exception) -> bool:
     text = _error_text(exc)
     status_code = _error_status_code(exc)
@@ -212,3 +243,25 @@ def _is_transient_gateway_error(exc: Exception) -> bool:
     return bool(status_code in {408, 409, 425, 429, 500, 502, 503, 504}) or any(
         token in text for token in _TRANSIENT_ERROR_SUBSTRINGS
     )
+
+
+def _retry_after_seconds(exc: Exception, *, maximum: float = 300.0) -> float:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    raw = None
+    if headers is not None:
+        raw = headers.get("retry-after")
+        if raw is None:
+            raw = headers.get("Retry-After")
+    if raw is None:
+        return 0.0
+    try:
+        return max(0.0, min(float(raw), maximum))
+    except (TypeError, ValueError):
+        try:
+            target = parsedate_to_datetime(str(raw))
+            if target.tzinfo is None:
+                target = target.replace(tzinfo=UTC)
+            return max(0.0, min((target - datetime.now(UTC)).total_seconds(), maximum))
+        except (TypeError, ValueError, OverflowError):
+            return 0.0

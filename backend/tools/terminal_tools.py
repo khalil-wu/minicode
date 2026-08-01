@@ -3,7 +3,11 @@ from __future__ import annotations
 from typing import Any
 
 from backend.permissions.context import ToolExecutionContext
-from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
+from backend.tools.base import MAX_TOOL_RESULT_BYTES, BaseTool, PermissionLevel, ToolResult, ToolSchema
+from backend.tools.output_limits import (
+    CLAUDE_BASH_OUTPUT_DEFAULT_CHARS,
+    CLAUDE_BASH_OUTPUT_MAX_CHARS,
+)
 from backend.tools.untrusted import wrap_untrusted_content
 
 
@@ -11,13 +15,16 @@ class ReadTerminalTool(BaseTool):
     """Read a bounded snapshot of an existing desktop terminal session."""
 
     name = "read_terminal"
+    result_kind = "terminal"
+    activity_kind = "commandExecution"
+    display_label = "Read terminal"
     description = (
         "Read recent output from an existing terminal session. Use this to inspect "
         "dev server, build, test, or shell status that is already visible in the terminal panel."
     )
     permission = PermissionLevel.AUTO
     read_only = True
-    max_result_chars = None
+    max_result_chars = MAX_TOOL_RESULT_BYTES
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -32,7 +39,9 @@ class ReadTerminalTool(BaseTool):
                     },
                     "max_chars": {
                         "type": "integer",
-                        "description": "Maximum recent output characters to return. Default 20000.",
+                        "minimum": 1,
+                        "maximum": CLAUDE_BASH_OUTPUT_MAX_CHARS,
+                        "description": f"Maximum recent output characters to return. Default {CLAUDE_BASH_OUTPUT_DEFAULT_CHARS}.",
                     },
                 },
             },
@@ -59,10 +68,15 @@ class ReadTerminalTool(BaseTool):
             return self._error_result("No terminal session is available for this conversation.")
 
         try:
-            max_chars = int(args.get("max_chars") or 20_000)
+            max_chars = int(args.get("max_chars") or CLAUDE_BASH_OUTPUT_DEFAULT_CHARS)
         except (TypeError, ValueError):
-            max_chars = 20_000
-        snapshot = manager.snapshot(session_id, max_chars=max_chars)
+            max_chars = CLAUDE_BASH_OUTPUT_DEFAULT_CHARS
+        max_chars = max(1, min(max_chars, CLAUDE_BASH_OUTPUT_MAX_CHARS))
+        snapshot = manager.snapshot(
+            session_id,
+            max_chars=max_chars,
+            conversation_id=conv_id,
+        )
         if snapshot is None:
             return self._error_result(f"Terminal session '{session_id}' not found.")
 

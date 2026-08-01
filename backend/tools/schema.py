@@ -49,6 +49,10 @@ def _strip_unavailable_tool_references(description: str, visible: set[str]) -> s
         "tool_describe",
         "tool_call",
         "ask_user",
+        "task_status",
+        "task_stop",
+        "send_message",
+        "sleep",
     }
     for name in sorted(known_tool_names - visible, key=len, reverse=True):
         pattern = re.compile(rf"(?<![\w.-]){re.escape(name)}(?![\w.-])")

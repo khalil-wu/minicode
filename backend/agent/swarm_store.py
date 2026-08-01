@@ -18,7 +18,7 @@ from backend.agent.swarm_migrations import (
     SchemaMigrationRunner,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 SCHEMA_MIGRATIONS = (
     SchemaMigration(1, """
         CREATE TABLE IF NOT EXISTS metadata (
@@ -117,6 +117,44 @@ SCHEMA_MIGRATIONS = (
             payload_json TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_subagent_results_status ON subagent_results(status);
+    """),
+    SchemaMigration(4, """
+        ALTER TABLE agent_runs ADD COLUMN owner_token TEXT NOT NULL DEFAULT '';
+        ALTER TABLE subagent_runs ADD COLUMN owner_token TEXT NOT NULL DEFAULT '';
+        ALTER TABLE subagent_runs ADD COLUMN agent_path TEXT NOT NULL DEFAULT '';
+        ALTER TABLE subagent_runs ADD COLUMN mailbox_epoch INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE subagent_results ADD COLUMN owner_token TEXT NOT NULL DEFAULT '';
+        ALTER TABLE subagent_results ADD COLUMN agent_path TEXT NOT NULL DEFAULT '';
+        ALTER TABLE subagent_results ADD COLUMN mailbox_epoch INTEGER NOT NULL DEFAULT 0;
+        CREATE INDEX IF NOT EXISTS idx_agent_runs_owner ON agent_runs(owner_token);
+        CREATE INDEX IF NOT EXISTS idx_subagent_runs_owner ON subagent_runs(owner_token);
+        CREATE TABLE IF NOT EXISTS runtime_leases (
+            runtime_instance_id TEXT PRIMARY KEY,
+            owner_token TEXT NOT NULL UNIQUE,
+            process_id INTEGER NOT NULL,
+            process_start_identity TEXT NOT NULL,
+            heartbeat_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_leases_expiry ON runtime_leases(expires_at);
+    """),
+    SchemaMigration(5, """
+        CREATE TABLE IF NOT EXISTS mailbox_deliveries (
+            message_id TEXT NOT NULL REFERENCES messages(message_id) ON DELETE CASCADE,
+            participant_id TEXT NOT NULL,
+            mailbox_epoch INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            claim_owner TEXT NOT NULL DEFAULT '',
+            claim_token TEXT NOT NULL DEFAULT '',
+            claimed_at INTEGER NOT NULL DEFAULT 0,
+            lease_expires_at INTEGER NOT NULL DEFAULT 0,
+            acked_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (message_id, participant_id, mailbox_epoch)
+        );
+        CREATE INDEX IF NOT EXISTS idx_mailbox_deliveries_claim
+            ON mailbox_deliveries(participant_id, mailbox_epoch, status, lease_expires_at);
+        CREATE INDEX IF NOT EXISTS idx_mailbox_deliveries_owner
+            ON mailbox_deliveries(claim_owner, claim_token);
     """),
 )
 
@@ -232,7 +270,7 @@ class FileSwarmStore:
             synchronous = conn.execute("PRAGMA synchronous").fetchone()
             page_size = conn.execute("PRAGMA page_size").fetchone()
             # Table row counts for a quick health snapshot
-            tables = ["tasks", "agent_runs", "subagent_runs", "messages", "teams"]
+            tables = ["tasks", "agent_runs", "subagent_runs", "messages", "mailbox_deliveries", "teams"]
             counts: dict[str, int] = {}
             for t in tables:
                 try:
@@ -280,25 +318,179 @@ class FileSwarmStore:
         except OSError:
             return 0
 
-    def upsert_agent_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def claim_runtime_lease(
+        self,
+        *,
+        runtime_instance_id: str,
+        requested_owner_token: str,
+        process_id: int,
+        process_start_identity: str,
+        now_ms: int,
+        ttl_ms: int,
+    ) -> dict[str, Any]:
+        """Claim an expiring runtime lease or reuse this process's lease.
+
+        ``runtime_instance_id`` is stable within one MiniCode process. The
+        opaque owner token is the fencing value stored on every mutable run.
+        A live lease owned by a different process cannot be stolen.
+        """
+        instance_id = str(runtime_instance_id or "").strip()
+        requested = str(requested_owner_token or "").strip()
+        start_identity = str(process_start_identity or "").strip()
+        if not instance_id or not requested:
+            raise ValueError("runtime lease requires instance id and owner token")
+        expires_at = int(now_ms) + max(1_000, int(ttl_ms))
+        with self._write() as connection:
+            row = connection.execute(
+                "SELECT * FROM runtime_leases WHERE runtime_instance_id = ?",
+                (instance_id,),
+            ).fetchone()
+            if row is not None:
+                same_process = bool(
+                    start_identity
+                    and int(row["process_id"]) == int(process_id)
+                    and str(row["process_start_identity"] or "") == start_identity
+                )
+                if same_process:
+                    owner_token = str(row["owner_token"])
+                    connection.execute(
+                        """
+                        UPDATE runtime_leases
+                        SET heartbeat_at = ?, expires_at = ?
+                        WHERE runtime_instance_id = ? AND owner_token = ?
+                        """,
+                        (int(now_ms), expires_at, instance_id, owner_token),
+                    )
+                    return {
+                        "acquired": True,
+                        "reused": True,
+                        "runtime_instance_id": instance_id,
+                        "owner_token": owner_token,
+                        "process_id": int(process_id),
+                        "process_start_identity": start_identity,
+                        "heartbeat_at": int(now_ms),
+                        "expires_at": expires_at,
+                    }
+                if int(row["expires_at"]) > int(now_ms):
+                    return {
+                        "acquired": False,
+                        "reused": False,
+                        **dict(row),
+                    }
+            connection.execute(
+                """
+                INSERT INTO runtime_leases(
+                    runtime_instance_id, owner_token, process_id,
+                    process_start_identity, heartbeat_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(runtime_instance_id) DO UPDATE SET
+                    owner_token = excluded.owner_token,
+                    process_id = excluded.process_id,
+                    process_start_identity = excluded.process_start_identity,
+                    heartbeat_at = excluded.heartbeat_at,
+                    expires_at = excluded.expires_at
+                """,
+                (
+                    instance_id,
+                    requested,
+                    int(process_id),
+                    start_identity,
+                    int(now_ms),
+                    expires_at,
+                ),
+            )
+        return {
+            "acquired": True,
+            "reused": False,
+            "runtime_instance_id": instance_id,
+            "owner_token": requested,
+            "process_id": int(process_id),
+            "process_start_identity": start_identity,
+            "heartbeat_at": int(now_ms),
+            "expires_at": expires_at,
+        }
+
+    def heartbeat_runtime_lease(
+        self,
+        *,
+        runtime_instance_id: str,
+        owner_token: str,
+        process_id: int,
+        process_start_identity: str,
+        now_ms: int,
+        ttl_ms: int,
+    ) -> bool:
+        expires_at = int(now_ms) + max(1_000, int(ttl_ms))
+        with self._write() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE runtime_leases
+                SET heartbeat_at = ?, expires_at = ?
+                WHERE runtime_instance_id = ? AND owner_token = ?
+                  AND process_id = ? AND process_start_identity = ?
+                """,
+                (
+                    int(now_ms),
+                    expires_at,
+                    str(runtime_instance_id or "").strip(),
+                    str(owner_token or "").strip(),
+                    int(process_id),
+                    str(process_start_identity or "").strip(),
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def list_runtime_leases(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM runtime_leases ORDER BY runtime_instance_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def release_runtime_lease(self, *, runtime_instance_id: str, owner_token: str) -> bool:
+        with self._write() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM runtime_leases
+                WHERE runtime_instance_id = ? AND owner_token = ?
+                """,
+                (
+                    str(runtime_instance_id or "").strip(),
+                    str(owner_token or "").strip(),
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def upsert_agent_run(
+        self,
+        payload: dict[str, Any],
+        *,
+        expected_owner_token: str | None = None,
+        allow_takeover_terminal: bool = False,
+    ) -> dict[str, Any] | None:
         record = dict(payload)
         run_id = str(record.get("run_id") or "").strip()
         if not run_id:
             raise ValueError("agent run requires run_id")
+        owner_token = str(record.get("runtime_owner_token") or "").strip()
         with self._write() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
                 INSERT INTO agent_runs(
                     run_id, conversation_id, parent_run_id, task_id,
-                    status, updated_at, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    status, updated_at, payload_json, owner_token
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id) DO UPDATE SET
                     conversation_id = excluded.conversation_id,
                     parent_run_id = excluded.parent_run_id,
                     task_id = excluded.task_id,
                     status = excluded.status,
                     updated_at = excluded.updated_at,
-                    payload_json = excluded.payload_json
+                    payload_json = excluded.payload_json,
+                    owner_token = excluded.owner_token
+                WHERE ? IS NULL
+                   OR agent_runs.owner_token = ?
+                   OR (? = 1 AND agent_runs.status != 'running')
                 """,
                 (
                     run_id,
@@ -308,9 +500,13 @@ class FileSwarmStore:
                     str(record.get("status") or "running"),
                     _epoch_ms(),
                     _json(record),
+                    owner_token,
+                    expected_owner_token,
+                    str(expected_owner_token or ""),
+                    1 if allow_takeover_terminal else 0,
                 ),
             )
-        return record
+        return record if cursor.rowcount == 1 else None
 
     def list_agent_runs(
         self,
@@ -338,25 +534,41 @@ class FileSwarmStore:
             ).fetchall()
         return [json.loads(row["payload_json"]) for row in rows]
 
-    def upsert_subagent(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def upsert_subagent(
+        self,
+        payload: dict[str, Any],
+        *,
+        expected_owner_token: str | None = None,
+        allow_takeover_terminal: bool = False,
+    ) -> dict[str, Any] | None:
         record = dict(payload)
         subagent_id = str(record.get("subagent_id") or "").strip()
         if not subagent_id:
             raise ValueError("subagent run requires subagent_id")
+        owner_token = str(record.get("runtime_owner_token") or "").strip()
+        agent_path = str(record.get("agent_path") or "").strip()
+        mailbox_epoch = max(0, int(record.get("mailbox_epoch") or 0))
         with self._write() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
                 INSERT INTO subagent_runs(
                     subagent_id, parent_run_id, task_id, workflow_id,
-                    status, updated_at, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    status, updated_at, payload_json, owner_token,
+                    agent_path, mailbox_epoch
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(subagent_id) DO UPDATE SET
                     parent_run_id = excluded.parent_run_id,
                     task_id = excluded.task_id,
                     workflow_id = excluded.workflow_id,
                     status = excluded.status,
                     updated_at = excluded.updated_at,
-                    payload_json = excluded.payload_json
+                    payload_json = excluded.payload_json,
+                    owner_token = excluded.owner_token,
+                    agent_path = excluded.agent_path,
+                    mailbox_epoch = excluded.mailbox_epoch
+                WHERE ? IS NULL
+                   OR subagent_runs.owner_token = ?
+                   OR (? = 1 AND subagent_runs.status != 'running')
                 """,
                 (
                     subagent_id,
@@ -366,9 +578,15 @@ class FileSwarmStore:
                     str(record.get("status") or "running"),
                     _epoch_ms(),
                     _json(record),
+                    owner_token,
+                    agent_path,
+                    mailbox_epoch,
+                    expected_owner_token,
+                    str(expected_owner_token or ""),
+                    1 if allow_takeover_terminal else 0,
                 ),
             )
-        return record
+        return record if cursor.rowcount == 1 else None
 
     def list_subagents(
         self,
@@ -396,30 +614,58 @@ class FileSwarmStore:
             ).fetchall()
         return [json.loads(row["payload_json"]) for row in rows]
 
-    def upsert_subagent_result(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def upsert_subagent_result(
+        self,
+        payload: dict[str, Any],
+        *,
+        expected_owner_token: str | None = None,
+        agent_path: str = "",
+        mailbox_epoch: int = 0,
+    ) -> dict[str, Any] | None:
         record = dict(payload)
         subagent_id = str(record.get("subagent_id") or "").strip()
         if not subagent_id:
             raise ValueError("subagent result requires subagent_id")
+        owner_token = str(expected_owner_token or record.get("runtime_owner_token") or "").strip()
+        expected_path = str(agent_path or record.get("agent_path") or "").strip()
+        expected_epoch = max(0, int(mailbox_epoch or record.get("mailbox_epoch") or 0))
         with self._write() as connection:
-            connection.execute(
+            if expected_owner_token is not None:
+                current = connection.execute(
+                    """
+                    SELECT 1 FROM subagent_runs
+                    WHERE subagent_id = ? AND owner_token = ?
+                      AND agent_path = ? AND mailbox_epoch = ?
+                    """,
+                    (subagent_id, owner_token, expected_path, expected_epoch),
+                ).fetchone()
+                if current is None:
+                    return None
+            cursor = connection.execute(
                 """
                 INSERT INTO subagent_results(
-                    subagent_id, status, completed_at, payload_json
-                ) VALUES (?, ?, ?, ?)
+                    subagent_id, status, completed_at, payload_json,
+                    owner_token, agent_path, mailbox_epoch
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(subagent_id) DO UPDATE SET
                     status = excluded.status,
                     completed_at = excluded.completed_at,
-                    payload_json = excluded.payload_json
+                    payload_json = excluded.payload_json,
+                    owner_token = excluded.owner_token,
+                    agent_path = excluded.agent_path,
+                    mailbox_epoch = excluded.mailbox_epoch
                 """,
                 (
                     subagent_id,
                     str(record.get("status") or ""),
                     int(record.get("completed_at") or _epoch_ms()),
                     _json(record),
+                    owner_token,
+                    expected_path,
+                    expected_epoch,
                 ),
             )
-        return record
+        return record if cursor.rowcount == 1 else None
 
     def get_subagent_result(self, subagent_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -429,8 +675,20 @@ class FileSwarmStore:
             ).fetchone()
         return json.loads(row["payload_json"]) if row is not None else None
 
-    def delete_subagent_result(self, subagent_id: str) -> bool:
+    def delete_subagent_result(
+        self,
+        subagent_id: str,
+        *,
+        expected_owner_token: str | None = None,
+    ) -> bool:
         with self._write() as connection:
+            if expected_owner_token is not None:
+                owner = connection.execute(
+                    "SELECT owner_token FROM subagent_runs WHERE subagent_id = ?",
+                    (subagent_id,),
+                ).fetchone()
+                if owner is None or str(owner["owner_token"] or "") != str(expected_owner_token):
+                    return False
             cursor = connection.execute(
                 "DELETE FROM subagent_results WHERE subagent_id = ?",
                 (subagent_id,),
@@ -451,20 +709,21 @@ class FileSwarmStore:
         interrupted_at: int,
         summary: str,
         current_instance_id: str,
-        active_process_ids: set[int],
+        current_owner_token: str,
+        current_process_id: int,
+        current_process_start_identity: str,
+        active_owner_tokens: set[str],
     ) -> dict[str, list[dict[str, Any]]]:
         with self._write() as connection:
             run_rows = connection.execute(
-                "SELECT run_id, payload_json FROM agent_runs"
+                "SELECT run_id, owner_token, payload_json FROM agent_runs"
             ).fetchall()
             runs: list[dict[str, Any]] = []
             for row in run_rows:
                 payload = json.loads(row["payload_json"])
-                owner_id = str(payload.get("runtime_instance_id") or "")
-                owner_process_id = int(payload.get("runtime_process_id") or 0)
-                owner_is_active = (
-                    owner_id == current_instance_id
-                    or owner_process_id in active_process_ids
+                previous_owner_token = str(row["owner_token"] or "")
+                owner_is_active = bool(
+                    previous_owner_token and previous_owner_token in active_owner_tokens
                 )
                 if payload.get("status") == "running" and not owner_is_active:
                     payload.update({
@@ -472,45 +731,85 @@ class FileSwarmStore:
                         "phase": "final",
                         "completed_at": interrupted_at,
                         "summary": summary,
-                        "requires_attention": True,
+                        "runtime_instance_id": current_instance_id,
+                        "runtime_process_id": int(current_process_id),
+                        "runtime_process_start_identity": current_process_start_identity,
+                        "runtime_owner_token": current_owner_token,
                     })
-                    connection.execute(
+                    cursor = connection.execute(
                         """
                         UPDATE agent_runs
-                        SET status = 'interrupted', updated_at = ?, payload_json = ?
-                        WHERE run_id = ?
+                        SET status = 'interrupted', updated_at = ?, payload_json = ?,
+                            owner_token = ?
+                        WHERE run_id = ? AND status = 'running' AND owner_token = ?
                         """,
-                        (interrupted_at, _json(payload), row["run_id"]),
+                        (
+                            interrupted_at,
+                            _json(payload),
+                            current_owner_token,
+                            row["run_id"],
+                            previous_owner_token,
+                        ),
                     )
+                    if cursor.rowcount != 1:
+                        latest = connection.execute(
+                            "SELECT payload_json FROM agent_runs WHERE run_id = ?",
+                            (row["run_id"],),
+                        ).fetchone()
+                        payload = json.loads(latest["payload_json"])
                 runs.append(payload)
 
             subagent_rows = connection.execute(
-                "SELECT subagent_id, payload_json FROM subagent_runs"
+                """
+                SELECT subagent_id, owner_token, agent_path, mailbox_epoch, payload_json
+                FROM subagent_runs
+                """
             ).fetchall()
             subagents: list[dict[str, Any]] = []
             for row in subagent_rows:
                 payload = json.loads(row["payload_json"])
-                owner_id = str(payload.get("runtime_instance_id") or "")
-                owner_process_id = int(payload.get("runtime_process_id") or 0)
-                owner_is_active = (
-                    owner_id == current_instance_id
-                    or owner_process_id in active_process_ids
+                previous_owner_token = str(row["owner_token"] or "")
+                owner_is_active = bool(
+                    previous_owner_token and previous_owner_token in active_owner_tokens
                 )
                 if payload.get("status") == "running" and not owner_is_active:
                     payload.update({
                         "status": "interrupted",
                         "completed_at": interrupted_at,
                         "result_summary": summary,
-                        "requires_attention": True,
+                        "runtime_instance_id": current_instance_id,
+                        "runtime_process_id": int(current_process_id),
+                        "runtime_process_start_identity": current_process_start_identity,
+                        "runtime_owner_token": current_owner_token,
                     })
-                    connection.execute(
+                    agent_path = str(payload.get("agent_path") or row["agent_path"] or "")
+                    mailbox_epoch = max(
+                        0,
+                        int(payload.get("mailbox_epoch") or row["mailbox_epoch"] or 0),
+                    )
+                    cursor = connection.execute(
                         """
                         UPDATE subagent_runs
-                        SET status = 'interrupted', updated_at = ?, payload_json = ?
-                        WHERE subagent_id = ?
+                        SET status = 'interrupted', updated_at = ?, payload_json = ?,
+                            owner_token = ?, agent_path = ?, mailbox_epoch = ?
+                        WHERE subagent_id = ? AND status = 'running' AND owner_token = ?
                         """,
-                        (interrupted_at, _json(payload), row["subagent_id"]),
+                        (
+                            interrupted_at,
+                            _json(payload),
+                            current_owner_token,
+                            agent_path,
+                            mailbox_epoch,
+                            row["subagent_id"],
+                            previous_owner_token,
+                        ),
                     )
+                    if cursor.rowcount != 1:
+                        latest = connection.execute(
+                            "SELECT payload_json FROM subagent_runs WHERE subagent_id = ?",
+                            (row["subagent_id"],),
+                        ).fetchone()
+                        payload = json.loads(latest["payload_json"])
                 subagents.append(payload)
 
             result_rows = connection.execute(
@@ -562,6 +861,13 @@ class FileSwarmStore:
                 "conversation_id": conversation_id,
                 "team_name": str(payload.get("team_name") or ""),
                 "task_id": str(payload.get("task_id") or ""),
+                "sender_mailbox_epoch": max(0, int(payload.get("sender_mailbox_epoch") or 0)),
+                "recipient_mailbox_epoch": max(0, int(payload.get("recipient_mailbox_epoch") or 0)),
+                "recipient_mailbox_epochs": {
+                    str(key): max(0, int(value or 0))
+                    for key, value in (payload.get("recipient_mailbox_epochs") or {}).items()
+                    if str(key).strip()
+                } if isinstance(payload.get("recipient_mailbox_epochs"), dict) else {},
                 "created_at": int(payload.get("created_at") or _epoch_ms()),
                 "seq": self._next_seq(connection, conversation_id),
             }
@@ -602,7 +908,7 @@ class FileSwarmStore:
             clauses.append("conversation_id = ?")
             values.append(conversation_id)
         if participant_id:
-            clauses.append("(sender_id = ? OR recipient_id = ?)")
+            clauses.append("(sender_id = ? OR recipient_id = ? OR recipient_id IN ('all', '*'))")
             values.extend((participant_id, participant_id))
         if since_seq > 0:
             clauses.append("seq > ?")
@@ -620,6 +926,189 @@ class FileSwarmStore:
                 (*values, bounded_limit),
             ).fetchall()
         return [json.loads(row["payload_json"]) for row in reversed(rows)]
+
+    @staticmethod
+    def _message_targets_incarnation(
+        message: dict[str, Any],
+        *,
+        participant_id: str,
+        mailbox_epoch: int,
+    ) -> bool:
+        recipient = str(message.get("recipient_id") or "")
+        if recipient in {"all", "*"}:
+            epochs = message.get("recipient_mailbox_epochs")
+            if isinstance(epochs, dict) and participant_id in epochs:
+                return int(epochs.get(participant_id) or 0) == mailbox_epoch
+            return mailbox_epoch <= 1
+        if recipient != participant_id:
+            return False
+        target_epoch = int(message.get("recipient_mailbox_epoch") or 0)
+        return target_epoch == mailbox_epoch or (target_epoch == 0 and mailbox_epoch <= 1)
+
+    def claim_messages(
+        self,
+        *,
+        participant_id: str,
+        mailbox_epoch: int,
+        claim_owner: str,
+        conversation_id: str = "",
+        since_seq: int = 0,
+        limit: int = 100,
+        now_ms: int | None = None,
+        lease_ms: int = 30_000,
+    ) -> list[dict[str, Any]]:
+        """Atomically claim incoming messages for one agent incarnation.
+
+        Claims are exclusive until acknowledged or their lease expires. The
+        returned delivery metadata is intentionally separate from the message
+        payload so mailbox history remains immutable.
+        """
+        participant = str(participant_id or "").strip()
+        owner = str(claim_owner or "").strip()
+        if not participant or not owner:
+            raise ValueError("mailbox claim requires participant_id and claim_owner")
+        epoch = max(0, int(mailbox_epoch or 0))
+        now = int(now_ms if now_ms is not None else _epoch_ms())
+        expires_at = now + max(1_000, int(lease_ms))
+        bounded_limit = max(1, min(int(limit or 100), 100))
+        clauses = ["(recipient_id = ? OR recipient_id IN ('all', '*'))"]
+        values: list[Any] = [participant]
+        if conversation_id:
+            clauses.append("conversation_id = ?")
+            values.append(str(conversation_id))
+        if since_seq > 0:
+            clauses.append("seq > ?")
+            values.append(max(0, int(since_seq)))
+        where = " AND ".join(clauses)
+
+        claimed: list[dict[str, Any]] = []
+        with self._write() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT message_id, payload_json
+                FROM messages
+                WHERE {where}
+                ORDER BY seq ASC, created_at ASC, message_id ASC
+                LIMIT 1000
+                """,
+                tuple(values),
+            ).fetchall()
+            for row in rows:
+                message = json.loads(row["payload_json"])
+                if not self._message_targets_incarnation(
+                    message,
+                    participant_id=participant,
+                    mailbox_epoch=epoch,
+                ):
+                    continue
+                delivery = connection.execute(
+                    """
+                    SELECT status, claim_owner, claim_token, lease_expires_at
+                    FROM mailbox_deliveries
+                    WHERE message_id = ? AND participant_id = ? AND mailbox_epoch = ?
+                    """,
+                    (row["message_id"], participant, epoch),
+                ).fetchone()
+                if delivery is not None:
+                    status = str(delivery["status"] or "")
+                    if status == "acked":
+                        continue
+                    if status == "claimed" and int(delivery["lease_expires_at"] or 0) > now:
+                        continue
+
+                claim_token = _new_id("claim")
+                connection.execute(
+                    """
+                    INSERT INTO mailbox_deliveries(
+                        message_id, participant_id, mailbox_epoch, status,
+                        claim_owner, claim_token, claimed_at, lease_expires_at, acked_at
+                    ) VALUES (?, ?, ?, 'claimed', ?, ?, ?, ?, 0)
+                    ON CONFLICT(message_id, participant_id, mailbox_epoch) DO UPDATE SET
+                        status = 'claimed',
+                        claim_owner = excluded.claim_owner,
+                        claim_token = excluded.claim_token,
+                        claimed_at = excluded.claimed_at,
+                        lease_expires_at = excluded.lease_expires_at,
+                        acked_at = 0
+                    """,
+                    (
+                        row["message_id"], participant, epoch, owner,
+                        claim_token, now, expires_at,
+                    ),
+                )
+                claimed.append({
+                    "message": message,
+                    "participant_id": participant,
+                    "mailbox_epoch": epoch,
+                    "claim_owner": owner,
+                    "claim_token": claim_token,
+                    "lease_expires_at": expires_at,
+                })
+                if len(claimed) >= bounded_limit:
+                    break
+        return claimed
+
+    def ack_message_claims(
+        self,
+        claims: list[dict[str, Any]],
+        *,
+        claim_owner: str,
+        acked_at: int | None = None,
+    ) -> int:
+        owner = str(claim_owner or "").strip()
+        if not owner or not claims:
+            return 0
+        now = int(acked_at if acked_at is not None else _epoch_ms())
+        count = 0
+        with self._write() as connection:
+            for claim in claims:
+                cursor = connection.execute(
+                    """
+                    UPDATE mailbox_deliveries
+                    SET status = 'acked', acked_at = ?, lease_expires_at = 0
+                    WHERE message_id = ? AND participant_id = ? AND mailbox_epoch = ?
+                      AND status = 'claimed' AND claim_owner = ? AND claim_token = ?
+                    """,
+                    (
+                        now,
+                        str(claim.get("message_id") or ""),
+                        str(claim.get("participant_id") or ""),
+                        max(0, int(claim.get("mailbox_epoch") or 0)),
+                        owner,
+                        str(claim.get("claim_token") or ""),
+                    ),
+                )
+                count += max(0, int(cursor.rowcount or 0))
+        return count
+
+    def release_message_claims(
+        self,
+        claims: list[dict[str, Any]],
+        *,
+        claim_owner: str,
+    ) -> int:
+        owner = str(claim_owner or "").strip()
+        if not owner or not claims:
+            return 0
+        count = 0
+        with self._write() as connection:
+            for claim in claims:
+                cursor = connection.execute(
+                    """
+                    DELETE FROM mailbox_deliveries
+                    WHERE message_id = ? AND participant_id = ? AND mailbox_epoch = ?
+                      AND status = 'claimed' AND claim_owner = ? AND claim_token = ?
+                    """,
+                    (
+                        str(claim.get("message_id") or ""),
+                        str(claim.get("participant_id") or ""),
+                        max(0, int(claim.get("mailbox_epoch") or 0)),
+                        owner,
+                        str(claim.get("claim_token") or ""),
+                    ),
+                )
+                count += max(0, int(cursor.rowcount or 0))
+        return count
 
     def create_task(self, payload: dict[str, Any]) -> dict[str, Any]:
         conversation_id = str(payload.get("conversation_id") or "").strip()
@@ -643,14 +1132,9 @@ class FileSwarmStore:
             "description": str(payload.get("description") or ""),
             "assignee": str(payload.get("assignee") or ""),
             "conversation_id": str(payload.get("conversation_id") or "").strip(),
-            "workflow_id": str(payload.get("workflow_id") or ""),
-            "workflow_name": str(payload.get("workflow_name") or ""),
-            "workflow_mode": str(payload.get("workflow_mode") or ""),
-            "node_id": str(payload.get("node_id") or ""),
             "agent_type": str(payload.get("agent_type") or "general-purpose").strip() or "general-purpose",
             "role": str(payload.get("role") or ""),
             "objective": str(payload.get("objective") or ""),
-            "required_for_final": bool(payload.get("required_for_final", True)),
             "read_only": bool(payload.get("read_only", False)),
             "write_scope": _string_list(payload.get("write_scope")),
             "status": str(payload.get("status") or "pending"),
@@ -787,18 +1271,12 @@ class FileSwarmStore:
                 "assignee",
                 "priority",
                 "team_name",
-                "workflow_id",
-                "workflow_name",
-                "workflow_mode",
-                "node_id",
                 "agent_type",
                 "role",
                 "objective",
             ):
                 if key in patch:
                     task[key] = str(patch.get(key) or "").strip()
-            if "required_for_final" in patch:
-                task["required_for_final"] = bool(patch.get("required_for_final"))
             if "read_only" in patch:
                 task["read_only"] = bool(patch.get("read_only"))
             if "write_scope" in patch:

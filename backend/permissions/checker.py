@@ -15,22 +15,58 @@ from __future__ import annotations
 import fnmatch
 import inspect
 import re
+import shlex
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 from weakref import WeakKeyDictionary
 
+from pathspec.gitignore import GitIgnoreSpec
+
 from backend.config import PermissionSettings
 from backend.permissions.context import PermissionContext, PermissionDecision
 from backend.permissions.network import assess_network_url
 from backend.permissions.rules import PermissionRuleMatcher, SandboxValidator
-from backend.tools.base import PermissionLevel
+from backend.security.sensitive_files import (
+    PROTECTED_WRITE_FILE_NAMES,
+    PROTECTED_WRITE_PATH_PARTS,
+)
+from backend.tools.base import PermissionLevel, WORKSPACE_PATH_SCHEMA_FIELDS
 
 if TYPE_CHECKING:
     from backend.tools.base import BaseTool
 
 
 _ACCEPTS_TOOL_CACHE: WeakKeyDictionary[Any, dict[str, tuple[Any, bool]]] = WeakKeyDictionary()
+
+# Windows and macOS resolve paths case-insensitively, so a denylist entry must
+# match regardless of the casing the model happens to use.
+_FILESYSTEM_IS_CASE_INSENSITIVE = sys.platform in {"win32", "darwin"}
+_LEGACY_TOOL_NAME_ALIASES = {
+    "terminal.exec": "run_command",
+    "terminal_exec": "run_command",
+}
+
+
+def _tool_pattern_matches(tool_name: str, pattern: str) -> bool:
+    """Match ordinary globs plus an MCP server-level rule.
+
+    `mcp__server` is a deliberate server boundary, not a literal tool named
+    server: it covers `mcp__server__*` without making similarly named servers
+    match by raw prefix.
+    """
+    normalized_pattern = str(pattern or "").strip()
+    normalized_pattern = _LEGACY_TOOL_NAME_ALIASES.get(
+        normalized_pattern.casefold(),
+        normalized_pattern,
+    )
+    tool_name = _LEGACY_TOOL_NAME_ALIASES.get(tool_name.casefold(), tool_name)
+    if fnmatch.fnmatch(tool_name, normalized_pattern):
+        return True
+    if normalized_pattern.startswith("mcp__") and "*" not in normalized_pattern:
+        return tool_name.startswith(normalized_pattern + "__")
+    return False
 
 
 def _callable_accepts_tool_parameter(owner: Any, method_name: str, callable_obj: Any) -> bool:
@@ -64,12 +100,12 @@ def _callable_accepts_tool_parameter(owner: Any, method_name: str, callable_obj:
 # ── Catastrophic command blocklist ──────────────────────────────────────────
 
 _CATASTROPHIC_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"rm\s+(-[a-z]*f[a-z]*\s+)?/\s*$", re.I), "recursive delete of root filesystem"),
+    (re.compile(r"rm\s+(-[a-z]*f[a-z]*\s+)?/+\s*$", re.I), "recursive delete of root filesystem"),
     (re.compile(r"rm\s+(-[a-z]*f[a-z]*\s+)?/\*", re.I), "recursive delete of root filesystem"),
     (re.compile(r"\brm\b(?:\s+--?[^\s]+)*\s+/\s*$", re.I), "recursive delete of root filesystem"),
-    (re.compile(r"\brm\b(?:\s+--?[^\s]+)*\s+(?:~|\$HOME|\$\{HOME\}|%USERPROFILE%)(?:[\\/]\*)?\s*$", re.I), "recursive delete of home directory"),
-    (re.compile(r"\brm\b(?:\s+--?[^\s]+)*\s+/(?:Users|home)/[^/\s]+/?\s*$", re.I), "recursive delete of system directory"),
-    (re.compile(r"\brm\b(?:\s+--?[^\s]+)*\s+/(?:etc|usr|var|bin|sbin|System|Library)(?:/|\s*$)", re.I), "recursive delete of system directory"),
+    (re.compile(r"\brm\b(?:\s+--?[^\s]+)*\s+(?:~|\$HOME|\$\{HOME\}|%USERPROFILE%)(?:[\\/][^/\s]*)?\s*$", re.I), "recursive delete of home directory"),
+    (re.compile(r"\brm\b(?:\s+--?[^\s]+)*\s+/+(?:Users|home)/[^/\s]+/?\s*$", re.I), "recursive delete of system directory"),
+    (re.compile(r"\brm\b(?:\s+--?[^\s]+)*\s+/+(?:etc|usr|var|bin|sbin|System|Library)(?:/|\s*$)", re.I), "recursive delete of system directory"),
     (re.compile(r"\bmkfs\b", re.I), "filesystem format"),
     (re.compile(r"\bdd\b.*\bof\s*=\s*/dev/", re.I), "raw disk write"),
     (re.compile(r":\(\)\s*\{.*\|.*&", re.I), "fork bomb"),
@@ -87,6 +123,10 @@ _CATASTROPHIC_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # Environment-variable exfiltration via /proc (parser-differential defense in
     # depth; path validation may not cover a bare `cat`). No legitimate dev use.
     (re.compile(r"/proc/[^/\s]+/environ", re.I), "read of process environment (secret exfiltration)"),
+    (
+        re.compile(r"\bzmodload\b(?=[^\n;&|]*\bzsh/(?:system|net/socket|files|zftp)\b)", re.I),
+        "load of a Zsh module that exposes raw system, network, or filesystem access",
+    ),
 ]
 
 
@@ -103,6 +143,14 @@ _INJECTION_RISK_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r">\("), "process substitution >()"),
     (re.compile(r"\$'"), "ANSI-C quoting ($'...') can hide characters"),
     (re.compile(r"\$IFS"), "IFS variable can bypass argument parsing"),
+    (
+        re.compile(r"\bprint\b(?=[^\n;&|]*\s-[A-Za-z]*P[A-Za-z]*(?:\s|$))"),
+        "Zsh prompt expansion (print -P)",
+    ),
+    (
+        re.compile(r"\bsetopt\b(?=[^\n;&|]*\b(?:prompt_?subst|glob_?subst)\b)", re.I),
+        "Zsh dynamic substitution option",
+    ),
 )
 
 
@@ -115,17 +163,225 @@ def command_injection_risk(command: str) -> str:
     return ""
 
 
-def _check_catastrophic_command(command: str) -> tuple[bool, str]:
+_POSIX_SHELL_WRAPPERS = {"bash", "sh", "zsh", "dash", "ksh"}
+_POWERSHELL_WRAPPERS = {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}
+_CMD_WRAPPERS = {"cmd", "cmd.exe"}
+
+_DESTRUCTIVE_COMPOUND_SEGMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r"^\s*rm\b(?=[^\n]*(?:^|\s)-[^\s]*[rR])", re.I),
+        "recursive delete hidden inside a compound command",
+    ),
+    (
+        re.compile(r"^\s*(?:Remove-Item|del|erase|rd|rmdir)\b(?=[^\n]*(?:-Recurse|/[sS]))", re.I),
+        "recursive delete hidden inside a compound command",
+    ),
+    (
+        re.compile(r"^\s*git\s+(?:clean\b(?=[^\n]*\s-[^\s]*[fdx])|reset\s+--hard\b)", re.I),
+        "destructive git operation hidden inside a compound command",
+    ),
+)
+
+
+def _split_shell_compound(command: str) -> list[str]:
+    """Split top-level shell chains without interpreting quoted separators."""
+    segments: list[str] = []
+    current: list[str] = []
+    quote = ""
+    escaped = False
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if escaped:
+            current.append(char)
+            escaped = False
+            index += 1
+            continue
+        # Backslash is not an escape character in PowerShell or cmd. Treat it
+        # as one only inside a quoted token, where suppressing quote parsing is
+        # required. This keeps `C:\\; Remove-Item ...` from hiding a real
+        # top-level separator behind the drive-root backslash.
+        if char == "\\" and quote and quote != "'":
+            current.append(char)
+            escaped = True
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            if not quote:
+                quote = char
+            elif quote == char:
+                quote = ""
+            current.append(char)
+            index += 1
+            continue
+        separator_length = 0
+        if not quote:
+            if command.startswith(("&&", "||"), index):
+                separator_length = 2
+            elif char in {";", "\n"}:
+                separator_length = 1
+        if separator_length:
+            segment = "".join(current).strip()
+            if segment:
+                segments.append(segment)
+            current.clear()
+            index += separator_length
+            continue
+        current.append(char)
+        index += 1
+    segment = "".join(current).strip()
+    if segment:
+        segments.append(segment)
+    return segments
+
+
+def _destructive_compound_reason(command: str) -> str:
+    segments = _split_shell_compound(command)
+    if len(segments) < 2:
+        return ""
+    for segment in segments:
+        for pattern, reason in _DESTRUCTIVE_COMPOUND_SEGMENTS:
+            if pattern.search(segment):
+                return reason
+    return ""
+
+
+# Tokens that, followed by a path, denote a shell WRITE to that path. Used to
+# stop a shell command from writing protected files (.claude/**, .git/**,
+# settings.json, .mcp.json, …) that the file tools (write_file/edit_file/
+# apply_patch) already block. cc blocks the same class of shell writes
+# (bashPermissions cd+redirect / cd+mv into .claude/settings.json); this is the
+# proportionate equivalent reusing the existing segment splitter — the OS
+# sandbox + CONFIRM remain the primary boundary, this closes the file-tool vs
+# shell asymmetry for the protected set.
+_SHELL_WRITE_REDIRECT_RE = re.compile(r">>?\s*([^\s;&|]+)")
+_SHELL_WRITE_COMMAND_RE = re.compile(
+    r"\b(?:mv|cp|tee|install|ln)\b\s+(.+)", re.IGNORECASE
+)
+
+
+def _path_is_protected_write(raw_path: str) -> bool:
+    cleaned = raw_path.strip().strip("'\"").replace("\\", "/").strip()
+    if not cleaned:
+        return False
+    name = cleaned.rsplit("/", 1)[-1].lower()
+    if name in PROTECTED_WRITE_FILE_NAMES:
+        return True
+    parts = [segment for segment in cleaned.split("/") if segment]
+    return any(part.lower() in PROTECTED_WRITE_PATH_PARTS for part in parts)
+
+
+def _protected_write_reason(command: str) -> str:
+    for segment in _split_shell_compound(command):
+        for match in _SHELL_WRITE_REDIRECT_RE.finditer(segment):
+            if _path_is_protected_write(match.group(1)):
+                return "shell write to a protected path (redirection)"
+        command_match = _SHELL_WRITE_COMMAND_RE.search(segment)
+        if command_match:
+            for token in command_match.group(1).split():
+                if token.startswith("-"):
+                    continue
+                if _path_is_protected_write(token):
+                    return "shell write to a protected path (file command)"
+    return ""
+
+
+def _shell_wrapper_payload(command: str) -> tuple[str | None, str]:
+    """Return a shell wrapper's command payload, or an unsafe parse reason."""
+    try:
+        argv = shlex.split(command, posix=True)
+    except ValueError as exc:
+        lowered = command.lower()
+        if any(name in lowered for name in (*_POSIX_SHELL_WRAPPERS, *_POWERSHELL_WRAPPERS, *_CMD_WRAPPERS)):
+            return None, f"malformed shell wrapper: {exc}"
+        return None, ""
+    if not argv:
+        return None, ""
+    executable = argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+    option_index = -1
+    if executable in _POSIX_SHELL_WRAPPERS:
+        option_index = next(
+            (index for index, value in enumerate(argv[1:], start=1) if value == "-c"),
+            -1,
+        )
+    elif executable in _POWERSHELL_WRAPPERS:
+        option_index = next(
+            (
+                index
+                for index, value in enumerate(argv[1:], start=1)
+                if value.lower() in {"-command", "-c"}
+            ),
+            -1,
+        )
+    elif executable in _CMD_WRAPPERS:
+        option_index = next(
+            (index for index, value in enumerate(argv[1:], start=1) if value.lower() in {"/c", "/k"}),
+            -1,
+        )
+    if option_index < 0:
+        return None, ""
+    if option_index + 1 >= len(argv):
+        return None, "shell wrapper is missing its command payload"
+    return " ".join(argv[option_index + 1 :]), ""
+
+
+def _normalize_for_catastrophic_match(command: str) -> str:
+    """Normalize a command for catastrophic-pattern matching.
+
+    Claude Code tokenizes the command into argv (``bashParser``) before testing
+    dangerous patterns, so quoted spellings collapse to their real targets. This
+    approximates that by dropping shell quotes (replacing them with spaces so
+    ``rm -rf "/"`` collapses to ``rm -rf /``). Home-variable trailing-slash
+    variants are handled by the patterns themselves.
+    """
+    no_quotes = command.replace('"', " ").replace("'", " ")
+    return re.sub(r"\s+", " ", no_quotes).strip()
+
+
+def _check_catastrophic_command(command: str, *, _depth: int = 0) -> tuple[bool, str]:
     stripped = command.strip()
-    for pattern, description in _CATASTROPHIC_PATTERNS:
-        if pattern.search(stripped):
-            return False, f"命令被安全策略拦截: {description}"
+    # Match against both the raw form and the quote/variable-normalized form so
+    # bypasses like ``rm -rf "/"`` or ``rm -rf $HOME/`` are caught.
+    candidates = (stripped, _normalize_for_catastrophic_match(stripped))
+    for candidate in candidates:
+        for pattern, description in _CATASTROPHIC_PATTERNS:
+            if pattern.search(candidate):
+                return False, f"命令被安全策略拦截: {description}"
+    compound_reason = _destructive_compound_reason(stripped)
+    if compound_reason:
+        return False, f"命令被安全策略拦截: {compound_reason}"
+    if _depth >= 4:
+        return False, "命令被安全策略拦截: shell wrapper nesting is too deep"
+    payload, parse_error = _shell_wrapper_payload(stripped)
+    if parse_error:
+        return False, f"命令被安全策略拦截: {parse_error}"
+    if payload is not None:
+        return _check_catastrophic_command(payload, _depth=_depth + 1)
     return True, ""
 
 
 def check_catastrophic_command(command: str) -> tuple[bool, str]:
     """Public wrapper for the static catastrophic shell-command blocklist."""
     return _check_catastrophic_command(command)
+
+
+def protected_write_command_reason(command: str, *, _depth: int = 0) -> str:
+    """Return a reason when a shell command writes to a protected path.
+
+    Unwraps shell wrappers (bash -c "…") like the catastrophic check so a write
+    hidden inside a wrapper is still seen. Empty string means no protected-path
+    write was detected.
+    """
+    stripped = command.strip()
+    reason = _protected_write_reason(stripped)
+    if reason:
+        return reason
+    if _depth >= 4:
+        return ""
+    payload, parse_error = _shell_wrapper_payload(stripped)
+    if parse_error or payload is None:
+        return ""
+    return protected_write_command_reason(payload, _depth=_depth + 1)
 
 
 def check_permission_level(
@@ -199,10 +455,6 @@ def evaluate_permission_decision(
         expiry="call",
     )
 
-def _is_workspace_root_file(normalized_path: str) -> bool:
-    return bool(normalized_path) and "/" not in normalized_path and "\\" not in normalized_path
-
-
 def normalize_permission_mode_token(mode: str | None) -> str:
     normalized = str(mode or "").strip().lower().replace("-", "_").replace(" ", "_")
     aliases = {
@@ -228,89 +480,38 @@ _PERMISSION_RESTRICTIVENESS: dict[PermissionLevel, int] = {
     PermissionLevel.ALWAYS_DENY: 3,
 }
 
-_PLAN_MODE_AUTO_ALLOW = [
-    "read_*",
-    "list_*",
-    "grep_*",
-    "glob_*",
-    "recall_*",
-    "tool_search",
-    "go_to_definition",
-    "find_references",
-    "git_status",
-    "git_diff",
-    # Network reads allowed — plan mode is "no local mutations", not "no I/O".
-    # web_fetch/web_search are read-only from the workspace perspective.
-    "web_fetch",
-    "web_search",
-    "mcp__websearch__fetch_page",
-    "mcp__websearch__search",
-    "ask_user",
-    "read_artifact",
-    "detect_python_environment",
-    "update_plan",
-    "enter_plan_mode",
-    "exit_plan_mode",
-    "task",
-]
-
-_PLAN_MODE_DENY = [
-    "write_*",
-    "edit_*",
-    "run_*",
-    "save_*",
-    "remember_*",
-    "terminal_*",
-    "load_skill",
-    "unload_skill",
-]
-
-_AUTO_MODE_ALLOW = [
-    *_PLAN_MODE_AUTO_ALLOW,
-    "todo_write",
-    "update_plan",
-    "task",
-    "list_skills",
-    "workspace_*",
-    "preview.detect",
-    "preview.verify",
-]
-
-_WRITE_TOOL_PATTERNS = [
-    "write_*",
-    "edit_*",
-    "save_*",
-]
-
-_CONFIRM_TOOL_PATTERNS = [
-    "run_*",
-    "terminal_*",
-    "remember_*",
-    "git_commit",
-    "git_push",
-    "git_stage_*",
-    "git_unstage_*",
-    "worktree_*",
-    "mcp__*",
-]
-
-_READ_ONLY_NETWORK_TOOL_PATTERNS = [
-    "web_fetch",
-    "web_search",
-    "mcp__websearch__fetch_page",
-    "mcp__websearch__search",
-]
-
-_NETWORK_URL_TOOL_PATTERNS = [
-    "web_fetch",
-    "browser_*",
-    "cdp_*",
-    "preview.navigate",
-    "preview.verify",
-    "mcp__*",
-    "mcp__websearch__fetch_page",
-    "mcp__*__fetch_page",
-]
+def _has_undeclared_path_argument(tool: "BaseTool", args: dict[str, Any] | None) -> bool:
+    """Detect a supplied filesystem path that lacks a tool-owned extractor."""
+    payload = args or {}
+    if not payload:
+        return False
+    try:
+        schema = tool.get_schema().parameters
+    except Exception:
+        return False
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(properties, dict):
+        return False
+    try:
+        extracted = {
+            str(value).strip()
+            for value in tool.get_workspace_paths(payload)
+            if str(value or "").strip() not in {"", "."}
+        }
+    except Exception:
+        extracted = set()
+    for field in WORKSPACE_PATH_SCHEMA_FIELDS.intersection(properties):
+        value = payload.get(field)
+        supplied = (
+            [value]
+            if isinstance(value, str)
+            else [item for item in value if isinstance(item, str)]
+            if isinstance(value, (list, tuple))
+            else []
+        )
+        if any(item.strip() not in {"", "."} and item.strip() not in extracted for item in supplied):
+            return True
+    return False
 
 _URL_SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*:", re.I)
 _URL_LIKE_ARG_KEYS = frozenset(
@@ -330,43 +531,23 @@ _URL_LIKE_ARG_KEYS = frozenset(
 )
 _HOST_LIKE_ARG_KEYS = frozenset({"host", "hostname", "domain", "server", "address"})
 _MAX_NETWORK_TARGETS_PER_CALL = 32
-_PYTHON_DEPENDENCY_INSTALL_RE = re.compile(
-    r"(?ix)"
-    r"(?:^|[;&|]\s*)"
-    r"(?:"
-    r"(?:python(?:\d+(?:\.\d+)?)?(?:\.exe)?|py(?:\.exe)?)\s+-m\s+pip\s+install\b"
-    r"|pip(?:\d+(?:\.\d+)?)?(?:\.exe)?\s+install\b"
-    r"|uv(?:\.exe)?\s+pip\s+install\b"
-    r"|(?:conda|mamba|micromamba)(?:\.exe)?\s+(?:install|create)\b"
-    r"|poetry(?:\.exe)?\s+add\b"
-    r"|pdm(?:\.exe)?\s+add\b"
-    r")"
-)
-
-
 def _network_target_requires_confirmation(
     tool_name: str,
     args: dict[str, Any] | None,
     context: PermissionContext | None,
+    tool: "BaseTool | None" = None,
 ) -> bool:
     if context is not None and context.mode == "bypass":
         return False
-    if not _matches_network_url_tool(tool_name):
+    if tool is not None:
+        if not bool(getattr(tool, "open_world", False)):
+            return False
+    elif not tool_name.startswith("mcp__"):
         return False
     for target in _extract_network_targets(args):
         if not assess_network_url(target, resolve_dns=False).allowed:
             return True
     return False
-
-
-def _is_python_dependency_install_command(tool_name: str, args: dict[str, Any] | None) -> bool:
-    if tool_name != "run_command" or not isinstance(args, dict):
-        return False
-    return bool(_PYTHON_DEPENDENCY_INSTALL_RE.search(str(args.get("command") or "")))
-
-
-def _matches_network_url_tool(tool_name: str) -> bool:
-    return any(fnmatch.fnmatch(tool_name, pattern) for pattern in _NETWORK_URL_TOOL_PATTERNS)
 
 
 def _extract_network_targets(args: dict[str, Any] | None) -> list[str]:
@@ -446,90 +627,19 @@ def _looks_like_plain_network_target(value: str) -> bool:
         return True
     return "." in host
 
-# Shell commands that only read state — safe to auto-allow without confirmation
-# (ClaudeCode BashTool.isReadOnly pattern).
-_READ_ONLY_SHELL_COMMANDS = frozenset({
-    "ls", "pwd", "cat", "head", "tail", "wc", "file", "stat", "tree",
-    "echo", "which", "whoami", "date", "uname", "hostname",
-    # env/printenv deliberately excluded (CC parity): dumping the environment
-    # leaks secrets (API keys, tokens), so they require confirmation instead of
-    # being auto-allowed as read-only.
-    "find", "grep", "rg", "fd", "diff", "test", "df", "du", "ps", "top",
-    "dir", "type", "where", "whereis",
-})
-# Git/gh/docker subcommands that only read
-_READ_ONLY_SUBCOMMANDS = {
-    "git": frozenset({"status", "diff", "log", "show", "branch", "remote",
-                      "rev-parse", "describe", "blame", "shortlog", "tag",
-                      "ls-files", "ls-remote", "for-each-ref"}),
-    "gh": frozenset(),
-    "docker": frozenset({"ps", "images", "logs", "inspect", "version", "info"}),
-    "npm": frozenset({"list", "ls", "view", "outdated"}),
-    "pip": frozenset({"list", "show", "freeze"}),
-    "kubectl": frozenset({"get", "describe", "logs"}),
-}
-
-
-# Shell metacharacters that enable redirection, chaining, or substitution.
-# A command containing any of these is no longer a single trivially-read-only
-# invocation, so we refuse to auto-classify it (CC rejects the same way before
-# its flag-parsing layer runs).
-_SHELL_CONTROL_TOKENS = (">", "<", "|", "&", ";", "$(", "${", "`", "\n")
-
-
-def is_read_only_command(command: str) -> bool:
-    """Return True when a shell command only reads state (no side effects).
-
-    Conservative by design: anything with redirection, piping, chaining, or
-    command substitution is rejected, as is any command not on the allowlist.
-    A false negative just means an extra confirmation prompt; a false positive
-    would auto-run a writing command, so we always err toward False.
-    """
-    cmd = (command or "").strip()
-    if not cmd or any(tok in cmd for tok in _SHELL_CONTROL_TOKENS):
-        return False
-    # Parser-differential / injection signals (ANSI-C quoting, IFS, process
-    # substitution) are never auto-read-only even if they slip past the token
-    # scan — they must go through a confirmation gate.
-    if command_injection_risk(cmd):
-        return False
-    parts = cmd.split()
-    head = parts[0].lower().rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-    if head in _READ_ONLY_SHELL_COMMANDS:
-        return True
-    sub = _READ_ONLY_SUBCOMMANDS.get(head)
-    if sub is not None and len(parts) >= 2:
-        return parts[1].lower() in sub
-    return False
-
-
-_LOCAL_FILE_TOOL_PATTERNS = [
-    "read_file",
-    "write_file",
-    "edit_file",
-    "list_files",
-    "grep_files",
-    "glob_files",
-    "fuzzy_search",
-    "go_to_definition",
-    "find_references",
-]
-
 _DEFAULT_PATH_DENYLIST = tuple(PermissionSettings().path_denylist)
-_DEFAULT_PATH_DENYLIST_NORMALIZED = frozenset(
-    pattern.replace("\\", "/").strip() for pattern in _DEFAULT_PATH_DENYLIST
-)
 
 
 def _bypass_denylist(configured: list[str]) -> list[str]:
-    """Keep built-in secret/repo guards in bypass, skip custom workspace policy."""
-    configured_normalized = {
-        pattern.replace("\\", "/").strip()
-        for pattern in configured
-    }
-    if _DEFAULT_PATH_DENYLIST_NORMALIZED.issubset(configured_normalized):
-        return list(_DEFAULT_PATH_DENYLIST)
-    return []
+    """Keep built-in secret/repo guards in bypass, skip custom workspace policy.
+
+    The built-in guards are unconditional: bypass waives the user's own workspace
+    policy, not the secret/repo floor. Previously a single missing default turned
+    this into an empty list, dropping .env/.git/secrets protection entirely —
+    cc's equivalent safety check is likewise immune to bypass.
+    """
+    del configured
+    return list(_DEFAULT_PATH_DENYLIST)
 
 
 class PermissionChecker:
@@ -624,11 +734,32 @@ class PermissionChecker:
         context: PermissionContext | None = None,
         tool: "BaseTool | None" = None,
     ) -> tuple[PermissionLevel, str, str]:
+        capability_floor = (PermissionLevel.AUTO, "", "")
+
+        def raise_floor(
+            level: PermissionLevel,
+            source: str,
+            rule: str,
+        ) -> None:
+            nonlocal capability_floor
+            if _PERMISSION_RESTRICTIVENESS[level] > _PERMISSION_RESTRICTIVENESS[capability_floor[0]]:
+                capability_floor = (level, source, rule)
+
+        def apply_floor(
+            level: PermissionLevel,
+            source: str,
+            rule: str,
+        ) -> tuple[PermissionLevel, str, str]:
+            if _PERMISSION_RESTRICTIVENESS[capability_floor[0]] > _PERMISSION_RESTRICTIVENESS[level]:
+                return capability_floor
+            return level, source, rule
+
         # 1. 检查是否在 always_deny
         matched = self._first_match(tool_name, self._settings.always_deny)
         if matched:
             return PermissionLevel.ALWAYS_DENY, "static_policy", matched
 
+        policy_override: tuple[PermissionLevel, str, str] | None = None
         if context is not None:
             matched = self._first_match(tool_name, context.tool_deny_rules)
             if matched:
@@ -637,7 +768,9 @@ class PermissionChecker:
             override = self._resolve_override_match(tool_name, context.session_overrides)
             if override is not None:
                 pattern, level = override
-                return level, "session_override", pattern
+                if level == PermissionLevel.ALWAYS_DENY:
+                    return level, "session_override", pattern
+                policy_override = (level, "session_override", pattern)
 
         # Content-level rules (Tool(content) syntax). A deny rule wins in every
         # mode (safety); an allow rule forces AUTO except in plan mode (plan is
@@ -645,112 +778,165 @@ class PermissionChecker:
         content_decision = self._content_rule_decision(tool_name, args)
         if content_decision == PermissionLevel.ALWAYS_DENY:
             return PermissionLevel.ALWAYS_DENY, "content_rule", "content_deny"
-        if _is_python_dependency_install_command(tool_name, args) and (context is None or context.mode != "bypass"):
-            return PermissionLevel.CONFIRM, "safety_policy", "python_dependency_install"
-        if content_decision == PermissionLevel.AUTO and (context is None or context.mode != "plan"):
-            return PermissionLevel.AUTO, "content_rule", "content_allow"
+        if policy_override is None and content_decision == PermissionLevel.AUTO:
+            policy_override = (PermissionLevel.AUTO, "content_rule", "content_allow")
 
-        if context is not None:
-            if context.mode == "confirm" and self._matches(tool_name, _READ_ONLY_NETWORK_TOOL_PATTERNS):
-                return PermissionLevel.CONFIRM, "mode", "confirm:network_read"
-            if context.mode == "auto" and _network_target_requires_confirmation(tool_name, args, context):
-                return PermissionLevel.CONFIRM, "capability_boundary", "network_target"
+        if context is not None and context.mode == "bypass":
+            return PermissionLevel.AUTO, "mode", "bypass:auto"
 
-            # Tool-owned permission decision (CC's checkPermissions analogue).
-            # Honored in every mode except plan/bypass. Plan denies local
-            # mutations outright, and bypass must not be narrowed by a tool's
-            # conservative default metadata. Auto still consults tools first so
-            # content-specific asks and safety checks cannot be bypassed by the
-            # centralized allowlist.
-            if tool is not None and context.mode not in {"plan", "bypass"}:
-                tool_level = self._consult_tool(tool, args, context)
-                if tool_level is not None:
-                    return tool_level, "tool", f"{tool_name}.check_permission"
+        tool_level: PermissionLevel | None = None
+        tool_decision_is_explicit = False
+        if tool is not None:
+            tool_level, tool_decision_is_explicit = self._tool_permission_decision(
+                tool,
+                args,
+                context,
+            )
 
-            # Compute mode-level permission first
-            mode_level: PermissionLevel | None = None
-            if context.mode == "bypass":
-                mode_level = PermissionLevel.AUTO
-            elif context.mode == "auto":
-                if self._matches(tool_name, _WRITE_TOOL_PATTERNS):
-                    mode_level = PermissionLevel.DIFF_REVIEW
-                elif _network_target_requires_confirmation(tool_name, args, context):
-                    mode_level = PermissionLevel.CONFIRM
-                elif tool is not None and self._tool_invocation_is_read_only(tool, args):
-                    mode_level = PermissionLevel.AUTO
-                elif self._matches(tool_name, _READ_ONLY_NETWORK_TOOL_PATTERNS):
-                    mode_level = PermissionLevel.AUTO
-                elif self._matches(tool_name, _CONFIRM_TOOL_PATTERNS):
-                    mode_level = PermissionLevel.CONFIRM
-                elif self._matches(tool_name, _AUTO_MODE_ALLOW):
-                    mode_level = PermissionLevel.AUTO
-                else:
-                    mode_level = PermissionLevel.CONFIRM
-            elif context.mode == "accept_edits":
-                if self._matches(tool_name, _WRITE_TOOL_PATTERNS):
-                    mode_level = PermissionLevel.AUTO
-                elif self._matches(tool_name, _READ_ONLY_NETWORK_TOOL_PATTERNS):
-                    mode_level = PermissionLevel.AUTO
-                elif self._matches(tool_name, _CONFIRM_TOOL_PATTERNS):
-                    mode_level = PermissionLevel.CONFIRM
-                else:
-                    mode_level = PermissionLevel.AUTO
-            elif context.mode == "plan":
-                if self._matches(tool_name, _PLAN_MODE_DENY):
-                    mode_level = PermissionLevel.ALWAYS_DENY
-                elif self._matches(tool_name, _PLAN_MODE_AUTO_ALLOW):
-                    mode_level = PermissionLevel.AUTO
-                else:
-                    mode_level = PermissionLevel.ALWAYS_DENY
-            elif context.mode == "confirm":
-                if self._matches(tool_name, self._settings.require_diff_review):
-                    mode_level = PermissionLevel.DIFF_REVIEW
-                elif self._matches(tool_name, _READ_ONLY_NETWORK_TOOL_PATTERNS):
-                    mode_level = PermissionLevel.CONFIRM
-                elif self._matches(tool_name, _PLAN_MODE_AUTO_ALLOW):
-                    mode_level = PermissionLevel.AUTO
-                else:
-                    mode_level = PermissionLevel.CONFIRM
-
-            if mode_level is not None:
-                return mode_level, "mode", f"{context.mode}:{mode_level.value}"
-
-        # 2. 检查是否需要 diff review
-        if self._matches(tool_name, _READ_ONLY_NETWORK_TOOL_PATTERNS):
-            return PermissionLevel.AUTO, "built_in", "read_only_network"
-
+        # Static policy is a restriction layer, not a fallback used only when
+        # a UI mode is absent. Apply it through the existing capability floor
+        # before confirm/auto/accept-edits choose their default behavior.
+        static_auto: tuple[PermissionLevel, str, str] | None = None
+        static_floor: list[tuple[PermissionLevel, str, str]] = []
         matched = self._first_match(tool_name, self._settings.require_diff_review)
         if matched:
-            return PermissionLevel.DIFF_REVIEW, "static_policy", matched
-
-        # 3. 检查是否需要 confirm
+            static_floor.append((PermissionLevel.DIFF_REVIEW, "static_policy", matched))
         matched = self._first_match(tool_name, self._settings.require_confirm)
         if matched:
-            if tool is not None:
-                tool_level = self._consult_tool(tool, args, context)
-                if tool_level is not None:
-                    return tool_level, "tool", f"{tool_name}.check_permission"
-            return PermissionLevel.CONFIRM, "static_policy", matched
-
-        # 4. 检查是否 auto allow
+            static_floor.append((PermissionLevel.CONFIRM, "static_policy", matched))
         matched = self._first_match(tool_name, self._settings.auto_allow)
         if matched:
-            return PermissionLevel.AUTO, "static_policy", matched
+            static_auto = (PermissionLevel.AUTO, "static_policy", matched)
 
-        # 5. 默认：需要确认
-        return PermissionLevel.CONFIRM, "default", "confirm"
+        if context is not None and context.mode == "plan":
+            if tool is None or tool_level != PermissionLevel.AUTO:
+                return PermissionLevel.ALWAYS_DENY, "mode", "plan:deny"
+            try:
+                side_effect_kind = str(tool.get_side_effect_kind(args) or "").strip().lower()
+            except Exception:
+                return PermissionLevel.ALWAYS_DENY, "mode", "plan:metadata_error"
+            if side_effect_kind != "none":
+                return PermissionLevel.ALWAYS_DENY, "mode", "plan:side_effect"
+            if tool_name.startswith("mcp__"):
+                return PermissionLevel.ALWAYS_DENY, "mode", "plan:untrusted_mcp"
+            return PermissionLevel.AUTO, "mode", "plan:auto"
+
+        # A user-authored/session-scoped MCP allow is the only way an extension
+        # may skip confirmation. Its own readOnlyHint is never sufficient.
+        if (
+            tool_name.startswith("mcp__")
+            and policy_override is not None
+            and policy_override[0] == PermissionLevel.AUTO
+            and not bool(getattr(tool, "destructive", False))
+            and not bool(getattr(tool, "open_world", False))
+        ):
+            return policy_override
+
+        # MCP declarations are untrusted extensions.  Their claimed read-only
+        # metadata may shape the UI but cannot waive an explicit confirmation.
+        if tool_name.startswith("mcp__"):
+            raise_floor(PermissionLevel.CONFIRM, "capability_boundary", "mcp_extension")
+
+        # CC asks whenever a filesystem-shaped tool call has no getPath seam.
+        # A forgotten declaration must not silently inherit AUTO in MiniCode.
+        if tool is not None and _has_undeclared_path_argument(tool, args):
+            raise_floor(
+                PermissionLevel.CONFIRM,
+                "capability_boundary",
+                f"{tool_name}.undeclared_path",
+            )
+
+        if context is not None and _network_target_requires_confirmation(
+            tool_name,
+            args,
+            context,
+            tool,
+        ):
+            raise_floor(PermissionLevel.CONFIRM, "capability_boundary", "network_target")
+
+        # Tool-owned checks define an invocation-specific capability floor.
+        # A content allow or remembered ordinary approval cannot lower it.
+        if tool is not None:
+            if tool_level is not None and tool_decision_is_explicit:
+                raise_floor(tool_level, "tool", f"{tool_name}.check_permission")
+            metadata_floor = self._tool_capability_floor(tool, args, context)
+            if metadata_floor is not None:
+                raise_floor(
+                    metadata_floor,
+                    "tool_capability",
+                    f"{tool_name}.runtime_metadata",
+                )
+
+        if policy_override is not None:
+            return apply_floor(*policy_override)
+
+        # Static rules are the default routing layer. Explicit content/session
+        # allows above are more specific; capability boundaries still win.
+        for floor in static_floor:
+            raise_floor(*floor)
+
+        if static_auto is not None:
+            return apply_floor(*static_auto)
+
+        if context is not None:
+            mode_level: PermissionLevel | None = None
+            if context.mode in {"auto", "accept_edits"}:
+                mode_level = tool_level or PermissionLevel.CONFIRM
+                if (
+                    context.mode == "accept_edits"
+                    and mode_level == PermissionLevel.DIFF_REVIEW
+                    and tool is not None
+                ):
+                    try:
+                        if tool.get_side_effect_kind(args) == "workspace":
+                            mode_level = PermissionLevel.AUTO
+                    except Exception:
+                        pass
+            elif context.mode == "confirm":
+                mode_level = tool_level or PermissionLevel.CONFIRM
+
+            if mode_level is not None:
+                if (
+                    context.mode == "accept_edits"
+                    and mode_level == PermissionLevel.AUTO
+                    and capability_floor[0] == PermissionLevel.DIFF_REVIEW
+                ):
+                    # This is the explicit product meaning of accept_edits:
+                    # workspace edits skip the review dialog, while confirm
+                    # and destructive/network floors remain effective.
+                    return PermissionLevel.AUTO, "mode", "accept_edits:auto"
+                return apply_floor(mode_level, "mode", f"{context.mode}:{mode_level.value}")
+
+        if tool_level is not None:
+            return apply_floor(tool_level, "tool", f"{tool_name}.permission")
+
+        return apply_floor(PermissionLevel.CONFIRM, "default", "confirm")
 
     def validate_file_operation(
         self,
         file_path: str,
         operation: str,
         content: str | None = None,
+        *,
+        context: PermissionContext | None = None,
     ) -> tuple[bool, str]:
         if operation not in {"read", "write", "execute"}:
             return False, f"Unsupported file operation: {operation}"
         path = Path(file_path).expanduser()
         if not path.is_absolute():
             path = self._workspace_root / path
+        if operation == "read":
+            from backend.agent.tool_result_persistence import is_tool_result_path
+
+            if is_tool_result_path(path):
+                return True, ""
+            constraints = context.filesystem_constraints if context is not None else {}
+            for raw_root in constraints.get("readable_roots", []):
+                try:
+                    path.resolve().relative_to(Path(str(raw_root)).expanduser().resolve())
+                    return True, ""
+                except (OSError, ValueError):
+                    continue
         return self._sandbox.validate_file_operation(str(path), operation, content)
 
     def evaluate(
@@ -771,6 +957,7 @@ class PermissionChecker:
             tool_name,
             args,
             context=context,
+            tool=tool,
         )
         decision = (
             "deny"
@@ -802,15 +989,12 @@ class PermissionChecker:
     def validate_command(self, command: str) -> tuple[bool, str]:
         return _check_catastrophic_command(command)
 
-    def _is_allowed_workspace_root_file_read(
+    def _is_allowed_workspace_root_path(
         self,
-        tool_name: str,
         file_path: str,
         *,
         context: PermissionContext | None = None,
     ) -> bool:
-        if tool_name != "read_file":
-            return False
         path_obj = Path(file_path).expanduser()
         resolved_path = path_obj if path_obj.is_absolute() else self._workspace_root / path_obj
         try:
@@ -829,32 +1013,7 @@ class PermissionChecker:
                 return False
             if fnmatch.fnmatch(Path(file_path).name, deny_pattern):
                 return False
-        return _is_workspace_root_file(normalized_path) and resolved_path.is_file()
-
-    def _is_allowed_workspace_root_directory_discovery(
-        self,
-        tool_name: str,
-        directory: str,
-        *,
-        context: PermissionContext | None = None,
-    ) -> bool:
-        """Allow safe top-level workspace discovery under a narrow allowlist.
-
-        A model may pass the absolute workspace root instead of ".". That
-        should behave like list_files(".") so the agent can discover the
-        allowed project directories before drilling into them. Keep this narrow
-        to filename/directory discovery tools; content search still needs an
-        explicitly allowed subtree.
-        """
-        if tool_name not in {"list_files", "glob_files"}:
-            return False
-        path_obj = Path(directory or ".").expanduser()
-        resolved_path = path_obj if path_obj.is_absolute() else self._workspace_root / path_obj
-        try:
-            normalized_path = resolved_path.resolve().relative_to(self._workspace_root).as_posix()
-        except ValueError:
-            return False
-        return normalized_path in {"", "."} and resolved_path.is_dir()
+        return normalized_path in {"", "."} and resolved_path.exists()
 
     def is_path_allowed(self, file_path: str, *, context: PermissionContext | None = None) -> bool:
         """
@@ -889,14 +1048,25 @@ class PermissionChecker:
             if context.mode == "bypass":
                 path_denylist = _bypass_denylist(path_denylist)
 
-        for deny_pattern in path_denylist:
-            normalized_deny = deny_pattern.replace("\\", "/").strip()
-            while normalized_deny.startswith("./"):
-                normalized_deny = normalized_deny[2:]
-            if fnmatch.fnmatch(raw_path, deny_pattern) or fnmatch.fnmatch(normalized_path, normalized_deny):
-                return False
-            # 也检查文件名
-            if fnmatch.fnmatch(Path(file_path).name, deny_pattern):
+        deny_spec = GitIgnoreSpec.from_lines(
+            pattern.replace("\\", "/").strip()
+            for pattern in path_denylist
+            if str(pattern or "").strip()
+        )
+        candidate = normalized_path or raw_path.lstrip("/")
+        if deny_spec.match_file(candidate):
+            return False
+        if _FILESYSTEM_IS_CASE_INSENSITIVE:
+            # NTFS and APFS resolve "Secrets/api.txt" and "secrets/api.txt" to
+            # the same file, but gitignore matching is case-sensitive, so a
+            # differently-cased path would slip past a denylist entry. cc
+            # normalizes case for the same reason (filesystem.ts).
+            folded_spec = GitIgnoreSpec.from_lines(
+                pattern.replace("\\", "/").strip().lower()
+                for pattern in path_denylist
+                if str(pattern or "").strip()
+            )
+            if folded_spec.match_file(candidate.lower()):
                 return False
 
         # 检查白名单（空白名单 = 不限制）
@@ -947,22 +1117,32 @@ class PermissionChecker:
         args: dict[str, Any] | None,
         *,
         context: PermissionContext | None = None,
+        tool: "BaseTool | None" = None,
     ) -> str:
-        # Path checks only apply to first-party local filesystem tools. Other
-        # tools may legitimately use fields named "path" for remote resources.
-        if args:
-            if self._matches(tool_name, _LOCAL_FILE_TOOL_PATTERNS):
-                # Bypass skips the workspace allowlist (full workspace access)
-                # below, but the denylist/sandbox safety check still runs — .git,
-                # secrets, and settings stay protected even in bypass.
-                file_path = args.get("file_path") or args.get("directory") or args.get("path")
-                if tool_name == "list_files" and str(file_path or "").strip() in {"", "."}:
-                    file_path = None
+        # Filesystem tools own the declaration of path-bearing arguments. The
+        # checker applies one policy without maintaining a parallel tool-name
+        # taxonomy.
+        if args and tool is not None:
+            try:
+                workspace_paths = list(tool.get_workspace_paths(args))
+            except Exception:
+                workspace_paths = []
+            for file_path in workspace_paths:
+                if str(file_path or "").strip() in {"", "."}:
+                    continue
+                tool_result_read = False
+                if bool(getattr(tool, "allow_tool_result_path", False)):
+                    from backend.agent.tool_result_persistence import is_tool_result_path
+
+                    tool_result_read = is_tool_result_path(str(file_path))
+                root_path_allowed = bool(
+                    getattr(tool, "allow_workspace_root_path", False)
+                    and self._is_allowed_workspace_root_path(str(file_path), context=context)
+                )
                 if (
-                    file_path
-                    and not self.is_path_allowed(file_path, context=context)
-                    and not self._is_allowed_workspace_root_file_read(tool_name, str(file_path), context=context)
-                    and not self._is_allowed_workspace_root_directory_discovery(tool_name, str(file_path), context=context)
+                    not tool_result_read
+                    and not self.is_path_allowed(str(file_path), context=context)
+                    and not root_path_allowed
                 ):
                     return (
                         f"路径 '{file_path}' 不在允许范围内。"
@@ -970,9 +1150,20 @@ class PermissionChecker:
                         f"禁止的路径模式: {self._settings.path_denylist}。"
                     )
 
-                if file_path and not (context is not None and context.mode == "bypass"):
-                    operation = "write" if self._matches(tool_name, _WRITE_TOOL_PATTERNS) else "read"
-                    allowed, reason = self.validate_file_operation(str(file_path), operation)
+                if not tool_result_read and not (context is not None and context.mode == "bypass"):
+                    try:
+                        operation = (
+                            "write"
+                            if tool.get_side_effect_kind(args) in {"workspace", "destructive"}
+                            else "read"
+                        )
+                    except Exception:
+                        operation = "read"
+                    allowed, reason = self.validate_file_operation(
+                        str(file_path),
+                        operation,
+                        context=context,
+                    )
                     if not allowed:
                         return reason
         return ""
@@ -1002,10 +1193,12 @@ class PermissionChecker:
             scope["boundary"] = "network"
         elif tool is not None and bool(getattr(tool, "mutates_workspace", False)):
             scope["boundary"] = "filesystem"
-        elif re.match(r"^(?:run_|terminal_|repl)", tool_name):
-            scope["boundary"] = "system"
-        elif tool_name in {"task", "workflow", "send_message"}:
-            scope["boundary"] = "agent"
+        elif tool is not None:
+            try:
+                side_effect_kind = tool.get_side_effect_kind(args)
+            except Exception:
+                side_effect_kind = ""
+            scope["boundary"] = "system" if side_effect_kind in {"external", "destructive"} else "general"
         else:
             scope["boundary"] = "general"
         return scope
@@ -1039,27 +1232,24 @@ class PermissionChecker:
         }
 
     @staticmethod
-    def _consult_tool(
+    def _tool_permission_decision(
         tool: "BaseTool",
         args: dict[str, Any] | None,
         context: PermissionContext | None,
-    ) -> PermissionLevel | None:
-        """Ask a tool to decide its own permission for this invocation.
-
-        Returns an explicit level from ``check_permission``, or ``AUTO`` when
-        the tool classifies the invocation as read-only. ``None`` means defer
-        to the centralized policy. Tool failures fall through to ``None`` so a
-        buggy hook can never silently widen access.
-        """
+    ) -> tuple[PermissionLevel, bool]:
+        """Return the invocation policy and whether a tool explicitly raised it."""
+        declared = getattr(tool, "permission", PermissionLevel.AUTO)
+        if not isinstance(declared, PermissionLevel):
+            declared = PermissionLevel.CONFIRM
         try:
             decided = tool.check_permission(args, context)
             if decided is not None:
-                return decided
+                return decided, True
             if tool.is_read_only(args):
-                return PermissionLevel.AUTO
-        except Exception:  # pragma: no cover - defensive; never widen on error
-            return None
-        return None
+                return PermissionLevel.AUTO, False
+        except Exception:  # pragma: no cover - metadata errors use declared policy
+            return declared, False
+        return declared, False
 
     @staticmethod
     def _tool_invocation_is_read_only(
@@ -1073,11 +1263,67 @@ class PermissionChecker:
             return False
 
     @staticmethod
+    def _tool_capability_floor(
+        tool: "BaseTool",
+        args: dict[str, Any] | None,
+        context: PermissionContext | None,
+    ) -> PermissionLevel | None:
+        """Translate tool metadata into an approval floor that rules cannot lower.
+
+        ``permission`` is normally a policy default and may be reduced by an
+        exact content rule or a scoped session approval.  Three declarations
+        are different because they describe the capability being exercised:
+
+        * diff-review tools must still present their diff outside the explicit
+          workspace-write modes;
+        * destructive invocations always require a human confirmation;
+        * open-world tools whose own metadata does not classify the invocation
+          as an ordinary read require confirmation.
+
+        Bypass and plan modes are resolved before this helper.  Metadata or
+        classification failures fail closed only to the tool's declared
+        permission; they never silently turn a mutating call into ``AUTO``.
+        """
+        declared = getattr(tool, "permission", PermissionLevel.AUTO)
+        if not isinstance(declared, PermissionLevel):
+            declared = PermissionLevel.AUTO
+
+        if declared == PermissionLevel.ALWAYS_DENY:
+            return PermissionLevel.ALWAYS_DENY
+
+        mode = getattr(context, "mode", "default") if context is not None else "default"
+        if declared == PermissionLevel.DIFF_REVIEW and mode != "accept_edits":
+            return PermissionLevel.DIFF_REVIEW
+
+        try:
+            side_effect_kind = str(tool.get_side_effect_kind(args) or "").strip().lower()
+        except Exception:  # pragma: no cover - defensive metadata fallback
+            side_effect_kind = ""
+        destructive = bool(getattr(tool, "destructive", False)) or side_effect_kind == "destructive"
+        if destructive:
+            return (
+                declared
+                if _PERMISSION_RESTRICTIVENESS[declared]
+                > _PERMISSION_RESTRICTIVENESS[PermissionLevel.CONFIRM]
+                else PermissionLevel.CONFIRM
+            )
+
+        if bool(getattr(tool, "open_world", False)) and declared != PermissionLevel.AUTO:
+            try:
+                invocation_is_read_only = bool(tool.is_read_only(args))
+            except Exception:  # pragma: no cover - unknown open-world calls require review
+                invocation_is_read_only = False
+            if not invocation_is_read_only:
+                return PermissionLevel.CONFIRM
+
+        return None
+
+    @staticmethod
     def _resolve_override(
         tool_name: str, overrides: dict[str, PermissionLevel]
     ) -> PermissionLevel | None:
         for pattern, level in overrides.items():
-            if fnmatch.fnmatch(tool_name, pattern):
+            if _tool_pattern_matches(tool_name, pattern):
                 return level
         return None
 
@@ -1087,18 +1333,10 @@ class PermissionChecker:
         overrides: dict[str, PermissionLevel],
     ) -> tuple[str, PermissionLevel] | None:
         for pattern, level in overrides.items():
-            if fnmatch.fnmatch(tool_name, pattern):
+            if _tool_pattern_matches(tool_name, pattern):
                 return pattern, level
         return None
 
     @staticmethod
     def _first_match(tool_name: str, patterns: list[str]) -> str:
-        return next((pattern for pattern in patterns if fnmatch.fnmatch(tool_name, pattern)), "")
-
-    @staticmethod
-    def _matches(tool_name: str, patterns: list[str]) -> bool:
-        """检查工具名是否匹配模式列表中的任何一个。"""
-        for pattern in patterns:
-            if fnmatch.fnmatch(tool_name, pattern):
-                return True
-        return False
+        return next((pattern for pattern in patterns if _tool_pattern_matches(tool_name, pattern)), "")

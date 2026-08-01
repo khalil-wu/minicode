@@ -70,74 +70,78 @@ export interface PreviewServerOutputLine {
 export interface PreviewLaunchProcessInfo extends PreviewLaunchConfigInfo {
   id: string;
   pid?: number;
-  status: "starting" | "running" | "ready" | "exited" | "crashed";
+  status: "starting" | "running" | "ready" | "exited" | "crashed" | "unhealthy";
   stderr_tail?: string[];
   output_tail?: PreviewServerOutputLine[];
+}
+
+interface PreviewOwnedEvent {
+  conversation_id: string;
 }
 
 // ──────────────────────────────────────────────────────────────────
 // Server event payload types
 // ──────────────────────────────────────────────────────────────────
 
-export interface PreviewServersUpdatedEvent {
+export interface PreviewServersUpdatedEvent extends PreviewOwnedEvent {
   type: "preview.servers.updated";
   servers: PreviewServerInfo[];
 }
 
-export interface PreviewServerDetectedEvent extends PreviewServerInfo {
+export interface PreviewServerDetectedEvent extends PreviewServerInfo, PreviewOwnedEvent {
   type: "preview.server.detected";
 }
 
-export interface PreviewServerStoppedEvent {
+export interface PreviewServerStoppedEvent extends PreviewOwnedEvent {
   type: "preview.server.stopped";
   port: number;
 }
 
-export interface PreviewNavigatedEvent {
+export interface PreviewNavigatedEvent extends PreviewOwnedEvent {
   type: "preview.navigated";
   url: string;
 }
 
-export interface PreviewRefreshedEvent {
+export interface PreviewRefreshedEvent extends PreviewOwnedEvent {
   type: "preview.refreshed";
   url?: string;
 }
 
-export interface PreviewLaunchConfigEvent {
+export interface PreviewLaunchConfigEvent extends PreviewOwnedEvent {
   type: "preview.launch.config";
   workspace_root?: string;
   configs: PreviewLaunchConfigInfo[];
   running?: PreviewLaunchProcessInfo[];
 }
 
-export interface PreviewLaunchStartedEvent extends PreviewLaunchProcessInfo {
+export interface PreviewLaunchStartedEvent extends PreviewLaunchProcessInfo, PreviewOwnedEvent {
   type: "preview.launch.started";
 }
 
-export interface PreviewLaunchStoppedEvent extends PreviewLaunchProcessInfo {
+export interface PreviewLaunchStoppedEvent extends PreviewLaunchProcessInfo, PreviewOwnedEvent {
   type: "preview.launch.stopped";
 }
 
-export interface PreviewServerReadyEvent {
+export interface PreviewServerReadyEvent extends PreviewOwnedEvent {
   type: "preview.server.ready";
   id: string;
   url: string;
   port: number;
 }
 
-export interface PreviewServerOutputEvent extends PreviewServerOutputLine {
+export interface PreviewServerOutputEvent extends PreviewServerOutputLine, PreviewOwnedEvent {
   type: "preview.server.output";
   id: string;
 }
 
-export interface PreviewServerCrashedEvent {
+export interface PreviewServerCrashedEvent extends PreviewOwnedEvent {
   type: "preview.server.crashed";
   id: string;
   exit_code?: number | null;
   stderr_tail?: string[];
 }
 
-export interface PreviewServerUnhealthyEvent {
+export interface PreviewServerUnhealthyEvent extends PreviewOwnedEvent {
   type: "preview.server.unhealthy";
   id: string;
   url?: string;
@@ -145,7 +149,7 @@ export interface PreviewServerUnhealthyEvent {
   last_error?: string;
 }
 
-export interface PreviewVerifiedEvent {
+export interface PreviewVerifiedEvent extends PreviewOwnedEvent {
   type: "preview.verified";
   url: string;
   ok: boolean;

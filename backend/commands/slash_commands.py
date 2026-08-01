@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from pathlib import Path
+import re
+import shlex
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from backend.commands.catalog import get_composer_command_catalog
-from backend.skills.loader import SkillLoader
 
 if TYPE_CHECKING:
     from backend.ws.handler import WebSocketSession
@@ -65,7 +65,16 @@ _MEMORY_MODE_ALIASES = {
 
 
 def _split_args(arg: str) -> list[str]:
-    return [token for token in str(arg or "").strip().split() if token]
+    raw = str(arg or "").strip()
+    if not raw:
+        return []
+    try:
+        # CC uses shell-quote parsing so quoted command arguments remain one
+        # indexed value. shlex provides the same quoting behavior here; on an
+        # incomplete quote both implementations fall back to whitespace split.
+        return [token for token in shlex.split(raw, posix=True) if token]
+    except ValueError:
+        return [token for token in raw.split() if token]
 
 
 def _normalize_permission_mode(token: str) -> str | None:
@@ -606,32 +615,48 @@ async def _handle_skills(
     _ = attachments
     skill_name = str(arg or "").strip()
     if skill_name:
-        handled = await _dispatch_command(
-            ws,
-            "load_skill",
-            {
-                "skill_name": skill_name,
-                "source": "slash:/skills",
-            },
-        )
-        if not handled:
-            await _emit_command_unavailable(ws, "skills")
-            return True, ""
-        await ws._emit_command_result(
-            "skills",
-            f"Requested skill activation: {skill_name}",
-            data={"skill_name": skill_name},
-        )
-        return True, ""
+        return False, f"${skill_name}"
 
     await _dispatch_command(ws, "skills.list", {"source": "slash:/skills"})
     await _dispatch_command(ws, "skills.marketplace.list", {"source": "slash:/skills"})
     await ws._emit_command_result(
         "skills",
-        "Opening Skills marketplace.",
+        "Opening Skills browser.",
         data={"ui_action": "open_skills_marketplace"},
     )
     return True, ""
+
+
+async def _handle_plan(
+    ws: "WebSocketSession", arg: str, attachments: Any
+) -> tuple[bool, str]:
+    success = await _apply_permission_mode(
+        ws,
+        command="plan",
+        mode="plan",
+        source="slash:/plan",
+    )
+    if not success:
+        return True, ""
+    remainder = str(arg or "").strip()
+    if remainder or attachments:
+        return False, remainder
+    return True, ""
+
+
+def _settings_handler(command: str, tab: str) -> SlashHandler:
+    async def _handler(
+        ws: "WebSocketSession", arg: str, attachments: Any
+    ) -> tuple[bool, str]:
+        _ = arg, attachments
+        await ws._emit_command_result(
+            command,
+            f"Opening {command} settings.",
+            data={"ui_action": f"open_settings:{tab}"},
+        )
+        return True, ""
+
+    return _handler
 
 
 async def _handle_compact(
@@ -764,22 +789,24 @@ async def _handle_resume(
         )
         return True, ""
 
-    checkpoint = load_latest_checkpoint(session_id)
-    if checkpoint is None:
-        await ws._emit_command_result(
-            "resume",
-            "No incomplete checkpoint found. The last task completed successfully or no checkpoint exists yet.",
-            level="info",
-        )
-        return True, ""
-
-    # Directly trigger agent run with resume metadata
     conversation_id = _active_conversation_id(ws)
     if not conversation_id:
         await ws._emit_command_result(
             "resume",
             "No active conversation. Cannot resume.",
             level="error",
+        )
+        return True, ""
+
+    checkpoint = load_latest_checkpoint(
+        session_id,
+        conversation_id=conversation_id,
+    )
+    if checkpoint is None:
+        await ws._emit_command_result(
+            "resume",
+            "No incomplete checkpoint found for this conversation. The last task completed successfully or no checkpoint exists yet.",
+            level="info",
         )
         return True, ""
 
@@ -817,6 +844,7 @@ def _build_compact_budget_snapshot(ws: "WebSocketSession", builder: Any) -> dict
 
 
 _LOCAL_COMMAND_HANDLERS: dict[str, SlashHandler] = {
+    "plan": _handle_plan,
     "new": _handle_new,
     "clear": _handle_clear,
     "effort": _handle_effort,
@@ -831,6 +859,9 @@ _LOCAL_COMMAND_HANDLERS: dict[str, SlashHandler] = {
     "cost": _handle_cost,
     "help": _handle_help,
     "skills": _handle_skills,
+    "model": _settings_handler("model", "provider"),
+    "mcp": _settings_handler("mcp", "connectors"),
+    "plugins": _settings_handler("plugins", "plugins"),
     "compact": _handle_compact,
     "goal": _handle_goal,
     "resume": _handle_resume,
@@ -855,52 +886,24 @@ def _build_local_handler(command_name: str) -> SlashHandler:
     return _handler
 
 
-def _template_workspace_root(ws: "WebSocketSession") -> str:
-    resolver = getattr(ws, "_workspace_root_for_conversation", None)
-    root: Any = None
-    if callable(resolver):
-        try:
-            root = resolver()
-        except TypeError:
-            root = resolver(getattr(ws, "active_conversation", None))
-    if root is None:
-        active = getattr(ws, "active_conversation", None)
-        root = getattr(active, "workspace_root", "") if active is not None else ""
-    if root is None:
-        root = getattr(ws, "workspace_root", "")
-    if not root:
-        return ""
-    try:
-        return str(Path(root).expanduser().resolve())
-    except (OSError, RuntimeError, TypeError, ValueError):
-        return str(root)
-
-
-def _template_skill_dir(skill_name: str) -> str:
-    normalized = str(skill_name or "").strip()
-    if not normalized:
-        return ""
-    meta = SkillLoader().get_meta(normalized)
-    if meta is None:
-        return ""
-    try:
-        return str(meta.source_path.parent.expanduser().resolve())
-    except (OSError, RuntimeError):
-        return str(meta.source_path.parent)
-
-
-def _expand_template_variables(template: str, ws: "WebSocketSession", skill_name: str = "") -> str:
-    if "${" not in template:
-        return template
-    return (
-        template
-        .replace("${CLAUDE_SKILL_DIR}", _template_skill_dir(skill_name))
-        .replace("${WORKSPACE}", _template_workspace_root(ws))
-    )
-
-
-def _build_template_handler(command_name: str, template: str, skill_name: str = "") -> SlashHandler:
+def _build_template_handler(
+    command_name: str,
+    template: str,
+    argument_names: list[str] | None = None,
+    *,
+    base_dir: str = "",
+    is_skill_file: bool = False,
+) -> SlashHandler:
     base_template = str(template or "").strip()
+    skill_dir = str(base_dir or "").strip()
+    # Claude Code renders skill directories with POSIX separators even on
+    # Windows so relative references in SKILL.md remain portable to the
+    # model/tool boundary.
+    if is_skill_file:
+        skill_dir = skill_dir.replace("\\", "/")
+    if is_skill_file and skill_dir:
+        base_template = f"Base directory for this skill: {skill_dir}\n\n{base_template}"
+    named_arguments = [str(name) for name in (argument_names or []) if str(name)]
 
     async def _handler(
         ws: "WebSocketSession", arg: str, attachments: Any
@@ -909,10 +912,14 @@ def _build_template_handler(command_name: str, template: str, skill_name: str = 
         if not base_template:
             await _emit_command_unavailable(ws, command_name)
             return True, ""
-        prompt = _expand_template_variables(base_template, ws, skill_name)
         extra = str(arg or "").strip()
-        if extra:
-            prompt = f"{prompt}\n\nAdditional command context:\n{extra}"
+        prompt = _substitute_command_arguments(
+            base_template,
+            extra,
+            argument_names=named_arguments,
+        )
+        if skill_dir:
+            prompt = prompt.replace("${CLAUDE_SKILL_DIR}", skill_dir)
         await ws._emit_command_result(
             command_name,
             f"Prepared template prompt for '/{command_name}'.",
@@ -920,6 +927,48 @@ def _build_template_handler(command_name: str, template: str, skill_name: str = 
         return False, prompt
 
     return _handler
+
+
+def _substitute_command_arguments(
+    template: str,
+    arguments: str,
+    *,
+    argument_names: list[str] | None = None,
+) -> str:
+    """Apply CC's $ARGUMENTS, indexed, and shorthand substitutions."""
+    raw = str(arguments or "").strip()
+    original_template = template
+    values = _split_args(raw)
+
+    def indexed(match: Any) -> str:
+        index = int(match.group(1))
+        return values[index] if index < len(values) else ""
+
+    content = template
+    had_placeholder = bool(
+        re.search(r"\$ARGUMENTS(?:\[\d+\])?", original_template)
+        or re.search(r"(?<![A-Za-z0-9_])\$\d+\b", original_template)
+        or any(
+            re.search(rf"\${re.escape(name)}(?![\[\w])", original_template)
+            for name in (argument_names or [])
+            if name and not name.isdecimal()
+        )
+    )
+    for index, name in enumerate(argument_names or []):
+        if not name or name.isdecimal():
+            continue
+        value = values[index] if index < len(values) else ""
+        content = re.sub(
+            rf"\${re.escape(name)}(?![\[\w])",
+            lambda _match, replacement=value: replacement,
+            content,
+        )
+    content = re.sub(r"\$ARGUMENTS\[(\d+)\]", indexed, content)
+    content = re.sub(r"(?<![A-Za-z0-9_])\$(\d+)\b", indexed, content)
+    content = content.replace("$ARGUMENTS", raw)
+    if raw and not had_placeholder:
+        content = f"{content.rstrip()}\n\nARGUMENTS: {raw}"
+    return content.strip()
 
 
 def _build_protocol_handler(entry: dict[str, Any]) -> SlashHandler:
@@ -954,44 +1003,6 @@ def _build_protocol_handler(entry: dict[str, Any]) -> SlashHandler:
         handled = await _dispatch_command(ws, protocol_command, payload)
         if not handled:
             await _emit_command_unavailable(ws, command_name)
-        return True, ""
-
-    return _handler
-
-
-def _build_plugin_local_handler(entry: dict[str, Any]) -> SlashHandler:
-    command_name = str(entry.get("command", "")).strip().lower()
-    ui_action = str(entry.get("ui_action") or "").strip()
-    component = str(entry.get("component") or "").strip()
-    plugin_name = str(entry.get("plugin_name") or "").strip()
-    base_payload = dict(entry.get("payload") or {}) if isinstance(entry.get("payload"), dict) else {}
-    arg_key = str(entry.get("arg_key") or "").strip()
-
-    async def _handler(
-        ws: "WebSocketSession", arg: str, attachments: Any
-    ) -> tuple[bool, str]:
-        _ = attachments
-        if not ui_action:
-            await _emit_command_unavailable(ws, command_name)
-            return True, ""
-
-        raw_arg = str(arg or "").strip()
-        data = dict(base_payload)
-        data["ui_action"] = ui_action
-        if component:
-            data["component"] = component
-        data.setdefault("source", f"slash:/{command_name}")
-        if plugin_name:
-            data.setdefault("plugin_name", plugin_name)
-        data.setdefault("command", command_name)
-        if raw_arg:
-            data[arg_key or "arg"] = raw_arg
-
-        await ws._emit_command_result(
-            command_name,
-            f"Opening plugin command: /{command_name}.",
-            data=data,
-        )
         return True, ""
 
     return _handler
@@ -1034,10 +1045,7 @@ def register_all_slash_commands(registry: Any) -> None:
         slash_name = f"/{command_name}"
 
         if command_type == "local":
-            if str(entry.get("source", "")).strip().lower() == "plugin":
-                registry.register_slash(slash_name, _build_plugin_local_handler(entry))
-            else:
-                registry.register_slash(slash_name, _build_local_handler(command_name))
+            registry.register_slash(slash_name, _build_local_handler(command_name))
             continue
 
         if command_type == "template":
@@ -1046,7 +1054,9 @@ def register_all_slash_commands(registry: Any) -> None:
                 _build_template_handler(
                     command_name,
                     str(entry.get("template", "")),
-                    str(entry.get("skill_name", "")),
+                    list(entry.get("argument_names") or []),
+                    base_dir=str(entry.get("base_dir") or ""),
+                    is_skill_file=bool(entry.get("is_skill_file")),
                 ),
             )
             continue

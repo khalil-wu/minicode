@@ -30,11 +30,11 @@ export class SafeBoundary extends Component<Props, State> {
     if (this.state.hasError) {
       if (this.props.fallback) return this.props.fallback;
       return (
-        <div style={{ padding: 16, color: "var(--text-danger, #e55)", fontSize: 13 }}>
+        <div style={{ padding: 16, color: "var(--text-danger, #e55)", fontSize: "var(--text-chrome)" }}>
           <p style={{ fontWeight: 600, marginBottom: 4 }}>
             {this.props.name ?? "Component"} encountered an error
           </p>
-          <pre style={{ opacity: 0.7, fontSize: 11, whiteSpace: "pre-wrap" }}>
+          <pre style={{ opacity: 0.7, fontSize: "var(--text-2xs)", whiteSpace: "pre-wrap" }}>
             {this.state.error?.message}
           </pre>
           <button
@@ -47,7 +47,7 @@ export class SafeBoundary extends Component<Props, State> {
               background: "var(--surface-2, #1a1a1a)",
               color: "var(--text-default, #ccc)",
               cursor: "pointer",
-              fontSize: 12,
+              fontSize: "var(--text-xxs)",
             }}
           >
             Retry

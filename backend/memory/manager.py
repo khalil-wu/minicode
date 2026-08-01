@@ -78,8 +78,7 @@ class MemoryManager:
     """File-memory facade.
 
     Long-term agent memory is intentionally file-backed: MEMORY.md plus named
-    markdown files. Vector storage remains available to document ingestion/RAG,
-    but it is not part of the default memory manager.
+    markdown files.
     """
 
     def __init__(

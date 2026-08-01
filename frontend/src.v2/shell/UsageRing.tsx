@@ -15,7 +15,7 @@ export const UsageRing = ({
     : 0;
   const percent = clampPercent((totalBudgetPercent ?? 0) > 0 ? totalBudgetPercent : (contextPercent ?? 0));
   const label = percent > 0 ? `${Math.round(percent * 100)}%` : "--";
-  const color = usageColor(percent);
+  const color = "var(--accent-primary)";
   const title = buildTitle({ buckets, contextUsage, percent });
 
   return (
@@ -49,12 +49,6 @@ const formatCount = (value: number): string => {
   return String(Math.round(value));
 };
 
-const usageColor = (percent: number): string => {
-  if (percent >= 0.9) return "var(--state-danger)";
-  if (percent >= 0.75) return "var(--state-warning)";
-  return "var(--state-success, #3fb950)";
-};
-
 const buildTitle = ({
   buckets,
   contextUsage,
@@ -65,9 +59,6 @@ const buildTitle = ({
   percent: number;
 }) => {
   const lines = [`Context budget: ${Math.round(percent * 100)}%`];
-  if (percent >= 0.85) {
-    lines.push("即将触发 compaction");
-  }
   if (contextUsage && contextUsage.limit > 0) {
     lines.push(`${formatCount(contextUsage.used)} / ${formatCount(contextUsage.limit)} tokens`);
   }

@@ -13,9 +13,9 @@ const delay = (ms: number): Promise<void> =>
 export const formatSettingsLoadError = (error: unknown): string => {
   const message = error instanceof Error ? error.message : String(error);
   if (/failed to fetch|networkerror|load failed/i.test(message)) {
-    return "MiniCode backend is not reachable yet. Retry after the desktop backend finishes starting.";
+    return "暂时无法连接 MiniCode 后端，请等待桌面后端启动完成后重试。";
   }
-  return message || "Request failed.";
+  return message || "请求失败。";
 };
 
 const isRetryableLoadError = (error: unknown): boolean => {

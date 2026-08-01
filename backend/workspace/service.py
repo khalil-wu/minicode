@@ -12,6 +12,7 @@ from urllib.parse import quote
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
 
+from backend.atomic_io import atomic_write_bytes
 from backend.security.sensitive_files import is_sensitive_file
 
 from .models import (
@@ -59,18 +60,25 @@ class WorkspaceService:
 
         entries: list[WorkspaceTreeEntry] = []
         try:
-            for item in sorted(target.iterdir(), key=lambda candidate: (not candidate.is_dir(), candidate.name.lower())):
+            for item in sorted(
+                target.iterdir(),
+                key=lambda candidate: (
+                    not (candidate.is_dir() and not candidate.is_symlink()),
+                    candidate.name.lower(),
+                ),
+            ):
                 if self.should_skip_entry(item):
                     continue
-                stat = item.stat()
+                stat = item.lstat()
+                is_dir = item.is_dir() and not item.is_symlink()
                 entries.append(
                     WorkspaceTreeEntry(
                         name=item.name,
-                        path=self.to_workspace_relative(item),
-                        is_dir=item.is_dir(),
-                        size_bytes=None if item.is_dir() else stat.st_size,
+                        path=self.to_workspace_relative(item, follow_symlinks=False),
+                        is_dir=is_dir,
+                        size_bytes=None if is_dir else stat.st_size,
                         modified_at=self.iso_timestamp(stat.st_mtime),
-                        has_children=item.is_dir() and self.directory_has_visible_children(item),
+                        has_children=is_dir and self.directory_has_visible_children(item),
                     )
                 )
         except PermissionError as exc:
@@ -83,6 +91,9 @@ class WorkspaceService:
         )
 
     def read_file(self, path: str) -> WorkspaceFileResponse:
+        self.ensure_not_sensitive_file(
+            self.resolve_workspace_path(path, follow_final_symlink=False)
+        )
         target = self.resolve_workspace_path(path)
         if not target.exists():
             raise HTTPException(status_code=404, detail=f"Path not found: {path}")
@@ -123,6 +134,9 @@ class WorkspaceService:
         )
 
     def raw_file_response(self, path: str) -> FileResponse:
+        self.ensure_not_sensitive_file(
+            self.resolve_workspace_path(path, follow_final_symlink=False)
+        )
         target = self.resolve_workspace_path(path)
         if not target.exists():
             raise HTTPException(status_code=404, detail=f"Path not found: {path}")
@@ -135,13 +149,17 @@ class WorkspaceService:
         return FileResponse(target, media_type=media_type, headers={"Content-Disposition": disposition})
 
     def write_file(self, path: str, content: str) -> WorkspaceFileResponse:
+        self.ensure_not_sensitive_file(
+            self.resolve_workspace_path(path, follow_final_symlink=False),
+            operation="modify",
+        )
         target = self.resolve_workspace_path(path)
+        self.ensure_not_sensitive_file(target, operation="modify")
         if target.exists() and target.is_dir():
             raise HTTPException(status_code=400, detail="Cannot write content into a directory path.")
 
         try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(content.encode("utf-8"))
+            atomic_write_bytes(target, content.encode("utf-8"))
             stat = target.stat()
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=f"Permission denied: {path}") from exc
@@ -160,7 +178,12 @@ class WorkspaceService:
         )
 
     def compare_and_write_file(self, path: str, expected_hash: str, content: str) -> WorkspaceFileResponse:
+        self.ensure_not_sensitive_file(
+            self.resolve_workspace_path(path, follow_final_symlink=False),
+            operation="modify",
+        )
         target = self.resolve_workspace_path(path)
+        self.ensure_not_sensitive_file(target, operation="modify")
         if target.exists() and target.is_dir():
             raise HTTPException(status_code=400, detail="Cannot write content into a directory path.")
 
@@ -188,8 +211,7 @@ class WorkspaceService:
                         },
                     )
 
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(content.encode("utf-8"))
+                atomic_write_bytes(target, content.encode("utf-8"))
                 stat = target.stat()
         except HTTPException:
             raise
@@ -210,6 +232,10 @@ class WorkspaceService:
         )
 
     def create_directory(self, path: str) -> WorkspacePathResponse:
+        self.ensure_not_sensitive_file(
+            self.resolve_workspace_path(path, follow_final_symlink=False),
+            operation="create",
+        )
         target = self.resolve_workspace_path(path)
         if target.exists():
             raise HTTPException(status_code=409, detail=f"Path already exists: {path}")
@@ -224,15 +250,18 @@ class WorkspaceService:
         return self.workspace_path_payload(target)
 
     def rename_path(self, path: str, new_path: str) -> WorkspacePathResponse:
-        source = self.resolve_workspace_path(path)
-        destination = self.resolve_workspace_path(new_path)
+        source = self.resolve_workspace_path(path, follow_final_symlink=False)
+        destination = self.resolve_workspace_path(new_path, follow_final_symlink=False)
+
+        self.ensure_not_sensitive_file(source, operation="rename")
+        self.ensure_not_sensitive_file(destination, operation="rename")
 
         self.ensure_not_workspace_root(source)
         self.ensure_not_workspace_root(destination)
 
-        if not source.exists():
+        if not source.exists() and not source.is_symlink():
             raise HTTPException(status_code=404, detail=f"Path not found: {path}")
-        if destination.exists():
+        if destination.exists() or destination.is_symlink():
             raise HTTPException(status_code=409, detail=f"Target already exists: {new_path}")
 
         try:
@@ -246,17 +275,20 @@ class WorkspaceService:
         return self.workspace_path_payload(destination)
 
     def delete_path(self, path: str, recursive: bool) -> WorkspaceDeleteResponse:
-        target = self.resolve_workspace_path(path)
+        target = self.resolve_workspace_path(path, follow_final_symlink=False)
         self.ensure_not_workspace_root(target)
+        self.ensure_not_sensitive_file(target, operation="delete")
 
-        if not target.exists():
+        if not target.exists() and not target.is_symlink():
             raise HTTPException(status_code=404, detail=f"Path not found: {path}")
 
-        relative_path = self.to_workspace_relative(target)
-        is_dir = target.is_dir()
+        relative_path = self.to_workspace_relative(target, follow_symlinks=False)
+        is_dir = target.is_dir() and not target.is_symlink()
 
         try:
-            if is_dir:
+            if target.is_symlink():
+                target.unlink()
+            elif is_dir:
                 if recursive:
                     shutil.rmtree(target)
                 else:
@@ -288,20 +320,32 @@ class WorkspaceService:
         raw = (path_value or ".").strip().replace("\\", "/")
         return raw or "."
 
-    def resolve_workspace_path(self, path_value: str) -> Path:
+    def resolve_workspace_path(
+        self,
+        path_value: str,
+        *,
+        follow_final_symlink: bool = True,
+    ) -> Path:
         root = self.workspace_root_path()
         relative = self.normalize_workspace_relative(path_value)
-        candidate = (root / relative).resolve()
+        lexical = root / relative
+        if follow_final_symlink or lexical == root:
+            candidate = lexical.resolve()
+        else:
+            candidate = lexical.parent.resolve() / lexical.name
         if candidate != root and root not in candidate.parents:
             raise HTTPException(status_code=400, detail="Path is outside workspace root.")
         return candidate
 
-    def to_workspace_relative(self, path: Path) -> str:
+    def to_workspace_relative(self, path: Path, *, follow_symlinks: bool = True) -> str:
         root = self.workspace_root_path()
-        resolved = path.resolve()
+        resolved = path.resolve() if follow_symlinks else path.absolute()
         if resolved == root:
             return "."
-        return resolved.relative_to(root).as_posix()
+        try:
+            return resolved.relative_to(root).as_posix()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Path is outside workspace root.") from exc
 
     @staticmethod
     def should_skip_entry(path: Path) -> bool:
@@ -319,6 +363,8 @@ class WorkspaceService:
         return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc).isoformat()
 
     def directory_has_visible_children(self, path: Path) -> bool:
+        if path.is_symlink():
+            return False
         try:
             for child in path.iterdir():
                 if not self.should_skip_entry(child):
@@ -363,19 +409,20 @@ class WorkspaceService:
             raise HTTPException(status_code=400, detail="Operation on workspace root is not allowed.")
 
     @staticmethod
-    def ensure_not_sensitive_file(path: Path) -> None:
+    def ensure_not_sensitive_file(path: Path, *, operation: str = "read") -> None:
         if is_sensitive_file(path):
             raise HTTPException(
                 status_code=403,
-                detail="Refusing to read sensitive credential file.",
+                detail=f"Refusing to {operation} sensitive credential file.",
             )
 
     def workspace_path_payload(self, path: Path) -> WorkspacePathResponse:
-        stat = path.stat()
-        is_dir = path.is_dir()
+        is_symlink = path.is_symlink()
+        stat = path.lstat() if is_symlink else path.stat()
+        is_dir = path.is_dir() and not is_symlink
         return WorkspacePathResponse(
             workspace_root=str(self.workspace_root_path()),
-            path=self.to_workspace_relative(path),
+            path=self.to_workspace_relative(path, follow_symlinks=not is_symlink),
             name=path.name,
             is_dir=is_dir,
             size_bytes=None if is_dir else stat.st_size,

@@ -9,6 +9,7 @@ LLM 适配层抽象基类（DESIGN.md §一 架构图 LLM Adapter）。
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 import re
@@ -28,6 +29,7 @@ _SENSITIVE_REQUEST_METADATA_KEY_RE = re.compile(
 )
 _REQUEST_METADATA_MAX_PAIRS = 16
 _REQUEST_METADATA_MAX_VALUE_CHARS = 512
+_LOCAL_REQUEST_METADATA_KEYS = {"prompt_cache_skip_write"}
 
 
 def sanitize_llm_request_metadata(metadata: dict[str, Any] | None) -> dict[str, str]:
@@ -45,6 +47,8 @@ def sanitize_llm_request_metadata(metadata: dict[str, Any] | None) -> dict[str, 
             break
         key = str(raw_key or "").strip()
         if not key or not _REQUEST_METADATA_KEY_RE.fullmatch(key):
+            continue
+        if key in _LOCAL_REQUEST_METADATA_KEYS:
             continue
         if _SENSITIVE_REQUEST_METADATA_KEY_RE.search(key):
             continue
@@ -81,11 +85,61 @@ def stream_chat_with_request_metadata(
     metadata: dict[str, Any] | None = None,
 ) -> AsyncIterator["StreamEvent"]:
     """Call stream_chat with request metadata only when the adapter supports it."""
-    request_metadata = sanitize_llm_request_metadata(metadata)
+    request_metadata: dict[str, Any] = sanitize_llm_request_metadata(metadata)
+    if isinstance(metadata, dict):
+        for key in _LOCAL_REQUEST_METADATA_KEYS:
+            if key in metadata:
+                request_metadata[key] = metadata[key]
     stream_chat = getattr(adapter, "stream_chat")
     if request_metadata and _stream_chat_accepts_metadata(stream_chat):
         return stream_chat(messages, tools=tools, metadata=request_metadata)
     return stream_chat(messages, tools=tools)
+
+
+async def safe_stream_chat_with_request_metadata(
+    adapter: Any,
+    messages: list["LLMMessage"],
+    tools: list[dict[str, Any]] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> AsyncIterator["StreamEvent"]:
+    """Normalize adapter exceptions into the loop's normal ERROR event.
+
+    Adapters normally translate transport failures themselves, but third-party
+    adapters and lightweight test providers can raise while opening or
+    iterating a stream. Letting those exceptions escape the loop bypasses the
+    bounded stream-retry ladder. This wrapper preserves cancellation and turns
+    every other exception into one classified ERROR event, keeping retry,
+    telemetry, and terminalization in a single path.
+    """
+
+    try:
+        stream = stream_chat_with_request_metadata(adapter, messages, tools, metadata)
+        async for event in stream:
+            yield event
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - normalize provider boundary failures
+        # Provider exceptions can embed request headers, query parameters, or
+        # gateway response bodies. Classify from the original exception, but
+        # only log/emit the shared redacted diagnostic.
+        from backend.llm.errors import classify_llm_error, sanitize_llm_error_message
+
+        classification = classify_llm_error(exc)
+        safe_error = sanitize_llm_error_message(exc, classification)
+        logger.warning(
+            "Provider stream raised; converting to ERROR event: %s (%s)",
+            safe_error,
+            type(exc).__name__,
+        )
+        yield StreamEvent(
+            type=StreamEventType.ERROR,
+            content=safe_error,
+            raw={
+                "exception_type": type(exc).__name__,
+                "provider_error_type": classification.provider_error_type,
+                "error_type": classification.error_type,
+            },
+        )
 
 
 class StreamEventType(Enum):
@@ -126,6 +180,10 @@ class ToolCallEvent:
     id: str  # 工具调用 ID（用于结果关联）
     name: str  # 工具名称
     arguments: dict[str, Any]  # 工具参数
+    # A parser recovered malformed provider JSON.  It remains in history so the
+    # provider's tool-call protocol stays balanced, but it must never execute.
+    arguments_repaired: bool = False
+    duplicate_id: bool = False
 
 
 @dataclass
@@ -136,15 +194,41 @@ class UsageInfo:
     output_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
+    cache_deleted_input_tokens: int = 0
     # Diagnostic subset reported by reasoning models. Providers normally count
     # this inside output_tokens, so total_tokens intentionally does not add it.
     reasoning_output_tokens: int = 0
+    # Whether input_tokens already includes cache_read_input_tokens. Each
+    # adapter sets this from its wire contract; downstream accounting does not
+    # infer it from provider or model names.
+    input_includes_cache_read: bool = True
 
     @property
     def total_tokens(self) -> int:
         # Cache fields are provider-specific diagnostics and are often a
         # subset of input_tokens (OpenAI) rather than additional tokens.
         return self.input_tokens + self.output_tokens
+
+    @property
+    def billable_tokens(self) -> int:
+        """Tokens that actually cost something this turn.
+
+        ``input_tokens`` counts the whole prompt on every request, and an agent
+        turn resends its context each iteration, so summing it across a turn
+        measures traffic rather than cost: a 50k context over 60 iterations
+        reads as 3M tokens while the real context never left 50k. Cached prefix
+        reads are the part being resent, so excluding them leaves new input plus
+        generated output — the same shape as Codex's ``non_cached_input``
+        rollout budget.
+
+        Only subtract cache reads when they are actually part of ``input_tokens``
+        (OpenAI). For Anthropic, cache reads are reported separately, so
+        subtracting them would under-count billable input.
+        """
+        if self.input_includes_cache_read:
+            cached = min(max(0, self.cache_read_input_tokens), max(0, self.input_tokens))
+            return max(0, self.input_tokens - cached) + max(0, self.output_tokens)
+        return max(0, self.input_tokens) + max(0, self.output_tokens)
 
 
 @dataclass
@@ -206,6 +290,11 @@ class LLMMessage:
 
     # tool 角色的结果
     tool_call_id: str | None = None
+
+    # Anthropic is_error: True when this tool result is an error, so the adapter
+    # marks the tool_result block with is_error (cc utils/messages.ts) instead of
+    # the model inferring failure from the result text. Other providers ignore it.
+    is_error: bool = False
 
     # Responses API assistant message phase, e.g. commentary/final_answer.
     # Other providers ignore this field.
@@ -304,15 +393,21 @@ class LLMAdapter(ABC):
         yield StreamEvent(type=StreamEventType.DONE)  # type: ignore[misc]
 
     @abstractmethod
-    async def simple_chat(self, messages: list[LLMMessage]) -> str:
+    async def simple_chat(
+        self,
+        messages: list[LLMMessage],
+        *,
+        max_tokens: int | None = None,
+    ) -> str:
         """
         非流式简单调用，用于摘要、压缩等内部任务。
 
         Returns:
-            完整的回复文本
+            完整的回复文本。max_tokens 由宿主侧调用用于 MCP sampling 等
+            必须有硬输出上限的辅助请求。
         """
 
-    # Optional per-turn bucket so simple_chat side calls (reflection /
+    # Optional per-turn bucket so simple_chat side calls (compaction /
     # last-resort / compaction) also land in the current turn's usage totals,
     # not only the global CostTracker. ContextVar keeps subagent tasks isolated.
     _turn_usage_bucket: ContextVar["UsageInfo | None"] = ContextVar(
@@ -337,10 +432,16 @@ class LLMAdapter(ABC):
             cls._turn_usage_bucket.set(None)
 
     @staticmethod
-    def record_non_stream_usage(usage_obj: Any, *, provider: str, model_id: str | None) -> None:
+    def record_non_stream_usage(
+        usage_obj: Any,
+        *,
+        provider: str,
+        model_id: str | None,
+        input_includes_cache_read: bool,
+    ) -> None:
         """Record token usage from a non-streaming response to the global
         CostTracker. Adapters should call this in ``simple_chat`` so that side
-        calls (reflection, last-resort recovery, context compaction) are counted
+        calls (last-resort recovery and context compaction) are counted
         toward totals/budgets instead of only the main streaming DONE frames.
         Defensive: silently no-ops if usage is missing or shaped unexpectedly.
         """
@@ -382,9 +483,10 @@ class LLMAdapter(ABC):
                 bucket.cache_creation_input_tokens += cache_creation
                 bucket.cache_read_input_tokens += cache_read
                 bucket.reasoning_output_tokens += reasoning_output_tokens
-            # The per-turn bucket feeds UI/turn totals; the global tracker owns
-            # process-wide cost accounting. Side calls must update both rather
-            # than choosing one or the other.
+            # The loop commits the complete turn bucket once. Standalone side
+            # calls without a bound turn still write directly to the tracker.
+            if bucket is not None:
+                return
             from backend.llm.cost_tracker import CostTracker
 
             CostTracker.get_instance().record_usage(
@@ -395,6 +497,7 @@ class LLMAdapter(ABC):
                 reasoning_output_tokens=reasoning_output_tokens,
                 model_id=model_id,
                 provider=provider,
+                input_includes_cache_read=input_includes_cache_read,
             )
         except Exception:  # noqa: BLE001 — accounting must never break the call
             logger.debug("Failed to record non-stream usage", exc_info=True)

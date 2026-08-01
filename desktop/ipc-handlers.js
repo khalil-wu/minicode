@@ -9,15 +9,18 @@ const {
   isHttpUrl,
   isProbablyTextBuffer,
   hashFileContent,
+  atomicWriteText,
   countDirEntries,
   isSamePath,
 } = require("./utils");
 
 const {
   assertIpcCapability,
+  assertReadablePath,
   assertTrustedPath,
   assertMutableTrustedPath,
   isWithinTrustedWorkspace,
+  isReadablePath,
   rememberTrustedWorkspaceRoot,
   restoreTrustedWorkspaceRoot,
 } = require("./security");
@@ -373,8 +376,8 @@ function registerIpcHandlers() {
     }
     try {
       const resolved = path.resolve(target.trim());
-      if (!isWithinTrustedWorkspace(resolved)) {
-        throw new Error("Path is outside the trusted workspace.");
+      if (!isReadablePath(resolved)) {
+        throw new Error("Path is outside trusted or approved user-output locations.");
       }
       const error = await shell.openPath(resolved);
       if (error) throw new Error(error);
@@ -393,8 +396,8 @@ function registerIpcHandlers() {
     }
     try {
       const resolved = path.resolve(target.trim());
-      if (!isWithinTrustedWorkspace(resolved)) {
-        throw new Error("Path is outside the trusted workspace.");
+      if (!isReadablePath(resolved)) {
+        throw new Error("Path is outside trusted or approved user-output locations.");
       }
       shell.showItemInFolder(resolved);
       return true;
@@ -485,6 +488,48 @@ function registerIpcHandlers() {
     return typeof typeIntoChromeTarget === "function" ? typeIntoChromeTarget(endpoint, targetId, selector, text) : null;
   }));
 
+  const embeddedBrowser = ctx.embeddedBrowserManager;
+  ipcMain.handle("minicode:embeddedBrowser:create", withMainSender("minicode:embeddedBrowser:create", async (_event, payload) => {
+    return embeddedBrowser?.create(payload);
+  }));
+  ipcMain.handle("minicode:embeddedBrowser:list", withMainSender("minicode:embeddedBrowser:list", () => {
+    return embeddedBrowser?.listTargets() ?? [];
+  }));
+  ipcMain.handle("minicode:embeddedBrowser:activate", withMainSender("minicode:embeddedBrowser:activate", (_event, id) => {
+    return embeddedBrowser?.activate(id) ?? false;
+  }));
+  ipcMain.handle("minicode:embeddedBrowser:setBounds", withMainSender("minicode:embeddedBrowser:setBounds", (_event, payload) => {
+    return embeddedBrowser?.setBounds(payload) ?? false;
+  }));
+  ipcMain.handle("minicode:embeddedBrowser:navigate", withMainSender("minicode:embeddedBrowser:navigate", async (_event, payload) => {
+    return embeddedBrowser?.navigate(payload);
+  }));
+  ipcMain.handle("minicode:embeddedBrowser:runAction", withMainSender("minicode:embeddedBrowser:runAction", (_event, payload) => {
+    return embeddedBrowser?.runNavigationAction(payload) ?? false;
+  }));
+  ipcMain.handle("minicode:embeddedBrowser:inspect", withMainSender("minicode:embeddedBrowser:inspect", async (_event, payload) => {
+    const action = payload?.kind === "network"
+      ? "get_network_logs"
+      : payload?.kind === "element"
+        ? "pick_element"
+        : payload?.kind === "region"
+          ? "pick_region"
+        : "get_console_logs";
+    return embeddedBrowser?.executeControlCommand({ action, target_id: payload?.id }) ?? { ok: false, value: [] };
+  }));
+  ipcMain.handle("minicode:embeddedBrowser:getSettings", withMainSender("minicode:embeddedBrowser:getSettings", (_event, payload) => {
+    return embeddedBrowser?.getBrowserSettings(payload?.url) ?? { downloadPolicy: "block", origin: "", permissions: [] };
+  }));
+  ipcMain.handle("minicode:embeddedBrowser:setSettings", withMainSender("minicode:embeddedBrowser:setSettings", (_event, payload) => {
+    return embeddedBrowser?.setBrowserSettings(payload) ?? { downloadPolicy: "block", origin: "", permissions: [] };
+  }));
+  ipcMain.handle("minicode:embeddedBrowser:clearSiteData", withMainSender("minicode:embeddedBrowser:clearSiteData", async (_event, id) => {
+    return embeddedBrowser?.clearSiteData(id) ?? false;
+  }));
+  ipcMain.handle("minicode:embeddedBrowser:close", withMainSender("minicode:embeddedBrowser:close", (_event, id) => {
+    return embeddedBrowser?.close(id) ?? false;
+  }));
+
   // -----------------------------------------------------------------------
   // Filesystem
   // -----------------------------------------------------------------------
@@ -550,7 +595,7 @@ function registerIpcHandlers() {
   }));
 
   ipcMain.handle("minicode:fs:readFile", withMainSender("minicode:fs:readFile", async (_event, targetPath) => {
-    const fullPath = assertTrustedPath(targetPath, "File");
+    const fullPath = assertReadablePath(targetPath, "File");
     const stat = await fs.promises.stat(fullPath);
     const MAX_READ_SIZE = 2 * 1024 * 1024; // Keep desktop editor reads aligned with the backend workspace API.
     if (stat.size > MAX_READ_SIZE) {
@@ -571,6 +616,7 @@ function registerIpcHandlers() {
       encoding: "utf-8",
       modified_at: stat.mtime.toISOString(),
       language_hint: path.extname(fullPath).slice(1) || "text",
+      read_only: !isWithinTrustedWorkspace(fullPath),
     };
   }));
 
@@ -582,8 +628,7 @@ function registerIpcHandlers() {
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
     }
-    await fs.promises.mkdir(path.dirname(fullPath), { recursive: true });
-    await fs.promises.writeFile(fullPath, content, "utf8");
+    await atomicWriteText(fullPath, content);
     const stat = await fs.promises.stat(fullPath);
     return {
       workspace_root: path.dirname(fullPath),
@@ -627,8 +672,7 @@ function registerIpcHandlers() {
       throw error;
     }
 
-    await fs.promises.mkdir(path.dirname(fullPath), { recursive: true });
-    await fs.promises.writeFile(fullPath, content, "utf8");
+    await atomicWriteText(fullPath, content);
     const stat = await fs.promises.stat(fullPath);
     return {
       workspace_root: path.dirname(fullPath),
@@ -697,28 +741,32 @@ function registerIpcHandlers() {
   // PTY
   // -----------------------------------------------------------------------
 
-  ipcMain.handle("minicode:pty:spawn", withMainSender("minicode:pty:spawn", (_event, cwd) => {
-    return ptyManager.spawnSession(cwd);
+  ipcMain.handle("minicode:pty:spawn", withMainSender("minicode:pty:spawn", (_event, cwd, conversationId) => {
+    return ptyManager.spawnSession(cwd, conversationId);
   }));
 
-  ipcMain.handle("minicode:pty:write", withMainSender("minicode:pty:write", (_event, sessionId, data) => {
-    return ptyManager.writeToSession(sessionId, data);
+  ipcMain.handle("minicode:pty:write", withMainSender("minicode:pty:write", (_event, sessionId, data, conversationId) => {
+    return ptyManager.writeToSession(sessionId, data, conversationId);
   }));
 
-  ipcMain.handle("minicode:pty:resize", withMainSender("minicode:pty:resize", (_event, sessionId, cols, rows) => {
-    ptyManager.resizeSession(sessionId, cols, rows);
+  ipcMain.handle("minicode:pty:resize", withMainSender("minicode:pty:resize", (_event, sessionId, cols, rows, conversationId) => {
+    ptyManager.resizeSession(sessionId, cols, rows, conversationId);
   }));
 
-  ipcMain.handle("minicode:pty:kill", withMainSender("minicode:pty:kill", (_event, sessionId) => {
-    ptyManager.killSession(sessionId);
+  ipcMain.handle("minicode:pty:kill", withMainSender("minicode:pty:kill", (_event, sessionId, conversationId) => {
+    return ptyManager.killSession(sessionId, conversationId);
   }));
 
-  ipcMain.handle("minicode:pty:list", withMainSender("minicode:pty:list", () => {
-    return ptyManager.listSessions();
+  ipcMain.handle("minicode:pty:killConversation", withMainSender("minicode:pty:killConversation", (_event, conversationId) => {
+    return ptyManager.killConversation(conversationId);
   }));
 
-  ipcMain.handle("minicode:pty:snapshot", withMainSender("minicode:pty:snapshot", (_event, sessionId, maxChars) => {
-    return ptyManager.snapshotSession(sessionId, maxChars);
+  ipcMain.handle("minicode:pty:list", withMainSender("minicode:pty:list", (_event, conversationId) => {
+    return ptyManager.listSessions(conversationId);
+  }));
+
+  ipcMain.handle("minicode:pty:snapshot", withMainSender("minicode:pty:snapshot", (_event, sessionId, maxChars, conversationId) => {
+    return ptyManager.snapshotSession(sessionId, maxChars, conversationId);
   }));
 
   ipcMain.handle("minicode:deepLink:ack", withMainSender("minicode:deepLink:ack", (_event, id) => {
@@ -728,9 +776,10 @@ function registerIpcHandlers() {
   ipcMain.handle("minicode:update:check", withMainSender("minicode:update:check", () => ctx.updater?.check?.() ?? false));
   ipcMain.handle("minicode:update:download", withMainSender("minicode:update:download", () => ctx.updater?.download?.() ?? false));
   ipcMain.handle("minicode:update:install", withMainSender("minicode:update:install", () => ctx.updater?.install?.() ?? false));
+  ipcMain.handle("minicode:update:status:get", withMainSender("minicode:update:status:get", () => ctx.updater?.getStatus?.() ?? { status: "idle" }));
 
-  ipcMain.handle("minicode:pty:ackExit", withMainSender("minicode:pty:ackExit", (_event, sessionId) => {
-    return ptyManager.acknowledgeExitedSession(sessionId);
+  ipcMain.handle("minicode:pty:ackExit", withMainSender("minicode:pty:ackExit", (_event, sessionId, conversationId) => {
+    return ptyManager.acknowledgeExitedSession(sessionId, conversationId);
   }));
 
   // -----------------------------------------------------------------------

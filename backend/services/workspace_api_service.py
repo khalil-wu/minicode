@@ -4,6 +4,8 @@ from pathlib import Path
 import subprocess
 from typing import Any
 
+from fastapi import HTTPException
+
 from backend.runtime_env import sanitized_git_env
 
 
@@ -189,6 +191,7 @@ def remove_recent_project_payload(path: str) -> dict[str, Any]:
 
 
 def resolve_workspace_git_root(path: str, fallback_root: Path) -> Path:
+    fallback_root = fallback_root.resolve()
     candidate = str(path or "").strip()
     if candidate:
         resolved: Path | None = Path(candidate).expanduser()
@@ -197,6 +200,8 @@ def resolve_workspace_git_root(path: str, fallback_root: Path) -> Path:
         except OSError:
             resolved = None
         if resolved is not None and resolved.is_dir():
+            if resolved != fallback_root and fallback_root not in resolved.parents:
+                raise HTTPException(status_code=400, detail="Git path is outside workspace root.")
             return resolved
     return fallback_root
 

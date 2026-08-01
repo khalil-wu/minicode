@@ -13,7 +13,6 @@ from backend.config import (
     get_anthropic_settings,
     load_config,
 )
-from backend.services.llm_provider_helpers import _resolve_openai_provider_id
 from backend.hooks.runtime import run_config_change_hook
 
 ConfigChangeHook = Callable[..., Awaitable[Any]]
@@ -115,14 +114,14 @@ def llm_model_updated_payload(
     payload_section: dict[str, Any]
     if normalized_provider == "anthropic":
         payload_section = get_anthropic_settings()
-        provider_id = "anthropic_off"
+        provider_id = "anthropic"
     elif normalized_provider == "custom":
         payload_section = get_custom_settings()
         wire_api = str(payload_section.get("wire_api") or "chat").strip()
-        provider_id = "custom_anthropic" if wire_api == "anthropic" else _resolve_openai_provider_id(str(payload_section.get("base_url") or ""))
+        provider_id = "custom_anthropic" if wire_api == "anthropic" else "custom"
     else:
         payload_section = get_openai_settings()
-        provider_id = _resolve_openai_provider_id(str(payload_section.get("base_url") or ""))
+        provider_id = "openai"
     wire_api = str(
         payload_section.get("wire_api")
         or ("anthropic" if normalized_provider == "anthropic" else "chat")
@@ -174,7 +173,7 @@ async def apply_llm_config_update(
                             command="effort",
                             message=(
                                 "Reasoning effort was not applied because the active provider "
-                                "uses Chat Completions. Switch to a Responses-compatible model/API format."
+                                "did not declare supported reasoning-effort levels for this model."
                             ),
                             level="warning",
                             data={

@@ -46,12 +46,12 @@ from backend.llm.openai_errors import (
     _clean_error_message,
     _error_status_code,
     _error_text,
-    _is_blocked_gateway_error,
-    _is_invalid_tool_schema_error,
     _is_prompt_cache_retention_unsupported_error,
     _is_reasoning_visibility_unsupported_error,
     _is_request_metadata_unsupported_error,
+    _is_stream_options_unsupported_error,
     _is_transient_gateway_error,
+    _retry_after_seconds,
 )
 from backend.llm.openai_payloads import (
     _normalize_schema_for_openai,
@@ -151,7 +151,6 @@ def _prefetch_tool_call_event(tool_calls: list[ToolCallEvent]) -> StreamEvent | 
     )
 
 _ADAPTER_RETRY_DELAY_SECONDS = 0.8
-_CHAT_HTTP_TIMEOUT_SECONDS = 120.0
 _PROVIDER_ERROR_BODY_LOG_LIMIT = 1200
 _PROVIDER_TIMELINE_LIMIT = 96
 _FUNCTION_CALL_RESULT_RE = re.compile(
@@ -166,24 +165,13 @@ def _provider_host(base_url: str) -> str:
     return parsed.netloc or parsed.path.split("/")[0] or "unknown"
 
 
-def _is_lucen_gateway(base_url: str) -> bool:
-    host = _provider_host(base_url).lower()
-    return host == "lucen.cc" or host.endswith(".lucen.cc")
-
-
 def _responses_reasoning_effort(settings: LLMSettings, *, has_tools: bool = False) -> str:
-    effort = normalize_reasoning_effort(
+    return normalize_reasoning_effort(
         settings.model,
         settings.wire_api,
         settings.reasoning_effort,
         settings.reasoning_effort_levels,
     )
-    if _is_lucen_gateway(settings.base_url):
-        # Lucen accepts Responses + tools with explicit reasoning, while
-        # tool-enabled requests without reasoning can hang or be rejected.
-        if has_tools and not effort:
-            return "high"
-    return effort
 
 
 def _responses_reasoning_summary(settings: LLMSettings) -> str:
@@ -229,13 +217,8 @@ def _responses_include_request(
     """
     if stateful_store:
         return []
-    model = (_response_tool_model(getattr(settings, "model", "")) or "").lower()
     reasoning_effort = _responses_reasoning_effort(settings, has_tools=has_tools)
-    is_openai_reasoning_model = bool(
-        model.startswith(("gpt-5", "gpt-6", "o1", "o3", "o4"))
-        or model in {"codex-mini-latest"}
-    )
-    if reasoning_request or has_tools or reasoning_effort or is_openai_reasoning_model:
+    if reasoning_request or has_tools or reasoning_effort:
         return ["reasoning.encrypted_content"]
     return []
 
@@ -416,14 +399,17 @@ def _adapter_error_content(prefix: str, exc: Exception) -> str:
     return f"{prefix}: {_clean_error_message(exc)}{suffix}"
 
 
-def _is_image_model(model: str) -> bool:
-    normalized = (model or "").strip().lower()
-    return normalized.startswith("gpt-image-") or normalized in {"image-2", "image2"}
-
-
-def _response_tool_model(model: str) -> str:
-    """Responses image generation uses a text/reasoning model plus an image tool."""
-    return "gpt-5.4-mini" if _is_image_model(model) else model
+def _adapter_error_raw(exc: Exception, provider: str) -> dict[str, Any]:
+    classification = classify_llm_error(exc)
+    raw: dict[str, Any] = {
+        "provider": provider,
+        "provider_error_type": classification.provider_error_type,
+        "error_type": classification.error_type,
+    }
+    retry_after = _retry_after_seconds(exc)
+    if retry_after > 0:
+        raw["retry_after_seconds"] = retry_after
+    return raw
 
 
 def _responses_function_call_output_item(message: LLMMessage) -> dict[str, Any]:
@@ -631,6 +617,7 @@ def _safe_request_params(payload: dict[str, Any] | None) -> dict[str, Any]:
         "max_tokens",
         "parallel_tool_calls",
         "prompt_cache_retention",
+        "seed",
     ):
         value = source.get(key)
         if isinstance(value, (str, bool, int, float)):
@@ -1028,7 +1015,7 @@ def _responses_prompt_cache_key(
     stable_prefix = split_sys_prompt_prefix(instructions).stable_prefix if instructions else ""
     payload = {
         "provider_host": _provider_host(settings.base_url),
-        "model": _response_tool_model(settings.model),
+        "model": settings.model,
         "instructions_sha256": hashlib.sha256(stable_prefix.encode("utf-8")).hexdigest() if stable_prefix else "",
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -1076,7 +1063,7 @@ def _responses_continuation_state_key(
         return ""
     payload = {
         "provider_host": _provider_host(settings.base_url),
-        "model": _response_tool_model(settings.model),
+        "model": settings.model,
         "conversation_id": conversation_id,
         "session_id": session_id,
         "cwd": cwd,
@@ -1449,46 +1436,6 @@ def _responses_stateful_permanently_unsupported_error(exc: Exception) -> bool:
     return bool(mentions_stateful and mentions_incompatibility)
 
 
-def _is_image_generation_prompt(messages: list[LLMMessage]) -> bool:
-    for message in reversed(messages):
-        if message.role != "user":
-            continue
-        content = message.content.lower()
-        return (
-            any(
-                token in content
-                for token in (
-                    "生成图片",
-                    "生成一张",
-                    "生成一个",
-                    "画一张",
-                    "画个",
-                    "绘制",
-                    "做一张图",
-                    "出一张图",
-                    "create an image",
-                    "generate an image",
-                    "generate a photo",
-                    "generate a picture",
-                    "draw an image",
-                    "draw a picture",
-                    "make an image",
-                )
-            )
-            and not message.images
-        )
-    return False
-
-
-def _image_generation_tool(model: str) -> dict[str, Any]:
-    image_model = model if _is_image_model(model) else "gpt-image-2"
-    if image_model == "image-2":
-        image_model = "gpt-image-2"
-    if image_model == "image2":
-        image_model = "gpt-image-2"
-    return {"type": "image_generation", "model": image_model}
-
-
 def _get_attr_or_item(value: Any, name: str, default: Any = None) -> Any:
     if isinstance(value, dict):
         return value.get(name, default)
@@ -1622,17 +1569,66 @@ def _response_message_phase_for_event(event: Any, phases: dict[str, str]) -> str
     return ""
 
 
-def _minimal_chat_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
-    for message in reversed(messages):
-        if str(message.role or "").strip().lower() == "user" and (message.content.strip() or message.images):
-            return [
-                LLMMessage(
-                    role="user",
-                    content=message.content.strip() or "Please inspect the attached image.",
-                    images=list(message.images),
-                ).to_openai_message()
-            ]
-    return [{"role": "user", "content": "Please continue."}]
+def _proxy_url_for_base_url(base_url: str) -> str:
+    parsed = urlparse(str(base_url or ""))
+    host = str(parsed.hostname or "").strip().lower()
+    port = parsed.port
+    no_proxy = ",".join(
+        value
+        for value in (os.getenv("NO_PROXY", ""), os.getenv("no_proxy", ""))
+        if value
+    )
+    if host and _host_matches_no_proxy(host, port, no_proxy):
+        return ""
+
+    explicit = (
+        os.getenv("LLM_PROXY_URL", "").strip()
+        or os.getenv("MINICODE_LLM_PROXY_URL", "").strip()
+    )
+    if explicit:
+        return explicit
+
+    if parsed.scheme.lower() == "https":
+        proxy = os.getenv("HTTPS_PROXY", "").strip() or os.getenv("https_proxy", "").strip()
+    else:
+        proxy = os.getenv("HTTP_PROXY", "").strip() or os.getenv("http_proxy", "").strip()
+    return (
+        proxy
+        or os.getenv("ALL_PROXY", "").strip()
+        or os.getenv("all_proxy", "").strip()
+    )
+
+
+def _normalized_openai_base_url(base_url: str) -> str:
+    value = str(base_url or "https://api.openai.com/v1").strip().rstrip("/")
+    parsed = urlparse(value)
+    if parsed.scheme and parsed.netloc and not parsed.path.strip("/"):
+        return f"{value}/v1"
+    return value
+
+
+def _host_matches_no_proxy(host: str, port: int | None, no_proxy: str) -> bool:
+    for raw_entry in str(no_proxy or "").split(","):
+        entry = raw_entry.strip().lower()
+        if not entry:
+            continue
+        if entry == "*":
+            return True
+        if "://" in entry:
+            entry = urlparse(entry).netloc
+        entry_host = entry
+        entry_port: int | None = None
+        if entry.count(":") == 1:
+            candidate_host, candidate_port = entry.rsplit(":", 1)
+            if candidate_port.isdigit():
+                entry_host = candidate_host
+                entry_port = int(candidate_port)
+        entry_host = entry_host.lstrip(".").strip("[]")
+        if not entry_host or (entry_port is not None and entry_port != port):
+            continue
+        if host == entry_host or host.endswith(f".{entry_host}"):
+            return True
+    return False
 
 class OpenAIAdapter(LLMAdapter):
     """
@@ -1647,6 +1643,8 @@ class OpenAIAdapter(LLMAdapter):
         client: AsyncOpenAI | None = None,
     ) -> None:
         self._settings = settings
+        self._owns_client = client is None
+        self._closed = False
         self._raw_http_client: httpx.AsyncClient | None = None
         self._responses_continuation_state: OrderedDict[str, _ResponsesContinuationState] = OrderedDict()
         self._responses_reasoning_visibility_supported = True
@@ -1654,33 +1652,41 @@ class OpenAIAdapter(LLMAdapter):
         self._responses_prompt_cache_retention_supported = True
         self._responses_metadata_supported = True
         self._chat_metadata_supported = True
+        self._chat_stream_usage_supported = True
         self._responses_stateful_supported = True
         self._use_raw_chat_http = client is None
         self._use_raw_responses_http = client is None
         if client:
             self._client = client
         else:
-            proxy_url = (
-                os.getenv("LLM_PROXY_URL", "").strip()
-                or os.getenv("MINICODE_LLM_PROXY_URL", "").strip()
-            )
-            no_proxy = os.getenv("NO_PROXY", "") + "," + os.getenv("no_proxy", "")
-            base_host = (settings.base_url or "").split("//")[-1].split("/")[0].split(":")[0]
-            skip_proxy = any(
-                h.strip() and base_host.endswith(h.strip())
-                for h in no_proxy.split(",")
-            )
-            if proxy_url and not skip_proxy:
-                http_client = httpx.AsyncClient(proxy=proxy_url)
+            proxy_url = _proxy_url_for_base_url(settings.base_url)
+            if proxy_url:
+                http_client = httpx.AsyncClient(proxy=proxy_url, trust_env=False)
             else:
                 http_client = httpx.AsyncClient(trust_env=False)
             self._raw_http_client = http_client
             self._client = AsyncOpenAI(
                 api_key=settings.api_key,
-                base_url=settings.base_url,
+                base_url=_normalized_openai_base_url(settings.base_url),
                 http_client=http_client,
                 max_retries=0,
             )
+
+    async def aclose(self) -> None:
+        """Close adapter-owned network resources exactly once.
+
+        A client injected by an embedder may be shared across adapters and
+        remains the caller's responsibility.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        if not self._owns_client:
+            return
+        close = getattr(self._client, "close", None)
+        if callable(close):
+            await close()
+        self._raw_http_client = None
 
     def export_stateful_continuation(self) -> dict[str, Any]:
         """Return provider-side Responses continuation state for local snapshots.
@@ -1752,8 +1758,10 @@ class OpenAIAdapter(LLMAdapter):
 
     @property
     def capabilities(self) -> ProviderCapabilities:
-        provider = "openai" if "api.openai.com" in (self._settings.base_url or "").lower() else "custom"
-        return capabilities_from_openai_settings(self._settings, provider=provider)
+        return capabilities_from_openai_settings(
+            self._settings,
+            provider=self._settings.provider,
+        )
 
     async def stream_chat(
         self,
@@ -1771,12 +1779,17 @@ class OpenAIAdapter(LLMAdapter):
             async for event in self._stream_chat_completions(messages, tools, metadata=metadata):
                 yield event
 
-    async def simple_chat(self, messages: list[LLMMessage]) -> str:
+    async def simple_chat(
+        self,
+        messages: list[LLMMessage],
+        *,
+        max_tokens: int | None = None,
+    ) -> str:
         """非流式调用，用于摘要、压缩等内部任务。"""
         if self._settings.wire_api == "responses":
-            return await self._simple_responses_api(messages)
+            return await self._simple_responses_api(messages, max_tokens=max_tokens)
         else:
-            return await self._simple_chat_completions(messages)
+            return await self._simple_chat_completions(messages, max_tokens=max_tokens)
 
     async def _create_responses_with_retry(self, kwargs: dict[str, Any]) -> Any:
         cleaned_kwargs = _strip_openai_unsupported_fields(kwargs)
@@ -1790,7 +1803,8 @@ class OpenAIAdapter(LLMAdapter):
 
         stripped_reasoning_visibility = False
         stripped_prompt_cache_retention = False
-        for attempt in range(5):
+        transient_retry_available = True
+        for _attempt in range(8):
             try:
                 return await self._client.responses.create(**kwargs)
             except Exception as exc:
@@ -1828,18 +1842,21 @@ class OpenAIAdapter(LLMAdapter):
                         kwargs.clear()
                         kwargs.update(retry_kwargs)
                         continue
-                if attempt == 0 and _is_transient_gateway_error(exc):
+                if transient_retry_available and _is_transient_gateway_error(exc):
+                    transient_retry_available = False
+                    delay = _retry_after_seconds(exc) or _ADAPTER_RETRY_DELAY_SECONDS
                     logger.warning(
-                        "Responses API transient failure, retrying once: %s",
+                        "Responses API transient failure, retrying once in %.3gs: %s",
+                        delay,
                         exc,
                     )
-                    await asyncio.sleep(_ADAPTER_RETRY_DELAY_SECONDS)
+                    await asyncio.sleep(delay)
                     continue
                 raise
         raise RuntimeError("Responses API retry failed without an upstream exception")
 
     def _responses_url(self) -> str:
-        base_url = (self._settings.base_url or "https://api.openai.com/v1").rstrip("/")
+        base_url = _normalized_openai_base_url(self._settings.base_url)
         return f"{base_url}/responses"
 
     def _responses_headers(self) -> dict[str, str]:
@@ -1861,7 +1878,7 @@ class OpenAIAdapter(LLMAdapter):
             self._responses_url(),
             headers=self._responses_headers(),
             json=_strip_openai_unsupported_fields(payload),
-            timeout=_CHAT_HTTP_TIMEOUT_SECONDS,
+            timeout=None,
         )
         await self._responses_http_raise_for_status(response)
         return _json_to_namespace(response.json())
@@ -1870,7 +1887,8 @@ class OpenAIAdapter(LLMAdapter):
         last_exc: Exception | None = None
         stripped_reasoning_visibility = False
         stripped_prompt_cache_retention = False
-        for attempt in range(5):
+        transient_retry_available = True
+        for _attempt in range(8):
             try:
                 return await self._create_responses_http(payload)
             except Exception as exc:
@@ -1909,12 +1927,15 @@ class OpenAIAdapter(LLMAdapter):
                         payload.clear()
                         payload.update(retry_payload)
                         continue
-                if attempt == 0 and _is_transient_gateway_error(exc):
+                if transient_retry_available and _is_transient_gateway_error(exc):
+                    transient_retry_available = False
+                    delay = _retry_after_seconds(exc) or _ADAPTER_RETRY_DELAY_SECONDS
                     logger.warning(
-                        "Responses HTTP transient failure, retrying once: %s",
+                        "Responses HTTP transient failure, retrying once in %.3gs: %s",
+                        delay,
                         exc,
                     )
-                    await asyncio.sleep(_ADAPTER_RETRY_DELAY_SECONDS)
+                    await asyncio.sleep(delay)
                     continue
                 raise
         if last_exc is not None:
@@ -1942,6 +1963,8 @@ class OpenAIAdapter(LLMAdapter):
         if not self._chat_metadata_supported:
             payload.pop("metadata", None)
             payload.pop("store", None)
+        if not self._chat_stream_usage_supported:
+            payload.pop("stream_options", None)
 
     def _responses_metadata_stateful_retry_payload(
         self,
@@ -2005,7 +2028,7 @@ class OpenAIAdapter(LLMAdapter):
             self._responses_url(),
             headers=self._responses_headers(),
             json=_strip_openai_unsupported_fields(payload),
-            timeout=_CHAT_HTTP_TIMEOUT_SECONDS,
+            timeout=None,
         ) as response:
             await self._responses_http_raise_for_status(response)
 
@@ -2027,7 +2050,8 @@ class OpenAIAdapter(LLMAdapter):
     async def _emit_responses_http_stream_events_with_retry(self, payload: dict[str, Any]) -> AsyncIterator[Any]:
         stripped_reasoning_visibility = False
         stripped_prompt_cache_retention = False
-        for attempt in range(5):
+        transient_retry_available = True
+        for _attempt in range(8):
             yielded_any = False
             try:
                 async for event in self._emit_responses_http_stream_events(payload):
@@ -2069,12 +2093,15 @@ class OpenAIAdapter(LLMAdapter):
                         payload.clear()
                         payload.update(retry_payload)
                         continue
-                if not yielded_any and attempt == 0 and _is_transient_gateway_error(exc):
+                if not yielded_any and transient_retry_available and _is_transient_gateway_error(exc):
+                    transient_retry_available = False
+                    delay = _retry_after_seconds(exc) or _ADAPTER_RETRY_DELAY_SECONDS
                     logger.warning(
-                        "Responses HTTP stream transient failure, retrying once: %s",
+                        "Responses HTTP stream transient failure, retrying once in %.3gs: %s",
+                        delay,
                         exc,
                     )
-                    await asyncio.sleep(_ADAPTER_RETRY_DELAY_SECONDS)
+                    await asyncio.sleep(delay)
                     continue
                 raise
 
@@ -2114,13 +2141,6 @@ class OpenAIAdapter(LLMAdapter):
         if tools:
             responses_tools = self._convert_tools_to_responses_format(tools)
             has_response_tools = bool(responses_tools)
-        if _is_image_model(model) or _is_image_generation_prompt(messages):
-            responses_tools = [
-                *responses_tools,
-                _image_generation_tool(model),
-            ]
-            has_response_tools = True
-
         stateful_enabled = (
             _responses_stateful_continuation_enabled(self._settings)
             and self._responses_stateful_supported
@@ -2145,7 +2165,6 @@ class OpenAIAdapter(LLMAdapter):
         request_input_fingerprints = _responses_input_fingerprints(api_input)
         request_input_match_fingerprints = _responses_input_match_fingerprints(api_input)
         previous_response_id = ""
-        instructions_covered_by_previous_response = False
         covered_prefix_fingerprints: list[str] = []
         covered_prefix_match_fingerprints: list[str] = []
         input_items_omitted = 0
@@ -2165,10 +2184,6 @@ class OpenAIAdapter(LLMAdapter):
                         and request_input_match_fingerprints[: len(covered)] == covered
                     ):
                         previous_response_id = state.previous_response_id
-                        instructions_covered_by_previous_response = (
-                            bool(current_instructions_full_hash)
-                            and state.instructions_full_hash == current_instructions_full_hash
-                        )
                         covered_prefix_fingerprints = list(
                             state.covered_item_fingerprints[: len(covered)]
                         )
@@ -2182,7 +2197,7 @@ class OpenAIAdapter(LLMAdapter):
                         self._responses_continuation_state.pop(state_key, None)
 
         kwargs: dict[str, Any] = {
-            "model": _response_tool_model(model),
+            "model": model,
             "input": request_input,
             "stream": True,
         }
@@ -2190,7 +2205,10 @@ class OpenAIAdapter(LLMAdapter):
             kwargs["store"] = True
         elif self._responses_stateful_supported:
             kwargs["store"] = False
-        if instructions and not instructions_covered_by_previous_response:
+        # Responses continuation only carries response items. OpenAI explicitly
+        # does not inherit ``instructions`` through ``previous_response_id``, so
+        # every request must send the current system/developer instructions.
+        if instructions:
             kwargs["instructions"] = instructions
         if request_metadata:
             kwargs["metadata"] = request_metadata
@@ -2203,6 +2221,12 @@ class OpenAIAdapter(LLMAdapter):
             kwargs["prompt_cache_retention"] = prompt_cache_retention
         if responses_tools:
             kwargs["tools"] = responses_tools
+        try:
+            configured_max_output = int(self._settings.max_tokens)
+        except (TypeError, ValueError):
+            configured_max_output = 0
+        if configured_max_output > 0:
+            kwargs["max_output_tokens"] = configured_max_output
 
         # Ask every Responses-compatible gateway for provider-visible reasoning
         # summaries. Unsupported gateways are retried without these optional
@@ -2249,7 +2273,6 @@ class OpenAIAdapter(LLMAdapter):
                 request_input_fingerprints = _responses_input_fingerprints(api_input)
                 request_input_match_fingerprints = _responses_input_match_fingerprints(api_input)
                 previous_response_id = ""
-                instructions_covered_by_previous_response = False
                 covered_prefix_fingerprints = []
                 covered_prefix_match_fingerprints = []
                 input_items_omitted = 0
@@ -2268,6 +2291,7 @@ class OpenAIAdapter(LLMAdapter):
                     yield StreamEvent(
                         type=StreamEventType.ERROR,
                         content=_adapter_error_content("LLM API 调用失败", retry_exc),
+                        raw=_adapter_error_raw(retry_exc, "openai_responses"),
                     )
                     return
             else:
@@ -2275,6 +2299,7 @@ class OpenAIAdapter(LLMAdapter):
                 yield StreamEvent(
                     type=StreamEventType.ERROR,
                     content=_adapter_error_content("LLM API 调用失败", exc),
+                    raw=_adapter_error_raw(exc, "openai_responses"),
                 )
                 return
 
@@ -2451,20 +2476,29 @@ class OpenAIAdapter(LLMAdapter):
                 # 函数调用
                 elif event_type == "response.function_call_arguments.done":
                     item_id = str(getattr(event, "item_id", "") or "").strip()
-                    call_id = str(getattr(event, "call_id", "") or item_id).strip()
-                    slot = response_tool_items.get(call_id) or response_tool_items.get(item_id) or {}
+                    event_call_id = str(getattr(event, "call_id", "") or "").strip()
+                    slot = response_tool_items.get(event_call_id) or response_tool_items.get(item_id) or {}
+                    call_id = str(slot.get("id") or event_call_id or item_id).strip()
                     name = str(getattr(event, "name", "") or slot.get("name", "")).strip()
-                    arguments_str = getattr(event, "arguments", "{}")
+                    # Prefer the delta-accumulated arguments; some OpenAI-compatible
+                    # gateways stream args via function_call_arguments.delta but send
+                    # an empty/missing `arguments` on .done, which would otherwise
+                    # drop the whole tool input. Mirrors the Chat path, which always
+                    # finalizes from the index-keyed accumulator.
+                    arguments_str = getattr(event, "arguments", "") or slot.get("arguments") or "{}"
 
+                    arguments_repaired = False
                     try:
                         arguments = json.loads(arguments_str)
                     except (json.JSONDecodeError, TypeError):
                         from backend.llm.json_repair import repair_tool_json
                         arguments = repair_tool_json(arguments_str) or {"_raw": arguments_str}
+                        arguments_repaired = True
                     tool_call = ToolCallEvent(
                         id=call_id,
                         name=name,
                         arguments=arguments,
+                        arguments_repaired=arguments_repaired,
                     )
                     pending_tool_calls.append(tool_call)
                     prefetch_event = _prefetch_tool_call_event([tool_call])
@@ -2564,10 +2598,28 @@ class OpenAIAdapter(LLMAdapter):
                     )
                     return
         except Exception as exc:
+            if (
+                previous_response_id
+                and not provider_timeline
+                and _responses_stateful_unsupported_error(exc)
+            ):
+                logger.warning(
+                    "Responses continuation failed during first stream iteration; "
+                    "resetting state and replaying stateless: %s",
+                    exc,
+                )
+                self._responses_continuation_state.pop(state_key, None)
+                if _responses_stateful_permanently_unsupported_error(exc):
+                    self._responses_stateful_supported = False
+                    self._responses_continuation_state.clear()
+                async for retry_event in self._stream_responses_api(messages, tools, metadata=metadata):
+                    yield retry_event
+                return
             logger.error("Responses API 流式解析异常: %s", exc)
             yield StreamEvent(
                 type=StreamEventType.ERROR,
                 content=f"LLM 流式响应异常: {_clean_error_message(exc)}",
+                raw=_adapter_error_raw(exc, "openai_responses"),
             )
             return
 
@@ -2647,19 +2699,26 @@ class OpenAIAdapter(LLMAdapter):
             phase=completed_response_message_phase,
         )
 
-    async def _simple_responses_api(self, messages: list[LLMMessage]) -> str:
+    async def _simple_responses_api(
+        self,
+        messages: list[LLMMessage],
+        *,
+        max_tokens: int | None = None,
+    ) -> str:
         """Responses API 非流式调用。"""
         instructions, input_messages = _split_responses_instructions(messages)
         api_input = self._build_responses_input(input_messages)
 
         model = self._settings.model
         kwargs: dict[str, Any] = {
-            "model": _response_tool_model(model),
+            "model": model,
             "input": api_input,
             "store": False,
         }
         if instructions:
             kwargs["instructions"] = instructions
+        if max_tokens:
+            kwargs["max_output_tokens"] = max(1, int(max_tokens))
         prompt_cache_key = _responses_prompt_cache_key(
             self._settings,
             instructions,
@@ -2671,9 +2730,6 @@ class OpenAIAdapter(LLMAdapter):
         if prompt_cache_retention:
             kwargs["prompt_cache_retention"] = prompt_cache_retention
 
-        if _is_image_model(model) or _is_image_generation_prompt(messages):
-            kwargs["tools"] = [_image_generation_tool(model)]
-
         reasoning_request = _responses_reasoning_request(self._settings)
         if reasoning_request:
             kwargs["reasoning"] = reasoning_request
@@ -2684,10 +2740,15 @@ class OpenAIAdapter(LLMAdapter):
             logger.error("Responses API simple_chat 失败: %s", exc)
             raise RuntimeError(f"LLM 调用失败: {exc}") from exc
 
-        # Side calls (compaction/reflection/recovery) must be counted toward
+        # Side calls (compaction/recovery) must be counted toward
         # cost/token totals, not only the streaming DONE frames.
         _resp_usage = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
-        self.record_non_stream_usage(_resp_usage, provider="openai", model_id=model)
+        self.record_non_stream_usage(
+            _resp_usage,
+            provider="openai",
+            model_id=model,
+            input_includes_cache_read=True,
+        )
 
         # 从 response.output 提取文本
         text = getattr(response, "output_text", "") or ""
@@ -2804,7 +2865,7 @@ class OpenAIAdapter(LLMAdapter):
                 "name": func.get("name", ""),
                 "description": func.get("description", ""),
                 "parameters": _normalize_schema_for_openai(func.get("parameters", {})),
-                "strict": False,
+                "strict": bool(func.get("strict", False)),
             })
         return result
 
@@ -2816,7 +2877,11 @@ class OpenAIAdapter(LLMAdapter):
         for tool in tools:
             normalized_tool = dict(tool)
             function_def = dict(normalized_tool.get("function", {}))
-            function_def.pop("strict", None)
+            # Preserve the tool's strict flag so OpenAI structured outputs are
+            # requested for tools that declare strict=True (matching cc's
+            # behavior). The schema normalization below still enforces
+            # additionalProperties:false for every object schema.
+            function_def["strict"] = bool(function_def.get("strict", False))
             function_def["parameters"] = _normalize_schema_for_openai(
                 function_def.get("parameters", {})
             )
@@ -2825,7 +2890,7 @@ class OpenAIAdapter(LLMAdapter):
         return normalized_tools
 
     def _chat_completions_url(self) -> str:
-        base_url = (self._settings.base_url or "https://api.openai.com/v1").rstrip("/")
+        base_url = _normalized_openai_base_url(self._settings.base_url)
         return f"{base_url}/chat/completions"
 
     def _chat_headers(self) -> dict[str, str]:
@@ -2869,7 +2934,7 @@ class OpenAIAdapter(LLMAdapter):
             self._chat_completions_url(),
             headers=self._chat_headers(),
             json=_strip_openai_unsupported_fields(payload),
-            timeout=_CHAT_HTTP_TIMEOUT_SECONDS,
+            timeout=None,
         ) as response:
             await self._chat_http_raise_for_status(response)
 
@@ -2949,9 +3014,22 @@ class OpenAIAdapter(LLMAdapter):
                             evt.raw = raw_text_delta
                         yield evt
 
-                for tool_call in delta.get("tool_calls") or []:
+                tool_call_deltas = delta.get("tool_calls") or []
+                if tool_call_deltas:
+                    # _ReasoningSplitter intentionally holds a short suffix so
+                    # split <think> tags cannot leak into visible text.  A tool
+                    # delta is a hard provider boundary: release that suffix
+                    # before any tool event, otherwise the loop seals a visibly
+                    # truncated narration and the held characters arrive late.
+                    for evt in _splitter_events(reasoning_splitter.flush()):
+                        if evt.type == StreamEventType.TEXT_CHUNK:
+                            full_text += evt.content
+                            evt.raw = raw_text_delta
+                        yield evt
+
+                for tool_call in tool_call_deltas:
                     idx = int(tool_call.get("index") or 0)
-                    is_new, _key, slot = accumulator.feed(tool_call, idx)
+                    should_start, _key, slot = accumulator.feed(tool_call, idx)
                     _append_provider_timeline(
                         provider_timeline,
                         "chat.tool_call.delta",
@@ -2960,14 +3038,14 @@ class OpenAIAdapter(LLMAdapter):
                         name=slot.get("name"),
                         arguments_chars=len(str(slot.get("arguments") or "")),
                     )
-                    if is_new and slot["id"] and slot["name"]:
+                    if should_start:
                         yield StreamEvent(
                             type=StreamEventType.TOOL_CALL_START,
                             tool_call_start=ToolCallStartEvent(
                                 id=slot["id"], name=slot["name"], index=idx,
                             ),
                         )
-                    elif not is_new and slot["_delta_bytes"] >= _DELTA_DEBOUNCE_BYTES:
+                    elif slot["_start_emitted"] and slot["_delta_bytes"] >= _DELTA_DEBOUNCE_BYTES:
                         slot["_delta_bytes"] = 0
                         yield StreamEvent(
                             type=StreamEventType.TOOL_CALL_DELTA,
@@ -2990,17 +3068,41 @@ class OpenAIAdapter(LLMAdapter):
                         finish_reason=finish_reason,
                     )
                     if not tool_prefetch_emitted and finish_reason == "tool_calls":
+                        for evt in _splitter_events(reasoning_splitter.flush()):
+                            if evt.type == StreamEventType.TEXT_CHUNK:
+                                full_text += evt.content
+                                evt.raw = raw_text_delta
+                            yield evt
                         prefetch_event = _prefetch_tool_call_event(accumulator.finalize())
                         if prefetch_event is not None:
                             yield prefetch_event
                             tool_prefetch_emitted = True
                     continue
 
+        if not saw_terminal_event and finish_reason:
+            # Some OpenAI-compatible gateways close the SSE response after a
+            # valid finish_reason without emitting the optional [DONE] sentinel.
+            # The semantic completion marker is sufficient; treating this as a
+            # failed stream discards valid text/tool calls and triggers retries.
+            saw_terminal_event = True
+            raw_done["terminal_fallback"] = "eof_after_finish_reason"
+            _append_provider_timeline(
+                provider_timeline,
+                "chat.eof_after_finish",
+                finish_reason=finish_reason,
+            )
+
         if not saw_terminal_event:
             yield StreamEvent(
                 type=StreamEventType.ERROR,
                 content="Chat completion stream ended before [DONE].",
-                raw={"provider": "openai_chat_completions", "event_type": "eof_without_terminal"},
+                raw={
+                    "provider": "openai_chat_completions",
+                    "event_type": "eof_without_terminal",
+                    "request_summary": request_summary or {},
+                    "safety": _provider_trace_safety(),
+                    "provider_timeline": provider_timeline,
+                },
             )
             return
 
@@ -3018,8 +3120,6 @@ class OpenAIAdapter(LLMAdapter):
     async def _stream_chat_completions_http(
         self,
         kwargs: dict[str, Any],
-        source_messages: list[LLMMessage],
-        tools: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         self._apply_chat_optional_downgrades(kwargs)
 
@@ -3042,19 +3142,26 @@ class OpenAIAdapter(LLMAdapter):
             ):
                 yield event
 
-        async def minimal_payload() -> dict[str, Any]:
-            return {
-                "model": self._settings.model,
-                "messages": _minimal_chat_messages(source_messages),
-                "stream": True,
-                **_chat_max_tokens_kwargs(self._settings),
-            }
-
         try:
             async for event in emit(kwargs):
                 yield event
             return
         except Exception as exc:
+            if _is_stream_options_unsupported_error(exc):
+                logger.warning(
+                    "Chat Completions HTTP rejected stream usage options; retrying without them: %s",
+                    exc,
+                )
+                self._chat_stream_usage_supported = False
+                retry_kwargs = dict(kwargs)
+                retry_kwargs.pop("stream_options", None)
+                try:
+                    async for event in emit(retry_kwargs):
+                        yield event
+                    return
+                except Exception as retry_exc:
+                    exc = retry_exc
+                    kwargs = retry_kwargs
             if _is_request_metadata_unsupported_error(exc):
                 logger.warning(
                     "Chat Completions HTTP rejected request metadata; retrying without it: %s",
@@ -3086,31 +3193,19 @@ class OpenAIAdapter(LLMAdapter):
                         exc = retry_exc
                         kwargs = retry_kwargs
 
-            if tools and (_is_invalid_tool_schema_error(exc) or _is_blocked_gateway_error(exc)):
-                _log_chat_provider_error(self._settings, "Chat Completions HTTP tool request", exc)
-                yield StreamEvent(
-                    type=StreamEventType.ERROR,
-                    content=_adapter_error_content(
-                        "Provider rejected tool calling for this model/request",
-                        exc,
-                    ),
-                )
-                return
-            elif _is_blocked_gateway_error(exc):
-                try:
-                    async for event in emit(await minimal_payload()):
-                        yield event
-                    return
-                except Exception as minimal_exc:
-                    exc = minimal_exc
-
             _log_chat_provider_error(self._settings, "Chat Completions HTTP API", exc)
             yield StreamEvent(
                 type=StreamEventType.ERROR,
                 content=_adapter_error_content("LLM API 调用失败", exc),
+                raw=_adapter_error_raw(exc, "openai_chat_completions"),
             )
 
-    async def _simple_chat_completions_http(self, messages: list[LLMMessage]) -> str:
+    async def _simple_chat_completions_http(
+        self,
+        messages: list[LLMMessage],
+        *,
+        max_tokens: int | None = None,
+    ) -> str:
         if self._raw_http_client is None:
             raise RuntimeError("Chat HTTP client is not initialized")
 
@@ -3121,13 +3216,19 @@ class OpenAIAdapter(LLMAdapter):
             "stream": False,
             **_chat_max_tokens_kwargs(self._settings),
         }
+        if max_tokens:
+            for key in ("max_tokens", "max_completion_tokens"):
+                if key in payload:
+                    payload[key] = max(1, int(max_tokens))
+        if self._settings.seed is not None:
+            payload["seed"] = self._settings.seed
 
         try:
             response = await self._raw_http_client.post(
                 self._chat_completions_url(),
                 headers=self._chat_headers(),
                 json=_strip_openai_unsupported_fields(payload),
-                timeout=_CHAT_HTTP_TIMEOUT_SECONDS,
+                timeout=None,
             )
             response.raise_for_status()
         except Exception as exc:
@@ -3136,7 +3237,12 @@ class OpenAIAdapter(LLMAdapter):
 
         data = response.json()
         # Side calls must be counted toward cost/token totals.
-        self.record_non_stream_usage(data.get("usage") if isinstance(data, dict) else None, provider="openai", model_id=self._settings.model)
+        self.record_non_stream_usage(
+            data.get("usage") if isinstance(data, dict) else None,
+            provider="openai",
+            model_id=self._settings.model,
+            input_includes_cache_read=True,
+        )
         choices = data.get("choices") or []
         if choices:
             message = (choices[0] or {}).get("message") or {}
@@ -3170,6 +3276,8 @@ class OpenAIAdapter(LLMAdapter):
             "stream_options": {"include_usage": True},
             **_chat_max_tokens_kwargs(self._settings),
         }
+        if self._settings.seed is not None:
+            kwargs["seed"] = self._settings.seed
         if request_metadata:
             kwargs["metadata"] = request_metadata
             kwargs["store"] = False
@@ -3197,25 +3305,9 @@ class OpenAIAdapter(LLMAdapter):
         chat_request_summary = build_chat_request_summary(sent_kwargs)
 
         if self._use_raw_chat_http:
-            async for event in self._stream_chat_completions_http(kwargs, messages, tools):
+            async for event in self._stream_chat_completions_http(kwargs):
                 yield event
             return
-
-        async def create_minimal_stream(error: Exception) -> tuple[Any, dict[str, Any]]:
-            logger.warning(
-                "Chat Completions blocked the full agent prompt, retrying with a minimal prompt: %s",
-                error,
-            )
-            minimal_kwargs = {
-                "model": self._settings.model,
-                "messages": _minimal_chat_messages(messages),
-                "stream": True,
-                **_chat_max_tokens_kwargs(self._settings),
-            }
-            stream = await self._client.chat.completions.create(
-                **_strip_openai_unsupported_fields(minimal_kwargs)
-            )
-            return stream, minimal_kwargs
 
         stream: Any | None = None
         try:
@@ -3223,6 +3315,20 @@ class OpenAIAdapter(LLMAdapter):
         except Exception as create_exc:
             pending_exc: Exception = create_exc
             pending_kwargs = kwargs
+            if _is_stream_options_unsupported_error(pending_exc):
+                logger.warning(
+                    "Chat Completions rejected stream usage options; retrying without them: %s",
+                    pending_exc,
+                )
+                self._chat_stream_usage_supported = False
+                retry_kwargs = dict(pending_kwargs)
+                retry_kwargs.pop("stream_options", None)
+                try:
+                    stream = await self._client.chat.completions.create(**_strip_openai_unsupported_fields(retry_kwargs))
+                    sent_kwargs = retry_kwargs
+                except Exception as retry_exc:
+                    pending_exc = retry_exc
+                    pending_kwargs = retry_kwargs
             if _is_request_metadata_unsupported_error(pending_exc):
                 logger.warning(
                     "Chat Completions rejected request metadata; retrying without it: %s",
@@ -3252,35 +3358,14 @@ class OpenAIAdapter(LLMAdapter):
                         pending_kwargs = retry_kwargs
             if stream is not None:
                 chat_request_summary = build_chat_request_summary(sent_kwargs)
-            elif tools and (_is_invalid_tool_schema_error(pending_exc) or _is_blocked_gateway_error(pending_exc)):
-                _log_chat_provider_error(self._settings, "Chat Completions API tool request", pending_exc)
+            else:
+                _log_chat_provider_error(self._settings, "Chat Completions API", pending_exc)
                 yield StreamEvent(
                     type=StreamEventType.ERROR,
-                    content=_adapter_error_content(
-                        "Provider rejected tool calling for this model/request",
-                        pending_exc,
-                    ),
+                    content=_adapter_error_content("LLM API 调用失败", pending_exc),
+                    raw=_adapter_error_raw(pending_exc, "openai_chat_completions"),
                 )
                 return
-            else:
-                if _is_blocked_gateway_error(pending_exc):
-                    try:
-                        stream, sent_kwargs = await create_minimal_stream(pending_exc)
-                        chat_request_summary = build_chat_request_summary(sent_kwargs)
-                    except Exception as minimal_exc:
-                        _log_chat_provider_error(self._settings, "Chat Completions API minimal retry", minimal_exc)
-                        yield StreamEvent(
-                            type=StreamEventType.ERROR,
-                            content=_adapter_error_content("LLM API 调用失败", minimal_exc),
-                        )
-                        return
-                else:
-                    _log_chat_provider_error(self._settings, "Chat Completions API", pending_exc)
-                    yield StreamEvent(
-                        type=StreamEventType.ERROR,
-                        content=_adapter_error_content("LLM API 调用失败", pending_exc),
-                    )
-                    return
 
         full_text = ""
         accumulator = _ToolCallAccumulator()
@@ -3345,6 +3430,16 @@ class OpenAIAdapter(LLMAdapter):
                         yield evt
 
                 if delta and delta.tool_calls:
+                    # Preserve the stream contract that all response text is
+                    # emitted before the first tool boundary.  Without this,
+                    # the splitter's held suffix is delivered after
+                    # TOOL_CALL_START and the agent timeline loses the end of
+                    # the model's sentence.
+                    for evt in _splitter_events(reasoning_splitter.flush()):
+                        if evt.type == StreamEventType.TEXT_CHUNK:
+                            full_text += evt.content
+                            evt.raw = raw_text_delta
+                        yield evt
                     for tc in delta.tool_calls:
                         idx = int(tc.index) if tc.index is not None else 0
                         tc_dict = {
@@ -3354,7 +3449,7 @@ class OpenAIAdapter(LLMAdapter):
                                 "arguments": tc.function.arguments if tc.function else "",
                             },
                         }
-                        is_new, _key, slot = accumulator.feed(tc_dict, idx)
+                        should_start, _key, slot = accumulator.feed(tc_dict, idx)
                         _append_provider_timeline(
                             provider_timeline,
                             "chat.tool_call.delta",
@@ -3363,14 +3458,14 @@ class OpenAIAdapter(LLMAdapter):
                             name=slot.get("name"),
                             arguments_chars=len(str(slot.get("arguments") or "")),
                         )
-                        if is_new and slot["id"] and slot["name"]:
+                        if should_start:
                             yield StreamEvent(
                                 type=StreamEventType.TOOL_CALL_START,
                                 tool_call_start=ToolCallStartEvent(
                                     id=slot["id"], name=slot["name"], index=idx,
                                 ),
                             )
-                        elif not is_new and slot["_delta_bytes"] >= _DELTA_DEBOUNCE_BYTES:
+                        elif slot["_start_emitted"] and slot["_delta_bytes"] >= _DELTA_DEBOUNCE_BYTES:
                             slot["_delta_bytes"] = 0
                             yield StreamEvent(
                                 type=StreamEventType.TOOL_CALL_DELTA,
@@ -3392,6 +3487,11 @@ class OpenAIAdapter(LLMAdapter):
                         finish_reason=finish_reason,
                     )
                     if not tool_prefetch_emitted and finish_reason == "tool_calls":
+                        for evt in _splitter_events(reasoning_splitter.flush()):
+                            if evt.type == StreamEventType.TEXT_CHUNK:
+                                full_text += evt.content
+                                evt.raw = raw_text_delta
+                            yield evt
                         prefetch_event = _prefetch_tool_call_event(accumulator.finalize())
                         if prefetch_event is not None:
                             yield prefetch_event
@@ -3401,6 +3501,22 @@ class OpenAIAdapter(LLMAdapter):
             yield StreamEvent(
                 type=StreamEventType.ERROR,
                 content=f"Stream interrupted: {_clean_error_message(exc)}",
+                raw=_adapter_error_raw(exc, "openai_chat_completions"),
+            )
+            return
+
+        if not finish_reason:
+            _append_provider_timeline(provider_timeline, "chat.eof_without_terminal")
+            yield StreamEvent(
+                type=StreamEventType.ERROR,
+                content="Chat completion stream ended before a finish reason.",
+                raw={
+                    "provider": "openai_chat_completions",
+                    "event_type": "eof_without_terminal",
+                    "request_summary": chat_request_summary,
+                    "safety": _provider_trace_safety(),
+                    "provider_timeline": provider_timeline,
+                },
             )
             return
 
@@ -3415,25 +3531,44 @@ class OpenAIAdapter(LLMAdapter):
 
         yield StreamEvent(type=StreamEventType.DONE, usage=usage, finish_reason=finish_reason, raw=raw_done)
 
-    async def _simple_chat_completions(self, messages: list[LLMMessage]) -> str:
+    async def _simple_chat_completions(
+        self,
+        messages: list[LLMMessage],
+        *,
+        max_tokens: int | None = None,
+    ) -> str:
         """Chat Completions API 非流式调用。"""
         if self._use_raw_chat_http:
-            return await self._simple_chat_completions_http(messages)
+            return await self._simple_chat_completions_http(messages, max_tokens=max_tokens)
 
         openai_messages = _openai_chat_messages(messages)
 
         try:
-            response = await self._client.chat.completions.create(**_strip_openai_unsupported_fields({
+            payload = {
                 "model": self._settings.model,
                 "messages": openai_messages,
                 **_chat_max_tokens_kwargs(self._settings),
-            }))
+            }
+            if max_tokens:
+                for key in ("max_tokens", "max_completion_tokens"):
+                    if key in payload:
+                        payload[key] = max(1, int(max_tokens))
+            if self._settings.seed is not None:
+                payload["seed"] = self._settings.seed
+            response = await self._client.chat.completions.create(
+                **_strip_openai_unsupported_fields(payload)
+            )
         except Exception as exc:
             _log_chat_provider_error(self._settings, "Chat Completions simple_chat", exc)
             raise RuntimeError(f"LLM 调用失败: {exc}") from exc
 
         # Side calls must be counted toward cost/token totals.
-        self.record_non_stream_usage(getattr(response, "usage", None), provider="openai", model_id=self._settings.model)
+        self.record_non_stream_usage(
+            getattr(response, "usage", None),
+            provider="openai",
+            model_id=self._settings.model,
+            input_includes_cache_read=True,
+        )
 
         choice = response.choices[0] if response.choices else None
         if choice and choice.message and choice.message.content:

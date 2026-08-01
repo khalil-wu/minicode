@@ -81,6 +81,7 @@ export const handleNoticeEvent = (e: ServerEvent, conversationId?: string): bool
     case "checkpoint.run.resume":
     case "workspace.recent.list":
     case "command_output_chunk":
+    case "client.command.ack":
     case "pong":
       return true;
     default:

@@ -15,13 +15,12 @@ const attachmentId = (): string => {
 
 const uploadWarning = (
   file: File,
-  result: { doc_id?: string; indexed_chunks?: number; attachment?: Record<string, unknown> },
+  result: { attachment?: Record<string, unknown> },
 ): string | undefined => {
   if (!/pdf/i.test(file.type || file.name)) return undefined;
   const parseError = String(result.attachment?.parse_error ?? "").trim();
   if (parseError) return shortUploadError(parseError);
-  if (result.doc_id && (result.indexed_chunks ?? 0) > 0) return undefined;
-  return "PDF attached; extracted text is not indexed.";
+  return undefined;
 };
 
 const shortUploadError = (value: string): string => {
@@ -53,7 +52,6 @@ const startUpload = (id: string, file: File, sessionId: string) => {
         status: "ready",
         artifactId: result.artifact_id,
         docId: result.doc_id,
-        indexedChunks: result.indexed_chunks,
         attachment,
         error: uploadWarning(file, result),
       });

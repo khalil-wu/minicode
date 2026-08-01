@@ -104,12 +104,30 @@ export default defineConfig(async ({ command, mode }) => {
     build: {
       outDir: "dist",
       emptyOutDir: true,
-      chunkSizeWarningLimit: 1500,
+      chunkSizeWarningLimit: 1000,
+      modulePreload: {
+        resolveDependencies(_filename, dependencies) {
+          return dependencies.filter((dependency) => (
+            !dependency.includes("/monaco-")
+            && !dependency.includes("/editor.worker-")
+          ));
+        },
+      },
       rollupOptions: {
         output: {
           manualChunks(id) {
             const normalized = id.replace(/\\/g, "/");
             if (!normalized.includes("/node_modules/")) return undefined;
+            if (normalized.includes("/@monaco-editor/react/")) return "monaco-react";
+            if (normalized.includes("/monaco-editor/esm/vs/basic-languages/")) return "monaco-languages";
+            if (normalized.includes("/monaco-editor/esm/vs/editor/contrib/")) {
+              const feature = normalized.split("/monaco-editor/esm/vs/editor/contrib/")[1]?.split("/")[0] || "misc";
+              return `monaco-contrib-${feature}`;
+            }
+            if (normalized.includes("/monaco-editor/esm/vs/editor/browser/")) return "monaco-editor-ui";
+            if (normalized.includes("/monaco-editor/esm/vs/editor/common/")) return "monaco-editor-core";
+            if (normalized.includes("/monaco-editor/esm/vs/platform/")) return "monaco-platform";
+            if (normalized.includes("/monaco-editor/esm/vs/base/")) return "monaco-base";
             if (
               normalized.includes("/react-markdown/")
               || normalized.includes("/remark-")

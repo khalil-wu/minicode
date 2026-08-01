@@ -1,0 +1,51 @@
+.mc-agent-avatar {
+  --agent-avatar-color: #66b9e8;
+  --agent-avatar-size: 30px;
+  position: relative;
+  display: inline-grid;
+  width: var(--agent-avatar-size);
+  height: var(--agent-avatar-size);
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--agent-avatar-color);
+  filter: drop-shadow(0 2px 3px color-mix(in oklch, var(--agent-avatar-color) 24%, transparent));
+}
+
+.mc-agent-avatar[data-size="small"] { --agent-avatar-size: 24px; }
+.mc-agent-avatar[data-size="large"] { --agent-avatar-size: 38px; }
+.mc-agent-avatar[data-tone="amber"] { --agent-avatar-color: #ffd338; }
+.mc-agent-avatar[data-tone="blue"] { --agent-avatar-color: #60bdd4; }
+.mc-agent-avatar[data-tone="green"] { --agent-avatar-color: #88d77b; }
+.mc-agent-avatar[data-tone="rose"] { --agent-avatar-color: #f47eb2; }
+.mc-agent-avatar[data-tone="teal"] { --agent-avatar-color: #61d0b1; }
+.mc-agent-avatar[data-tone="violet"] { --agent-avatar-color: #a986ee; }
+
+.mc-agent-avatar-art {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  fill: currentColor;
+}
+
+.mc-agent-avatar[data-status="completed"] { opacity: 0.9; }
+.mc-agent-avatar[data-status="waiting"] { opacity: 0.78; }
+.mc-agent-avatar[data-status="attention"] {
+  filter:
+    drop-shadow(0 0 0.5px color-mix(in oklch, var(--state-danger) 88%, transparent))
+    drop-shadow(0 3px 5px color-mix(in oklch, var(--agent-avatar-color) 28%, transparent));
+}
+
+.mc-agent-avatar[data-status="running"] .mc-agent-avatar-art {
+  animation: mc-agent-avatar-breathe 1.9s ease-in-out infinite;
+  transform-origin: center;
+}
+
+@keyframes mc-agent-avatar-breathe {
+  0%, 100% { transform: scale(0.96) rotate(-1deg); opacity: 0.88; }
+  50% { transform: scale(1.04) rotate(2deg); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mc-agent-avatar[data-status="running"] .mc-agent-avatar-art { animation: none; }
+}

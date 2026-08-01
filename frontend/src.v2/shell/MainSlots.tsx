@@ -20,27 +20,40 @@ const isCompactViewport = () => (
 
 interface MainSlotsProps {
   mode?: "split" | "tabs";
+  forceChat?: boolean;
 }
 
-export const MainSlots = ({ mode = "split" }: MainSlotsProps) => {
+export const MainSlots = ({ mode = "split", forceChat = false }: MainSlotsProps) => {
   const panelSlots = useAppStore((s) => s.panelSlots);
   const focusPanel = useAppStore((s) => s.focusPanel);
   const resizePanel = useAppStore((s) => s.resizePanel);
+  const setAppMode = useAppStore((s) => s.setAppMode);
+  const hasOpenEditor = useAppStore((s) => s.editorTabs.length > 0);
   const [compact, setCompact] = useState(isCompactViewport);
 
   const chatSlot = panelSlots.find((slot) => slot.kind === "chat") ?? { id: "main-chat", kind: "chat" as const, label: "Chat" };
-  const activeSlot =
-    panelSlots.find((slot) => slot.focused) ??
-    chatSlot;
+  const focusedSlot = panelSlots.find((slot) => slot.focused) ?? chatSlot;
+  const activeSlot = forceChat
+    ? chatSlot
+    : focusedSlot;
   const editorSlot = panelSlots.find((slot) => slot.kind === "editor") ?? null;
   const showSwitcher = Boolean(editorSlot);
   const maximizedSlot = panelSlots.find((slot) => slot.maximized) ?? null;
+  const effectiveMaximizedSlot = forceChat ? null : maximizedSlot;
   const tabbed = mode === "tabs";
   const visibleSlots = useMemo(() => {
-    if (maximizedSlot) return [maximizedSlot];
+    if (effectiveMaximizedSlot) return [effectiveMaximizedSlot];
     if (tabbed || compact || !editorSlot) return [activeSlot];
     return [chatSlot, editorSlot];
-  }, [activeSlot, chatSlot, compact, editorSlot, maximizedSlot, tabbed]);
+  }, [activeSlot, chatSlot, compact, editorSlot, effectiveMaximizedSlot, tabbed]);
+  // Keep the chat tree mounted behind an active Code editor. Conversation
+  // history, virtual-row measurements, composer state, and scroll position
+  // then survive Cowork/Code and Chat/File switches instead of being rebuilt.
+  const mountedSlots = useMemo(() => {
+    if (!tabbed) return visibleSlots;
+    if (!editorSlot || !hasOpenEditor) return visibleSlots;
+    return [chatSlot, editorSlot];
+  }, [chatSlot, editorSlot, hasOpenEditor, tabbed, visibleSlots]);
 
   useEffect(() => {
     const onResize = () => setCompact(isCompactViewport());
@@ -48,6 +61,11 @@ export const MainSlots = ({ mode = "split" }: MainSlotsProps) => {
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
+
+  const focusWorkbenchPanel = (id: string) => {
+    if (forceChat && editorSlot?.id === id) setAppMode("code");
+    focusPanel(id);
+  };
 
   return (
     <div
@@ -63,36 +81,47 @@ export const MainSlots = ({ mode = "split" }: MainSlotsProps) => {
       }}
     >
       <main style={mainCanvasStyle}>
-        {showSwitcher && (tabbed || compact || maximizedSlot) && (
+        {showSwitcher && (tabbed || compact || effectiveMaximizedSlot) && (
           <WorkbenchSlotSwitcher
             chatSlot={chatSlot}
             editorSlot={editorSlot}
             activeKind={activeSlot.kind === "editor" ? "editor" : "chat"}
-            onFocus={focusPanel}
+            onFocus={focusWorkbenchPanel}
           />
         )}
         <div style={slotDeckStyle}>
-          {visibleSlots.map((slot, index) => (
-            <div
-              key={slot.id}
-              style={{
-                ...slotFrameStyle,
-                flex: `${Math.max(slot.size ?? 1, 0.45)} 1 0`,
-                borderRight: index < visibleSlots.length - 1 ? "1px solid var(--border-subtle)" : "0",
-              }}
-              onMouseDown={() => focusPanel(slot.id)}
-            >
-              <PanelContent slot={slot} />
-              {index < visibleSlots.length - 1 && (
-                <ResizeHandle
-                  slotId={slot.id}
-                  currentSize={slot.size ?? 1}
-                  neighborSize={visibleSlots[index + 1]?.size ?? 1}
-                  onResize={resizePanel}
-                />
-              )}
-            </div>
-          ))}
+          {mountedSlots.map((slot) => {
+            const visibleIndex = visibleSlots.findIndex((candidate) => candidate.id === slot.id);
+            const visible = visibleIndex >= 0;
+            return (
+              <div
+                key={slot.id}
+                className="mc-main-slot-frame"
+                data-panel-slot-kind={slot.kind}
+                style={{
+                  ...slotFrameStyle,
+                  display: visible ? "flex" : "none",
+                  flex: visibleSlots.length === 1
+                    ? "1 1 0px"
+                    : `${Math.max(slot.size ?? 1, 0.45)} 1 0px`,
+                  borderRight: !tabbed && visible && visibleIndex < visibleSlots.length - 1
+                    ? "1px solid var(--border-subtle)"
+                    : "0",
+                }}
+                onMouseDown={() => focusPanel(slot.id)}
+              >
+                <PanelContent slot={slot} />
+                {!tabbed && visible && visibleIndex < visibleSlots.length - 1 && (
+                  <ResizeHandle
+                    slotId={slot.id}
+                    currentSize={slot.size ?? 1}
+                    neighborSize={visibleSlots[visibleIndex + 1]?.size ?? 1}
+                    onResize={resizePanel}
+                  />
+                )}
+              </div>
+            );
+          })}
         </div>
       </main>
     </div>
@@ -163,7 +192,7 @@ const ResizeHandle = ({
     <div
       role="separator"
       aria-orientation="vertical"
-      aria-label="Resize main panels"
+      aria-label="调整主面板宽度"
       aria-valuemin={18}
       aria-valuemax={82}
       aria-valuenow={currentPercent}
@@ -190,13 +219,13 @@ const WorkbenchSlotSwitcher = ({
   onFocus: (id: string) => void;
 }) => {
   const options = [
-    { id: chatSlot.id, kind: "chat" as const, label: "Chat", icon: <MessagesSquare size={13} /> },
-    { id: editorSlot?.id ?? "", kind: "editor" as const, label: "File", icon: <FileCode2 size={13} />, title: editorSlot?.label ?? "File" },
+    { id: chatSlot.id, kind: "chat" as const, label: "对话", icon: <MessagesSquare size={14} /> },
+    { id: editorSlot?.id ?? "", kind: "editor" as const, label: "文件", icon: <FileCode2 size={14} />, title: editorSlot?.label ?? "文件" },
   ].filter((option) => option.kind === "chat" || editorSlot);
 
   return (
     <div style={slotSwitcherBarStyle}>
-      <div role="tablist" aria-label="Main work area" style={slotSwitcherTrackStyle}>
+      <div role="tablist" aria-label="主工作区" style={slotSwitcherTrackStyle}>
         <span
           aria-hidden="true"
           style={{
@@ -220,7 +249,7 @@ const WorkbenchSlotSwitcher = ({
               title={option.title ?? option.label}
             >
               <span style={slotHeaderIconStyle} aria-hidden="true">{option.icon}</span>
-              <span className="sr-only">{option.label}</span>
+              <span>{option.label}</span>
             </button>
           );
         })}
@@ -294,13 +323,13 @@ const slotSwitcherBarStyle: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "flex-end",
   padding: "4px 12px",
-  borderBottom: "1px solid var(--border-subtle)",
   background: "var(--surface-sidebar)",
 };
 
 const slotSwitcherTrackStyle: React.CSSProperties = {
   position: "relative",
-  width: 64,
+  width: 164,
+  flexShrink: 0,
   height: 28,
   display: "grid",
   gridTemplateColumns: "1fr 1fr",
@@ -331,17 +360,22 @@ const slotSwitcherButtonStyle: React.CSSProperties = {
   display: "inline-flex",
   alignItems: "center",
   justifyContent: "center",
-  padding: 0,
+  gap: 5,
+  padding: "0 8px",
   border: "1px solid transparent",
   borderRadius: "4px",
   background: "transparent",
   font: "inherit",
+  fontSize: "var(--text-xs)",
+  fontWeight: 560,
+  whiteSpace: "nowrap",
   cursor: "pointer",
   transition: "color 120ms ease",
 };
 
 const slotHeaderIconStyle: React.CSSProperties = {
   display: "inline-flex",
+  flexShrink: 0,
   alignItems: "center",
   justifyContent: "center",
   color: "var(--text-muted)",

@@ -1,9 +1,11 @@
-import { AtSign, Command, Folder, Sparkles } from "lucide-react";
+import { AtSign, Blocks, Command, Folder } from "lucide-react";
+import { BrandIcon } from "../components/BrandIcon";
 import { fileIcon } from "../shell/fileTreeHelpers";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { isDesktop, fsListTree, fsSearchFiles } from "../desktop/runtime";
 import { useAppStore } from "../stores";
 import { listWorkspaceTree, searchWorkspaceFiles } from "../protocol/workspace";
+import { apiBase, authHeaders } from "../protocol/api";
 import { fuzzyFilter } from "../lib/fuzzy-match";
 import { buildRuntimeSlashArgMenuItems, buildRuntimeSlashMenuItems } from "../lib/runtime-commands";
 import { mentionSearchCache, mentionTreeCache, type MentionFileItem } from "./mentionCache";
@@ -21,24 +23,34 @@ type FileItem = MentionFileItem;
 interface MenuItem {
   name: string;
   description: string;
-  type?: "file" | "folder" | "skill" | "command" | "argument";
+  type?: "file" | "folder" | "plugin" | "skill" | "command" | "argument";
   path?: string;
   section?: string;
   keywords?: string[];
   displayName?: string;
+  icon?: string;
   sourceLevel?: string;
   active?: boolean;
-  triggers?: string[];
   allowImplicitInvocation?: boolean;
-  mcpRequired?: string[];
   mcpDependencies?: string[];
   defaultPrompt?: string;
+  skillPath?: string;
 }
 
 const MENTION_SEARCH_DEBOUNCE_MS = 150;
 const MENTION_CACHE_LIMIT = 80;
 const SLASH_MENU_LIMIT = 18;
 const ROOT_SLASH_SKILL_PREVIEW_LIMIT = 6;
+
+interface PluginMentionEntry {
+  name: string;
+  displayName?: string;
+  description?: string;
+  shortDescription?: string;
+  skill_count?: number;
+  mcp_server_count?: number;
+  enabled?: boolean;
+}
 
 const rememberMentionResults = (cache: Map<string, FileItem[]>, key: string, results: FileItem[]) => {
   if (!cache.has(key) && cache.size >= MENTION_CACHE_LIMIT) {
@@ -51,6 +63,7 @@ const rememberMentionResults = (cache: Map<string, FileItem[]>, key: string, res
 export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" }: Props) => {
   const [activeIndex, setActiveIndex] = useState(0);
   const [fileResults, setFileResults] = useState<FileItem[]>([]);
+  const [pluginResults, setPluginResults] = useState<PluginMentionEntry[]>([]);
   const [searching, setSearching] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<Array<HTMLDivElement | null>>([]);
@@ -60,7 +73,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
   const selectedSkills = useAppStore((s) => s.selectedSkills);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const slashFilter = filter ?? "";
-  const selectedSkillNames = new Set(selectedSkills.map((skill) => skill.name));
+  const selectedSkillKeys = new Set(selectedSkills.map((skill) => skill.path || skill.name));
 
   // Slash commands and explicit skill picker
   const slashBaseItems: MenuItem[] = buildRuntimeSlashMenuItems(storeCommands).map((item) => ({
@@ -71,18 +84,18 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
   }));
   const slashSkillItems: MenuItem[] = availableSkills.map((skill) => ({
     name: `/${skill.name}`,
-    description: skill.description || "Skill",
+    description: skill.short_description || skill.description || "Skill",
     type: "skill" as const,
-    path: `/${skill.name}`,
+    path: skill.path ? `skill-path:${encodeURIComponent(skill.path)}` : `skill-name:${encodeURIComponent(skill.name)}`,
     section: "Skills",
     displayName: skill.display_name,
+    icon: skill.icon,
     sourceLevel: skill.source_level,
-    active: Boolean(skill.active || selectedSkillNames.has(skill.name)),
-    triggers: skill.triggers,
+    active: Boolean(skill.active || selectedSkillKeys.has(skill.path || skill.name)),
     allowImplicitInvocation: skill.allow_implicit_invocation,
-    mcpRequired: skill.mcp_required,
     mcpDependencies: skill.mcp_dependencies,
     defaultPrompt: skill.default_prompt,
+    skillPath: skill.path,
   }));
   const skillsPickerActive = /^\/skills(?:\s|$)/i.test(slashFilter);
   const explicitSkillPickerActive = kind === "skill";
@@ -104,7 +117,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
     ? fuzzyFilter(
         slashSkillItems,
         slashFilter.replace(/^\/skills\s*/i, "").replace(/^\//, ""),
-        (c) => [c.name, c.displayName, c.description, c.defaultPrompt, ...(c.triggers ?? []), ...(c.mcpRequired ?? []), ...(c.mcpDependencies ?? [])].filter(Boolean).join(" "),
+        (c) => [c.name, c.displayName, c.description, c.defaultPrompt, ...(c.mcpDependencies ?? [])].filter(Boolean).join(" "),
       )
     : slashFilter && slashFilter !== "/"
       ? fuzzyFilter(
@@ -118,52 +131,72 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
   // Mention mode: extract query from @<query>
   const mentionQuery = kind === "mention" ? (filter ?? "").replace(/^@/, "").trim() : "";
   const mentionSearchQuery = stripLineAnchor(mentionQuery);
-  const skillItems: MenuItem[] = kind === "mention"
-    ? fuzzyFilter(
-        availableSkills.map((skill) => ({
-          name: `@${skill.name}`,
-          description: skill.description || "Skill",
-          type: "skill" as const,
-          path: `skill:${skill.name}`,
-          section: "Skills",
-          displayName: skill.display_name,
-          sourceLevel: skill.source_level,
-          active: Boolean(skill.active || selectedSkillNames.has(skill.name)),
-          triggers: skill.triggers,
-          allowImplicitInvocation: skill.allow_implicit_invocation,
-          mcpRequired: skill.mcp_required,
-          mcpDependencies: skill.mcp_dependencies,
-          defaultPrompt: skill.default_prompt,
-        })),
-        mentionSearchQuery,
-        (skill) => [skill.name, skill.displayName, skill.description, skill.defaultPrompt].filter(Boolean).join(" "),
-      ).slice(0, 8)
-    : [];
   const explicitSkillItems: MenuItem[] = kind === "skill"
     ? fuzzyFilter(
         availableSkills.map((skill) => ({
           name: `$${skill.name}`,
-          description: skill.description || "Skill",
+          description: skill.short_description || skill.description || "Skill",
           type: "skill" as const,
-          path: `skill:${skill.name}`,
+          path: skill.path ? `skill-path:${encodeURIComponent(skill.path)}` : `skill-name:${encodeURIComponent(skill.name)}`,
           section: "Skills",
           displayName: skill.display_name,
+          icon: skill.icon,
           sourceLevel: skill.source_level,
-          active: Boolean(skill.active || selectedSkillNames.has(skill.name)),
-          triggers: skill.triggers,
+          active: Boolean(skill.active || selectedSkillKeys.has(skill.path || skill.name)),
           allowImplicitInvocation: skill.allow_implicit_invocation,
-          mcpRequired: skill.mcp_required,
           mcpDependencies: skill.mcp_dependencies,
           defaultPrompt: skill.default_prompt,
+          skillPath: skill.path,
         })),
         (filter ?? "").replace(/^\$/, ""),
-        (skill) => [skill.name, skill.displayName, skill.description, skill.defaultPrompt, ...(skill.triggers ?? []), ...(skill.mcpRequired ?? []), ...(skill.mcpDependencies ?? [])].filter(Boolean).join(" "),
+        (skill) => [skill.name, skill.displayName, skill.description, skill.defaultPrompt, ...(skill.mcpDependencies ?? [])].filter(Boolean).join(" "),
       ).slice(0, 18)
+    : [];
+
+  const mentionPluginItems: MenuItem[] = kind === "mention"
+    ? fuzzyFilter(
+        pluginResults
+          .filter((plugin) => plugin.enabled !== false)
+          .map((plugin) => ({
+            name: `@${plugin.displayName || plugin.name}`,
+            displayName: plugin.displayName || plugin.name,
+            description: plugin.shortDescription || plugin.description || [
+              plugin.skill_count ? `${plugin.skill_count} skill${plugin.skill_count === 1 ? "" : "s"}` : "",
+              plugin.mcp_server_count ? `${plugin.mcp_server_count} MCP server${plugin.mcp_server_count === 1 ? "" : "s"}` : "",
+            ].filter(Boolean).join(" · ") || "Plugin",
+            type: "plugin" as const,
+            path: `plugin:${encodeURIComponent(plugin.name)}`,
+            section: "Plugins",
+          })),
+        mentionSearchQuery,
+        (plugin) => [plugin.name, plugin.displayName, plugin.description].filter(Boolean).join(" "),
+      ).slice(0, 8)
     : [];
 
   useEffect(() => {
     setActiveIndex(0);
   }, [open, kind, filter]);
+
+  useEffect(() => {
+    if (!open || kind !== "mention") return;
+    let active = true;
+    let headers: HeadersInit = {};
+    try {
+      headers = authHeaders();
+    } catch {
+      headers = {};
+    }
+    fetch(`${apiBase()}/api/plugins`, { headers })
+      .then(async (response) => response.ok ? response.json() : { plugins: [] })
+      .then((payload) => {
+        if (!active) return;
+        setPluginResults(Array.isArray(payload?.plugins) ? payload.plugins : []);
+      })
+      .catch(() => {
+        if (active) setPluginResults([]);
+      });
+    return () => { active = false; };
+  }, [open, kind]);
 
   // File search effect for @ mentions
   useEffect(() => {
@@ -188,10 +221,10 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
       }
       setSearching(true);
       if (desktopMode && workingDirectory) {
-        fsListTree(workingDirectory)
+        Promise.resolve(fsListTree(workingDirectory))
           .then((entries) => {
             if (searchId !== searchSequenceRef.current) return; // Stale result
-            const results = entries.slice(0, 8).map((entry) => {
+            const results = (entries ?? []).slice(0, 8).map((entry) => {
               const type = entry.isDirectory ? "folder" as const : "file" as const;
               return {
                 name: entry.name || entry.path,
@@ -214,7 +247,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
           });
         return;
       }
-      listWorkspaceTree(".")
+      listWorkspaceTree(workingDirectory, ".")
         .then((tree) => {
           if (searchId !== searchSequenceRef.current) return; // Stale result
           const children = tree?.children ?? [];
@@ -272,7 +305,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
             setSearching(false);
           });
       } else {
-        searchWorkspaceFiles(mentionSearchQuery, 10, "all")
+        searchWorkspaceFiles(workingDirectory, mentionSearchQuery, 10, "all")
           .then((files) => {
             if (searchId !== searchSequenceRef.current) return; // Stale result
             const results = files.map((f) => ({
@@ -304,7 +337,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
       ? slashItems.slice(0, SLASH_MENU_LIMIT)
       : kind === "skill"
         ? explicitSkillItems
-      : [...skillItems, ...fileResults].slice(0, 18);
+      : [...mentionPluginItems, ...fileResults].slice(0, 18);
 
   useEffect(() => {
     if (!open) return;
@@ -378,8 +411,6 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
             const showSection = i === 0 || items[i - 1]?.section !== it.section;
             const displayName = displayMenuName(it, skillsPickerActive || explicitSkillPickerActive);
             const sourceLabel = it.type === "skill" ? formatSourceLevel(it.sourceLevel) : "";
-            const triggerLabel = it.triggers?.slice(0, 2).join(", ");
-            const showTriggers = Boolean(skillsPickerActive && triggerLabel);
             const skillPolicyLabel = it.type === "skill" ? formatSkillPolicy(it) : "";
             return (
               <div key={it.path ?? it.name}>
@@ -411,7 +442,6 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
                       {it.active && <span style={activeBadgeStyle}>active</span>}
                     </span>
                     {it.description && <span style={menuDescriptionStyle}>{it.description}</span>}
-                    {showTriggers && <span style={menuTriggerStyle}>triggers: {triggerLabel}</span>}
                     {skillPolicyLabel && <span style={menuTriggerStyle}>{skillPolicyLabel}</span>}
                   </span>
                   {sourceLabel && <span style={sourceBadgeStyle}>{sourceLabel}</span>}
@@ -505,7 +535,7 @@ const menuTriggerStyle: React.CSSProperties = {
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
   color: "var(--text-muted)",
-  fontSize: 11,
+  fontSize: "var(--text-2xs)",
   lineHeight: 1.3,
   fontFamily: "var(--font-mono)",
 };
@@ -513,14 +543,14 @@ const menuTriggerStyle: React.CSSProperties = {
 const menuShortcutStyle: React.CSSProperties = {
   flexShrink: 0,
   color: "var(--text-muted)",
-  fontSize: 11,
+  fontSize: "var(--text-2xs)",
   fontFamily: "var(--font-mono)",
 };
 
 const sectionLabelStyle: React.CSSProperties = {
   padding: "6px 7px 4px",
   color: "var(--text-muted)",
-  fontSize: 11,
+  fontSize: "var(--text-2xs)",
   fontWeight: 700,
   letterSpacing: 0,
   textTransform: "uppercase",
@@ -538,7 +568,7 @@ const sourceBadgeStyle: React.CSSProperties = {
   borderRadius: "var(--radius-sm, 5px)",
   color: "var(--text-muted)",
   background: "var(--surface-page)",
-  fontSize: 11,
+  fontSize: "var(--text-2xs)",
   lineHeight: 1.25,
   fontFamily: "var(--font-mono)",
 };
@@ -546,14 +576,15 @@ const sourceBadgeStyle: React.CSSProperties = {
 const activeBadgeStyle: React.CSSProperties = {
   flexShrink: 0,
   color: "var(--accent-primary)",
-  fontSize: 11,
+  fontSize: "var(--text-2xs)",
   fontFamily: "var(--font-mono)",
 };
 
 function renderMenuIcon(item: MenuItem) {
   if (item.type === "folder") return <Folder size={14} />;
   if (item.type === "file") return fileIcon(item.name || item.path || "file", { size: 14, className: "composer-context-icon-svg" });
-  if (item.type === "skill") return <Sparkles size={14} />;
+  if (item.type === "skill") return <BrandIcon value={item.displayName || item.name} iconUrl={item.icon} fallback="skill" size={14} />;
+  if (item.type === "plugin") return <Blocks size={14} />;
   if (item.type === "argument") return <AtSign size={14} />;
   return <Command size={14} />;
 }
@@ -566,7 +597,7 @@ function displayMenuName(item: MenuItem, skillsPickerActive: boolean): string {
 function formatSkillPolicy(item: MenuItem): string {
   const parts: string[] = [];
   if (item.allowImplicitInvocation === false) parts.push("explicit only");
-  const mcp = [...(item.mcpRequired ?? []), ...(item.mcpDependencies ?? [])].filter(Boolean);
+  const mcp = (item.mcpDependencies ?? []).filter(Boolean);
   if (mcp.length > 0) parts.push(`MCP: ${mcp.slice(0, 2).join(", ")}`);
   return parts.join(" · ");
 }

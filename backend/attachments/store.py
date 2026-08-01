@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.config import DATA_ROOT
+from backend.atomic_io import atomic_write_text
 
 
 ATTACHMENT_DATA_DIR = DATA_ROOT / "attachments"
@@ -13,6 +14,7 @@ ATTACHMENT_INDEX_FILE = "index.json"
 ARTIFACT_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 MAX_ATTACHMENT_CONTENT_CHARS = 50 * 1024 * 1024
 MAX_ATTACHMENT_METADATA_CHARS = 256 * 1024
+MAX_ATTACHMENT_NATIVE_DATA_CHARS = ((MAX_ATTACHMENT_CONTENT_CHARS + 2) // 3) * 4
 
 
 class AttachmentStore:
@@ -31,6 +33,7 @@ class AttachmentStore:
         artifact_id: str,
         content: str,
         metadata: dict[str, Any] | None = None,
+        native_data: str = "",
     ) -> None:
         safe_id = self._safe_artifact_id(artifact_id)
         if len(content) > MAX_ATTACHMENT_CONTENT_CHARS:
@@ -38,26 +41,38 @@ class AttachmentStore:
         metadata_payload = json.dumps(dict(metadata or {}), ensure_ascii=False)
         if len(metadata_payload) > MAX_ATTACHMENT_METADATA_CHARS:
             raise ValueError("Attachment metadata exceeds the 256 KB limit.")
+        if len(native_data) > MAX_ATTACHMENT_NATIVE_DATA_CHARS:
+            raise ValueError("Attachment native data exceeds the 50 MB limit.")
         payload = {
             "artifact_id": safe_id,
             "content": content,
             "metadata": json.loads(metadata_payload),
         }
+        if native_data:
+            payload["native_data"] = native_data
         path = self._path_for(safe_id)
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp_path.replace(path)
+        atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
         self._index_payload(payload)
         self._persist_index()
         self._index_ready = True
 
-    def get(self, artifact_id: str) -> str | None:
-        payload = self.get_payload(artifact_id)
+    def get(self, artifact_id: str, *, conversation_id: str = "", workspace_root: str = "") -> str | None:
+        payload = self.get_payload(
+            artifact_id,
+            conversation_id=conversation_id,
+            workspace_root=workspace_root,
+        )
         if payload is None:
             return None
         return str(payload.get("content") or "")
 
-    def get_payload(self, artifact_id: str) -> dict[str, Any] | None:
+    def get_payload(
+        self,
+        artifact_id: str,
+        *,
+        conversation_id: str = "",
+        workspace_root: str = "",
+    ) -> dict[str, Any] | None:
         try:
             path = self._path_for(artifact_id)
         except ValueError:
@@ -68,33 +83,62 @@ class AttachmentStore:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
-        return payload if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            return None
+        metadata = payload.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        if conversation_id and str(metadata.get("conversation_id") or "") != conversation_id:
+            return None
+        stored_workspace = str(metadata.get("workspace_root") or "")
+        if workspace_root:
+            if not stored_workspace:
+                return None
+            try:
+                if Path(stored_workspace).resolve() != Path(workspace_root).resolve():
+                    return None
+            except OSError:
+                if stored_workspace != workspace_root:
+                    return None
+        return payload
 
     def get_metadata(self, artifact_id: str) -> dict[str, Any]:
         payload = self.get_payload(artifact_id)
         metadata = payload.get("metadata") if payload else None
         return dict(metadata) if isinstance(metadata, dict) else {}
 
-    def find_payload(self, ref: str) -> dict[str, Any] | None:
+    def get_native_data(self, artifact_id: str) -> str | None:
+        payload = self.get_payload(artifact_id)
+        if payload is None:
+            return None
+        native_data = payload.get("native_data")
+        return str(native_data) if isinstance(native_data, str) and native_data else None
+
+    def find_payload(
+        self,
+        ref: str,
+        *,
+        conversation_id: str = "",
+        workspace_root: str = "",
+    ) -> dict[str, Any] | None:
         """Find an uploaded attachment by artifact_id, doc_id, or file name."""
         needle = str(ref or "").strip()
         if not needle:
             return None
 
-        payload = self.get_payload(needle)
+        payload = self.get_payload(needle, conversation_id=conversation_id, workspace_root=workspace_root)
         if payload is not None:
             return payload
 
         indexed_id = self._index.get(needle.casefold())
         if indexed_id:
-            indexed_payload = self.get_payload(indexed_id)
+            indexed_payload = self.get_payload(indexed_id, conversation_id=conversation_id, workspace_root=workspace_root)
             if indexed_payload is not None:
                 return indexed_payload
 
         if not self._index_ready:
             self._rebuild_index()
             indexed_id = self._index.get(needle.casefold())
-            return self.get_payload(indexed_id) if indexed_id else None
+            return self.get_payload(indexed_id, conversation_id=conversation_id, workspace_root=workspace_root) if indexed_id else None
         return None
 
     def _load_index(self) -> dict[str, str]:
@@ -127,12 +171,10 @@ class AttachmentStore:
                 self._index[ref.casefold()] = artifact_id
 
     def _persist_index(self) -> None:
-        tmp_path = self._index_path.with_suffix(".json.tmp")
-        tmp_path.write_text(
+        atomic_write_text(
+            self._index_path,
             json.dumps(self._index, ensure_ascii=False, separators=(",", ":")),
-            encoding="utf-8",
         )
-        tmp_path.replace(self._index_path)
 
     def _rebuild_index(self) -> None:
         self._index = {}
@@ -149,9 +191,15 @@ class AttachmentStore:
         self._persist_index()
         self._index_ready = True
 
-    def resolve_content(self, ref: str) -> tuple[str, str, dict[str, Any]] | None:
+    def resolve_content(
+        self,
+        ref: str,
+        *,
+        conversation_id: str = "",
+        workspace_root: str = "",
+    ) -> tuple[str, str, dict[str, Any]] | None:
         """Resolve an attachment reference to artifact_id, content, and metadata."""
-        payload = self.find_payload(ref)
+        payload = self.find_payload(ref, conversation_id=conversation_id, workspace_root=workspace_root)
         if payload is None:
             return None
         artifact_id = str(payload.get("artifact_id") or "").strip()

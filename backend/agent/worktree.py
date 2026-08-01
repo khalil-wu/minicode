@@ -84,6 +84,13 @@ def create_agent_worktree(slug: str, base: Path) -> tuple[AgentWorktree | None, 
     Returns ``(worktree, "")`` on success or ``(None, reason)`` when isolation
     is unavailable (not a git repo, git missing, add failed).
     """
+    from backend.agent.checkpoint import validate_storage_id
+
+    try:
+        slug = validate_storage_id(slug, field_name="worktree_slug")
+    except ValueError as exc:
+        return None, str(exc)
+
     git_root = find_git_root(base)
     if git_root is None:
         return None, f"{base} is not inside a git repository (or git is unavailable)"
@@ -194,18 +201,34 @@ def cleanup_agent_worktree(worktree: AgentWorktree) -> tuple[bool, str]:
     return False, ""
 
 
-def resume_agent_worktree(worktree_path: str | Path) -> AgentWorktree | None:
+def resume_agent_worktree(
+    worktree_path: str | Path,
+    *,
+    expected_repo_root: str | Path,
+    expected_subagent_id: str,
+) -> AgentWorktree | None:
     """Re-adopt a worktree recorded in a checkpoint for a resumed subagent.
 
     Returns ``None`` when the directory is gone or no longer a valid worktree,
     letting the caller degrade to non-isolated execution.
     """
     try:
-        path = Path(worktree_path)
+        from backend.agent.checkpoint import validate_storage_id
+
+        subagent_id = validate_storage_id(
+            expected_subagent_id,
+            field_name="subagent_id",
+        )
+        expected_base = Path(expected_repo_root).resolve()
+        repo_root = (find_git_root(expected_base) or expected_base).resolve()
+        path = Path(worktree_path).resolve()
+        expected_path = (repo_root / ".minicode" / "worktrees" / subagent_id).resolve()
+        if path != expected_path:
+            return None
         if not path.is_dir():
             return None
         git_root = find_git_root(path)
-        if git_root is None:
+        if git_root is None or git_root.resolve() != repo_root:
             return None
         # The worktree must actually be a linked worktree of this repo (its
         # branch/HEAD are re-derived rather than trusted from the checkpoint).

@@ -154,7 +154,7 @@ export const sectionHeaderRowStyle: React.CSSProperties = {
 
 export const sectionMetaStyle: React.CSSProperties = {
   color: "var(--text-muted)",
-  fontSize: 11,
+  fontSize: "var(--text-2xs)",
   fontFamily: "var(--font-mono)",
 };
 
@@ -193,13 +193,13 @@ export const filterButtonStyle: React.CSSProperties = {
   border: 0,
   borderRadius: 999,
   cursor: "pointer",
-  fontSize: 11,
+  fontSize: "var(--text-2xs)",
   whiteSpace: "nowrap",
   transition: "var(--transition-fast)",
 };
 
 export const filterCountStyle: React.CSSProperties = {
-  fontSize: 10,
+  fontSize: "var(--text-3xs)",
   opacity: 0.7,
   fontFamily: "var(--font-mono)",
 };
@@ -212,7 +212,7 @@ export const sessionListWrapStyle: React.CSSProperties = {
   padding: "2px 0 10px",
   display: "grid",
   alignContent: "start",
-  gap: 10,
+  gap: 7,
 };
 
 export const emptyStateStyle: React.CSSProperties = {
@@ -266,10 +266,10 @@ export const sessionRowStyle: React.CSSProperties = {
   boxSizing: "border-box",
   display: "flex",
   alignItems: "center",
-  minHeight: 34,
-  padding: "5px 7px",
+  minHeight: 36,
+  padding: "0 8px 0 40px",
   cursor: "pointer",
-  gap: 8,
+  gap: 6,
   position: "relative",
   transition: "var(--transition-fast)",
   textAlign: "left",
@@ -283,7 +283,7 @@ export const sessionTitleStyle: React.CSSProperties = {
   fontSize: "var(--text-sm)",
   fontFamily: "var(--font-prose)",
   fontWeight: 400,
-  lineHeight: 1.5,
+  lineHeight: 1.35,
   color: "var(--text-primary)",
   overflow: "hidden",
   textOverflow: "ellipsis",
@@ -297,7 +297,7 @@ export const sessionMetaLineStyle: React.CSSProperties = {
   minWidth: 0,
   overflow: "hidden",
   whiteSpace: "nowrap",
-  fontSize: 11,
+  fontSize: "var(--text-2xs)",
   color: "var(--text-muted)",
   marginTop: 2,
 };

@@ -1,0 +1,118 @@
+name: MiniCode Windows release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the signed artifact"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Signed Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            desktop/package-lock.json
+      - name: Require signing secrets
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          MINICODE_UPDATE_FEED_URL: ${{ vars.MINICODE_UPDATE_FEED_URL }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64)) {
+            throw "WINDOWS_CERTIFICATE_BASE64 is required; refusing unsigned release."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
+            throw "WINDOWS_CERTIFICATE_PASSWORD is required; refusing unsigned release."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:MINICODE_UPDATE_FEED_URL) -or -not $env:MINICODE_UPDATE_FEED_URL.StartsWith("https://")) {
+            throw "MINICODE_UPDATE_FEED_URL repository variable must be an HTTPS URL."
+          }
+      - name: Install frontend
+        working-directory: frontend
+        run: npm ci
+      - name: Install desktop
+        working-directory: desktop
+        run: npm ci
+      - name: Verify release version matches tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $packageVersion = (Get-Content desktop/package.json -Raw | ConvertFrom-Json).version
+          $tagVersion = "${{ github.ref_name }}".TrimStart("v")
+          if ($packageVersion -ne $tagVersion) {
+            throw "desktop/package.json version $packageVersion does not match tag $tagVersion"
+          }
+      - name: Prepare signing certificate
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+        run: |
+          $certificatePath = Join-Path $env:RUNNER_TEMP "minicode-signing.p12"
+          [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
+          "CSC_LINK=$certificatePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Build signed installer
+        working-directory: desktop
+        env:
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          MINICODE_UPDATE_FEED_URL: ${{ vars.MINICODE_UPDATE_FEED_URL }}
+        run: npm run dist:win
+      - name: Verify installer signature and update metadata
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem desktop/release/*.exe)
+          if ($installers.Count -eq 0) { throw "No Windows installer was produced." }
+          foreach ($installer in $installers) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $installer.FullName
+            if ($signature.Status -ne "Valid") {
+              throw "Invalid Authenticode signature for $($installer.Name): $($signature.Status)"
+            }
+          }
+          if (-not (Test-Path desktop/release/latest.yml)) {
+            throw "latest.yml was not produced; refusing a release that cannot be updated."
+          }
+          if (@(Get-ChildItem desktop/release/*.blockmap).Count -eq 0) {
+            throw "No differential update blockmap was produced."
+          }
+          Get-ChildItem desktop/release -File |
+            Where-Object { $_.Extension -in ".exe", ".yml", ".blockmap" } |
+            Get-FileHash -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } |
+            Set-Content desktop/release/SHA256SUMS.txt -Encoding ascii
+      - name: Upload signed release bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: minicode-windows-release
+          if-no-files-found: error
+          path: |
+            desktop/release/*.exe
+            desktop/release/*.yml
+            desktop/release/*.blockmap
+            desktop/release/SHA256SUMS.txt
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', github.run_number) }}
+          files: |
+            desktop/release/*.exe
+            desktop/release/*.yml
+            desktop/release/*.blockmap
+            desktop/release/SHA256SUMS.txt

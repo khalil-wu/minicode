@@ -94,7 +94,7 @@ export function FileChangesCard({ cell }: { cell: DiffCellState }) {
             onClick={revertAll}
             title="撤销这些更改"
           >
-            <RotateCcw size={12} />
+            <RotateCcw size={14} />
             撤销
           </button>
           {reviewableFiles.length > 0 && (
@@ -104,7 +104,7 @@ export function FileChangesCard({ cell }: { cell: DiffCellState }) {
               onClick={openReview}
               title="在审核面板查看更改"
             >
-              <FileSearch size={12} />
+              <FileSearch size={14} />
               审核
             </button>
           )}
@@ -197,7 +197,7 @@ export function InlineDiffPreview({
     <div className="agent-loop-file-inline-diff" aria-label={`${path} diff`}>
       <div className="agent-loop-file-inline-diff-header">
         <div className="agent-loop-file-inline-diff-title">
-          <Code2 size={13} />
+          <Code2 size={14} />
           <span>{shortPath(path)}</span>
           <span className="agent-loop-file-inline-diff-meta">
             {preview.totalLines} 行
@@ -211,7 +211,7 @@ export function InlineDiffPreview({
             title="复制 diff"
             onClick={copyPatch}
           >
-            <Copy size={12} />
+            <Copy size={14} />
           </button>
         </div>
       </div>
@@ -236,7 +236,7 @@ export function InlineDiffPreview({
             onClick={() => setShowAll(true)}
           >
             {preview.foldedCount} 行已折叠
-            <ChevronDown size={12} />
+            <ChevronDown size={14} />
           </button>
         )}
         {showAll && (
@@ -246,7 +246,7 @@ export function InlineDiffPreview({
             onClick={() => setShowAll(false)}
           >
             收起 diff
-            <ChevronDown size={12} className="rotated-180" />
+            <ChevronDown size={14} className="rotated-180" />
           </button>
         )}
       </div>

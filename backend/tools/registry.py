@@ -5,10 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import inspect
-from collections import Counter, OrderedDict
+from collections import Counter
 from copy import deepcopy
-from dataclasses import replace
-from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -17,17 +15,9 @@ if TYPE_CHECKING:
     from backend.tools.toolsets import ToolsetPolicy
 
 from backend.permissions.context import ToolExecutionContext
-from backend.tools.base import BaseTool, ToolResult, PermissionLevel
+from backend.tools.base import BaseTool, PermissionLevel, ToolResult, validate_tool_input
 
 logger = logging.getLogger(__name__)
-
-RESULT_CACHE_MAXSIZE = 128
-# Keep open-world and directory/search tools out of the generic result cache.
-# web_fetch has permission/network-target checks inside the tool; list/grep/glob
-# need their own freshness logic because workspace files can change externally.
-_CACHEABLE_TOOL_NAMES = {"read_file"}
-_MUTATING_TOOL_NAMES = {"write_file", "edit_file"}
-
 
 class CapabilityRegistry:
     """In-memory registry for tools, commands, and skills."""
@@ -37,8 +27,6 @@ class CapabilityRegistry:
         self._commands: dict[str, Any] = {}
         self._skills: dict[str, dict[str, Any]] = {}
         self._schema_cache: dict[str, list[dict[str, Any]]] = {}
-        self._result_cache: OrderedDict[str, ToolResult] = OrderedDict()
-        self._result_cache_paths: dict[str, set[str]] = {}
         self._version = 0
 
     def register(self, tool: BaseTool) -> None:
@@ -48,22 +36,12 @@ class CapabilityRegistry:
                 tool.name,
             )
         self._tools[tool.name] = tool
-        try:
-            from backend.agent.tool_projection import DEFAULT_PROJECTION_REGISTRY
-
-            DEFAULT_PROJECTION_REGISTRY.register_tool_metadata(
-                tool.name,
-                tool.to_projection_metadata(),
-            )
-        except Exception as exc:  # pragma: no cover - metadata must not block tools
-            logger.debug("Tool projection metadata registration failed for %s: %s", tool.name, exc)
         self._touch()
 
     def unregister(self, name: str) -> bool:
         removed = self._tools.pop(name, None) is not None
         if removed:
             self._touch()
-            self._clear_result_cache()
         return removed
 
     def register_command(self, name: str, handler: Any) -> None:
@@ -332,9 +310,6 @@ class CapabilityRegistry:
             parts.append(getattr(tool, "description", "") or "")
         required_args = getattr(spec, "required_args", ()) or ()
         parts.extend(str(arg) for arg in required_args)
-        arg_roles = getattr(spec, "arg_roles", None) or {}
-        if isinstance(arg_roles, dict):
-            parts.extend(str(value) for value in arg_roles.values())
         return " ".join(str(part) for part in parts if str(part).strip())
 
     def _direct_schema_fingerprint(
@@ -482,16 +457,20 @@ class CapabilityRegistry:
                 is_error=True,
             )
 
-        cache_key = (
-            self._build_result_cache_key(name, args, context)
-            if name in _CACHEABLE_TOOL_NAMES
-            else self._build_idempotent_result_cache_key(tool, name, args, context)
-        )
-        if cache_key is not None:
-            cached = self._result_cache.get(cache_key)
-            if cached is not None:
-                self._result_cache.move_to_end(cache_key)
-                return replace(cached)
+        validation_error = validate_tool_input(tool, args)
+        if validation_error:
+            return ToolResult(
+                content=f"Invalid input for tool '{name}': {validation_error}",
+                is_error=True,
+                status="failed",
+                error_kind="validation_error",
+                user_summary="工具输入未通过结构化校验。",
+                developer_detail=validation_error,
+                model_observation=(
+                    f"The {name} input does not match its schema: {validation_error}. "
+                    "Correct the arguments and call the tool again."
+                ),
+            )
 
         try:
             if self._tool_accepts_context(tool):
@@ -501,32 +480,13 @@ class CapabilityRegistry:
         except Exception as exc:
             return ToolResult(
                 content=(
-                    f"Tool '{name}' execution failed: {exc}\n"
+                    f"Tool '{name}' execution failed ({type(exc).__name__}).\n"
                     "Check the arguments or try a different approach."
                 ),
                 is_error=True,
+                developer_detail=str(exc),
             )
-
-        if cache_key is not None and not result.is_error:
-            self._store_result_cache(cache_key, args, result)
-        elif not result.is_error and self._tool_mutates(name):
-            self._invalidate_result_cache(args)
-
         return result
-
-    def _tool_mutates(self, name: str) -> bool:
-        """Whether a tool mutates state — tool metadata first, then legacy set.
-
-        Lets any write/external-effect tool (run_command, git_commit, MCP
-        proxies) invalidate the read cache, not just write_file/edit_file.
-        """
-        tool = self._tools.get(name)
-        if tool is not None and (
-            getattr(tool, "mutates_workspace", False)
-            or getattr(tool, "mutates_external_state", False)
-        ):
-            return True
-        return name in _MUTATING_TOOL_NAMES
 
     def list_tools(self) -> list[str]:
         return list(self._tools.keys())
@@ -538,136 +498,6 @@ class CapabilityRegistry:
     @property
     def version(self) -> int:
         return self._version
-
-    def _build_result_cache_key(
-        self,
-        name: str,
-        args: dict[str, Any],
-        context: ToolExecutionContext | None = None,
-    ) -> str:
-        workspace_root = ""
-        if context and context.workspace_root:
-            workspace_root = Path(context.workspace_root).resolve().as_posix()
-        payload = {
-            "workspace_root": workspace_root,
-            "args": args,
-            "fingerprint": self._build_result_cache_fingerprint(name, args, context),
-        }
-        return f"{name}:{json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)}"
-
-    def _build_idempotent_result_cache_key(
-        self,
-        tool: BaseTool,
-        name: str,
-        args: dict[str, Any],
-        context: ToolExecutionContext | None = None,
-    ) -> str | None:
-        if not (
-            self._tool_declares_runtime_policy(tool, "idempotent")
-            or self._tool_declares_runtime_policy(tool, "side_effect_kind")
-        ):
-            return None
-        try:
-            side_effect_kind = str(tool.get_side_effect_kind(args)).strip().lower()
-            idempotent = bool(tool.is_idempotent(args))
-            idempotency_key = str(tool.idempotency_key(args) or "").strip()
-        except Exception:
-            return None
-        if side_effect_kind != "none" or not idempotent or not idempotency_key:
-            return None
-
-        workspace_root = ""
-        if context and context.workspace_root:
-            workspace_root = Path(context.workspace_root).resolve().as_posix()
-        permission = getattr(context, "permission", None) if context is not None else None
-        payload = {
-            "workspace_root": workspace_root,
-            "permission_mode": str(getattr(permission, "mode", "") or ""),
-            "workspace_scope": str(getattr(permission, "workspace_scope", "") or ""),
-            "allow_network": bool(getattr(context, "allow_network", False)) if context is not None else False,
-            "idempotency_key": idempotency_key,
-        }
-        return f"{name}:idempotent:{json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)}"
-
-    @staticmethod
-    def _tool_declares_runtime_policy(tool: BaseTool, name: str) -> bool:
-        declares = getattr(tool, "_declares_metadata", None)
-        if callable(declares):
-            try:
-                return bool(declares(name))
-            except Exception:
-                return False
-        return name in getattr(tool, "__dict__", {})
-
-    def _build_result_cache_fingerprint(
-        self,
-        name: str,
-        args: dict[str, Any],
-        context: ToolExecutionContext | None = None,
-    ) -> dict[str, Any]:
-        if name != "read_file":
-            return {}
-        raw_path = args.get("file_path") or args.get("path")
-        if not isinstance(raw_path, str) or not raw_path.strip():
-            return {"path": "", "state": "missing_arg"}
-
-        path = Path(raw_path)
-        if not path.is_absolute() and context and context.workspace_root:
-            path = Path(context.workspace_root) / path
-        try:
-            resolved = path.resolve()
-            stat = resolved.stat()
-        except OSError:
-            return {"path": path.as_posix(), "state": "unavailable"}
-
-        return {
-            "path": resolved.as_posix(),
-            "state": "stat",
-            "mtime_ns": stat.st_mtime_ns,
-            "size": stat.st_size,
-        }
-
-    def _store_result_cache(self, cache_key: str, args: dict[str, Any], result: ToolResult) -> None:
-        self._result_cache[cache_key] = replace(result)
-        self._result_cache.move_to_end(cache_key)
-        self._result_cache_paths[cache_key] = self._extract_related_paths(args)
-        while len(self._result_cache) > RESULT_CACHE_MAXSIZE:
-            oldest_key, _ = self._result_cache.popitem(last=False)
-            self._result_cache_paths.pop(oldest_key, None)
-
-    def _invalidate_result_cache(self, args: dict[str, Any]) -> None:
-        related_paths = self._extract_related_paths(args)
-        if not related_paths:
-            self._clear_result_cache()
-            return
-
-        stale_keys = [
-            cache_key
-            for cache_key, cached_paths in self._result_cache_paths.items()
-            if related_paths & cached_paths
-        ]
-        for cache_key in stale_keys:
-            self._result_cache.pop(cache_key, None)
-            self._result_cache_paths.pop(cache_key, None)
-
-    def _clear_result_cache(self) -> None:
-        self._result_cache.clear()
-        self._result_cache_paths.clear()
-
-    def _extract_related_paths(self, args: dict[str, Any]) -> set[str]:
-        paths: set[str] = set()
-        for key, value in args.items():
-            if not isinstance(value, str) or not value.strip():
-                continue
-            lowered = key.lower()
-            if lowered in {"file_path", "path", "directory", "cwd", "root"} or lowered.endswith("_path"):
-                paths.add(self._normalize_path(value))
-        return paths
-
-    def _normalize_path(self, raw_path: str) -> str:
-        if "://" in raw_path:
-            return raw_path.strip()
-        return Path(raw_path).as_posix()
 
     def _tool_accepts_context(self, tool: BaseTool) -> bool:
         try:
@@ -749,7 +579,6 @@ class CapabilityRegistry:
         } <= tool_names
         mcp_prompt_bridge = {"list_mcp_prompts", "get_mcp_prompt"} <= tool_names
         deferred_bridge = {"tool_search", "tool_describe", "tool_call"} <= tool_names
-        skill_bridge = {"load_skill", "unload_skill", "list_skills"} <= tool_names
         return {
             "tools_total": len(views),
             "direct_tools": sum(
@@ -768,7 +597,7 @@ class CapabilityRegistry:
             "mcp_resource_subscription_bridge": mcp_resource_subscription_bridge,
             "mcp_prompt_bridge": mcp_prompt_bridge,
             "deferred_bridge": deferred_bridge,
-            "skill_bridge": skill_bridge,
+            "skill_catalog": bool(self._skills),
         }
 
     def _touch(self) -> None:

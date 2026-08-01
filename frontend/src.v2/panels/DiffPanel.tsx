@@ -148,7 +148,7 @@ export const DiffPanel = () => {
             {visibleScopeOption.count > 0 && (
               <span style={scopeCountStyle}>{visibleScopeOption.count}</span>
             )}
-            <ChevronDown size={13} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
+            <ChevronDown size={14} style={{ color: "var(--text-muted)", flexShrink: 0 }} />
           </button>
           {scopeMenuOpen && (
             <div role="listbox" aria-label="Diff source" style={scopeMenuStyle}>
@@ -180,7 +180,7 @@ export const DiffPanel = () => {
             className="w-6 h-[22px]"
             style={{ ...iconButtonStyle }}
           >
-            {diffViewMode === "unified" ? <Columns2 size={12} /> : <Rows3 size={12} />}
+            {diffViewMode === "unified" ? <Columns2 size={14} /> : <Rows3 size={14} />}
           </button>
         )}
         <button
@@ -194,7 +194,7 @@ export const DiffPanel = () => {
             color: diffViewMode === "monaco" ? "var(--accent-primary)" : undefined,
           }}
         >
-          <Code2 size={12} />
+          <Code2 size={14} />
         </button>
       </div>
       <div className="flex-1 min-h-0 overflow-hidden">
@@ -299,7 +299,7 @@ const UnifiedDiffBody = ({ lines, language, comments, onLineClick, filePath, act
             )}
             {commentMap.has(i) && (
               <span className="ml-2 inline align-middle" style={{ color: "var(--accent-primary)", fontSize: "var(--text-xs)" }} title={commentMap.get(i)!.content}>
-                <MessageCircle size={12} style={{ display: "inline", verticalAlign: "middle" }} />
+                <MessageCircle size={14} style={{ display: "inline", verticalAlign: "middle" }} />
               </span>
             )}
           </div>
@@ -621,7 +621,7 @@ const scopeCountStyle: React.CSSProperties = {
   border: "1px solid color-mix(in oklch, var(--accent-primary) 28%, transparent)",
   color: "var(--accent-primary)",
   fontFamily: "var(--font-mono)",
-  fontSize: 10,
+  fontSize: "var(--text-3xs)",
   flexShrink: 0,
 };
 
@@ -726,7 +726,7 @@ const ActiveReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState
                         onClick={(e) => { e.stopPropagation(); useAppStore.getState().setDiffFileDecision(file.path, "approved"); }}
                         style={{ ...fileDecisionBtnStyle, color: decision === "approved" ? "var(--text-on-accent)" : "var(--state-success)", background: decision === "approved" ? "var(--state-success)" : "transparent" }}
                       >
-                        <CheckCircle size={13} />
+                        <CheckCircle size={14} />
                       </button>
                       <button
                         title="拒绝文件"
@@ -734,7 +734,7 @@ const ActiveReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState
                         onClick={(e) => { e.stopPropagation(); useAppStore.getState().setDiffFileDecision(file.path, "rejected"); }}
                         style={{ ...fileDecisionBtnStyle, color: decision === "rejected" ? "var(--text-on-accent)" : "var(--state-danger)", background: decision === "rejected" ? "var(--state-danger)" : "transparent" }}
                       >
-                        <XCircle size={13} />
+                        <XCircle size={14} />
                       </button>
                     </>
                   )}
@@ -792,18 +792,18 @@ const ActiveReviewTab = ({ diffReview, viewMode }: { diffReview: DiffReviewState
               onClick={() => useAppStore.getState().openEditorFile(selectedFile.path, selectedFile.path.split(/[/\\]/).pop())}
               title="Open file in editor" aria-label="Open file in editor" style={iconButtonStyle}
             >
-              <ExternalLink size={13} />
+              <ExternalLink size={14} />
             </button>
           )}
           {diffReview.status === "error" && diffReview.error && (
             <span style={{ color: "var(--state-danger)" }}>{diffReview.error}</span>
           )}
           {!isReadOnly && isSubmitted && <span style={{ color: "var(--text-muted)" }}>已提交</span>}
-          {!isReadOnly && <button disabled={isSubmitted} onClick={() => respond(diffReview.requestId, false)} style={{ ...rejectButtonStyle, opacity: isSubmitted ? 0.6 : 1 }}><X size={13} /> 全部拒绝</button>}
-          {!isReadOnly && <button disabled={isSubmitted} onClick={() => respond(diffReview.requestId, true)} style={{ ...acceptButtonStyle, opacity: isSubmitted ? 0.6 : 1 }}><Check size={13} /> 全部接受</button>}
+          {!isReadOnly && <button disabled={isSubmitted} onClick={() => respond(diffReview.requestId, false)} style={{ ...rejectButtonStyle, opacity: isSubmitted ? 0.6 : 1 }}><X size={14} /> 全部拒绝</button>}
+          {!isReadOnly && <button disabled={isSubmitted} onClick={() => respond(diffReview.requestId, true)} style={{ ...acceptButtonStyle, opacity: isSubmitted ? 0.6 : 1 }}><Check size={14} /> 全部接受</button>}
           {!isReadOnly && comments.length > 0 && (
             <button disabled={isSubmitted} onClick={() => useAppStore.getState().submitDiffReviewWithComments()} style={{ ...acceptButtonStyle, background: "var(--accent-primary)", borderColor: "var(--accent-primary)", marginLeft: 4, opacity: isSubmitted ? 0.6 : 1 }}>
-              <MessageCircle size={13} /> 提交意见 ({comments.length})
+              <MessageCircle size={14} /> 提交意见 ({comments.length})
             </button>
           )}
         </div>
@@ -1012,10 +1012,10 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
       <aside className="min-h-0 overflow-y-auto overflow-x-hidden p-2.5 flex flex-col gap-2" style={{ borderRight: "1px solid var(--border-subtle)" }}>
         <div className="flex flex-col gap-1.5" style={{ fontSize: "var(--text-xs)" }}>
           <div className="flex items-center gap-1.5">
-            <GitBranch size={13} color="var(--accent-primary)" />
+            <GitBranch size={14} color="var(--accent-primary)" />
             <span className="flex-1 font-bold" style={{ color: "var(--text-primary)" }}>未提交更改</span>
             <button onClick={requestGitChanges} title="Refresh" aria-label="Refresh git changes" className="w-[22px] h-5" style={iconButtonStyle}>
-              <RefreshCw size={11} className={gitChanges.loading ? "spin" : ""} />
+              <RefreshCw size={14} className={gitChanges.loading ? "spin" : ""} />
             </button>
           </div>
           {(hasWorkingChanges || hasStagedChanges) && (
@@ -1027,7 +1027,7 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
                   aria-label="Stage all"
                   style={{ ...smallActionButtonStyle, color: "var(--state-success)" }}
                 >
-                  <Plus size={11} />
+                  <Plus size={14} />
                   全部暂存
                 </button>
               )}
@@ -1038,7 +1038,7 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
                   aria-label="Unstage all"
                   style={{ ...smallActionButtonStyle, color: "var(--text-muted)" }}
                 >
-                  <Minus size={11} />
+                  <Minus size={14} />
                   全部取消暂存
                 </button>
               )}
@@ -1048,7 +1048,7 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
 
         {gitChanges.staged.length > 0 && (
           <div>
-            <div className="uppercase mb-1 tracking-wide" style={{ fontSize: 10, color: "var(--text-muted)", letterSpacing: "0.5px" }}>
+            <div className="uppercase mb-1 tracking-wide" style={{ fontSize: "var(--text-3xs)", color: "var(--text-muted)", letterSpacing: "0.5px" }}>
               已暂存 ({gitChanges.staged.length})
             </div>
             {visibleStaged.map((f) => (
@@ -1065,12 +1065,12 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
                 >
                   <div className="overflow-hidden text-ellipsis whitespace-nowrap" style={{ fontFamily: "var(--font-mono)" }}>{f.path}</div>
                   <div className="flex gap-1.5 mt-px">
-                    <span style={{ color: "var(--state-success)", fontSize: 10 }}>+{f.additions}</span>
-                    <span style={{ color: "var(--state-danger)", fontSize: 10 }}>-{f.deletions}</span>
+                    <span style={{ color: "var(--state-success)", fontSize: "var(--text-3xs)" }}>+{f.additions}</span>
+                    <span style={{ color: "var(--state-danger)", fontSize: "var(--text-3xs)" }}>-{f.deletions}</span>
                   </div>
                 </button>
                 <button onClick={() => handleUnstage(f.path)} title="Unstage" aria-label={`Unstage ${f.path}`} style={{ ...fileDecisionBtnStyle, color: "var(--text-muted)" }}>
-                  <Minus size={11} />
+                  <Minus size={14} />
                 </button>
               </div>
             ))}
@@ -1080,7 +1080,7 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
 
         {gitChanges.workingTree.length > 0 && (
           <div>
-            <div className="uppercase mb-1 tracking-wide" style={{ fontSize: 10, color: "var(--text-muted)", letterSpacing: "0.5px" }}>
+            <div className="uppercase mb-1 tracking-wide" style={{ fontSize: "var(--text-3xs)", color: "var(--text-muted)", letterSpacing: "0.5px" }}>
               已修改 ({gitChanges.workingTree.length})
             </div>
             {visibleWorking.map((f) => (
@@ -1097,15 +1097,15 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
                 >
                   <div className="overflow-hidden text-ellipsis whitespace-nowrap" style={{ fontFamily: "var(--font-mono)" }}>{f.path}</div>
                   <div className="flex gap-1.5 mt-px">
-                    <span style={{ color: "var(--state-success)", fontSize: 10 }}>+{f.additions}</span>
-                    <span style={{ color: "var(--state-danger)", fontSize: 10 }}>-{f.deletions}</span>
+                    <span style={{ color: "var(--state-success)", fontSize: "var(--text-3xs)" }}>+{f.additions}</span>
+                    <span style={{ color: "var(--state-danger)", fontSize: "var(--text-3xs)" }}>-{f.deletions}</span>
                   </div>
                 </button>
                 <button onClick={() => handleRevert(f.path)} title="Discard changes" aria-label={`Discard changes in ${f.path}`} style={{ ...fileDecisionBtnStyle, color: "var(--state-danger)" }}>
-                  <RotateCcw size={11} />
+                  <RotateCcw size={14} />
                 </button>
                 <button onClick={() => handleStage(f.path)} title="Stage" aria-label={`Stage ${f.path}`} style={{ ...fileDecisionBtnStyle, color: "var(--state-success)" }}>
-                  <Plus size={11} />
+                  <Plus size={14} />
                 </button>
               </div>
             ))}
@@ -1115,7 +1115,7 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
 
         {gitChanges.untracked.length > 0 && (
           <div>
-            <div className="uppercase mb-1 tracking-wide" style={{ fontSize: 10, color: "var(--text-muted)", letterSpacing: "0.5px" }}>
+            <div className="uppercase mb-1 tracking-wide" style={{ fontSize: "var(--text-3xs)", color: "var(--text-muted)", letterSpacing: "0.5px" }}>
               未跟踪 ({gitChanges.untracked.length})
             </div>
             {visibleUntracked.map((path) => (
@@ -1133,7 +1133,7 @@ const GitChangesTab = ({ viewMode }: { viewMode: DiffViewMode }) => {
                   <div className="overflow-hidden text-ellipsis whitespace-nowrap" style={{ fontFamily: "var(--font-mono)" }}>{path}</div>
                 </button>
                 <button onClick={() => handleStage(path)} title="Stage" aria-label={`Stage ${path}`} style={{ ...fileDecisionBtnStyle, color: "var(--state-success)" }}>
-                  <Plus size={11} />
+                  <Plus size={14} />
                 </button>
               </div>
             ))}

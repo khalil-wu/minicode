@@ -51,6 +51,7 @@ def build_handoff_preflight(
     conversation_repo: Any,
     main_worktree_root: Any,
     has_running_turn: bool,
+    dirty_action: str = "block",
 ) -> dict[str, Any]:
     conversation_id = str(getattr(conversation, "id", "") or "")
     isolated = bool(getattr(conversation, "git_isolated", False))
@@ -73,7 +74,10 @@ def build_handoff_preflight(
     source_status = _status(source_path) if source_path.exists() else "<missing>"
     main_status = _status(base_root) if base_root.exists() else "<missing>"
     if source_status and source_status != "<missing>" and source_status != "<status unavailable>":
-        checks.append(_check("source.dirty", "blocking", "Commit or discard source workspace changes before handoff."))
+        if dirty_action == "stash":
+            checks.append(_check("source.dirty.stash", "warning", "Local changes will be stashed and restored in the destination workspace."))
+        else:
+            checks.append(_check("source.dirty", "blocking", "Commit changes, or choose 'stash' to move tracked and untracked changes safely."))
     if source_status == "<status unavailable>":
         checks.append(_check("source.status_unavailable", "blocking", "Could not verify source Git status."))
 
@@ -113,6 +117,7 @@ def build_handoff_preflight(
         "target_head": _head(base_root) if base_root.exists() else "",
         "target_branch": worktree_branch,
         "target_status": main_status,
+        "dirty_action": dirty_action,
     }
     fingerprint = hashlib.sha256(json.dumps(fingerprint_payload, sort_keys=True).encode("utf-8")).hexdigest()
     return {
@@ -124,7 +129,21 @@ def build_handoff_preflight(
         "checks": checks,
         "allowed": not any(check["severity"] == "blocking" for check in checks),
         "fingerprint": fingerprint,
+        "dirty_action": dirty_action,
     }
+
+
+def stash_workspace_changes(root: Path, *, label: str) -> tuple[bool, str]:
+    """Move tracked and untracked work aside for a handoff, retaining recovery."""
+    ok, output = _git(root, "stash", "push", "--include-untracked", "--message", label)
+    if not ok or "No local changes" in output:
+        return False, output or "Failed to stash local changes"
+    ok, ref = _git(root, "stash", "list", "-1", "--format=%gd")
+    return (bool(ok and ref), ref or output)
+
+
+def restore_workspace_stash(root: Path, stash_ref: str) -> tuple[bool, str]:
+    return _git(root, "stash", "pop", stash_ref)
 
 
 def switch_main_checkout(base_root: Path, branch: str) -> tuple[bool, str]:

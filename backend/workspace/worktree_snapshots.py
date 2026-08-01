@@ -10,6 +10,7 @@ needed to find and restore that commit.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ from typing import Any
 from backend.config import DATA_ROOT
 
 WORKTREE_SNAPSHOT_DATA_DIR = DATA_ROOT / "worktree-snapshots"
+_SNAPSHOT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
 @dataclass(frozen=True)
@@ -73,7 +75,10 @@ class WorktreeSnapshotStore:
         snapshot_id = (snapshot_id or "").strip()
         if not snapshot_id:
             return None
-        path = self._path_for(snapshot_id)
+        try:
+            path = self._path_for(snapshot_id)
+        except ValueError:
+            return None
         if not path.exists():
             return None
         try:
@@ -81,8 +86,15 @@ class WorktreeSnapshotStore:
         except (OSError, json.JSONDecodeError):
             return None
 
-    def list(self, conversation_id: str | None = None, *, limit: int = 100) -> list[WorktreeSnapshotRecord]:
+    def list(
+        self,
+        conversation_id: str | None = None,
+        *,
+        repo_root: Path | None = None,
+        limit: int = 100,
+    ) -> list[WorktreeSnapshotRecord]:
         records: list[WorktreeSnapshotRecord] = []
+        resolved_repo_root = repo_root.resolve() if repo_root is not None else None
         for path in sorted(self._root.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
             try:
                 record = WorktreeSnapshotRecord.from_dict(json.loads(path.read_text(encoding="utf-8")))
@@ -90,13 +102,19 @@ class WorktreeSnapshotStore:
                 continue
             if conversation_id and record.conversation_id != conversation_id:
                 continue
+            if resolved_repo_root is not None:
+                try:
+                    if Path(record.main_repo_path).resolve() != resolved_repo_root:
+                        continue
+                except OSError:
+                    continue
             records.append(record)
             if len(records) >= limit:
                 break
         return records
 
     def _path_for(self, snapshot_id: str) -> Path:
-        safe = "".join(ch for ch in snapshot_id if ch.isalnum() or ch in {"_", "-"}).strip()
-        if not safe:
-            safe = "snapshot"
-        return self._root / f"{safe}.json"
+        clean = str(snapshot_id or "").strip()
+        if not _SNAPSHOT_ID_RE.fullmatch(clean):
+            raise ValueError("Invalid snapshot_id")
+        return self._root / f"{clean}.json"

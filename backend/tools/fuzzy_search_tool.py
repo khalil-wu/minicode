@@ -26,6 +26,9 @@ class FuzzySearchTool(BaseTool):
     """
 
     name = "fuzzy_search"
+    result_kind = "file"
+    activity_kind = "workspaceSearch"
+    display_label = "Find files"
     read_only = True
     description = (
         "Find files by partial name match using fuzzy scoring. "

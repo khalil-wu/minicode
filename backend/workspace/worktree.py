@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +27,8 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
+
+WORKTREE_GIT_TIMEOUT_SECONDS = 120
 
 
 @dataclass
@@ -109,6 +112,7 @@ class WorktreeManager:
                 capture_output=True,
                 text=True, encoding="utf-8",
                 check=True,
+                timeout=WORKTREE_GIT_TIMEOUT_SECONDS,
             )
 
             worktrees: list[WorktreeInfo] = []
@@ -139,7 +143,7 @@ class WorktreeManager:
 
             return worktrees
 
-        except subprocess.CalledProcessError as e:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             logger.error(f"Failed to list worktrees: {e.stderr}")
             return []
 
@@ -188,13 +192,14 @@ class WorktreeManager:
                 capture_output=True,
                 text=True, encoding="utf-8",
                 check=True,
+                timeout=WORKTREE_GIT_TIMEOUT_SECONDS,
             )
 
             logger.info(f"Created worktree at {path}")
             logger.debug(result.stdout)
             return True
 
-        except subprocess.CalledProcessError as e:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             logger.error(f"Failed to create worktree: {e.stderr}")
             return False
 
@@ -226,13 +231,14 @@ class WorktreeManager:
                 capture_output=True,
                 text=True, encoding="utf-8",
                 check=True,
+                timeout=WORKTREE_GIT_TIMEOUT_SECONDS,
             )
 
             logger.info(f"Removed worktree at {path}")
             logger.debug(result.stdout)
             return True
 
-        except subprocess.CalledProcessError as e:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             logger.error(f"Failed to remove worktree: {e.stderr}")
             return False
 
@@ -251,13 +257,14 @@ class WorktreeManager:
                 capture_output=True,
                 text=True, encoding="utf-8",
                 check=True,
+                timeout=WORKTREE_GIT_TIMEOUT_SECONDS,
             )
 
             logger.info("Pruned worktrees")
             logger.debug(result.stdout)
             return True
 
-        except subprocess.CalledProcessError as e:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             logger.error(f"Failed to prune worktrees: {e.stderr}")
             return False
 
@@ -278,8 +285,9 @@ class WorktreeManager:
                 text=True,
                 encoding="utf-8",
                 check=True,
+                timeout=WORKTREE_GIT_TIMEOUT_SECONDS,
             )
-        except (subprocess.CalledProcessError, OSError):
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
             return True
         return bool(result.stdout.strip())
 
@@ -305,14 +313,37 @@ class WorktreeManager:
         snapshot_id = f"wtsnap_{uuid.uuid4().hex[:12]}"
         head = self._rev_parse(wt, "HEAD")
 
-        # index 污染无所谓:worktree 即将被删除
-        if not self._git_ok(wt, "add", "-A"):
-            logger.error("Snapshot failed at 'git add -A' for %s", wt)
-            return None
-        tree = self._capture_output(wt, "write-tree")
-        if not tree:
-            logger.error("Snapshot failed at 'git write-tree' for %s", wt)
-            return None
+        # Build the snapshot tree with a temporary index. The real worktree
+        # index (including the user's staging choices) must remain untouched.
+        with tempfile.TemporaryDirectory(prefix="minicode-wt-snapshot-") as temp_dir:
+            index_path = Path(temp_dir) / "index"
+            env = sanitized_git_env()
+            env["GIT_INDEX_FILE"] = str(index_path)
+
+            def _snapshot_git(*args: str) -> subprocess.CompletedProcess[str] | None:
+                try:
+                    return subprocess.run(
+                        ["git", *args],
+                        cwd=wt,
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        check=True,
+                        timeout=WORKTREE_GIT_TIMEOUT_SECONDS,
+                    )
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+                    return None
+
+            seeded = _snapshot_git("read-tree", head) if head else _snapshot_git("read-tree", "--empty")
+            if seeded is None or _snapshot_git("add", "-A") is None:
+                logger.error("Snapshot failed while building temporary index for %s", wt)
+                return None
+            tree_result = _snapshot_git("write-tree")
+            tree = (tree_result.stdout or "").strip() if tree_result is not None else ""
+            if not tree:
+                logger.error("Snapshot failed at 'git write-tree' for %s", wt)
+                return None
 
         commit_args = ["commit-tree", tree]
         if head:
@@ -360,8 +391,25 @@ class WorktreeManager:
         if record is None or not record.snapshot_sha:
             logger.warning("Snapshot not found or has no commit: %s", snapshot_id)
             return WorktreeRestore(restored=False, error=f"Snapshot '{snapshot_id}' was not found")
+        try:
+            if Path(record.main_repo_path).resolve() != self.repo_root:
+                return WorktreeRestore(
+                    restored=False,
+                    snapshot=record,
+                    error="Snapshot belongs to a different repository",
+                )
+        except OSError:
+            return WorktreeRestore(restored=False, snapshot=record, error="Invalid snapshot repository")
 
         dest_path = Path(dest).resolve() if dest else Path(record.original_path).resolve()
+        original_path = Path(record.original_path).resolve()
+        safe_parent = original_path.parent
+        if dest is not None and dest_path != original_path and safe_parent not in dest_path.parents:
+            return WorktreeRestore(
+                restored=False,
+                snapshot=record,
+                error="Restore destination is outside the original worktree parent",
+            )
         if dest_path.exists() and any(dest_path.iterdir()):
             candidate = dest_path.parent / f"{dest_path.name}-restored"
             if candidate.exists():
@@ -380,7 +428,11 @@ class WorktreeManager:
     def list_snapshots(
         self, conversation_id: str | None = None, *, limit: int = 100
     ) -> list["WorktreeSnapshotRecord"]:
-        return self._snapshots().list(conversation_id, limit=limit)
+        return self._snapshots().list(
+            conversation_id,
+            repo_root=self.repo_root,
+            limit=limit,
+        )
 
     def safe_remove_worktree(
         self,
@@ -410,6 +462,11 @@ class WorktreeManager:
         snap = None
         if dirty and snapshot:
             snap = self.snapshot_worktree(wt, conversation_id=conversation_id, branch=branch)
+            if snap is None:
+                return WorktreeRemoval(
+                    removed=False,
+                    error="Worktree snapshot failed; refusing destructive removal",
+                )
 
         removed = self.remove_worktree(wt, force=force)
         if not removed:
@@ -433,8 +490,9 @@ class WorktreeManager:
                 text=True,
                 encoding="utf-8",
                 check=True,
+                timeout=WORKTREE_GIT_TIMEOUT_SECONDS,
             )
-        except (subprocess.CalledProcessError, OSError):
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
             return None
         return (result.stdout or "").strip() or None
 
@@ -448,9 +506,10 @@ class WorktreeManager:
                 text=True,
                 encoding="utf-8",
                 check=True,
+                timeout=WORKTREE_GIT_TIMEOUT_SECONDS,
             )
             return True
-        except (subprocess.CalledProcessError, OSError):
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
             return False
 
     def _rev_parse(self, cwd: Path, ref: str) -> str | None:
@@ -468,9 +527,10 @@ class WorktreeManager:
                 env=sanitized_git_env(),
                 capture_output=True,
                 check=True,
+                timeout=WORKTREE_GIT_TIMEOUT_SECONDS,
             )
             return True
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
             return False
 
     def _parse_worktree_info(self, data: dict[str, str]) -> WorktreeInfo:

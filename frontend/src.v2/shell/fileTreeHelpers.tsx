@@ -220,8 +220,8 @@ export const mediaTypeForPath = (path: string): string => {
 export const isPreviewableFile = (path: string): boolean =>
   /(\.png|\.jpe?g|\.gif|\.webp|\.svg|\.pdf)$/i.test(path);
 
-export const previewUrlForPath = (path: string): string => {
-  if (!isDesktop()) return workspaceRawResourceUrlWithToken(path);
+export const previewUrlForPath = (path: string, workspaceRoot = ""): string => {
+  if (!isDesktop()) return workspaceRawResourceUrlWithToken(path, workspaceRoot);
   const normalized = path.replace(/\\/g, "/");
   const withLeadingSlash = /^[a-zA-Z]:\//.test(normalized) ? `/${normalized}` : normalized;
   return encodeURI(`file://${withLeadingSlash}`);

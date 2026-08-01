@@ -9,13 +9,14 @@
   "type": "commonjs",
   "scripts": {
     "dev": "chcp 65001 > nul && set PYTHONUTF8=1&& set PYTHONIOENCODING=utf-8&& set ELECTRON_RUN_AS_NODE=&& electron .",
+    "dev:figma": "set MINICODE_ENABLE_FIGMA_CAPTURE=1&& set MINICODE_FRONTEND_URL=http://127.0.0.1:5173&& npm run dev",
     "start": "chcp 65001 > nul && set PYTHONUTF8=1&& set PYTHONIOENCODING=utf-8&& set ELECTRON_RUN_AS_NODE=&& electron .",
     "build:frontend": "npm --prefix ../frontend run build",
     "build:frontend:desktop": "chcp 65001 > nul && set MINICODE_VITE_RELATIVE_BASE=1&& npm --prefix ../frontend run build",
     "start:client": "npm run build:frontend:desktop && chcp 65001 > nul && set PYTHONUTF8=1&& set PYTHONIOENCODING=utf-8&& set ELECTRON_RUN_AS_NODE=&& electron .",
     "start:client:devfrontend": "chcp 65001 > nul && set PYTHONUTF8=1&& set PYTHONIOENCODING=utf-8&& set MINICODE_FRONTEND_URL=http://127.0.0.1:5173&& set ELECTRON_RUN_AS_NODE=&& electron .",
     "test": "npm run test:unit && npm run test:e2e",
-    "test:unit": "node --test cdp-bridge.test.js pty-manager.test.js security.test.js updater.test.js window-manager.test.js",
+    "test:unit": "node --test backend-sidecar.test.js cdp-bridge.test.js crash-reporter.test.js embedded-browser-bridge.test.js embedded-browser-manager.test.js pty-manager.test.js security.test.js updater.test.js utils.test.js window-manager.test.js",
     "test:e2e": "node electron-smoke.test.js",
     "version:check": "python ../scripts/version_sync.py --check",
     "version:sync": "python ../scripts/version_sync.py",
@@ -24,6 +25,7 @@
     "dist:win": "npm run version:check && npm run runtime:prepare && npm run build:frontend:desktop && chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=&& electron-builder --win nsis"
   },
   "devDependencies": {
+    "@divriots/h2d-electron-sdk": "^0.0.4",
     "electron": "^33.2.0",
     "electron-builder": "^24.13.3"
   },
@@ -38,17 +40,25 @@
       "output": "release",
       "buildResources": "build"
     },
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "${env.MINICODE_UPDATE_FEED_URL}"
+      }
+    ],
     "files": [
       "main.js",
       "preload.js",
       "backend-sidecar.js",
       "cdp-bridge.js",
+      "crash-reporter.js",
+      "embedded-browser-manager.js",
+      "embedded-browser-bridge.js",
       "ipc-handlers.js",
       "pty-manager.js",
       "security.js",
       "utils.js",
       "window-manager.js",
-      "window-open-policy.js",
       "updater.js",
       "startup-error.html",
       "startup-error-preload.js",
@@ -83,13 +93,19 @@
       {
         "from": "python-runtime",
         "to": "python-runtime",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe",
+        "to": "windows-sandbox/codex.exe"
       }
     ],
     "win": {
       "icon": "build/icon.ico",
       "publisherName": "MiniCode Team",
-      "signAndEditExecutable": false,
+      "signAndEditExecutable": true,
       "target": [
         {
           "target": "nsis",
@@ -112,7 +128,9 @@
     }
   },
   "dependencies": {
+    "@openai/codex": "0.144.4",
     "electron-updater": "^6.6.2",
-    "node-pty": "^1.1.0"
+    "node-pty": "^1.1.0",
+    "write-file-atomic": "^7.0.1"
   }
 }

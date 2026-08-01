@@ -6,11 +6,14 @@ from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
 from backend.agent.loop import run_agent_loop
 from backend.agent.query_engine import QueryEngine
+from backend.attachments.store import MAX_ATTACHMENT_CONTENT_CHARS
 from backend.services.chat_api_service import (
     ChatApiServiceError,
     run_rest_chat,
     upload_document_payload,
 )
+
+_UPLOAD_READ_CHUNK = 1024 * 1024
 
 from . import _state
 from .models import ChatRequest, ChatResponse, UploadResponse
@@ -40,7 +43,25 @@ async def upload_document(
     file: UploadFile = File(...),
 ) -> UploadResponse:
     """Upload a document into the active WebSocket session."""
-    raw_content = await file.read()
+    # Read in bounded chunks and reject early once the same 50 MB limit the
+    # attachment store enforces is exceeded, instead of pulling an unbounded
+    # body fully into memory (and then base64/vectorizing it) before the store's
+    # post-hoc size check runs. Closes the upload OOM window.
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        while True:
+            chunk = await file.read(_UPLOAD_READ_CHUNK)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_ATTACHMENT_CONTENT_CHARS:
+                raise HTTPException(status_code=413, detail="Upload exceeds the 50 MB limit.")
+            chunks.append(chunk)
+        raw_content = b"".join(chunks)
+    except HTTPException:
+        await file.close()
+        raise
     try:
         payload = upload_document_payload(
             session_id=session_id,

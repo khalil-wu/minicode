@@ -20,6 +20,9 @@ class ListMcpResourcesTool(BaseTool):
     """
 
     read_only = True
+    result_kind = "mcp"
+    activity_kind = "genericTool"
+    display_label = "List MCP resources"
     should_defer = True
     search_hint = "mcp resources server catalog external context database schema api docs"
 
@@ -42,8 +45,6 @@ class ListMcpResourcesTool(BaseTool):
             capability="mcp.discover",
             toolset="mcp",
             exposure="deferred",
-            accepted_resource_types=("mcp_server",),
-            empty_args_policy="allow",
         )
 
     def get_schema(self) -> ToolSchema:
@@ -83,6 +84,9 @@ class ReadMcpResourceTool(BaseTool):
     """
 
     read_only = True
+    result_kind = "mcp"
+    activity_kind = "genericTool"
+    display_label = "Read MCP resource"
     should_defer = True
     search_hint = "mcp resource read uri external context database schema api docs"
 
@@ -109,15 +113,6 @@ class ReadMcpResourceTool(BaseTool):
             toolset="mcp",
             exposure="deferred",
             required_args=("uri",),
-            arg_roles={"uri": "mcp_resource_uri", "server": "mcp_server"},
-            arg_sources={"uri": ("mcp_resource_list",)},
-            repair_policy={"uri": "resource_resolver"},
-            accepted_resource_types=("mcp_resource",),
-            empty_args_policy="repair_or_block",
-            blocked_guidance=(
-                "missing required uri. Call list_mcp_resources first to discover available "
-                "resource URIs, then retry read_mcp_resource with a specific URI from the result."
-            ),
         )
 
     def get_schema(self) -> ToolSchema:
@@ -196,6 +191,9 @@ class ListMcpResourceTemplatesTool(BaseTool):
     """Discover parameterized MCP resource templates."""
 
     read_only = True
+    result_kind = "mcp"
+    activity_kind = "genericTool"
+    display_label = "List MCP resource templates"
 
     def __init__(self, mcp_manager: Any | None) -> None:
         self.name = "list_mcp_resource_templates"
@@ -239,6 +237,9 @@ class SubscribeMcpResourceTool(BaseTool):
     """Subscribe to updates for one MCP resource URI."""
 
     read_only = True
+    result_kind = "mcp"
+    activity_kind = "genericTool"
+    display_label = "MCP resource subscription"
 
     def __init__(self, mcp_manager: Any | None) -> None:
         self.name = "subscribe_mcp_resource"
@@ -311,6 +312,9 @@ class ListMcpResourceNotificationsTool(BaseTool):
     """Read pending resource update notifications from connected MCP servers."""
 
     read_only = True
+    result_kind = "mcp"
+    activity_kind = "genericTool"
+    display_label = "List MCP resource notifications"
 
     def __init__(self, mcp_manager: Any | None) -> None:
         self.name = "list_mcp_resource_notifications"
@@ -354,6 +358,9 @@ class ListMcpPromptsTool(BaseTool):
     """Discover prompt templates exposed by connected MCP servers."""
 
     read_only = True
+    result_kind = "mcp"
+    activity_kind = "genericTool"
+    display_label = "List MCP prompts"
 
     def __init__(self, mcp_manager: Any | None) -> None:
         self.name = "list_mcp_prompts"
@@ -402,6 +409,9 @@ class GetMcpPromptTool(BaseTool):
     """Render a prompt template from a connected MCP server."""
 
     read_only = True
+    result_kind = "mcp"
+    activity_kind = "genericTool"
+    display_label = "Get MCP prompt"
 
     def __init__(self, mcp_manager: Any | None) -> None:
         self.name = "get_mcp_prompt"

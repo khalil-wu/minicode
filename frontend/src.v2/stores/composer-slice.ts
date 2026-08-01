@@ -1,7 +1,6 @@
 import type { StateCreator } from "zustand";
-import type { AppStore, ComposerSlice, PendingApproval, PendingDiffReview } from "./types";
+import type { AppStore, ComposerSlice } from "./types";
 import { initialUiPermissionMode, syncPermissionMode } from "../protocol/permissions";
-import { buildApprovalResponseCommand } from "../protocol/prompt-responses";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { LS, readLS, writeLS } from "./shared-helpers";
 
@@ -32,21 +31,12 @@ const initialPermissionMode = (): ComposerSlice["permissionMode"] => {
   return normalized;
 };
 
-const initialPromptPersona = (): ComposerSlice["promptPersona"] => {
-  const stored = readLS(LS.promptPersona);
-  if (stored !== "codex") {
-    writeLS(LS.promptPersona, "codex");
-  }
-  return "codex";
-};
-
 export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> = (set, get) => ({
   draft: "",
   attachments: [],
   quotedMessage: null,
   permissionMode: initialPermissionMode(),
   agentMode: initialAgentMode(),
-  promptPersona: initialPromptPersona(),
   effortLevel: "high" as const,
   prMonitor: null,
   actionChip: null,
@@ -95,50 +85,10 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
     writeLS(LS.permissionMode, m);
     set({ permissionMode: m });
     syncPermissionMode(m, "frontend.ui", before.conversationId);
-    if (m === "bypass" || m === "auto") {
-      const responded = new Set<string>();
-      for (const approval of [before.pendingApproval, ...before.approvalQueue]) {
-        if (!approval || responded.has(approval.requestId)) continue;
-        if (m === "auto" && !isAutoAllowedApproval(approval)) continue;
-        responded.add(approval.requestId);
-        sendClientCommand(buildApprovalResponseCommand(approval.requestId, "approve", approval.protocol));
-      }
-      for (const diff of [before.pendingDiffReview, before.diffReview]) {
-        if (!diff || responded.has(diff.requestId)) continue;
-        if (m === "auto" && !isAutoAllowedDiffApproval(diff)) continue;
-        responded.add(diff.requestId);
-        sendClientCommand(buildApprovalResponseCommand(diff.requestId, "approve", diff.protocol));
-      }
-      if (m === "bypass") {
-        set({
-          pendingApproval: null,
-          approvalQueue: [],
-          pendingDiffReview: null,
-          diffReview: null,
-        });
-      } else if (responded.size > 0) {
-        set((state) => ({
-          pendingApproval: state.pendingApproval && responded.has(state.pendingApproval.requestId)
-            ? null
-            : state.pendingApproval,
-          approvalQueue: state.approvalQueue.filter((approval) => !responded.has(approval.requestId)),
-          pendingDiffReview: state.pendingDiffReview && responded.has(state.pendingDiffReview.requestId)
-            ? null
-            : state.pendingDiffReview,
-          diffReview: state.diffReview && responded.has(state.diffReview.requestId)
-            ? null
-            : state.diffReview,
-        }));
-      }
-    }
   },
   setAgentMode: (m) => {
     writeLS(LS.agentMode, m);
     set({ agentMode: m });
-  },
-  setPromptPersona: (persona) => {
-    writeLS(LS.promptPersona, persona);
-    set({ promptPersona: persona });
   },
   setEffortLevel: (e) => {
     set({ effortLevel: e });
@@ -163,7 +113,9 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
   clearSelectedMentions: () => set({ selectedMentions: [] }),
   addSelectedSkill: (skill) =>
     set((s) => ({
-      selectedSkills: s.selectedSkills.some((existing) => existing.name === skill.name)
+      selectedSkills: s.selectedSkills.some((existing) =>
+        skill.path && existing.path ? existing.path === skill.path : existing.name === skill.name
+      )
         ? s.selectedSkills
         : [...s.selectedSkills, { ...skill, kind: "skill" as const }],
     })),
@@ -175,22 +127,3 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
   openMentionPanel: () => set({ mentionPanelOpen: true, slashPanelOpen: false }),
   closeMentionPanel: () => set({ mentionPanelOpen: false }),
 });
-
-function isAutoAllowedApproval(approval: PendingApproval): boolean {
-  return isAutoAllowedToolName(approval.toolName);
-}
-
-function isAutoAllowedDiffApproval(diff: PendingDiffReview | NonNullable<AppStore["diffReview"]>): boolean {
-  const toolName = "toolName" in diff ? diff.toolName || "" : "";
-  const hasFiles = "files" in diff && Array.isArray(diff.files) && diff.files.length > 0;
-  return isAutoAllowedToolName(toolName) || hasFiles;
-}
-
-function isAutoAllowedToolName(toolName: string): boolean {
-  const name = toolName.trim();
-  if (!name) return false;
-  if (/^(?:run_|terminal_|git_(?:commit|push|stage|unstage)|remember_|load_skill|unload_skill|mcp__)/i.test(name)) {
-    return false;
-  }
-  return /^(?:read_|list_|grep|grep_|glob|glob_|fuzzy_search|web_|workspace_|preview\.(?:detect|verify)|todo_write|write_|edit_|save_)/i.test(name);
-}

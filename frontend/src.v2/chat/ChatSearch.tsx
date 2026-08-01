@@ -152,18 +152,18 @@ export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
           border: "1px solid var(--border-soft, #444)",
           borderRadius: "4px",
           outline: "none",
-          fontSize: "13px",
+          fontSize: "var(--text-chrome)",
           fontFamily: "inherit",
         }}
       />
       {query && (
         <span
           style={{
-            fontSize: "12px",
+            fontSize: "var(--text-xxs)",
             color:
               matchCount > 0
                 ? "var(--text-muted, #888)"
-                : "var(--text-error, #e55)",
+                : "var(--state-danger)",
             whiteSpace: "nowrap",
             minWidth: "60px",
             textAlign: "center",

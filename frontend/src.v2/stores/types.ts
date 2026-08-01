@@ -16,27 +16,18 @@ export type EffortLevel = "none" | "minimal" | "low" | "medium" | "high" | "xhig
 export interface SkillInfo {
   name: string;
   description: string;
+  path?: string;
   display_name?: string;
+  short_description?: string;
   icon?: string;
+  icon_large?: string;
+  brand_color?: string;
   version?: string;
-  triggers?: string[];
-  tools_required?: string[];
-  mcp_required?: string[];
   mcp_dependencies?: string[];
   allow_implicit_invocation?: boolean;
   default_prompt?: string;
   source_level?: string;
   active?: boolean;
-  usage?: SkillUsageStats;
-}
-
-export interface SkillUsageStats {
-  load_count?: number;
-  reuse_count?: number;
-  failure_count?: number;
-  unload_count?: number;
-  last_event?: string;
-  last_invoked_at?: string;
 }
 
 export interface MarketplaceSkill {
@@ -45,6 +36,10 @@ export interface MarketplaceSkill {
   description: string;
   triggers: string[];
   installed: boolean;
+  source?: string;
+  path?: string;
+  iconUrl?: string;
+  websiteUrl?: string;
 }
 
 export interface SlashCommandArg {
@@ -57,8 +52,7 @@ export interface SlashCommand {
   command: string;
   label: string;
   description: string;
-  type: "local" | "template" | "protocol" | "local-jsx";
-  /** For local-jsx commands: the overlay/panel id this command opens. */
+  type: "local" | "template" | "protocol";
   panel?: string;
   /** Structured argument options for local commands (second-stage menu). */
   args?: SlashCommandArg[];
@@ -277,23 +271,6 @@ export interface ContextUsage {
   ledger?: ContextLedger;
 }
 
-export interface PluginCommandPanelPayload {
-  component: string;
-  command?: string;
-  plugin_name?: string;
-  pluginName?: string;
-  source?: string;
-  arg?: string;
-  title?: string;
-  description?: string;
-  fields?: unknown[];
-  prompt_template?: string;
-  promptTemplate?: string;
-  submit_label?: string;
-  submitLabel?: string;
-  [key: string]: unknown;
-}
-
 export interface UISlice {
   themeMode: ThemeMode;
   textScale: number;
@@ -341,8 +318,6 @@ export interface UISlice {
   skillsMarketplaceOpen: boolean;
   liveArtifactsOpen: boolean;
   agentEditorOpen: boolean;
-  pluginCommandPanelOpen: boolean;
-  pluginCommandPanelPayload: PluginCommandPanelPayload | null;
   setThemeMode: (m: ThemeMode) => void;
   setTextScale: (s: number) => void;
   setViewMode: (m: ViewMode) => void;
@@ -363,8 +338,6 @@ export interface UISlice {
   toggleSkillsMarketplace: () => void;
   toggleLiveArtifacts: () => void;
   toggleAgentEditor: () => void;
-  openPluginCommandPanel: (payload: PluginCommandPanelPayload) => void;
-  closePluginCommandPanel: () => void;
   setCurrentModel: (m: string) => void;
   setCurrentProvider: (p: string) => void;
   setCurrentProviderMeta: (meta: { providerId?: string; baseUrl?: string; wireApi?: string }) => void;
@@ -387,6 +360,7 @@ export interface UISlice {
   submitDiffReviewWithComments: () => void;
   submitPartialApproval: () => void;
   setPreviewArtifact: (artifact: ArtifactContentState | null) => void;
+  setConversationPreviewArtifact: (conversationId: string, artifact: ArtifactContentState | null) => void;
   setLivePreviewUrl: (url: string | null) => void;
   openLivePreview: (url: string) => void;
   setPreviewServers: (servers: PreviewServerInfo[]) => void;
@@ -437,6 +411,7 @@ export interface PanelSlot {
 
 export interface TerminalSessionInfo {
   id: string;
+  conversationId: string;
   pid?: number;
   shell: string;
   cwd: string;
@@ -444,14 +419,17 @@ export interface TerminalSessionInfo {
   createdAt?: number;
   exitCode?: number;
   exitedAt?: number;
+  terminalMode?: "pty" | "pipe";
 }
 
 export interface TerminalSnapshotInfo {
   id: string;
+  conversationId: string;
   pid?: number | null;
   shell: string;
   cwd: string;
   status?: "running" | "exited";
+  terminalMode?: "pty" | "pipe";
   output: string;
   outputChars?: number;
   totalOutputChars?: number;
@@ -470,10 +448,13 @@ export interface EditorOpenRequest {
 export interface BackgroundTaskEntry {
   id: string;
   command: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "cancelled";
   exitCode?: number;
   duration?: number;
   timestamp: number;
+  completedAt?: number;
+  conversationId: string;
+  cwd?: string;
 }
 
 export interface BrowserAnnotation {
@@ -484,6 +465,10 @@ export interface BrowserAnnotation {
   selector?: string;
   xPercent?: number;
   yPercent?: number;
+  widthPercent?: number;
+  heightPercent?: number;
+  viewportWidth?: number;
+  viewportHeight?: number;
   note: string;
   createdAt: number;
   screenshotCapturedAt?: number;
@@ -510,15 +495,36 @@ export interface ScheduledTaskEntry {
   name: string;
   prompt: string;
   schedule: string;
+  timezone?: string;
+  isolation?: "worktree" | "workspace";
+  conversation_id?: string;
   permission_mode: string;
   enabled: boolean;
   last_run_at?: string | null;
   next_run_at?: string | null;
   created_at?: string;
+  workspace_root?: string;
+  last_run_id?: string | null;
+  last_run_status?: "pending" | "running" | "completed" | "partial" | "failed" | "cancelled" | string | null;
+  last_error?: string | null;
+}
+
+export interface ScheduledTaskRunEntry {
+  id: string;
+  task_id: string;
+  scheduled_at: string;
+  started_at?: string;
+  finished_at?: string | null;
+  status: "pending" | "running" | "completed" | "failed" | "cancelled" | string;
+  conversation_id?: string;
+  workspace_root?: string;
+  result_summary?: string;
+  error?: string;
 }
 
 export interface MarketplaceConnector {
   name: string;
+  providerName?: string;
   title: string;
   description: string;
   transport: string;
@@ -531,6 +537,12 @@ export interface MarketplaceConnector {
   requiresUserAction?: boolean;
   setupHint?: string;
   docsUrl?: string;
+  websiteUrl?: string;
+  iconUrl?: string;
+  source?: "curated" | "mcp-registry" | string;
+  official?: boolean;
+  actionable?: boolean;
+  setupMode?: "remote" | "manual" | string;
   autoStart?: boolean;
   maxRetries?: number;
 }
@@ -556,6 +568,8 @@ export interface WorkspaceSlice {
   toggleRightPanel: () => void;
   setDockHeight: (h: number) => void;
   toggleDock: () => void;
+  openBottomTab: (t: WorkspaceSlice["activeBottomTab"]) => void;
+  closeBottomDock: () => void;
   setActiveBottomTab: (t: WorkspaceSlice["activeBottomTab"]) => void;
   addPanel: (slot: PanelSlot | (Omit<PanelSlot, "kind"> & { kind: LegacyPanelKind })) => void;
   removePanel: (id: string) => void;
@@ -582,6 +596,8 @@ export interface WorkspaceSlice {
   setPrStatus: (pr: PrStatus | null, checks: CiCheck[]) => void;
   scheduledTasks: ScheduledTaskEntry[];
   setScheduledTasks: (tasks: ScheduledTaskEntry[]) => void;
+  scheduledTaskRuns: ScheduledTaskRunEntry[];
+  setScheduledTaskRuns: (runs: ScheduledTaskRunEntry[]) => void;
   marketplaceConnectors: MarketplaceConnector[];
   setMarketplaceConnectors: (connectors: MarketplaceConnector[]) => void;
 }
@@ -626,11 +642,36 @@ export interface FileContextRef {
 export interface SkillContextRef {
   kind: "skill";
   name: string;
+  path?: string;
   description?: string;
   sourceLevel?: string;
 }
 
-export type MessageContextRef = FileContextRef | SkillContextRef;
+export interface PluginContextRef {
+  kind: "plugin";
+  name: string;
+  path: string;
+  configName: string;
+  description?: string;
+}
+
+export interface BrowserAnnotationContextRef {
+  kind: "browser_annotation";
+  name: string;
+  path: string;
+  url: string;
+  note: string;
+  selector?: string;
+  targetId?: string;
+  xPercent?: number;
+  yPercent?: number;
+  widthPercent?: number;
+  heightPercent?: number;
+  viewportWidth?: number;
+  viewportHeight?: number;
+}
+
+export type MessageContextRef = FileContextRef | SkillContextRef | PluginContextRef | BrowserAnnotationContextRef;
 
 export interface MessageAttachmentRef {
   id: string;
@@ -640,7 +681,6 @@ export interface MessageAttachmentRef {
   sizeBytes: number;
   artifactId?: string;
   docId?: string;
-  indexedChunks?: number;
   dataUrl?: string;
   inputSource?: "pasted_text" | "upload";
   sourceCharCount?: number;
@@ -653,6 +693,7 @@ export interface ThinkingContentBlock {
   visibility?: "debug" | "timeline" | "compact" | string;
   is_raw_provider_reasoning?: boolean;
   provider_reasoning_type?: string;
+  phase?: string;
 }
 /** Provider-native citation extracted from LLM response annotations. */
 export interface ProviderRawCitation {
@@ -757,7 +798,6 @@ export interface ProviderRequestSummary {
 export interface ProviderTraceSafety {
   redacted_prompt?: boolean;
   has_encrypted_reasoning?: boolean;
-  synthetic_trace?: boolean;
 }
 
 export interface ProviderStatefulContinuationSummary {
@@ -782,7 +822,6 @@ export interface ProviderLoopMetrics {
   completed_tool_call_count?: number;
   pending_tool_call_count?: number;
   elapsed_ms?: number;
-  dynamic_iteration_budget_enabled?: boolean;
 }
 
 export interface PromptSectionSummaryRow {
@@ -868,18 +907,11 @@ export interface ProviderRawMetadata {
 
 export interface TextContentBlock {
   type: "text";
+  itemId?: string;
   content: string;
   source?: "stream" | "reply" | string;
-  visibility?: "final" | "timeline" | "unsealed" | "draft" | "debug" | string;
-  role?: "assistant" | "runtime" | string;
-  phase?: "final" | "model" | "tool" | "recover" | string;
-  segmentId?: string;
-  iterationIndex?: number;
-  streamAttempt?: number;
-  sealReason?: string;
-  sealed?: boolean;
+  status?: "in_progress" | "completed" | "partial" | string;
   isStreaming?: boolean;
-  promoteAllUnsealedNarration?: boolean;
   providerRaw?: ProviderRawMetadata;
   finishReason?: string;
 }
@@ -901,9 +933,6 @@ export interface ProcessContentBlock {
   stepId?: string;
   toolCallIds?: string[];
   defaultCollapsed?: boolean;
-  displayScope?: string;
-  panelHint?: RightStackTab | string;
-  requiresAttention?: boolean;
   skillName?: string;
   triggerMode?: "explicit" | "implicit" | "model" | string;
   sourceLevel?: string;
@@ -917,9 +946,9 @@ export interface ToolCallContentBlock { type: "tool_call"; record: ToolCallRecor
 export interface ProgressContentBlock {
   type: "progress";
   id: string;
-  stage: "status" | "planning" | "tool" | "approval" | "verification" | "final";
+  stage: "status" | "planning" | "tool" | "approval" | "final";
   phase?: AgentProgressPhase;
-  status: "running" | "completed" | "failed" | "info";
+  status: "running" | "completed" | "partial" | "failed" | "info";
   message: string;
   label?: string;
   summary?: string;
@@ -931,9 +960,6 @@ export interface ProgressContentBlock {
   stepId?: string;
   count?: number;
   iterationId?: string;
-  displayScope?: string;
-  panelHint?: RightStackTab | string;
-  requiresAttention?: boolean;
   ephemeral?: boolean;
   timestamp: number;
 }
@@ -955,6 +981,7 @@ export interface ChatMessage {
   usage?: MessageUsage;
   timestamp: number;
   completedAt?: number;
+  durationMs?: number;
   isStreaming?: boolean;
   isThinkingStreaming?: boolean;
   resumeState?: "resumed";
@@ -963,6 +990,7 @@ export interface ChatMessage {
   queueState?: "queued" | "cancelled";
   queuePosition?: number;
   queueMessageId?: string;
+  steeredIntoMessageId?: string;
   /** Attachments carried by a BriefTool (send_message) reply on this message.
    * Rendered as the focused assistant reply. */
   replyAttachments?: ReplyAttachmentMeta[];
@@ -992,6 +1020,12 @@ export interface ConversationMeta {
   dispatchBadge?: boolean;
   environment?: "local" | "remote" | "ssh";
   goal?: ConversationGoal | null;
+  parentConversationId?: string;
+  parentMessageIndex?: number;
+  forkId?: string;
+  branchKind?: string;
+  mergedIntoConversationId?: string;
+  mergedAt?: string;
 }
 
 export interface ConversationGoal {
@@ -1046,7 +1080,7 @@ export interface ChatSlice {
   isStreaming: boolean;
   isPaused: boolean;
   isConnected: boolean;
-  lastUsage: { input: number; output: number; cacheRead: number; cacheWrite: number; promptCacheTotal?: number; promptCacheHitRate?: number; reasoning?: number } | null;
+  lastUsage: { input: number; output: number; cacheRead: number; cacheWrite: number; cacheDeleted?: number; promptCacheTotal?: number; promptCacheHitRate?: number; reasoning?: number } | null;
   usageTotals: { input: number; output: number; cacheRead: number; cacheWrite: number; promptCacheTotal?: number; reasoning?: number; turns: number };
   sideChats: Record<string, SideChatThread>;
   toolCallCount: number;
@@ -1056,7 +1090,6 @@ export interface ChatSlice {
   recallMessage: (id: string) => void;
   removeEmptyStreamingAssistant: (conversationId?: string, messageId?: string) => void;
   interrupt: () => void;
-  pauseStreaming: () => void;
   requestConversationSwitch: (id: string) => void;
   applyConversationSwitched: (payload: { conversationId: string }) => void;
   switchConversation: (id: string) => void;
@@ -1066,18 +1099,22 @@ export interface ChatSlice {
   setActiveGoal: (goal: ConversationGoal | null, conversationId?: string) => void;
   hydrateConversationMessages: (id: string, messages: ChatMessage[], options?: { activate?: boolean; isStreaming?: boolean }) => void;
   bindStreamingTurn: (conversationId: string | undefined, messageId: string | undefined, turnId: string | undefined) => void;
-  appendTextChunk: (
-    content: string,
+  startAgentMessage: (
+    itemId: string,
     conversationId?: string,
-    source?: string,
-    metadata?: Partial<Omit<TextContentBlock, "type" | "content" | "source">>,
+    messageId?: string,
+  ) => void;
+  appendAgentMessageDelta: (
+    itemId: string,
+    delta: string,
+    conversationId?: string,
     messageId?: string,
   ) => void;
   setFinalAnswerAttachments: (conversationId: string | undefined, attachments: ReplyAttachmentMeta[], messageId?: string) => void;
-  finalizeStreamingText: (
-    conversationId: string | undefined,
-    source?: string,
-    metadata?: Partial<Omit<TextContentBlock, "type" | "content" | "source">>,
+  completeAgentMessage: (
+    item: { id: string; text: string; source?: string; status?: string },
+    conversationId?: string,
+    metadata?: Pick<TextContentBlock, "providerRaw" | "finishReason">,
     messageId?: string,
   ) => void;
   appendThinkingChunk: (
@@ -1091,14 +1128,13 @@ export interface ChatSlice {
     conversationId?: string,
     messageId?: string,
   ) => void;
-  appendProgress: (progress: Omit<ProgressContentBlock, "type" | "timestamp">, conversationId?: string, messageId?: string) => void;
-  replaceEphemeralProgress: (progress: Omit<ProgressContentBlock, "type" | "timestamp">, conversationId?: string, messageId?: string) => void;
   appendToolCallBlock: (tc: ToolCallRecord, conversationId?: string, messageId?: string) => void;
   updateToolCall: (
     id: string,
     patch: Partial<ToolCallRecord>,
     conversationId?: string,
     scope?: { turnId?: string; iterationId?: string; stepId?: string },
+    messageId?: string,
   ) => void;
   finishStreaming: (
     conversationId?: string,
@@ -1106,28 +1142,33 @@ export interface ChatSlice {
     terminalStatus?: "completed" | "partial" | "failed" | "interrupted",
     messageId?: string,
     failureMessage?: string,
+    durationMs?: number,
   ) => void;
-  resumeStreaming: (conversationId?: string, toolCallsPending?: PendingToolCallResume[], messageId?: string, turnId?: string) => void;
-  replaceStreamingText: (
-    conversationId: string,
-    fullText: string,
-    source?: string,
-    metadata?: Partial<Omit<TextContentBlock, "type" | "content" | "source">>,
+  resumeStreaming: (
+    conversationId?: string,
+    toolCallsPending?: PendingToolCallResume[],
     messageId?: string,
+    turnId?: string,
+    snapshotBlocks?: ContentBlock[],
   ) => void;
   setConnected: (c: boolean) => void;
   setLastUsage: (u: ChatSlice["lastUsage"]) => void;
   ensureSideChat: (id: string) => void;
   removeSideChat: (id: string) => void;
   setSideChatDraft: (id: string, draft: string) => void;
-  startSideChatMessage: (id: string, content: string) => void;
+  startSideChatMessage: (
+    id: string,
+    content: string,
+    messageIds: { assistantMessageId: string; userMessageId: string },
+  ) => void;
 }
 
 export type PendingToolCallResume = {
   id: string;
   name: string;
   args: Record<string, unknown>;
-  status?: ToolCallRecord["status"];
+  status?: ToolCallRecord["status"] | "completed" | "error" | "cancelled" | "waiting_approval";
+  transition?: string;
   started_at?: number;
   startedAt?: number;
   display_hint?: string;
@@ -1139,12 +1180,22 @@ export type PendingToolCallResume = {
   iteration_id?: string;
   iterationId?: string;
   phase?: string;
+  finished_at?: number;
+  finishedAt?: number;
+  duration_ms?: number;
+  durationMs?: number;
+  waiting_on?: string;
+  waitingOn?: string;
+  blocking_reason?: string;
+  blockingReason?: string;
+  outputPreview?: string;
+  stdoutPreview?: string;
+  stderrPreview?: string;
 };
 
 // ── Composer Slice ────────────────────────────────────────────────
 
 export type PermissionMode = "ask_permissions" | "plan" | "auto" | "bypass";
-export type PromptPersona = "minicode" | "codex";
 export type AgentMode = "build" | "plan" | "review" | "explore";
 
 export interface ComposerAttachment {
@@ -1155,7 +1206,6 @@ export interface ComposerAttachment {
   status: "uploading" | "ready" | "error";
   artifactId?: string;
   docId?: string;
-  indexedChunks?: number;
   attachment?: Record<string, unknown>;
   dataUrl?: string;
   error?: string;
@@ -1176,12 +1226,11 @@ export interface ComposerSlice {
   quotedMessage: ComposerQuote | null;
   permissionMode: PermissionMode;
   agentMode: AgentMode;
-  promptPersona: PromptPersona;
   effortLevel: EffortLevel;
   prMonitor: PRMonitorState | null;
   actionChip: { label: string; description?: string } | null;
   mentionResults: { path: string; name: string; kind: "file" | "folder"; score?: number }[];
-  selectedMentions: { path: string; name: string; kind: "file" | "folder" | "url" }[];
+  selectedMentions: Array<FileContextRef | PluginContextRef | BrowserAnnotationContextRef>;
   selectedSkills: SkillContextRef[];
   slashPanelOpen: boolean;
   mentionPanelOpen: boolean;
@@ -1194,7 +1243,6 @@ export interface ComposerSlice {
   clearAttachments: () => void;
   setPermissionMode: (m: PermissionMode) => void;
   setAgentMode: (m: AgentMode) => void;
-  setPromptPersona: (persona: PromptPersona) => void;
   setEffortLevel: (e: EffortLevel) => void;
   setPRMonitor: (pr: PRMonitorState | null) => void;
   setActionChip: (c: ComposerSlice["actionChip"]) => void;
@@ -1234,6 +1282,8 @@ export interface SubagentMessageState {
   content: string;
   createdAt: number;
   seq?: number;
+  senderMailboxEpoch?: number;
+  recipientMailboxEpoch?: number;
   deliveryStatus?: "sending" | "sent" | "failed";
 }
 
@@ -1241,22 +1291,19 @@ export interface SubagentState {
   id: string;
   role: string;
   status: "pending" | "running" | "blocked" | "done" | "partial" | "cancelled" | "error";
+  agentPath?: string;
+  mailboxEpoch?: number;
   summary?: string;
   parentRunId?: string;
   turnId?: string;
-  workflowId?: string;
-  workflowName?: string;
-  workflowMode?: string;
-  nodeId?: string;
   taskId?: string;
   dependsOn?: string[];
   blockedBy?: string[];
   objective?: string;
   currentActivity?: string;
   waitingOn?: string;
-  blocksFinalReply?: boolean;
   lastProgressAt?: number;
-  requiredForFinal?: boolean;
+  background?: boolean;
   needsInput?: boolean;
   resultAvailable?: boolean;
   readOnly?: boolean;
@@ -1315,7 +1362,7 @@ export interface AgentSlice {
   setRuntimeSession: (session: RuntimeSessionSnapshot | null) => void;
   setRuntimeCapabilities: (capabilities: AgentCapabilitiesPayload | null) => void;
   appendAgentProgress: (progress: Omit<ProgressContentBlock, "type" | "timestamp">, conversationId?: string) => void;
-  finishAgentProgress: (conversationId?: string, status?: "completed" | "failed") => void;
+  finishAgentProgress: (conversationId?: string, status?: "completed" | "partial" | "failed") => void;
   clearAgentProgress: (conversationId?: string) => void;
   snapshotAgentState: (conversationId?: string) => void;
   restoreAgentState: (conversationId?: string) => void;
@@ -1347,6 +1394,7 @@ export interface PendingDiffReview {
   sourceAgent?: string;
   sourceThread?: string;
   sourceTool?: string;
+  reviewState?: DiffReviewState;
 }
 
 export interface PendingAskUser {
@@ -1361,16 +1409,20 @@ export interface ApprovalSlice {
   pendingApproval: PendingApproval | null;
   approvalQueue: PendingApproval[];
   pendingDiffReview: PendingDiffReview | null;
+  diffReviewQueue: PendingDiffReview[];
   pendingAskUser: PendingAskUser | null;
+  askUserQueue: PendingAskUser[];
   setApproval: (a: PendingApproval) => void;
   markApprovalSubmitted: (requestId: string) => void;
   markApprovalError: (requestId: string, error: string) => void;
   clearApproval: (requestId?: string) => void;
   clearApprovals: (requestIds: string[]) => void;
   setDiffReview: (d: PendingDiffReview) => void;
-  clearDiffReview: () => void;
+  clearDiffReview: (requestId?: string) => void;
+  clearDiffReviews: (requestIds: string[]) => void;
   setAskUser: (a: PendingAskUser) => void;
-  clearAskUser: () => void;
+  clearAskUser: (requestId?: string) => void;
+  clearAskUsers: (requestIds: string[]) => void;
 }
 
 // ── Inspector Slice ──────────────────────────────────────────────
@@ -1405,6 +1457,7 @@ export interface EditorTab {
   largeFile?: boolean;
   loadWarning?: string | null;
   sizeBytes?: number;
+  readOnly?: boolean;
 }
 
 export interface EditorSlice {
@@ -1421,9 +1474,9 @@ export interface EditorSlice {
     content: string,
     error?: string | null,
     contentHash?: string,
-    meta?: Pick<EditorTab, "largeFile" | "loadWarning" | "sizeBytes">,
+    meta?: Pick<EditorTab, "largeFile" | "loadWarning" | "sizeBytes" | "readOnly">,
   ) => void;
-  markTabSaved: (path: string, contentHash?: string) => void;
+  markTabSaved: (path: string, savedContent: string, contentHash?: string) => void;
   markTabExternalChanged: (path: string) => void;
   reloadTab: (path: string, content: string, contentHash?: string) => void;
   insertIntoActiveEditor: (text: string) => boolean;

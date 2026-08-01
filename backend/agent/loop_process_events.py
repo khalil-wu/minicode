@@ -15,11 +15,9 @@ def model_process_text_event(
     text = (content or "").strip()
     if not text:
         return None
-    # Unphased text with no tool call may be provider/internal analysis. Once it
-    # directly leads into a concrete tool call, preserve it as process narration
-    # after the provisional answer draft is retracted.
-    if (source or "model_preamble") == "model_preamble":
-        return None
+    # A tool call is the hard boundary that proves unphased assistant text was
+    # mid-turn narration rather than the final answer. Preserve that text just
+    # like pi/Claude Code preserve assistant text before a tool-use block.
     return AgentEvent.agent_item(
         id=f"{iteration_id}:model-output:{source or 'stream'}",
         kind="process_text",
@@ -35,6 +33,5 @@ def model_process_text_event(
         group_id=iteration_id,
         step_id=f"{iteration_id}:model-output",
         tool_call_ids=[tc.id for tc in tool_calls],
-        display_scope="activity",
         seq=1,
     )

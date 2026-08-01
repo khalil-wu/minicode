@@ -6,6 +6,7 @@ import type {
   Citation,
   ContentBlock,
   MessageAttachmentRef,
+  MessageContextRef,
   MessageUsage,
 } from "../stores/types";
 
@@ -20,6 +21,10 @@ export type BackendTranscriptMessage = {
   artifacts?: unknown;
   attachments?: unknown;
   attachmentRefs?: unknown;
+  context_refs?: unknown;
+  contextRefs?: unknown;
+  reply_attachments?: unknown;
+  replyAttachments?: unknown;
   citations?: unknown;
   usage?: unknown;
   timestamp?: unknown;
@@ -31,6 +36,8 @@ export type BackendTranscriptMessage = {
   termination_reason?: unknown;
   failureMessage?: unknown;
   failure_message?: unknown;
+  steered?: unknown;
+  steer_target_message_id?: unknown;
 };
 
 const toTimestamp = (value: unknown): number => {
@@ -89,11 +96,11 @@ const toUsage = (value: unknown): MessageUsage | undefined => {
 
 const toArray = <T,>(value: unknown): T[] => Array.isArray(value) ? value as T[] : [];
 
-const isProgressStage = (value: unknown): value is "status" | "planning" | "tool" | "approval" | "verification" | "final" =>
-  value === "status" || value === "planning" || value === "tool" || value === "approval" || value === "verification" || value === "final";
+const isProgressStage = (value: unknown): value is "status" | "planning" | "tool" | "approval" | "final" =>
+  value === "status" || value === "planning" || value === "tool" || value === "approval" || value === "final";
 
-const isProgressStatus = (value: unknown): value is "running" | "completed" | "failed" | "info" =>
-  value === "running" || value === "completed" || value === "failed" || value === "info";
+const isProgressStatus = (value: unknown): value is "running" | "completed" | "partial" | "failed" | "info" =>
+  value === "running" || value === "completed" || value === "partial" || value === "failed" || value === "info";
 
 const isProgressVisibility = (value: unknown): value is "timeline" | "compact" | "debug" =>
   value === "timeline" || value === "compact" || value === "debug";
@@ -107,33 +114,26 @@ const booleanValue = (value: unknown): boolean | undefined =>
 const numberValue = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isFinite(value) ? value : undefined;
 
-const legacyProjectionForToolName = (name: string): { resultKind: string; activityKind: string } => {
-  const normalized = name.toLowerCase();
-  if (/(?:command|terminal|shell|bash|powershell|cmd)/.test(normalized)) {
-    return { resultKind: "command", activityKind: "commandExecution" };
-  }
-  if (/(?:write|edit|patch|delete|remove|create|move|rename|save)/.test(normalized) && normalized !== "todo_write") {
-    return { resultKind: "edit", activityKind: "fileChange" };
-  }
-  if (/(?:web_search|search_web)/.test(normalized)) {
-    return { resultKind: "search", activityKind: "webSearch" };
-  }
-  if (/(?:web_fetch|fetch_page)/.test(normalized)) {
-    return { resultKind: "web", activityKind: "webSearch" };
-  }
-  if (normalized === "read_file" || normalized === "read_artifact") {
-    return { resultKind: "file", activityKind: "fileRead" };
-  }
-  if (/(?:list|grep|glob|search)/.test(normalized)) {
-    return { resultKind: "file", activityKind: "workspaceSearch" };
-  }
-  return { resultKind: "generic", activityKind: "genericTool" };
-};
-
 const stringArrayValue = (value: unknown): string[] | undefined => {
   if (!Array.isArray(value)) return undefined;
   const items = value.filter((item): item is string => typeof item === "string" && Boolean(item));
   return items.length ? items : undefined;
+};
+
+const toOutputFiles = (value: unknown): ToolCallRecord["outputFiles"] => {
+  const files = toArray<Record<string, unknown>>(value).flatMap((item) => {
+    const path = String(item.path ?? "").trim();
+    if (!path) return [];
+    const size = Number(item.size ?? 0);
+    return [{
+      path,
+      name: stringValue(item.name),
+      size: Number.isFinite(size) && size > 0 ? size : 0,
+      mimeType: stringValue(item.mimeType ?? item.mime_type),
+      isImage: booleanValue(item.isImage ?? item.is_image),
+    }];
+  });
+  return files.length ? files : undefined;
 };
 
 const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
@@ -143,15 +143,24 @@ const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
   const name = String(tool.name ?? "").trim();
   if (!id || !name) return null;
   const args = tool.args && typeof tool.args === "object" ? tool.args as Record<string, unknown> : {};
-  const status = String(tool.status ?? "running");
-  const legacyProjection = legacyProjectionForToolName(name);
+  const rawStatus = String(tool.status ?? "running").toLowerCase();
+  const status = rawStatus === "completed"
+    ? "success"
+    : rawStatus === "error"
+      ? "failed"
+      : rawStatus === "waiting_approval"
+        ? "pending"
+        : rawStatus;
   return {
     id,
     name,
     args,
-    status: (status === "pending" || status === "running" || status === "success" || status === "failed" || status === "blocked" || status === "partial" || status === "timeout")
+    status: (status === "pending" || status === "running" || status === "success" || status === "failed" || status === "blocked" || status === "partial" || status === "timeout" || status === "cancelled")
       ? status
       : "running",
+    transition: stringValue(tool.transition ?? tool.tool_transition),
+    waitingOn: stringValue(tool.waitingOn ?? tool.waiting_on),
+    blockingReason: stringValue(tool.blockingReason ?? tool.blocking_reason),
     summary: typeof tool.summary === "string" ? tool.summary : undefined,
     artifactId: typeof tool.artifactId === "string"
       ? tool.artifactId
@@ -187,12 +196,12 @@ const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
       ? tool.resultKind
       : typeof tool.result_kind === "string"
         ? tool.result_kind
-        : legacyProjection.resultKind,
+        : "generic",
     activityKind: typeof tool.activityKind === "string"
       ? tool.activityKind
       : typeof tool.activity_kind === "string"
         ? tool.activity_kind
-        : legacyProjection.activityKind,
+        : "genericTool",
     limitation: typeof tool.limitation === "string" ? tool.limitation : undefined,
     provider: typeof tool.provider === "string" ? tool.provider : undefined,
     providerErrorType: typeof tool.providerErrorType === "string"
@@ -254,21 +263,6 @@ const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
         ? tool.iteration_id
         : undefined,
     phase: typeof tool.phase === "string" ? tool.phase : undefined,
-    displayScope: typeof tool.displayScope === "string"
-      ? tool.displayScope
-      : typeof tool.display_scope === "string"
-        ? tool.display_scope
-        : undefined,
-    panelHint: typeof tool.panelHint === "string"
-      ? tool.panelHint
-      : typeof tool.panel_hint === "string"
-        ? tool.panel_hint
-        : undefined,
-    requiresAttention: typeof tool.requiresAttention === "boolean"
-      ? tool.requiresAttention
-      : typeof tool.requires_attention === "boolean"
-        ? tool.requires_attention
-        : undefined,
     startedAt: toTimestamp(tool.startedAt ?? tool.started_at),
     finishedAt: tool.finishedAt != null || tool.finished_at != null
       ? toTimestamp(tool.finishedAt ?? tool.finished_at)
@@ -288,14 +282,17 @@ const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
       : typeof tool.stderr_preview === "string"
         ? tool.stderr_preview
         : undefined,
+    outputFiles: toOutputFiles(tool.outputFiles ?? tool.output_files),
+    temporaryRemoved: booleanValue(tool.temporaryRemoved ?? tool.temporary_removed),
     diff: normalizeToolDiff(tool.diff),
   };
 };
 
-const toBlocks = (value: unknown): ContentBlock[] | undefined => {
+export const normalizeContentBlocks = (value: unknown): ContentBlock[] | undefined => {
   const items = toArray<Record<string, unknown>>(value);
   if (!items.length) return undefined;
   const blocks: ContentBlock[] = [];
+  const toolBlockIndexes = new Map<string, number>();
   for (const item of items) {
     const type = String(item.type ?? "").trim();
     if (type === "thinking") {
@@ -306,17 +303,51 @@ const toBlocks = (value: unknown): ContentBlock[] | undefined => {
         visibility: stringValue(item.visibility),
         is_raw_provider_reasoning: booleanValue(item.is_raw_provider_reasoning),
         provider_reasoning_type: stringValue(item.provider_reasoning_type),
+        phase: stringValue(item.phase),
       });
       continue;
     }
     if (type === "text") {
+      const legacyVisibility = stringValue(item.visibility);
+      const legacyPhase = stringValue(item.phase);
+      const legacyRole = stringValue(item.role);
+      const legacySource = stringValue(item.source);
+      if (
+        legacyVisibility === "timeline"
+        || legacyVisibility === "debug"
+        || legacyPhase === "commentary"
+        || legacyRole === "runtime"
+        || ["model_preamble", "post_tool", "runtime"].includes(legacySource || "")
+      ) {
+        blocks.push({
+          type: "process",
+          id: stringValue(item.itemId ?? item.item_id) || `legacy-process-${blocks.length}`,
+          itemKind: "process_text",
+          content: typeof item.content === "string" ? item.content : "",
+          source: legacySource || "runtime",
+          role: legacyRole,
+          status: "completed",
+          visibility: legacyVisibility === "debug" ? "debug" : "timeline",
+          timestamp: toTimestamp(item.timestamp),
+        });
+        continue;
+      }
+      const isStreaming = booleanValue(item.isStreaming ?? item.is_streaming) === true
+        || legacyVisibility === "draft"
+        || legacyVisibility === "unsealed";
       blocks.push({
         type: "text",
+        itemId: stringValue(item.itemId ?? item.item_id) || "agent-message",
         content: typeof item.content === "string" ? item.content : "",
-        source: stringValue(item.source),
-        visibility: stringValue(item.visibility),
-        role: stringValue(item.role),
-        phase: stringValue(item.phase),
+        source: legacySource || (isStreaming ? undefined : "model_final"),
+        status: stringValue(item.status) || (isStreaming ? "in_progress" : "completed"),
+        isStreaming,
+        providerRaw: item.providerRaw && typeof item.providerRaw === "object"
+          ? item.providerRaw as Extract<ContentBlock, { type: "text" }>["providerRaw"]
+          : item.provider_raw && typeof item.provider_raw === "object"
+            ? item.provider_raw as Extract<ContentBlock, { type: "text" }>["providerRaw"]
+            : undefined,
+        finishReason: stringValue(item.finishReason ?? item.finish_reason),
       });
       continue;
     }
@@ -342,9 +373,6 @@ const toBlocks = (value: unknown): ContentBlock[] | undefined => {
         stepId: stringValue(item.stepId ?? item.step_id),
         toolCallIds: stringArrayValue(item.toolCallIds ?? item.tool_call_ids),
         defaultCollapsed: booleanValue(item.defaultCollapsed ?? item.default_collapsed),
-        displayScope: stringValue(item.displayScope ?? item.display_scope),
-        panelHint: stringValue(item.panelHint ?? item.panel_hint),
-        requiresAttention: booleanValue(item.requiresAttention ?? item.requires_attention),
         skillName: stringValue(item.skillName ?? item.skill_name),
         triggerMode: stringValue(item.triggerMode ?? item.trigger_mode),
         sourceLevel: stringValue(item.sourceLevel ?? item.source_level),
@@ -358,7 +386,29 @@ const toBlocks = (value: unknown): ContentBlock[] | undefined => {
     }
     if (type === "tool_call") {
       const record = toToolCallRecord(item.record ?? item);
-      if (record) blocks.push({ type: "tool_call", record });
+      if (record) {
+        const existingIndex = toolBlockIndexes.get(record.id);
+        if (existingIndex == null) {
+          toolBlockIndexes.set(record.id, blocks.length);
+          blocks.push({ type: "tool_call", record });
+        } else {
+          const existing = blocks[existingIndex];
+          if (existing?.type === "tool_call") {
+            const terminal = new Set(["success", "failed", "blocked", "partial", "timeout", "cancelled"]);
+            const keepExistingTerminal = terminal.has(existing.record.status) && !terminal.has(record.status);
+            if (!keepExistingTerminal) {
+              blocks[existingIndex] = {
+                type: "tool_call",
+                record: {
+                  ...existing.record,
+                  ...record,
+                  startedAt: Math.min(existing.record.startedAt, record.startedAt),
+                },
+              };
+            }
+          }
+        }
+      }
       continue;
     }
     if (type === "progress") {
@@ -397,6 +447,8 @@ const toBlocks = (value: unknown): ContentBlock[] | undefined => {
             ? item.step_id
             : undefined,
         count: typeof item.count === "number" ? item.count : undefined,
+        iterationId: stringValue(item.iterationId ?? item.iteration_id),
+        ephemeral: booleanValue(item.ephemeral),
         timestamp: toTimestamp(item.timestamp),
       });
     }
@@ -406,6 +458,7 @@ const toBlocks = (value: unknown): ContentBlock[] | undefined => {
 
 const legacyBlocksFor = (
   message: BackendTranscriptMessage,
+  role: ChatMessage["role"],
   toolCalls: ToolCallRecord[],
 ): ContentBlock[] | undefined => {
   const blocks: ContentBlock[] = [];
@@ -416,73 +469,21 @@ const legacyBlocksFor = (
     blocks.push({ type: "tool_call", record });
   }
   if (typeof message.content === "string" && message.content) {
-    blocks.push({ type: "text", content: message.content });
+    blocks.push(role === "assistant"
+      ? {
+          type: "text",
+          itemId: "agent-message",
+          content: message.content,
+          source: "model_final",
+          status: "completed",
+          isStreaming: false,
+        }
+      : { type: "text", content: message.content });
   }
   return blocks.length ? blocks : undefined;
 };
 
 const normalizeText = (value: string): string => value.trim().replace(/\s+/g, " ");
-
-const normalizeFinalTextForRepair = (value: string): string =>
-  value.replace(/\r\n?/g, "\n").trim();
-
-const isTimelineTextBlock = (block: ContentBlock): boolean =>
-  block.type === "text" &&
-  (
-    block.visibility === "timeline" ||
-    block.visibility === "debug" ||
-    block.visibility === "unsealed" ||
-    block.visibility === "draft" ||
-    block.role === "runtime" ||
-    block.source === "model_preamble" ||
-    block.source === "post_tool" ||
-    block.source === "runtime"
-  );
-
-const isRepairableUnsealedFinalBlock = (block: ContentBlock): boolean =>
-  block.type === "text" &&
-  block.visibility === "unsealed" &&
-  (!block.source || block.source === "stream");
-
-const isExplicitFinalTextBlock = (block: ContentBlock): block is Extract<ContentBlock, { type: "text" }> =>
-  block.type === "text" &&
-  Boolean(block.content.trim()) &&
-  (
-    block.visibility === "final" ||
-    block.phase === "final" ||
-    block.source === "model_final" ||
-    block.source === "reply" ||
-    block.source === "fallback" ||
-    block.source === "partial"
-  );
-
-const repairHydratedFinalTextBlock = (
-  message: BackendTranscriptMessage,
-  role: ChatMessage["role"],
-  blocks: ContentBlock[] | undefined,
-): ContentBlock[] | undefined => {
-  if (role !== "assistant" || !blocks?.length) return blocks;
-  if (blocks.some(isExplicitFinalTextBlock)) return blocks;
-  const finalContent = typeof message.content === "string" ? normalizeFinalTextForRepair(message.content) : "";
-  if (!finalContent) return blocks;
-  for (let index = blocks.length - 1; index >= 0; index -= 1) {
-    const block = blocks[index];
-    if (block.type !== "text") continue;
-    if (isTimelineTextBlock(block) && !isRepairableUnsealedFinalBlock(block)) continue;
-    if (normalizeFinalTextForRepair(block.content) !== finalContent) continue;
-    return blocks.map((item, itemIndex) => (
-      itemIndex === index && item.type === "text"
-        ? {
-            ...item,
-            source: item.source && item.source !== "stream" ? item.source : "model_final",
-            visibility: "final",
-            phase: "final",
-          }
-        : item
-    ));
-  }
-  return blocks;
-};
 
 const toAttachmentRefs = (value: unknown): MessageAttachmentRef[] => {
   const items = toArray<Record<string, unknown>>(value);
@@ -499,7 +500,6 @@ const toAttachmentRefs = (value: unknown): MessageAttachmentRef[] => {
       sizeBytes: Number(item.size_bytes ?? item.sizeBytes ?? 0),
       artifactId,
       docId: String(item.doc_id ?? item.docId ?? ""),
-      indexedChunks: Number(item.indexed_chunks ?? item.indexedChunks ?? 0),
       dataUrl: typeof item.dataUrl === "string" ? item.dataUrl : undefined,
       inputSource: item.input_source === "pasted_text" || item.inputSource === "pasted_text"
         ? "pasted_text"
@@ -507,6 +507,43 @@ const toAttachmentRefs = (value: unknown): MessageAttachmentRef[] => {
       sourceCharCount: Number(item.source_char_count ?? item.sourceCharCount ?? 0) || undefined,
     }];
   });
+};
+
+const toContextRefs = (value: unknown): MessageContextRef[] => {
+  return toArray<Record<string, unknown>>(value).reduce<MessageContextRef[]>((refs, item) => {
+    const kind = String(item.kind ?? "").trim();
+    const name = String(item.name ?? "").trim();
+    const path = String(item.path ?? "").trim();
+    if (kind === "skill" && name) {
+      refs.push({ kind, name, path: path || undefined });
+      return refs;
+    }
+    if (kind === "plugin") {
+      const configName = String(item.configName ?? item.config_name ?? name).trim();
+      if (configName && path.startsWith("plugin://")) {
+        refs.push({ kind, name: name || configName, configName, path });
+      }
+    }
+    return refs;
+  }, []);
+};
+
+const toReplyAttachments = (value: unknown): ChatMessage["replyAttachments"] => {
+  const items = toArray<Record<string, unknown>>(value);
+  const seenPaths = new Set<string>();
+  const attachments = items.flatMap((item) => {
+    const path = String(item.path ?? "").trim();
+    const pathKey = path.toLocaleLowerCase();
+    if (!path || seenPaths.has(pathKey)) return [];
+    seenPaths.add(pathKey);
+    const size = Number(item.size ?? 0);
+    return [{
+      path,
+      size: Number.isFinite(size) && size > 0 ? size : 0,
+      isImage: item.isImage === true || item.is_image === true,
+    }];
+  });
+  return attachments.length ? attachments : undefined;
 };
 
 const dedupeHydratedMessages = (messages: ChatMessage[]): ChatMessage[] => {
@@ -526,16 +563,15 @@ const dedupeHydratedMessages = (messages: ChatMessage[]): ChatMessage[] => {
 export const hydrateMessages = (messages: BackendTranscriptMessage[] | undefined): ChatMessage[] =>
   dedupeHydratedMessages((messages ?? []).map((message, index) => {
     const role = toRole(message.role);
-    const parsedBlocks = toBlocks(message.blocks);
+    const parsedBlocks = normalizeContentBlocks(message.blocks);
     const fallbackToolCalls = toArray<unknown>(message.tool_calls ?? message.toolCalls).flatMap((item) => {
       const record = toToolCallRecord(item);
       return record ? [record] : [];
     });
-    const blocks = repairHydratedFinalTextBlock(
-      message,
-      role,
-      parsedBlocks ?? legacyBlocksFor(message, fallbackToolCalls),
-    );
+    // Structured transcripts are authoritative: hydration never infers a
+    // final answer from message.content or block position.
+    // Only the pre-block legacy schema is upgraded at this compatibility edge.
+    const blocks = parsedBlocks ?? legacyBlocksFor(message, role, fallbackToolCalls);
     return {
       id: typeof message.id === "string" && message.id ? message.id : `m-${index}-${Date.now().toString(36)}`,
       role,
@@ -543,6 +579,8 @@ export const hydrateMessages = (messages: BackendTranscriptMessage[] | undefined
       blocks,
       artifacts: toArray<ArtifactPreview>(message.artifacts),
       attachmentRefs: toAttachmentRefs(message.attachmentRefs ?? message.attachments),
+      contextRefs: toContextRefs(message.contextRefs ?? message.context_refs),
+      replyAttachments: toReplyAttachments(message.replyAttachments ?? message.reply_attachments),
       citations: toArray<Citation>(message.citations),
       usage: toUsage(message.usage),
       timestamp: toTimestamp(message.timestamp),
@@ -552,6 +590,9 @@ export const hydrateMessages = (messages: BackendTranscriptMessage[] | undefined
       terminalStatus: normalizeTerminalStatus(message.terminalStatus ?? message.terminal_status),
       failureMessage: typeof (message.failureMessage ?? message.failure_message) === "string"
         ? String(message.failureMessage ?? message.failure_message)
+        : undefined,
+      steeredIntoMessageId: message.steered === true && typeof message.steer_target_message_id === "string"
+        ? message.steer_target_message_id
         : undefined,
     };
   }));

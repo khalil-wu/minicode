@@ -7,6 +7,7 @@ import type { ChatMessage, MessageAttachmentRef, MessageContextRef } from "../st
 import { hasRuntimePendingUserAction, hasRuntimePendingUserActionForConversation } from "../lib/runtime-session";
 import { hasLocalPendingPromptForConversation } from "../lib/pending-prompts";
 import { normalizeAgentErrorMessage } from "./errorMessages";
+import { uniqueMessageId } from "../stores/shared-helpers";
 
 interface SendChatMessageOptions {
   displayContent?: string;
@@ -17,6 +18,8 @@ interface SendChatMessageOptions {
   contextRefs?: MessageContextRef[];
   allowWhileStreaming?: boolean;
   skipLocalAppend?: boolean;
+  assistantMessageId?: string;
+  userMessageId?: string;
 }
 
 let lastSendSignature = "";
@@ -27,9 +30,6 @@ export const resetSendDeduplication = () => {
   lastSendSignature = "";
   lastSendAt = 0;
 };
-
-const localMessageId = (prefix = "m"): string =>
-  `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
 const addSystemNotice = (content: string) => {
   useAppStore.setState((state) => ({
@@ -66,13 +66,42 @@ const attachmentRefFromPayload = (payload: Record<string, unknown>): MessageAtta
     sizeBytes: Number(payload.size_bytes ?? payload.sizeBytes ?? 0),
     artifactId,
     docId: String(payload.doc_id ?? payload.docId ?? ""),
-    indexedChunks: Number(payload.indexed_chunks ?? payload.indexedChunks ?? 0),
     dataUrl: typeof payload.dataUrl === "string" ? payload.dataUrl : undefined,
     inputSource: payload.input_source === "pasted_text" || payload.inputSource === "pasted_text"
       ? "pasted_text"
       : "upload",
     sourceCharCount: Number(payload.source_char_count ?? payload.sourceCharCount ?? 0) || undefined,
   };
+};
+
+const durableAttachmentRef = (attachment: MessageAttachmentRef): MessageAttachmentRef => {
+  if (!attachment.artifactId || !attachment.dataUrl?.startsWith("blob:")) return attachment;
+  const durable = { ...attachment };
+  delete durable.dataUrl;
+  return durable;
+};
+
+const contextRefSignature = (ref: MessageContextRef): Record<string, unknown> => {
+  if (ref.kind === "plugin") {
+    return { kind: ref.kind, configName: ref.configName, path: ref.path };
+  }
+  if (ref.kind === "skill") {
+    return { kind: ref.kind, name: ref.name, path: ref.path ?? "" };
+  }
+  if (ref.kind === "browser_annotation") {
+    return {
+      kind: ref.kind,
+      url: ref.url,
+      note: ref.note,
+      selector: ref.selector ?? "",
+      targetId: ref.targetId ?? "",
+      xPercent: ref.xPercent ?? null,
+      yPercent: ref.yPercent ?? null,
+      widthPercent: ref.widthPercent ?? null,
+      heightPercent: ref.heightPercent ?? null,
+    };
+  }
+  return { kind: ref.kind, path: ref.path };
 };
 
 const appendLocalUserTurn = ({
@@ -196,7 +225,14 @@ export const getChatSendBlockReason = (conversationId?: string): string | null =
   const targetConversationId = conversationId ?? state.conversationId ?? state.runtimeSession?.active_conversation_id ?? undefined;
   if (
     hasLocalPendingPromptForConversation(
-      [state.pendingApproval, state.pendingDiffReview, state.pendingAskUser],
+      [
+        state.pendingApproval,
+        ...state.approvalQueue,
+        state.pendingDiffReview,
+        ...state.diffReviewQueue,
+        state.pendingAskUser,
+        ...state.askUserQueue,
+      ],
       targetConversationId,
       state.conversationId,
     )
@@ -246,6 +282,8 @@ export const sendChatMessage = ({
   contextRefs = [],
   allowWhileStreaming = false,
   skipLocalAppend = false,
+  assistantMessageId: requestedAssistantMessageId,
+  userMessageId: requestedUserMessageId,
 }: SendChatMessageOptions): boolean => {
   const contentForBackend = (backendContent ?? displayContent ?? "").trim();
   const contentForDisplay = (displayContent ?? backendContent ?? "").trim();
@@ -258,11 +296,12 @@ export const sendChatMessage = ({
       : state.sideChats[conversationId]?.isStreaming ?? state.conversationStreaming[conversationId] ?? false
     : state.isStreaming;
   const queued = allowWhileStreaming && targetStreaming;
-  const displayAttachmentRefs = attachmentRefs.length > 0
+  const displayAttachmentRefs = (attachmentRefs.length > 0
     ? attachmentRefs
     : attachments
         .map(attachmentRefFromPayload)
-        .filter((item): item is MessageAttachmentRef => item != null && isAttachmentRef(item));
+        .filter((item): item is MessageAttachmentRef => item != null && isAttachmentRef(item)))
+    .map(durableAttachmentRef);
   if (!allowWhileStreaming) {
     if (recoverStaleStreamingState(conversationId)) {
       return sendChatMessage({
@@ -274,6 +313,8 @@ export const sendChatMessage = ({
         contextRefs,
         allowWhileStreaming,
         skipLocalAppend,
+        assistantMessageId: requestedAssistantMessageId,
+        userMessageId: requestedUserMessageId,
       });
     }
     const reason = getChatSendBlockReason(conversationId);
@@ -303,14 +344,17 @@ export const sendChatMessage = ({
     workspaceRoot: targetWorkspaceRoot,
     content: contentForBackend,
     attachments: attachments.map((item) => String(item.artifact_id ?? item.artifactId ?? item.id ?? "")).filter(Boolean),
+    contextRefs: contextRefs.map(contextRefSignature),
   });
   const now = Date.now();
   if (sendSignature === lastSendSignature && now - lastSendAt < DUPLICATE_SEND_WINDOW_MS) {
     pushToast("Duplicate send ignored.", "warning");
     return false;
   }
-  const assistantMessageId = skipLocalAppend ? "" : localMessageId("a");
-  const userMessageId = skipLocalAppend ? "" : localMessageId("u");
+  const assistantMessageId = requestedAssistantMessageId
+    || (skipLocalAppend ? "" : uniqueMessageId("a"));
+  const userMessageId = requestedUserMessageId
+    || (skipLocalAppend ? "" : uniqueMessageId("u"));
 
   // A manual right-panel tab selection locks auto-routing for the rest of the
   // current interaction. A new user turn should re-enable auto-routing (so the
@@ -326,6 +370,21 @@ export const sendChatMessage = ({
     agent_mode: state.agentMode,
     ...(targetConversationId ? { conversation_id: targetConversationId } : {}),
     ...(attachments.length > 0 ? { attachments } : {}),
+    ...(contextRefs.some((ref) => ref.kind === "skill" && ref.path)
+      ? {
+          skills: contextRefs
+            .filter((ref): ref is Extract<MessageContextRef, { kind: "skill" }> => ref.kind === "skill")
+            .filter((ref) => Boolean(ref.path))
+            .map((ref) => ({ name: ref.name, path: String(ref.path) })),
+        }
+      : {}),
+    ...(contextRefs.some((ref) => ref.kind === "plugin")
+      ? {
+          plugins: contextRefs
+            .filter((ref): ref is Extract<MessageContextRef, { kind: "plugin" }> => ref.kind === "plugin")
+            .map((ref) => ({ config_name: ref.configName, path: ref.path })),
+        }
+      : {}),
     ...(assistantMessageId ? { assistant_message_id: assistantMessageId } : {}),
     ...(userMessageId ? { user_message_id: userMessageId } : {}),
     ...(allowWhileStreaming ? { queue_if_busy: true } : {}),

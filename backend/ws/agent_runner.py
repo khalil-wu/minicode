@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
 import uuid
 from datetime import UTC, datetime
@@ -19,9 +18,7 @@ from backend.agent.context import ContextBuilder
 from backend.agent.loop import AgentLoopSessionContext
 from backend.agent.message import AgentEvent
 from backend.agent.query_engine import AgentSession, QuerySubmission
-from backend.agent.runtime_spans import runtime_span
 from backend.agent.runtime import default_runtime
-from backend.agent.tool_projection import sanitize_internal_tool_names_for_user_text, user_facing_tool_name
 from backend.agent.turn_state import AgentTurnState
 from backend.config import get_available_models, get_llm_provider, load_config
 from backend.llm.errors import classify_llm_error, sanitize_llm_error_message
@@ -33,7 +30,6 @@ from backend.ws.utils import (
 )
 from backend.ws.stream_state import (
     create_stream_state,
-    remove_pending_tool_call,
     upsert_pending_tool_call,
 )
 
@@ -45,44 +41,14 @@ _PLAN_STATUSES = {"draft", "accepted", "executing", "completed", "cancelled"}
 _PLAN_STEP_STATUSES = {"pending", "running", "done", "skipped", "failed"}
 _TODO_STATUSES = {"pending", "in_progress", "completed", "blocked"}
 _SUBAGENT_STATUSES = {"pending", "running", "blocked", "done", "partial", "cancelled", "error"}
-_PROGRESS_STAGES = {"status", "planning", "verification", "final"}
+_PROGRESS_STAGES = {"status", "planning", "tool", "approval", "verification", "final"}
 _PROGRESS_STATUSES = {"running", "completed", "failed", "info"}
 LLM_STATEFUL_CONTINUATION_SNAPSHOT_KEY = "llm_stateful_continuation"
-_COLLABORATION_TOOL_NAMES = {
-    "task",
-    "task_status",
-    "task_stop",
-    "workflow",
-    "send_message",
-    "message_list",
-    "task_create",
-    "task_list",
-    "task_get",
-    "task_update",
-    "task_output",
-    "team_create",
-    "team_list",
-    "team_delete",
-}
-_COLLABORATION_FINAL_STALL_RE = re.compile(
-    r"(?:"
-    r"let me|i(?:'ll| will| am going to| need to| should)|now i|"
-    r"我(?:会|将|要|先|来|准备|需要|打算|用|直接|再)|让我|现在我|接下来我|稍等"
-    r").{0,180}"
-    r"(?:final report|report|summary|synthesi[sz]e|collect|poll|status|workflow|subagents?|"
-    r"answer\s+based\s+on\s+what\s+i(?:'ve| have)?\s+found|give\s+the\s+user.{0,80}answer|"
-    r"报告|总结|结论|结果|取出|读取|查看|检查|工作流|子代理|多\s*agent)",
-    re.IGNORECASE | re.DOTALL,
-)
-
 logger = logging.getLogger(__name__)
-_PUBLIC_RESULT_MARKER_RE = re.compile(
-    r"^(?:#+\s*)?(?:findings|summary|result|results|结论|结果|问题|建议|发现|要点)\b",
-    re.IGNORECASE,
-)
 _TURN_MESSAGE_SCOPED_EVENT_TYPES = {
-    "text_chunk",
-    "text_replace",
+    "item.started",
+    "agent_message.delta",
+    "item.completed",
     "image_chunk",
     "thinking_delta",
     "thinking",
@@ -90,12 +56,8 @@ _TURN_MESSAGE_SCOPED_EVENT_TYPES = {
     "tool_output_delta",
     "command_output_chunk",
     "tool_result",
-    "agent.loop.started",
-    "agent.loop.completed",
     "agent.run.started",
-    "agent.run.updated",
     "agent.run.completed",
-    "agent.phase.updated",
     "agent.item",
     "agent.progress",
     "runtime.span",
@@ -104,8 +66,6 @@ _TURN_MESSAGE_SCOPED_EVENT_TYPES = {
     "approval_request",
     "approval.file_diff",
     "ask_user",
-    "verification.started",
-    "verification.result",
     "citation.add",
     "artifact.preview",
     "done",
@@ -121,10 +81,6 @@ _TOOL_TURN_SCOPED_EVENT_TYPES = {
 }
 
 
-def _contains_cjk(text: str) -> bool:
-    return any("\u3400" <= char <= "\u9fff" or "\uf900" <= char <= "\ufaff" for char in text)
-
-
 def _failed_tool_call_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         record
@@ -133,249 +89,60 @@ def _failed_tool_call_records(records: list[dict[str, Any]]) -> list[dict[str, A
     ]
 
 
-def _has_metadata_value(value: Any) -> bool:
-    return value is not None and value != ""
+def _reply_attachments_from_tool_calls(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collect verified deliverables for transcript restoration after restart."""
+    attachments: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    for record in records:
+        output_files = record.get("outputFiles") or record.get("output_files")
+        if not isinstance(output_files, list):
+            continue
+        for item in output_files:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or "").strip()
+            path_key = path.casefold()
+            if not path or path_key in seen_paths:
+                continue
+            seen_paths.add(path_key)
+            try:
+                size = max(0, int(item.get("size") or 0))
+            except (TypeError, ValueError):
+                size = 0
+            attachments.append({
+                "path": path,
+                "size": size,
+                "is_image": bool(item.get("isImage", item.get("is_image", False))),
+            })
+    return attachments
 
 
-def _text_chunk_metadata(data: dict[str, Any]) -> dict[str, Any]:
-    metadata = {
-        key: data[key]
-        for key in (
-            "source",
-            "visibility",
-            "role",
-            "phase",
-            "segmentId",
-            "iterationIndex",
-            "streamAttempt",
-            "sealReason",
-            "sealed",
-            "promoteAllUnsealedNarration",
-            "providerRaw",
-            "finishReason",
+def _project_agent_message_event(
+    turn_state: AgentTurnState,
+    event_type: str,
+    data: dict[str, Any],
+) -> None:
+    if event_type == "item.started":
+        item = data.get("item") if isinstance(data.get("item"), dict) else {}
+        if item.get("type") == "agent_message":
+            turn_state.start_agent_message(str(item.get("id") or "agent-message"))
+    elif event_type == "agent_message.delta":
+        turn_state.append_agent_message_delta(
+            str(data.get("item_id") or "agent-message"),
+            str(data.get("delta") or ""),
         )
-        if _has_metadata_value(data.get(key))
-    }
-    nested = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
-    if isinstance(nested, dict):
-        for source_key, target_key in (
-            ("visibility", "visibility"),
-            ("role", "role"),
-            ("phase", "phase"),
-            ("segmentId", "segmentId"),
-            ("segment_id", "segmentId"),
-            ("iterationIndex", "iterationIndex"),
-            ("iteration_index", "iterationIndex"),
-            ("streamAttempt", "streamAttempt"),
-            ("stream_attempt", "streamAttempt"),
-            ("sealReason", "sealReason"),
-            ("seal_reason", "sealReason"),
-            ("sealed", "sealed"),
-            ("promoteAllUnsealedNarration", "promoteAllUnsealedNarration"),
-            ("promote_all_unsealed_narration", "promoteAllUnsealedNarration"),
-        ):
-            if _has_metadata_value(nested.get(source_key)):
-                metadata[target_key] = nested[source_key]
-        provider_raw = nested.get("providerRaw")
-        if isinstance(provider_raw, dict) and provider_raw:
-            metadata["providerRaw"] = dict(provider_raw)
-        finish_reason = nested.get("finishReason")
-        if isinstance(finish_reason, str) and finish_reason:
-            metadata["finishReason"] = finish_reason
-    return metadata
-
-
-def _first_nonempty_text(*values: Any) -> str:
-    for value in values:
-        text = str(value or "").strip()
-        if text:
-            return text
-    return ""
-
-
-def _workflow_span_event_name(event_type: str) -> str:
-    if not event_type.startswith("workflow_"):
-        return ""
-    return event_type.replace("_", ".")
-
-
-def _workflow_span_status(event_type: str, event: dict[str, Any]) -> str:
-    if event_type == "workflow_completed":
-        return "completed"
-    if event_type == "workflow_cancelled" or str(event.get("launch_error") or "").strip():
-        return "failed"
-    return "running"
-
-
-def _workflow_span_summary(event_type: str, event: dict[str, Any]) -> str:
-    if event_type == "workflow_started":
-        name = _first_nonempty_text(event.get("name"), event.get("workflow_id"), "workflow")
-        mode = _first_nonempty_text(event.get("mode"))
-        steps = event.get("steps") if isinstance(event.get("steps"), list) else []
-        suffix = f" ({mode}, {len(steps)} step(s))" if mode or steps else ""
-        return f"Workflow started: {name}{suffix}"
-    if event_type == "workflow_nodes_resumed":
-        tasks = event.get("tasks") if isinstance(event.get("tasks"), list) else []
-        error = _first_nonempty_text(event.get("launch_error"))
-        if error:
-            return f"Workflow resume needs attention: {error}"
-        return f"Workflow resumed {len(tasks)} node(s)"
-    if event_type == "workflow_nodes_unblocked":
-        tasks = event.get("tasks") if isinstance(event.get("tasks"), list) else []
-        error = _first_nonempty_text(event.get("launch_error"))
-        if error:
-            return f"Workflow launch needs attention: {error}"
-        return f"Workflow unblocked {len(tasks)} node(s)"
-    if event_type == "workflow_completed":
-        return "Workflow completed"
-    if event_type == "workflow_cancelled":
-        return "Workflow cancelled"
-    return event_type.replace("_", " ")
-
-
-def _runtime_span_for_agent_event(event_type: str, data: dict[str, Any]) -> AgentEvent | None:
-    """Derive semantic runtime spans from legacy collaboration events."""
-    if event_type == "runtime.span":
-        return None
-
-    if event_type in {"subagent.start", "subagent.progress", "subagent.done"}:
-        subagent_id = str(data.get("subagent_id") or "").strip()
-        if not subagent_id:
-            return None
-        role = _first_nonempty_text(data.get("role"), data.get("agent_type"), "subagent")
-        span_id = f"subagent:{subagent_id}"
-        common: dict[str, Any] = {
-            "span_id": span_id,
-            "phase": "subagent",
-            "label": role,
-            "agent_id": subagent_id,
-            "waiting_on": _first_nonempty_text(data.get("waiting_on"), data.get("tool_name")),
-            "ui_visible": False,
-            "requires_attention": bool(data.get("requires_attention") or data.get("error") or data.get("timed_out")),
-        }
-        extra_data = {
-            key: data[key]
-            for key in (
-                "parent_id",
-                "parent_run_id",
-                "workflow_id",
-                "workflow_name",
-                "workflow_mode",
-                "node_id",
-                "task_id",
-                "iteration",
-                "iterations",
-                "max_iterations",
-                "tool_call_count",
-                "blocks_final_reply",
+    elif event_type == "item.completed":
+        item = data.get("item") if isinstance(data.get("item"), dict) else {}
+        if item.get("type") == "agent_message":
+            turn_state.complete_agent_message(
+                item,
+                finish_reason=str(data.get("finish_reason") or ""),
+                provider_raw=(
+                    data.get("provider_raw")
+                    if isinstance(data.get("provider_raw"), dict)
+                    else None
+                ),
             )
-            if data.get(key) is not None
-        }
-        if event_type == "subagent.start":
-            return runtime_span(
-                "subagent.started",
-                status="running",
-                summary=_first_nonempty_text(data.get("current_activity"), data.get("prompt"), f"{role} started"),
-                started_at=data.get("last_progress_at") if isinstance(data.get("last_progress_at"), int) else None,
-                data=extra_data,
-                **common,
-            )
-        if event_type == "subagent.progress":
-            return runtime_span(
-                "subagent.progress",
-                status="running",
-                summary=_first_nonempty_text(data.get("current_activity"), data.get("detail"), f"{role} running"),
-                data=extra_data,
-                **common,
-            )
-        raw_status = str(data.get("status") or "").strip().lower()
-        failed = bool(data.get("error") or data.get("timed_out"))
-        span_status = (
-            "cancelled" if raw_status in {"cancelled", "interrupted"}
-            else "partial" if raw_status == "partial"
-            else "failed" if failed or raw_status in {"error", "failed"}
-            else "completed"
-        )
-        return runtime_span(
-            "subagent.completed",
-            status=span_status,
-            summary=_first_nonempty_text(data.get("error"), data.get("summary"), f"{role} completed"),
-            duration_ms=data.get("duration_ms") if isinstance(data.get("duration_ms"), int) else None,
-            data=extra_data,
-            **common,
-        )
-
-    if event_type == "subagent.event":
-        nested = data.get("event")
-        if not isinstance(nested, dict):
-            return None
-        nested_type = str(nested.get("type") or "").strip()
-        span_event = _workflow_span_event_name(nested_type)
-        if not span_event:
-            return None
-        workflow_id = _first_nonempty_text(nested.get("workflow_id"), data.get("subagent_id"))
-        if not workflow_id:
-            return None
-        status = _workflow_span_status(nested_type, nested)
-        steps = nested.get("steps") if isinstance(nested.get("steps"), list) else []
-        tasks = nested.get("tasks") if isinstance(nested.get("tasks"), list) else []
-        span_data = {
-            key: nested[key]
-            for key in ("workflow_id", "name", "mode", "launched", "launch_summary", "launch_error")
-            if nested.get(key) is not None
-        }
-        if steps:
-            span_data["step_count"] = len(steps)
-        if tasks:
-            span_data["task_count"] = len(tasks)
-        return runtime_span(
-            span_event,
-            span_id=f"workflow:{workflow_id}",
-            phase="workflow",
-            status=status,
-            label=_first_nonempty_text(nested.get("name"), workflow_id),
-            summary=_workflow_span_summary(nested_type, nested),
-            agent_id=workflow_id,
-            ui_visible=False,
-            requires_attention=status == "failed",
-            data=span_data,
-        )
-
-    if event_type == "inspector.update":
-        if str(data.get("target_kind") or "").strip() != "cache":
-            return None
-        payload = data.get("payload")
-        if not isinstance(payload, dict) or payload.get("kind") != "cache_metric":
-            return None
-        cache_layer = _first_nonempty_text(payload.get("cache_layer"), "cache")
-        signature = _first_nonempty_text(payload.get("args_signature"), data.get("target_id"), payload.get("observed_at"))
-        hit = bool(payload.get("hit"))
-        stale = bool(payload.get("stale"))
-        evicted = bool(payload.get("evicted"))
-        status = "completed" if hit else "info"
-        if stale or evicted:
-            status = "failed"
-        summary_state = "hit" if hit else "miss"
-        if stale:
-            summary_state = "stale"
-        elif evicted:
-            summary_state = "evicted"
-        return runtime_span(
-            f"cache.lookup.{summary_state}",
-            span_id=f"cache:{cache_layer}:{signature}",
-            run_id=_first_nonempty_text(payload.get("run_id")),
-            turn_id=_first_nonempty_text(payload.get("turn_id")),
-            phase="cache",
-            status=status,
-            label=cache_layer,
-            summary=f"Cache {summary_state}: {cache_layer}",
-            tool_name=_first_nonempty_text(payload.get("tool_name")),
-            ui_visible=False,
-            requires_attention=stale or evicted,
-            data=dict(payload),
-        )
-
-    return None
 
 
 def _empty_ui_agent_state() -> dict[str, Any]:
@@ -468,7 +235,19 @@ def _llm_adapter_cache_key(
 def _clear_session_llm_cache(session: Any) -> None:
     cache = getattr(session, "_llm_adapter_cache", None)
     if isinstance(cache, dict):
+        adapters = list({id(adapter): adapter for adapter in cache.values()}.values())
         cache.clear()
+        close_tasks = getattr(session, "_llm_close_tasks", None)
+        if not isinstance(close_tasks, set):
+            close_tasks = set()
+            setattr(session, "_llm_close_tasks", close_tasks)
+        for adapter in adapters:
+            close = getattr(adapter, "aclose", None)
+            if not callable(close):
+                continue
+            task = asyncio.create_task(close())
+            close_tasks.add(task)
+            task.add_done_callback(close_tasks.discard)
 
 
 def _get_or_create_session_llm(
@@ -637,10 +416,6 @@ def _subagent_summary(data: dict[str, Any]) -> str:
         value = str(data.get(key) or "").strip()
         if not value:
             continue
-        if re.match(r"^running\s+[a-z0-9_.:-]+$", value, re.IGNORECASE):
-            continue
-        if re.match(r"^tool started\s*:", value, re.IGNORECASE):
-            continue
         return value
     return ""
 
@@ -748,7 +523,6 @@ def _ui_agent_state_for_event(current: Any, event_type: str, data: dict[str, Any
             **({"detail": str(data.get("detail"))} if data.get("detail") is not None else {}),
             **({"currentActivity": str(data.get("current_activity"))} if data.get("current_activity") is not None else {}),
             **({"waitingOn": str(data.get("waiting_on"))} if data.get("waiting_on") is not None else {}),
-            **({"blocksFinalReply": bool(data.get("blocks_final_reply"))} if data.get("blocks_final_reply") is not None else {}),
             **({"lastProgressAt": data.get("last_progress_at")} if isinstance(data.get("last_progress_at"), int) else {}),
         })[-20:]
         return state
@@ -758,21 +532,22 @@ def _ui_agent_state_for_event(current: Any, event_type: str, data: dict[str, Any
         if not subagent_id:
             return None
         raw_status = str(data.get("status") or "completed").strip().lower()
+        event_error = data.get("error") if isinstance(data.get("error"), str) else ""
         status = (
             "partial" if raw_status == "partial"
             else "cancelled" if raw_status in {"cancelled", "interrupted"}
-            else "error" if data.get("error") or raw_status in {"error", "failed"}
+            else "error" if event_error.strip() or raw_status in {"error", "failed"}
             else "done"
         )
         result = data.get("result") if isinstance(data.get("result"), dict) else {}
         record = data.get("record") if isinstance(data.get("record"), dict) else {}
         result_content = str(result.get("content") or data.get("summary") or "").strip()
-        result_error = str(result.get("error") or data.get("error") or "").strip()
+        result_error = str(result.get("error") or event_error or "").strip()
         state["subagents"] = _upsert_by_id(list(state.get("subagents") or []), {
             "id": subagent_id,
             "role": str(record.get("agent_type") or record.get("role") or "subagent"),
             "status": status if status in _SUBAGENT_STATUSES else "done",
-            "summary": str(data.get("error") or data.get("summary") or ""),
+            "summary": str(event_error or data.get("summary") or ""),
             "resultAvailable": bool(result_content or result_error),
             **({"resultContent": result_content} if result_content else {}),
             **({"resultError": result_error} if result_error else {}),
@@ -829,9 +604,6 @@ def _ui_agent_state_for_event(current: Any, event_type: str, data: dict[str, Any
             **({"stepId": str(data.get("step_id"))} if data.get("step_id") is not None else {}),
             **({"count": data.get("count")} if isinstance(data.get("count"), int) else {}),
             **({"iterationId": str(data.get("iteration_id"))} if data.get("iteration_id") is not None else {}),
-            **({"displayScope": str(data.get("display_scope"))} if data.get("display_scope") is not None else {}),
-            **({"panelHint": str(data.get("panel_hint"))} if data.get("panel_hint") is not None else {}),
-            **({"requiresAttention": bool(data.get("requires_attention"))} if data.get("requires_attention") is not None else {}),
             "timestamp": int(time.time() * 1000),
         }
         state["agentProgress"] = _upsert_by_id(list(state.get("agentProgress") or []), entry)[-80:]
@@ -860,165 +632,12 @@ def _clear_turn_scoped_tool_state(tool_registry: Any, conversation_id: str) -> N
         clear_todos(conversation_id)
 
 
-def _tool_record_detail(record: dict[str, Any], *, fallback: str) -> str:
-    detail = (
-        str(record.get("summary") or "").strip()
-        or str(record.get("displaySummary") or "").strip()
-        or str(record.get("contentPreview") or "").strip()
-        or str(record.get("outputPreview") or "").strip()
-        or str(record.get("inputSummary") or "").strip()
-        or fallback
-    )
-    if len(detail) > 700:
-        detail = detail[:700].rstrip() + "..."
-    return detail
-
-
-def _has_collaboration_tool_records(records: list[dict[str, Any]]) -> bool:
-    for record in records:
-        name = str(record.get("name") or "").strip().lower()
-        if name in _COLLABORATION_TOOL_NAMES:
-            return True
-        if name.startswith(("task_", "team_")):
-            return True
-    return False
-
-
-def _is_low_value_collaboration_final_reply(reply: str, records: list[dict[str, Any]]) -> bool:
-    text = " ".join(str(reply or "").split())
-    if not text:
-        return False
-    if not _has_collaboration_tool_records(records):
-        return False
-    if len(text) > 600:
-        return False
-    if any(_PUBLIC_RESULT_MARKER_RE.search(line.strip()) for line in str(reply or "").splitlines()):
-        return False
-    return bool(_COLLABORATION_FINAL_STALL_RE.search(text))
-
-
-def _ask_user_question_from_record(record: dict[str, Any]) -> str:
-    args = record.get("args")
-    if isinstance(args, dict):
-        question = str(args.get("question") or args.get("prompt") or "").strip()
-        if question:
-            return question
-    request = record.get("request")
-    if isinstance(request, dict):
-        question = str(request.get("question") or request.get("prompt") or "").strip()
-        if question:
-            return question
-    return str(record.get("inputSummary") or record.get("displaySummary") or "").strip()
-
-
-def _format_failed_ask_user_reply(
-    records: list[dict[str, Any]],
-    *,
-    user_message: str,
-) -> str:
-    failed = _failed_tool_call_records(records)
-    if not failed:
-        return ""
-    if any(str(record.get("name") or "").strip().lower() != "ask_user" for record in failed):
-        return ""
-    question = next(
-        (value for value in (_ask_user_question_from_record(record) for record in failed) if value),
-        "",
-    )
-    cjk = _contains_cjk(user_message) or _contains_cjk(question)
-    if question:
-        return f"需要你确认一下：{question}" if cjk else f"I need one detail before continuing: {question}"
-    return "需要你补充一个必要信息后我才能继续。" if cjk else "I need one detail before I can continue."
-
-
-def _format_failed_tool_only_reply(
-    records: list[dict[str, Any]],
-    *,
-    user_message: str,
-    failure_message: str = "",
-) -> str:
-    failed = _failed_tool_call_records(records)
-    if not failed:
-        return ""
-    ask_user_reply = _format_failed_ask_user_reply(records, user_message=user_message)
-    if ask_user_reply:
-        return ask_user_reply
-    if _contains_cjk(user_message):
-        intro = (
-            "\u5de5\u5177\u8c03\u7528\u5931\u8d25\uff0c\u800c\u4e14\u6a21\u578b\u6ca1\u6709\u751f\u6210\u6700\u7ec8\u56de\u590d\u3002"
-            "\u8fd9\u8f6e\u4e0d\u80fd\u5f53\u4f5c\u6210\u529f\u5b8c\u6210\uff0c\u5931\u8d25\u70b9\u5982\u4e0b\uff1a"
-        )
-        failure_label = "\u8fd0\u884c\u9519\u8bef"
-        no_details = "\u5de5\u5177\u672a\u8fd4\u56de\u53ef\u7528\u7684\u5931\u8d25\u7ec6\u8282\u3002"
-    else:
-        intro = (
-            "Some actions failed and the final summary could not be generated. "
-            "Here is what failed:"
-        )
-        failure_label = "Run error"
-        no_details = "The tool did not return usable failure details."
-
-    parts = [intro]
-    failure_detail = failure_message.strip()
-    if failure_detail:
-        parts.append(f"{failure_label}: {failure_detail}")
-    for index, record in enumerate(failed[-3:], start=1):
-        cjk = _contains_cjk(user_message)
-        name = user_facing_tool_name(str(record.get("name") or "tool"), cjk=cjk)
-        status = str(record.get("status") or "failed")
-        detail = sanitize_internal_tool_names_for_user_text(_tool_record_detail(record, fallback=no_details), cjk=cjk)
-        parts.append(f"{index}. {name} [{status}]\n{detail}")
-    return "\n\n".join(parts)
-
-
-def _format_tool_activity_without_final_reply(
-    records: list[dict[str, Any]],
-    *,
-    user_message: str,
-    failure_message: str = "",
-) -> str:
-    if not records:
-        return ""
-    failed_reply = _format_failed_tool_only_reply(
-        records,
-        user_message=user_message,
-        failure_message=failure_message,
-    )
-    if failed_reply:
-        return failed_reply
-
-    if _contains_cjk(user_message):
-        intro = (
-            "\u6a21\u578b\u6ca1\u6709\u751f\u6210\u6700\u7ec8\u603b\u7ed3\uff0c\u6211\u5148\u628a\u5df2\u7ecf\u62ff\u5230\u7684\u7ed3\u679c\u653e\u5728\u8fd9\u91cc\uff1a"
-        )
-        failure_label = "\u8fd0\u884c\u9519\u8bef"
-        no_details = "\u5de5\u5177\u672a\u8fd4\u56de\u53ef\u7528\u7684\u6458\u8981\u3002"
-    else:
-        intro = (
-            "The model did not generate a final summary, so here are the results already returned:"
-        )
-        failure_label = "Run error"
-        no_details = "The tool did not return a usable summary."
-
-    parts = [intro]
-    failure_detail = failure_message.strip()
-    if failure_detail:
-        parts.append(f"{failure_label}: {failure_detail}")
-    for index, record in enumerate(records[-3:], start=1):
-        cjk = _contains_cjk(user_message)
-        name = user_facing_tool_name(str(record.get("name") or "tool"), cjk=cjk)
-        status = str(record.get("status") or "completed")
-        detail = sanitize_internal_tool_names_for_user_text(_tool_record_detail(record, fallback=no_details), cjk=cjk)
-        parts.append(f"{index}. {name} [{status}]\n{detail}")
-    return "\n\n".join(parts)
-
-
 class SessionAgentRunnerMixin:
     """Agent run logic for WebSocketSession.
 
     Depends on session attributes: ws, query_engine, conversation_repo,
     context_builder, permission_checker, permission_context, config,
-    llm, artifact_store, tool_registry, skill_manager, vector_memory,
+    llm, artifact_store, tool_registry, skill_manager,
     _approval_handler, _active_task_id, _interrupted, etc.
     """
 
@@ -1158,8 +777,8 @@ class SessionAgentRunnerMixin:
         _clear_turn_scoped_tool_state(self.tool_registry, conversation.id)
 
         # Track active streaming metadata for reconnection recovery. Prefer
-        # the client-created draft id so streamed events cannot attach to a
-        # later local assistant draft if an old turn finishes late.
+        # the client-created assistant placeholder id so late events from an
+        # old turn cannot attach to a newer assistant message.
         assistant_message_id = _client_assistant_message_id(metadata) or f"assistant_{uuid.uuid4().hex[:8]}"
         stream_state = create_stream_state(conversation.id, assistant_message_id)
         getattr(self, "_conversation_streams", {})[conversation.id] = stream_state
@@ -1241,15 +860,21 @@ class SessionAgentRunnerMixin:
             getattr(self, "_conversation_streams", {}).pop(conversation.id, None)
             return
 
+        run_workspace_root = self._workspace_root_for_conversation(conversation)
+        run_memory_manager = getattr(self, "memory_manager", None)
+        if run_workspace_root is not None:
+            from backend.memory.file_memory import FileMemory
+            from backend.memory.manager import MemoryManager
+
+            run_memory_manager = MemoryManager(FileMemory.for_workspace(run_workspace_root))
+
         run_context_builder = ContextBuilder(
             token_budget=run_config.token_budget,
             agent_settings=run_config.agent,
             skill_executor=getattr(self, "skill_executor", None),
-            rag_pipeline=getattr(self, "rag_pipeline", None),
-            memory_manager=getattr(self, "memory_manager", None),
+            memory_manager=run_memory_manager,
             llm=run_llm,
             skill_manager=self.skill_manager,
-            vector_memory=self.vector_memory,
         )
         run_context_builder.load_snapshot(run_context_snapshot)
         _import_llm_stateful_continuation_from_snapshot(run_llm, run_context_snapshot)
@@ -1259,12 +884,24 @@ class SessionAgentRunnerMixin:
             run_metadata.setdefault("previous_turn_aborted", True)
         run_metadata.setdefault("assistant_message_id", assistant_message_id)
         run_metadata.setdefault("agent_runtime", default_runtime())
-        run_workspace_root = self._workspace_root_for_conversation(conversation)
         run_workspace_context = self._workspace_context_for_conversation(conversation)
         run_metadata.setdefault("workspace_context", run_workspace_context)
         run_metadata.setdefault("conversation_id", conversation.id)
         run_metadata.setdefault("cost_session_id", self.session_id)
         run_metadata.setdefault("requires_explicit_workspace", True)
+        mcp_manager = getattr(self, "mcp_manager", None)
+        iter_connected_mcp = getattr(mcp_manager, "iter_connected_clients", None)
+        connected_mcp_servers: list[str] = []
+        if callable(iter_connected_mcp):
+            try:
+                connected_mcp_servers = [
+                    str(name)
+                    for name, _client in iter_connected_mcp()
+                    if str(name).strip()
+                ]
+            except Exception as exc:
+                logger.debug("Unable to snapshot connected MCP servers: %s", exc)
+        run_metadata.setdefault("connected_mcp_servers", connected_mcp_servers)
         run_permission_context = self._permission_context_for_conversation(
             conversation,
             source="agent.run",
@@ -1282,23 +919,104 @@ class SessionAgentRunnerMixin:
                     result = send_conversations()
                     if asyncio.iscoroutine(result):
                         await result
-            run_permission_context.mode = "plan"
+            # ``PermissionContext`` is an immutable turn snapshot.  EnterPlanMode
+            # updates the live tool context itself; mutating this frozen snapshot
+            # used to raise ``FrozenInstanceError`` after the plan-mode switch.
+            # Keep the callback side-effect free after persistence/UI updates.
+
+        def _live_run_permission_context():
+            """Return the session's current permission state for this run."""
+            if self.active_conversation_id == conversation.id:
+                return self.permission_context
+            current = self.conversation_repo.get_conversation(conversation.id)
+            return self._permission_context_for_conversation(current, source="agent.run.live")
 
         run_metadata.setdefault("permission_mode_setter", _set_run_permission_mode)
+        run_metadata.setdefault("permission_context_provider", _live_run_permission_context)
+        run_manager = getattr(self, "_run_manager", None)
+        turn_input_queue = getattr(run_manager, "turn_input_queue", None)
+        if callable(turn_input_queue):
+            run_metadata.setdefault("turn_input_queue", turn_input_queue(conversation.id))
 
-        # 回填压缩摘要为持久备忘，保证模型轮次即使丢掉 snapshot 也能读到高层结论
-        compaction_summary = (conversation.compaction_summary or "").strip()
-        if compaction_summary:
-            run_context_builder.set_compaction_summary_note(compaction_summary)
+        def _persist_consumed_turn_input(item: Any) -> None:
+            append_transcript = getattr(self.conversation_repo, "append_transcript_message", None)
+            if not callable(append_transcript):
+                return
+            context_refs = [
+                {"kind": "skill", "name": value["name"], "path": value["path"]}
+                for value in getattr(item, "selected_skills", ())
+            ]
+            context_refs.extend(
+                {
+                    "kind": "plugin",
+                    "name": value["config_name"],
+                    "config_name": value["config_name"],
+                    "path": value["path"],
+                }
+                for value in getattr(item, "selected_plugins", ())
+            )
+            append_transcript(
+                conversation.id,
+                {
+                    "id": str(getattr(item, "user_message_id", "") or f"user_{getattr(item, 'message_id', '')}"),
+                    "role": "user",
+                    "content": str(getattr(item, "content", "") or ""),
+                    "timestamp": datetime.now(UTC).isoformat(),
+                    "attachments": [dict(value) for value in getattr(item, "attachments", ())],
+                    **({"context_refs": context_refs} if context_refs else {}),
+                    "steered": True,
+                    "steer_target_message_id": str(getattr(item, "target_message_id", "") or ""),
+                },
+            )
+
+        run_metadata.setdefault("persist_consumed_turn_input", _persist_consumed_turn_input)
+
+        def _acknowledge_consumed_turn_input(item: Any) -> None:
+            acknowledge = getattr(run_manager, "acknowledge_turn_input", None)
+            if not callable(acknowledge):
+                return
+            acknowledge(conversation.id, getattr(item, "original_command", None))
+
+        run_metadata.setdefault(
+            "acknowledge_consumed_turn_input",
+            _acknowledge_consumed_turn_input,
+        )
+
+        selected_skills = run_metadata.get("selected_skills")
+        selected_plugins = run_metadata.get("selected_plugins")
+        persisted_context_refs: list[dict[str, str]] = []
+        if isinstance(selected_skills, list):
+            persisted_context_refs.extend(
+                {
+                    "kind": "skill",
+                    "name": str(item.get("name") or ""),
+                    "path": str(item.get("path") or ""),
+                }
+                for item in selected_skills
+                if isinstance(item, dict) and str(item.get("name") or "").strip()
+            )
+        if isinstance(selected_plugins, list):
+            persisted_context_refs.extend(
+                {
+                    "kind": "plugin",
+                    "name": str(item.get("config_name") or item.get("name") or ""),
+                    "config_name": str(item.get("config_name") or item.get("name") or ""),
+                    "path": str(item.get("path") or ""),
+                }
+                for item in selected_plugins
+                if isinstance(item, dict)
+                and str(item.get("config_name") or item.get("name") or "").strip()
+            )
 
         self.conversation_repo.append_transcript_message(
             conversation.id,
             {
-                "id": f"user_{uuid.uuid4().hex[:8]}",
+                "id": str(run_metadata.get("user_message_id") or f"user_{uuid.uuid4().hex[:8]}"),
                 "role": "user",
                 "content": user_message,
                 "timestamp": datetime.now(UTC).isoformat(),
                 "attachments": normalized_attachments,
+                **({"context_refs": persisted_context_refs} if persisted_context_refs else {}),
             },
         )
 
@@ -1312,6 +1030,18 @@ class SessionAgentRunnerMixin:
             user_message=user_message,
             max_iterations=run_config.agent.max_iterations,
         )
+        if isinstance(selected_skills, list):
+            agent_state.prompt_context["selected_skills"] = [
+                dict(item) for item in selected_skills if isinstance(item, dict)
+            ]
+        if isinstance(selected_plugins, list):
+            from backend.services.plugin_settings_service import resolve_enabled_plugin_mentions
+            plugin_injections = resolve_enabled_plugin_mentions(
+                [item for item in selected_plugins if isinstance(item, dict)],
+                connected_mcp_servers=connected_mcp_servers,
+            )
+            if plugin_injections:
+                agent_state.prompt_context["plugin_injections"] = plugin_injections
         agent_state.workspace_context = run_workspace_context
         agent_state.attachments = normalized_attachments
         agent_state.checkpoint_manager = getattr(self, "checkpoint_manager", None)
@@ -1334,36 +1064,47 @@ class SessionAgentRunnerMixin:
 
         conv_id = conversation.id
 
-        async def _stream_callback(line: str, stream: str = "stdout") -> None:
-            await self._send_ws_payload(
-                {
-                    "type": "command_output_chunk",
-                    "conversation_id": conv_id,
-                    "message_id": assistant_message_id,
-                    "turn_id": assistant_message_id,
-                    "content": line,
-                    "stream": stream if stream in {"stdout", "stderr"} else "stdout",
-                },
-                log_context="command_output_chunk",
-            )
-
-        async def _emit_derived_runtime_span(event_type: str, data: dict[str, Any]) -> None:
-            span_event = _runtime_span_for_agent_event(event_type, data)
-            if span_event is None:
-                return
-            span_payload = dict(span_event.data)
-            span_payload.setdefault("conversation_id", conversation.id)
-            span_payload.setdefault("message_id", assistant_message_id)
-            span_payload.setdefault("turn_id", assistant_message_id)
-            self._persist_ui_agent_state_event(conversation.id, span_event.type, span_payload)
-            await self._send_event(AgentEvent(type=span_event.type, data=span_payload))
+        async def _stream_callback(
+            line: str,
+            stream: str = "stdout",
+            tool_call_id: str = "",
+        ) -> None:
+            payload: dict[str, Any] = {
+                "conversation_id": conv_id,
+                "message_id": assistant_message_id,
+                "turn_id": assistant_message_id,
+                "content": line,
+                "stream": stream if stream in {"stdout", "stderr"} else "stdout",
+            }
+            if tool_call_id:
+                payload["id"] = tool_call_id
+                payload["tool_call_id"] = tool_call_id
+                turn_state.record_tool_output_delta({
+                    "id": tool_call_id,
+                    "output": line,
+                    "stream": payload["stream"],
+                })
+                await _persist_partial_turn()
+            await self._send_event(AgentEvent(type="command_output_chunk", data=payload))
 
         async def _emit_runtime_event(event_type: str, data: dict[str, Any]) -> None:
             payload = dict(data)
             payload.setdefault("conversation_id", conversation.id)
             if event_type in _TURN_MESSAGE_SCOPED_EVENT_TYPES:
                 payload.setdefault("message_id", assistant_message_id)
-                payload.setdefault("turn_id", assistant_message_id)
+                # Use the canonical turn_id (= run_id, captured into stream_state
+                # from agent.run.started) so callback/runtime.span events group
+                # with the Path-A tool_call/tool_result events the EventEnvelope
+                # stamps. Fall back to assistant_message_id only before run.started.
+                payload.setdefault("turn_id", stream_state.get("turn_id") or assistant_message_id)
+                # Stamp task_id from the same source as the EventEnvelope so
+                # callback-emitted events are not missing the multi-agent task id.
+                payload.setdefault(
+                    "task_id",
+                    getattr(self, "_conversation_run_task_ids", {}).get(
+                        conversation.id, getattr(self, "_active_task_id", "") or ""
+                    ),
+                )
             self._persist_ui_agent_state_event(conversation.id, event_type, payload)
             if event_type == "runtime.span":
                 span_id = str(payload.get("span_id") or "").strip()
@@ -1376,23 +1117,14 @@ class SessionAgentRunnerMixin:
                     or span_status in {"completed", "failed", "cancelled", "interrupted"}
                 ):
                     active_runtime_spans.pop(span_id, None)
-            elif event_type == "agent.loop.started":
-                loop_id = str(payload.get("loop_id") or payload.get("item_id") or "").strip()
-                if loop_id:
-                    active_agent_loops[loop_id] = dict(payload)
-            elif event_type == "agent.loop.completed":
-                loop_id = str(payload.get("loop_id") or payload.get("item_id") or "").strip()
-                if loop_id:
-                    active_agent_loops.pop(loop_id, None)
-            if event_type == "text_chunk" and payload.get("visibility") != "debug":
-                content = str(payload.get("content", ""))
-                metadata = _text_chunk_metadata(payload)
-                if content:
-                    turn_state.append_text(content, metadata)
-                if payload.get("finalize"):
-                    turn_state.finalize_text(metadata)
+            _project_agent_message_event(turn_state, event_type, payload)
+            if event_type == "agent.item" or (
+                event_type == "agent.progress"
+                and str(payload.get("status") or "").strip().lower()
+                in {"completed", "failed", "partial", "cancelled", "interrupted"}
+            ):
+                await _persist_partial_turn(force=True)
             await self._send_event(AgentEvent(type=event_type, data=payload))
-            await _emit_derived_runtime_span(event_type, payload)
 
         assistant_artifacts: list[dict[str, Any]] = []
         usage_payload: dict[str, int] | None = None
@@ -1401,15 +1133,84 @@ class SessionAgentRunnerMixin:
         query_terminal_status = ""
         query_terminal_reason = ""
         query_done_payload: dict[str, Any] = {}
+        query_run_completed_payload: dict[str, Any] = {}
         active_runtime_spans: dict[str, dict[str, Any]] = {}
-        active_agent_loops: dict[str, dict[str, Any]] = {}
         assistant_message_id = str(stream_state.get("message_id") or assistant_message_id)
 
         def _now_ms() -> int:
             return int(time.time() * 1000)
 
         turn_state = AgentTurnState(now_ms=_now_ms)
-        synthesized_no_final_reply = False
+        turn_started_at_ms = _now_ms()
+        awaiting_user_input = False
+        partial_persist_lock = asyncio.Lock()
+        last_partial_persisted_at = 0.0
+
+        async def _persist_partial_turn(*, force: bool = False) -> None:
+            """Checkpoint the current typed turn without writing every token."""
+            nonlocal last_partial_persisted_at
+            upsert = getattr(self.conversation_repo, "upsert_transcript_message", None)
+            if not callable(upsert):
+                return
+            async with partial_persist_lock:
+                now = time.monotonic()
+                # Codex durably journals streamed response items. MiniCode's
+                # transcript stores the current projection instead, so cap
+                # delta-driven rewrites while always committing lifecycle
+                # boundaries such as tool results and approval waits.
+                if not force and now - last_partial_persisted_at < 1.0:
+                    return
+                snapshot = turn_state.finalize(terminal_status="partial")
+                if not snapshot.blocks and not assistant_artifacts:
+                    return
+                partial_message: dict[str, Any] = {
+                    "id": assistant_message_id,
+                    "role": "assistant",
+                    "content": snapshot.content,
+                    "timestamp": datetime.fromtimestamp(turn_started_at_ms / 1000, UTC).isoformat(),
+                    "terminal_status": "partial",
+                    "termination_reason": "run_in_progress",
+                    "duration_ms": max(0, _now_ms() - turn_started_at_ms),
+                    "usage": snapshot.usage,
+                    "blocks": snapshot.blocks,
+                }
+                if snapshot.tool_calls:
+                    partial_message["tool_calls"] = snapshot.tool_calls
+                if assistant_artifacts:
+                    partial_message["artifacts"] = list(assistant_artifacts)
+                if snapshot.citations:
+                    partial_message["citations"] = snapshot.citations
+                try:
+                    await asyncio.to_thread(upsert, conversation.id, partial_message)
+                    last_partial_persisted_at = time.monotonic()
+                except Exception:
+                    logger.exception(
+                        "Failed to persist partial assistant transcript projection for conversation %s",
+                        conversation.id,
+                    )
+                    return
+                try:
+                    saved_snapshot = run_context_builder.export_snapshot()
+                    llm_stateful_snapshot = _export_llm_stateful_continuation_snapshot(run_llm)
+                    if llm_stateful_snapshot:
+                        saved_snapshot[LLM_STATEFUL_CONTINUATION_SNAPSHOT_KEY] = llm_stateful_snapshot
+                    else:
+                        saved_snapshot.pop(LLM_STATEFUL_CONTINUATION_SNAPSHOT_KEY, None)
+                    latest_conversation = self.conversation_repo.get_conversation(conversation.id)
+                    _merge_ui_agent_state_into_snapshot(
+                        saved_snapshot,
+                        getattr(latest_conversation, "context_snapshot", None),
+                    )
+                    await asyncio.to_thread(
+                        self.conversation_repo.save_context_snapshot,
+                        conversation.id,
+                        saved_snapshot,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to persist partial context snapshot for conversation %s",
+                        conversation.id,
+                    )
 
         async def _maybe_emit_source_citation(data: dict[str, Any]) -> None:
             citation = turn_state.record_source_citation(data)
@@ -1422,42 +1223,29 @@ class SessionAgentRunnerMixin:
             }))
 
         async def _emit_no_final_reply_summary_if_needed() -> None:
-            nonlocal run_failed_message, synthesized_no_final_reply
-            if synthesized_no_final_reply or run_failed_message:
+            nonlocal run_failed_message
+            nonlocal query_terminal_status, query_terminal_reason
+            if query_terminal_status in {"partial", "failed", "cancelled", "interrupted"}:
+                return
+            if awaiting_user_input:
                 return
             tool_records = turn_state.tool_call_records()
             current_reply = turn_state.content().strip()
-            if current_reply and not _is_low_value_collaboration_final_reply(current_reply, tool_records):
-                return
-            if not tool_records or _failed_tool_call_records(tool_records):
-                return
-            fallback_reply = _format_tool_activity_without_final_reply(
-                tool_records,
-                user_message=user_message,
-                failure_message=run_failed_message,
-            )
-            if not fallback_reply:
-                return
+            # Text routing is structural. Never reinterpret or erase a provider
+            # answer because its wording resembles process narration.
             if current_reply:
-                turn_state.replace_text("")
-            synthesized_no_final_reply = True
-            fallback_metadata = {"source": "fallback", "visibility": "final", "phase": "final"}
-            turn_state.append_text(fallback_reply, fallback_metadata)
-            fallback_event = AgentEvent.text_chunk(fallback_reply, source="fallback", visibility="final", phase="final")
-            fallback_event.data["conversation_id"] = conversation.id
-            fallback_event.data["message_id"] = assistant_message_id
-            await self._send_event(fallback_event)
+                return
+            failed_tools = bool(_failed_tool_call_records(tool_records))
+            query_terminal_status = "failed" if failed_tools or not tool_records else "partial"
+            if not query_terminal_reason:
+                query_terminal_reason = "missing_final_answer"
             if not run_failed_message:
-                run_failed_message = "操作已完成，但最终回复未能生成；请查看上方的工具结果。"
-                turn_state.record_error({"message": run_failed_message})
-                error_event = AgentEvent.error(
-                    run_failed_message,
-                    recoverable=True,
-                    error_type="api",
+                run_failed_message = (
+                    "Tool calls failed before the model produced a final response."
+                    if failed_tools
+                    else "The model ended without producing a final response."
                 )
-                error_event.data["conversation_id"] = conversation.id
-                error_event.data["message_id"] = assistant_message_id
-                await self._send_event(error_event)
+                turn_state.record_error({"message": run_failed_message})
 
         async def _cancel_child_subagents_for_run(reason: str) -> None:
             run_id = str(run_metadata.get("run_id") or "").strip()
@@ -1470,9 +1258,14 @@ class SessionAgentRunnerMixin:
             except Exception:
                 logger.debug("Failed to cancel child subagents for run %s", run_id, exc_info=True)
 
+        def _terminal_delivery_complete() -> bool:
+            checker = getattr(run_manager, "is_delivery_complete", None)
+            return bool(callable(checker) and checker(conversation.id))
+
         async def _send_done_once(status: str = "completed", reason: str = "") -> None:
             nonlocal done_event_sent
-            if done_event_sent:
+            if done_event_sent or _terminal_delivery_complete():
+                done_event_sent = True
                 return
             # Include accumulated usage so error/budget termination paths
             # (which don't emit their own done event from the loop) still
@@ -1481,10 +1274,12 @@ class SessionAgentRunnerMixin:
             done_event = AgentEvent.done(
                 status=status,
                 reason=reason,
+                duration_ms=round((time.monotonic() - start_time) * 1000),
                 input_tokens=int(u.get("input_tokens", 0) or 0),
                 output_tokens=int(u.get("output_tokens", 0) or 0),
                 cache_creation_input_tokens=int(u.get("cache_creation_input_tokens", 0) or 0),
                 cache_read_input_tokens=int(u.get("cache_read_input_tokens", 0) or 0),
+                cache_deleted_input_tokens=int(u.get("cache_deleted_input_tokens", 0) or 0),
                 reasoning_output_tokens=int(u.get("reasoning_output_tokens", 0) or 0),
             )
             for key, value in query_done_payload.items():
@@ -1494,6 +1289,16 @@ class SessionAgentRunnerMixin:
             done_event.data["message_id"] = assistant_message_id
             await self._send_event(done_event)
             done_event_sent = True
+
+        from backend.ws.reasoning_batcher import ReasoningEventBatcher
+
+        reasoning_batcher = ReasoningEventBatcher()
+
+        async def _flush_pending_reasoning() -> None:
+            pending = reasoning_batcher.flush_if_pending()
+            if pending is not None:
+                await self._send_event(pending)
+                await _persist_partial_turn()
 
         try:
             # Emit session.state_changed: working
@@ -1518,7 +1323,6 @@ class SessionAgentRunnerMixin:
                     state=agent_state,
                     runtime=AgentLoopSessionContext(
                         skill_manager=self.skill_manager,
-                        vector_memory=self.vector_memory,
                         permission_context=run_permission_context,
                         workspace_root=run_workspace_root,
                         session_id=self.session_id,
@@ -1564,54 +1368,27 @@ class SessionAgentRunnerMixin:
                     if event_turn_id:
                         stream_state["turn_id"] = event_turn_id
 
-                if event.type == "text_chunk":
-                    if event.data.get("image_data"):
-                        image_data = str(event.data.get("image_data") or "").strip()
-                        media_type = str(event.data.get("media_type") or "image/png").strip() or "image/png"
-                        if image_data:
-                            artifact_id = self.artifact_store.save(
-                                image_data,
-                                source="generated_image",
-                                type="image",
-                                preview_lines=1,
-                            )
-                            artifact = {
-                                "artifact_id": artifact_id,
-                                "artifactId": artifact_id,
-                                "kind": "image",
-                                "summary": "Generated image",
-                                "bytes": len(image_data),
-                                "media_type": media_type,
-                                "mediaType": media_type,
-                                "url": f"data:{media_type};base64,{image_data}",
-                            }
-                            assistant_artifacts.append(artifact)
-                            await self._send_ws_payload(
-                                {
-                                    "type": "artifact.preview",
-                                    "conversation_id": conv_id,
-                                    "message_id": assistant_message_id,
-                                    "artifact_id": artifact_id,
-                                    "kind": "image",
-                                    "summary": "Generated image",
-                                    "bytes": len(image_data),
-                                    "media_type": media_type,
-                                    "url": f"data:{media_type};base64,{image_data}",
-                                },
-                                log_context="artifact.preview",
-                            )
-                    if event.data.get("visibility") != "debug":
-                        content = str(event.data.get("content", ""))
-                        metadata = _text_chunk_metadata(event.data)
-                        if content:
-                            turn_state.append_text(content, metadata)
-                        if event.data.get("finalize"):
-                            turn_state.finalize_text(metadata)
-                elif event.type == "text_replace":
-                    turn_state.replace_text(
-                        str(event.data.get("content", "")),
-                        _text_chunk_metadata(event.data),
-                    )
+                if event.type in {"thinking_delta", "thinking"}:
+                    awaiting_user_input = False
+                    thinking_chunk = str(event.data.get("content", ""))
+                    thinking_metadata = {
+                        key: event.data[key]
+                        for key in ("source", "visibility", "is_raw_provider_reasoning", "provider_reasoning_type", "phase")
+                        if key in event.data
+                    }
+                    turn_state.append_thinking(thinking_chunk, thinking_metadata)
+                    for reasoning_event in reasoning_batcher.push(event):
+                        await self._send_event(reasoning_event)
+                        await _persist_partial_turn()
+                    continue
+
+                # Reasoning must never be reordered across text, tool, progress,
+                # error, or terminal boundaries.
+                await _flush_pending_reasoning()
+
+                if event.type in {"item.started", "agent_message.delta", "item.completed"}:
+                    awaiting_user_input = False
+                    _project_agent_message_event(turn_state, event.type, event.data)
                 elif event.type == "image_chunk":
                     image_data = str(event.data.get("image_data") or "").strip()
                     media_type = str(event.data.get("media_type") or "image/png").strip() or "image/png"
@@ -1621,6 +1398,8 @@ class SessionAgentRunnerMixin:
                             source="generated_image",
                             type="image",
                             preview_lines=1,
+                            conversation_id=conversation.id,
+                            workspace_root=str(run_workspace_root or ""),
                         )
                         artifact = {
                             "artifact_id": artifact_id,
@@ -1647,15 +1426,11 @@ class SessionAgentRunnerMixin:
                             },
                             log_context="artifact.preview",
                         )
-                elif event.type in {"thinking_delta", "thinking"}:
-                    thinking_chunk = str(event.data.get("content", ""))
-                    thinking_metadata = {
-                        key: event.data[key]
-                        for key in ("source", "visibility", "is_raw_provider_reasoning", "provider_reasoning_type")
-                        if key in event.data
-                    }
-                    turn_state.append_thinking(thinking_chunk, thinking_metadata)
+                    # The provider image has been converted into a typed
+                    # artifact event.  Do not also forward it as answer text.
+                    continue
                 elif event.type == "tool_call":
+                    awaiting_user_input = False
                     record = turn_state.record_tool_call(event.data)
                     if record is not None:
                         tool_id = str(record.get("id") or "")
@@ -1668,15 +1443,19 @@ class SessionAgentRunnerMixin:
                     # Preserve incremental tool output so restored transcripts keep command previews.
                     turn_state.record_tool_output_delta(event.data)
                 elif event.type == "tool_result":
+                    awaiting_user_input = False
                     tool_id = str(event.data.get("id") or "").strip()
                     if tool_id:
-                        remove_pending_tool_call(stream_state, tool_id)
                         turn_state.record_tool_result(event.data)
                     await _maybe_emit_source_citation(event.data)
                 elif event.type == "agent.progress":
                     turn_state.record_progress(event.data)
                 elif event.type == "agent.item":
                     turn_state.record_process_item(event.data)
+                elif event.type == "agent.run.completed":
+                    # Buffer the durable completion so lifecycle, transcript,
+                    # and DONE share one immutable terminal status.
+                    query_run_completed_payload = dict(event.data)
                 elif event.type == "done":
                     query_done_payload = dict(event.data)
                     usage_payload = turn_state.record_done(event.data)
@@ -1701,6 +1480,9 @@ class SessionAgentRunnerMixin:
                         model_id=getattr(run_llm, "_model", None) or getattr(getattr(run_llm, "_settings", None), "model", None),
                         provider=usage_provider,
                         session_id=self.session_id,
+                        input_includes_cache_read=bool(
+                            usage_payload.get("input_includes_cache_read", True)
+                        ),
                     )
                     await _emit_no_final_reply_summary_if_needed()
                 elif event.type == "error":
@@ -1714,14 +1496,29 @@ class SessionAgentRunnerMixin:
                             message=str(event.data.get("message") or ""),
                             recoverable=bool(event.data.get("recoverable", True)),
                         ))
+                elif event.type in {"approval_request", "ask_user"}:
+                    awaiting_user_input = True
+
+                if event.type in {
+                    "tool_call",
+                    "tool_result",
+                    "agent.item",
+                    "item.completed",
+                    "error",
+                    "approval_request",
+                    "ask_user",
+                }:
+                    await _persist_partial_turn(force=True)
+                elif event.type in {"agent_message.delta", "tool_output_delta"}:
+                    await _persist_partial_turn()
 
                 event.data.setdefault("conversation_id", conversation.id)
                 if event.type in _TURN_MESSAGE_SCOPED_EVENT_TYPES:
                     event.data.setdefault("message_id", assistant_message_id)
-                if event.type == "done":
+                if event.type in {"agent.run.completed", "done"}:
                     continue
                 await self._send_event(event)
-                await _emit_derived_runtime_span(event.type, event.data)
+            await _flush_pending_reasoning()
         except asyncio.CancelledError:
             run_interrupted = True
             interrupted_conversations = getattr(self, "_interrupted_conversation_ids", None)
@@ -1739,8 +1536,8 @@ class SessionAgentRunnerMixin:
                     type="error",
                     data={
                         "message": run_failed_message,
-                        "recoverable": True,
-                        "error_type": "api",
+                        "recoverable": False,
+                        "error_type": "runtime",
                         "conversation_id": conversation.id,
                         "message_id": assistant_message_id,
                     },
@@ -1755,57 +1552,14 @@ class SessionAgentRunnerMixin:
             # the finally block ran after an exception path).
             terminal_status = (
                 "cancelled" if run_interrupted
-                else "failed" if run_failed_message
                 else "cancelled" if query_terminal_status == "interrupted"
-                else query_terminal_status or "completed"
+                else query_terminal_status
+                if query_terminal_status
+                else "failed"
+                if run_failed_message
+                else "completed"
             )
 
-            # Close any lifecycle item whose normal terminal event was skipped
-            # by a timeout, provider exception or interrupted stream.
-            lifecycle_ended_at = _now_ms()
-            for span_id, started in list(active_runtime_spans.items()):
-                started_at = int(started.get("started_at") or lifecycle_ended_at)
-                base_event = str(started.get("event") or "runtime").removesuffix(".started")
-                closed = runtime_span(
-                    f"{base_event}.{terminal_status}",
-                    span_id=span_id,
-                    run_id=str(started.get("run_id") or ""),
-                    turn_id=str(started.get("turn_id") or assistant_message_id),
-                    iteration_id=str(started.get("iteration_id") or ""),
-                    phase=str(started.get("phase") or ""),
-                    status=terminal_status,
-                    label=str(started.get("label") or "runtime"),
-                    summary=f"{str(started.get('label') or 'Runtime').capitalize()} {terminal_status}",
-                    started_at=started_at,
-                    ended_at=lifecycle_ended_at,
-                    duration_ms=lifecycle_ended_at - started_at,
-                    requires_attention=terminal_status != "completed",
-                )
-                closed.data["conversation_id"] = conversation.id
-                closed.data["message_id"] = assistant_message_id
-                await self._send_event(closed)
-            active_runtime_spans.clear()
-            for loop_id, started in list(active_agent_loops.items()):
-                closed = AgentEvent.loop_completed(
-                    loop_id=loop_id,
-                    iteration_id=str(started.get("iteration_id") or loop_id),
-                    status=terminal_status,
-                    title="Stopped" if terminal_status != "completed" else "Processed",
-                    summary=f"Agent loop {terminal_status}",
-                    started_at=int(started.get("started_at") or lifecycle_ended_at),
-                    completed_at=lifecycle_ended_at,
-                )
-                closed.data["conversation_id"] = conversation.id
-                closed.data["message_id"] = assistant_message_id
-                await self._send_event(closed)
-            active_agent_loops.clear()
-
-            # Note: session.state_changed(idle) is emitted AFTER any synthesized
-            # fallback reply below, so the fallback text_chunk reaches the client
-            # while it is still streaming (otherwise the client ends streaming on
-            # idle and the fallback only appears after a refresh).
-            if terminal_status == "completed":
-                turn_state.finalize_text()
             turn_snapshot = turn_state.finalize(terminal_status=terminal_status)
             assistant_blocks = turn_snapshot.blocks
             assistant_citations = turn_snapshot.citations
@@ -1814,111 +1568,36 @@ class SessionAgentRunnerMixin:
             assistant_content = turn_snapshot.content
 
             assistant_tool_calls = turn_snapshot.tool_calls
-            if (
-                _is_low_value_collaboration_final_reply(assistant_content, assistant_tool_calls)
-                and assistant_tool_calls
-                and not _failed_tool_call_records(assistant_tool_calls)
-                and _format_tool_activity_without_final_reply(
-                    assistant_tool_calls,
-                    user_message=user_message,
-                    failure_message=run_failed_message,
-                )
-            ):
-                turn_state.replace_text("")
-                turn_snapshot = turn_state.finalize(terminal_status=terminal_status)
-                assistant_blocks = turn_snapshot.blocks
-                assistant_citations = turn_snapshot.citations
-                assistant_content = turn_snapshot.content
-                assistant_tool_calls = turn_snapshot.tool_calls
-            synthesized_final_reply_to_emit = ""
-            synthesized_final_error_to_emit = ""
-            failed_tool_only_reply = ""
-            if not assistant_content.strip():
-                failed_tool_only_reply = _format_failed_tool_only_reply(
-                    assistant_tool_calls,
-                    user_message=user_message,
-                    failure_message=run_failed_message,
-                )
-            if failed_tool_only_reply and not run_failed_message and terminal_status != "partial":
-                run_failed_message = "Tool calls failed before the assistant produced a reply."
-                terminal_status = "failed"
-                turn_snapshot = turn_state.finalize(terminal_status=terminal_status)
-                assistant_blocks = turn_snapshot.blocks
-                assistant_citations = turn_snapshot.citations
-                assistant_content = turn_snapshot.content
-                assistant_tool_calls = turn_snapshot.tool_calls
-                failed_tool_only_reply = _format_failed_tool_only_reply(
-                    assistant_tool_calls,
-                    user_message=user_message,
-                    failure_message=run_failed_message,
-                ) or failed_tool_only_reply
-            elif failed_tool_only_reply and terminal_status == "partial":
-                # Max-iteration/partial runs must retain the useful tool
-                # evidence; do not relabel them as "tool calls failed".
-                failed_tool_only_reply = _format_tool_activity_without_final_reply(
-                    assistant_tool_calls,
-                    user_message=user_message,
-                    failure_message=run_failed_message,
-                ) or failed_tool_only_reply
-                synthesized_final_error_to_emit = run_failed_message
-            if failed_tool_only_reply and not assistant_content.strip():
-                assistant_content = failed_tool_only_reply
-                synthesized_final_reply_to_emit = failed_tool_only_reply
-                assistant_blocks = [
-                    *assistant_blocks,
-                    {
-                        "type": "text",
-                        "content": assistant_content,
-                        "source": "fallback",
-                        "visibility": "final",
-                        "phase": "final",
-                    },
-                ]
             if not assistant_content.strip() and assistant_tool_calls:
-                no_final_reply = _format_tool_activity_without_final_reply(
-                    assistant_tool_calls,
-                    user_message=user_message,
-                    failure_message=run_failed_message,
-                )
-                if no_final_reply:
-                    if not run_failed_message:
-                        run_failed_message = "操作已完成，但最终回复未能生成；请查看上方的工具结果。"
-                        terminal_status = "failed"
-                        synthesized_final_error_to_emit = run_failed_message
-                    assistant_content = no_final_reply
-                    synthesized_final_reply_to_emit = no_final_reply
-                    assistant_blocks = [
-                        *assistant_blocks,
-                        {
-                            "type": "text",
-                            "content": assistant_content,
-                            "source": "fallback",
-                            "visibility": "final",
-                            "phase": "final",
-                        },
-                    ]
-            if synthesized_final_reply_to_emit and not synthesized_no_final_reply:
-                fallback_event = AgentEvent.text_chunk(
-                    synthesized_final_reply_to_emit,
-                    source="fallback",
-                    visibility="final",
-                    phase="final",
-                )
-                fallback_event.data["conversation_id"] = conversation.id
-                fallback_event.data["message_id"] = assistant_message_id
-                await self._send_event(fallback_event)
-            if synthesized_final_error_to_emit:
+                if terminal_status == "completed":
+                    terminal_status = "partial"
+                if not run_failed_message:
+                    run_failed_message = "The model ended without producing a final response."
+
+            # Terminal delivery is the authoritative outcome of the run. The
+            # transcript, summary and context snapshot below are projections;
+            # a full disk, lock, or serialization failure must not strand the
+            # client in a streaming state after the model has already stopped.
+            run_manager = getattr(self, "_run_manager", None)
+            mark_terminal_status = getattr(run_manager, "mark_terminal_status", None)
+            if callable(mark_terminal_status):
+                mark_terminal_status(conversation.id, terminal_status)
+            if query_run_completed_payload and not _terminal_delivery_complete():
+                run_completed_payload = dict(query_run_completed_payload)
+                run_completed_payload["status"] = terminal_status
+                run_completed_payload["conversation_id"] = conversation.id
+                run_completed_payload["message_id"] = assistant_message_id
+                if query_terminal_reason:
+                    run_completed_payload["terminal_reason"] = query_terminal_reason
+                generic_summary = str(run_completed_payload.get("summary") or "").strip().lower()
+                if terminal_status != "completed" and generic_summary in {"", "completed", "run completed"}:
+                    run_completed_payload["summary"] = {
+                        "partial": "Run partially completed",
+                        "cancelled": "Run cancelled",
+                        "failed": "Run failed",
+                    }.get(terminal_status, "Run completed")
                 await self._send_event(
-                    AgentEvent(
-                        type="error",
-                        data={
-                            "message": synthesized_final_error_to_emit,
-                            "recoverable": True,
-                            "error_type": "tool_error",
-                            "conversation_id": conversation.id,
-                            "message_id": assistant_message_id,
-                        },
-                    )
+                    AgentEvent(type="agent.run.completed", data=run_completed_payload)
                 )
             conversation_summary_payload: dict[str, Any] | None = None
             if assistant_content or assistant_blocks or assistant_tool_calls or assistant_artifacts:
@@ -1937,6 +1616,9 @@ class SessionAgentRunnerMixin:
                     assistant_message["failure_message"] = run_failed_message
                 if assistant_tool_calls:
                     assistant_message["tool_calls"] = assistant_tool_calls
+                    reply_attachments = _reply_attachments_from_tool_calls(assistant_tool_calls)
+                    if reply_attachments:
+                        assistant_message["reply_attachments"] = reply_attachments
                 if assistant_blocks:
                     assistant_message["blocks"] = assistant_blocks
                 if assistant_artifacts:
@@ -1944,7 +1626,22 @@ class SessionAgentRunnerMixin:
                 if assistant_citations:
                     assistant_message["citations"] = assistant_citations
 
-                self.conversation_repo.append_transcript_message(conversation.id, assistant_message)
+                try:
+                    upsert = getattr(self.conversation_repo, "upsert_transcript_message", None)
+                    if callable(upsert):
+                        await asyncio.to_thread(upsert, conversation.id, assistant_message)
+                    else:
+                        await asyncio.to_thread(
+                            self.conversation_repo.append_transcript_message,
+                            conversation.id,
+                            assistant_message,
+                        )
+                except Exception:
+                    logger.exception(
+                        "Failed to persist terminal assistant transcript projection "
+                        "for conversation %s",
+                        conversation.id,
+                    )
 
                 if assistant_content:
                     new_summary = build_conversation_summary(
@@ -1962,48 +1659,82 @@ class SessionAgentRunnerMixin:
                             assistant_content=assistant_content,
                         ),
                     )
-                    self.conversation_repo.update_summary(conversation.id, new_summary)
-                    updated_conversation = self.conversation_repo.update_facts(
-                        conversation.id,
-                        local_facts=new_local_facts,
-                    ) or self.conversation_repo.get_conversation(conversation.id)
-                    conversation_summary_payload = {
-                        "type": "conversation.summary.updated",
-                        "conversation_id": conversation.id,
-                        "summary": new_summary,
-                        "title": getattr(updated_conversation, "title", conversation.title),
-                        "updated_at": getattr(updated_conversation, "updated_at", conversation.updated_at),
-                    }
+                    try:
+                        await asyncio.to_thread(
+                            self.conversation_repo.update_summary,
+                            conversation.id,
+                            new_summary,
+                        )
+                        updated_conversation = await asyncio.to_thread(
+                            self.conversation_repo.update_facts,
+                            conversation.id,
+                            local_facts=new_local_facts,
+                        ) or await asyncio.to_thread(
+                            self.conversation_repo.get_conversation,
+                            conversation.id,
+                        )
+                        conversation_summary_payload = {
+                            "type": "conversation.summary.updated",
+                            "conversation_id": conversation.id,
+                            "summary": new_summary,
+                            "title": getattr(updated_conversation, "title", conversation.title),
+                            "updated_at": getattr(updated_conversation, "updated_at", conversation.updated_at),
+                        }
+                    except Exception:
+                        logger.exception(
+                            "Failed to persist conversation summary/facts projection "
+                            "for conversation %s",
+                            conversation.id,
+                        )
 
-            await self._flush_ui_agent_state_now(conversation.id)
-            saved_snapshot = run_context_builder.export_snapshot()
-            llm_stateful_snapshot = _export_llm_stateful_continuation_snapshot(run_llm)
-            if llm_stateful_snapshot:
-                saved_snapshot[LLM_STATEFUL_CONTINUATION_SNAPSHOT_KEY] = llm_stateful_snapshot
-            else:
-                saved_snapshot.pop(LLM_STATEFUL_CONTINUATION_SNAPSHOT_KEY, None)
-            latest_conversation = self.conversation_repo.get_conversation(conversation.id)
-            _merge_ui_agent_state_into_snapshot(
-                saved_snapshot,
-                getattr(latest_conversation, "context_snapshot", None),
-            )
-            self.conversation_repo.save_context_snapshot(conversation.id, saved_snapshot)
-            if conversation.id == self.active_conversation_id:
-                self._load_active_conversation_snapshot(conversation.id, saved_snapshot)
-            run_manager = getattr(self, "_run_manager", None)
-            mark_terminal_status = getattr(run_manager, "mark_terminal_status", None)
-            if callable(mark_terminal_status):
-                mark_terminal_status(conversation.id, terminal_status)
+            try:
+                await self._flush_ui_agent_state_now(conversation.id)
+            except Exception:
+                logger.exception(
+                    "Failed to flush terminal UI-agent-state projection for conversation %s",
+                    conversation.id,
+                )
+            try:
+                saved_snapshot = run_context_builder.export_snapshot()
+                llm_stateful_snapshot = _export_llm_stateful_continuation_snapshot(run_llm)
+                if llm_stateful_snapshot:
+                    saved_snapshot[LLM_STATEFUL_CONTINUATION_SNAPSHOT_KEY] = llm_stateful_snapshot
+                else:
+                    saved_snapshot.pop(LLM_STATEFUL_CONTINUATION_SNAPSHOT_KEY, None)
+                latest_conversation = await asyncio.to_thread(
+                    self.conversation_repo.get_conversation,
+                    conversation.id,
+                )
+                _merge_ui_agent_state_into_snapshot(
+                    saved_snapshot,
+                    getattr(latest_conversation, "context_snapshot", None),
+                )
+                await asyncio.to_thread(
+                    self.conversation_repo.save_context_snapshot,
+                    conversation.id,
+                    saved_snapshot,
+                )
+                if conversation.id == self.active_conversation_id:
+                    self._load_active_conversation_snapshot(conversation.id, saved_snapshot)
+            except Exception:
+                logger.exception(
+                    "Failed to persist terminal context snapshot projection for conversation %s",
+                    conversation.id,
+                )
+            # `done` is the observable commit boundary. Everything a client can
+            # immediately query after it must already be durable. Each
+            # projection above isolates its own failure, so delivery remains
+            # unconditional even when one persistence step fails.
+            await _send_done_once(status=terminal_status, reason=query_terminal_reason)
+            mark_delivery_complete = getattr(run_manager, "mark_delivery_complete", None)
+            if callable(mark_delivery_complete):
+                mark_delivery_complete(conversation.id)
             await self._send_event(AgentEvent.session_state_changed(
                 state="idle",
                 conversation_id=conversation.id,
                 reason=("completed" if terminal_status == "completed"
                         else terminal_status),
             ))
-            mark_delivery_complete = getattr(run_manager, "mark_delivery_complete", None)
-            if callable(mark_delivery_complete):
-                mark_delivery_complete(conversation.id)
-            await _send_done_once(status=terminal_status, reason=query_terminal_reason)
             if conversation_summary_payload is not None:
                 await self._send_ws_payload(
                     conversation_summary_payload,

@@ -1,13 +1,12 @@
 import {
   Minus,
-  Moon,
+  Folder,
   PanelLeft,
   PanelRight,
   Plus,
   Search,
-  Settings2,
   Square,
-  Sun,
+  SquareTerminal,
   Wifi,
   WifiOff,
   X,
@@ -44,31 +43,26 @@ export const HeaderBar = ({
 }: HeaderBarProps) => {
   const isConnected = useAppStore((s) => s.isConnected);
   const appMode = useAppStore((s) => s.appMode);
-  const themeMode = useAppStore((s) => s.themeMode);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const toggleCommandPalette = useAppStore((s) => s.toggleCommandPalette);
-  const toggleSettings = useAppStore((s) => s.toggleSettings);
-  const setThemeMode = useAppStore((s) => s.setThemeMode);
   const startNewConversation = useAppStore((s) => s.createConversation);
+  const dockCollapsed = useAppStore((s) => s.dockCollapsed);
+  const activeBottomTab = useAppStore((s) => s.activeBottomTab);
+  const openBottomTab = useAppStore((s) => s.openBottomTab);
+  const closeBottomDock = useAppStore((s) => s.closeBottomDock);
 
   const createConversationInCurrentMode = () => {
     startNewConversation({ appMode, bindWorkspace: Boolean(workingDirectory) });
   };
-  const darkThemeActive =
-    themeMode === "dark" ||
-    (themeMode === "system" && typeof window !== "undefined" && window.matchMedia?.("(prefers-color-scheme: dark)").matches);
-  const nextTheme = darkThemeActive ? "light" : "dark";
-  const connectionLabel = isConnected ? "Backend connected" : "Backend disconnected";
+  const connectionLabel = isConnected ? "后端已连接" : "后端未连接";
+  const projectName = workingDirectory.split(/[\\/]/).filter(Boolean).pop() || "MiniCode";
 
   return (
     <header className="header-bar mc-header">
       <div className="mc-header-start">
-        <IconButton label="Settings" onClick={toggleSettings} buttonRef={sideChatFallbackButtonRef}>
-          <Settings2 />
-        </IconButton>
         {leftPanelAvailable && (
           <IconButton
-            label={leftPanelOpen ? "Close left sidebar" : "Open left sidebar"}
+            label={leftPanelOpen ? "收起左侧栏" : "打开左侧栏"}
             onClick={onToggleLeftPanel}
             active={leftPanelOpen}
             ariaControls={leftPanelControls}
@@ -77,46 +71,51 @@ export const HeaderBar = ({
             <PanelLeft />
           </IconButton>
         )}
-        <IconButton label="New conversation" onClick={createConversationInCurrentMode}>
+        <IconButton label="新建任务" onClick={createConversationInCurrentMode}>
           <Plus />
         </IconButton>
       </div>
 
       <div className="mc-header-center">
-        <div className="mc-header-brand" aria-label="MiniCode">
-          <BrandMark size={18} />
-          <span>MiniCode</span>
+        <div className="mc-header-brand" aria-label={projectName} title={workingDirectory || "MiniCode"}>
+          {workingDirectory ? <Folder size={16} /> : <BrandMark size={18} />}
+          <span>{projectName}</span>
         </div>
         <div className="mc-header-drag-region" onDoubleClick={() => desktop()?.windowControls.maximize()} />
       </div>
 
       <div className="mc-header-end">
-        <IconButton label="Command palette" onClick={() => toggleCommandPalette()}>
+        <IconButton label="命令面板" onClick={() => toggleCommandPalette()} buttonRef={sideChatFallbackButtonRef}>
           <Search />
         </IconButton>
-        <span className="mc-header-theme">
-          <IconButton
-            label={darkThemeActive ? "Switch to light theme" : "Switch to dark theme"}
-            onClick={() => setThemeMode(nextTheme)}
-          >
-            {darkThemeActive ? <Sun /> : <Moon />}
-          </IconButton>
-        </span>
         {appMode !== "code" && (
           <div className="mc-header-budget">
             <ContextBudgetIndicator />
           </div>
         )}
         {rightPanelAvailable && (
-          <IconButton
-            label={rightPanelOpen ? "Close right panel" : "Open right panel"}
-            onClick={onToggleRightPanel}
-            active={rightPanelOpen}
-            ariaControls={rightPanelControls}
-            expanded={rightPanelOpen}
-          >
-            <PanelRight />
-          </IconButton>
+          <>
+            <IconButton
+              label={!dockCollapsed && activeBottomTab === "terminal" ? "关闭终端" : "打开终端"}
+              onClick={() => {
+                if (!dockCollapsed && activeBottomTab === "terminal") closeBottomDock();
+                else openBottomTab("terminal");
+              }}
+              active={!dockCollapsed && activeBottomTab === "terminal"}
+              expanded={!dockCollapsed && activeBottomTab === "terminal"}
+            >
+              <SquareTerminal />
+            </IconButton>
+            <IconButton
+              label={rightPanelOpen ? "关闭右侧栏" : "打开右侧栏"}
+              onClick={onToggleRightPanel}
+              active={rightPanelOpen}
+              ariaControls={rightPanelControls}
+              expanded={rightPanelOpen}
+            >
+              <PanelRight />
+            </IconButton>
+          </>
         )}
         <span
           role="img"
@@ -126,18 +125,18 @@ export const HeaderBar = ({
           data-connected={isConnected ? "true" : "false"}
         >
           {isConnected ? <Wifi aria-hidden="true" /> : <WifiOff aria-hidden="true" />}
-          {!isConnected && <span className="mc-connection-label">Offline</span>}
+          {!isConnected && <span className="mc-connection-label">离线</span>}
         </span>
 
         {isDesktop() && (
           <div className="mc-window-controls">
-            <WindowControlButton label="Minimize" onClick={() => desktop()?.windowControls.minimize()}>
+            <WindowControlButton label="最小化" onClick={() => desktop()?.windowControls.minimize()}>
               <Minus size={14} />
             </WindowControlButton>
-            <WindowControlButton label="Maximize" onClick={() => desktop()?.windowControls.maximize()}>
-              <Square size={11} />
+            <WindowControlButton label="最大化" onClick={() => desktop()?.windowControls.maximize()}>
+              <Square size={14} />
             </WindowControlButton>
-            <WindowControlButton label="Close" onClick={() => desktop()?.windowControls.close()} danger>
+            <WindowControlButton label="关闭" onClick={() => desktop()?.windowControls.close()} danger>
               <X size={14} />
             </WindowControlButton>
           </div>

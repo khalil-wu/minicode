@@ -1,12 +1,6 @@
 import { useAppStore } from "../stores";
 import type { ApprovalFileDiffEvent, ServerEvent } from "../protocol/events";
-
-const isEventForActiveConversation = (e: ServerEvent): boolean => {
-  const conversationId = (e as unknown as { conversation_id?: unknown }).conversation_id;
-  if (typeof conversationId !== "string" || !conversationId.trim()) return true;
-  const activeConversationId = useAppStore.getState().conversationId;
-  return !activeConversationId || conversationId === activeConversationId;
-};
+import type { DiffReviewState } from "../stores/types";
 
 const eventConversationId = (e: ServerEvent): string | undefined => {
   const conversationId = (e as unknown as { conversation_id?: unknown }).conversation_id;
@@ -96,7 +90,7 @@ const applyApprovalRequest = (
   if (patch) {
     s.updateToolCall(request.requestId, { diff: { plus, minus, patch } });
   }
-  s.setDiffReviewState({
+  const reviewState: DiffReviewState = {
     requestId: request.requestId,
     protocol: request.protocol,
     conversationId: request.conversationId,
@@ -111,7 +105,7 @@ const applyApprovalRequest = (
     mode: "approval",
     fileDecisions: {},
     lineComments: [],
-  });
+  };
   s.setDiffReview({
     requestId: request.requestId,
     protocol: request.protocol,
@@ -121,6 +115,7 @@ const applyApprovalRequest = (
     sourceTool: request.sourceTool,
     diff: patch || (typeof request.diff === "string" ? request.diff : JSON.stringify(request.diff, null, 2)),
     filePath: files.length === 1 ? files[0]?.path : files.length > 1 ? `${files.length} files` : undefined,
+    reviewState,
   });
 };
 
@@ -164,7 +159,6 @@ export const handleControlEvent = (e: ServerEvent): boolean => {
         return true;
       }
       if (request.subtype === "elicitation") {
-        if (!isEventForActiveConversation(e)) return true;
         s.setAskUser({
           requestId,
           protocol: "control",
@@ -209,30 +203,27 @@ export const handleControlEvent = (e: ServerEvent): boolean => {
       const requestIds = Array.isArray(ev.request_ids) ? ev.request_ids.filter(Boolean) : [];
       if (requestIds.length > 0) {
         s.clearApprovals(requestIds);
+        s.clearDiffReviews(requestIds);
+        s.clearAskUsers(requestIds);
         useAppStore.setState((state) => ({
-          pendingDiffReview: requestIds.includes(state.pendingDiffReview?.requestId ?? "")
-            ? null
-            : state.pendingDiffReview,
           diffReview: requestIds.includes(state.diffReview?.requestId ?? "")
             ? null
             : state.diffReview,
-          pendingAskUser: requestIds.includes(state.pendingAskUser?.requestId ?? "")
-            ? null
-            : state.pendingAskUser,
         }));
       } else {
         useAppStore.setState({
           pendingApproval: null,
           approvalQueue: [],
           pendingDiffReview: null,
+          diffReviewQueue: [],
           diffReview: null,
           pendingAskUser: null,
+          askUserQueue: [],
         });
       }
       return true;
     }
     case "ask_user": {
-      if (!isEventForActiveConversation(e)) return true;
       const ev = e as unknown as { tool_call_id?: string; request_id?: string; question?: string; options?: string[] };
       const requestId = ev.tool_call_id ?? ev.request_id ?? "";
       const question = ev.question ?? "The agent needs your input.";

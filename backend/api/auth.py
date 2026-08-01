@@ -12,10 +12,16 @@ from fastapi import Request, WebSocket
 
 RUNTIME_TOKEN_ENV = "MINICODE_RUNTIME_TOKEN"
 WORKSPACE_RAW_TOKEN_TTL_SECONDS = 300
+SKILL_ASSET_TOKEN_TTL_SECONDS = 300
+PLUGIN_ASSET_TOKEN_TTL_SECONDS = 300
 
 
 def _runtime_token() -> str:
     return os.environ.get(RUNTIME_TOKEN_ENV, "").strip()
+
+
+def _runtime_token_configured() -> bool:
+    return bool(_runtime_token())
 
 
 def _constant_time_equal(left: str, right: str) -> bool:
@@ -86,19 +92,19 @@ def _is_websocket_authorized(websocket: WebSocket) -> bool:
     return bool(supplied) and _constant_time_equal(supplied, expected)
 
 
-def _workspace_raw_token_signature(path: str, expires_at: int, secret: str) -> str:
-    payload = f"workspace_raw:v1:{path}:{expires_at}".encode("utf-8")
+def _workspace_raw_token_signature(path: str, workspace_root: str, expires_at: int, secret: str) -> str:
+    payload = f"workspace_raw:v2:{workspace_root}:{path}:{expires_at}".encode("utf-8")
     digest = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).digest()
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
-def _build_workspace_raw_token(path: str, *, now: int | None = None) -> str:
+def _build_workspace_raw_token(path: str, workspace_root: str = "", *, now: int | None = None) -> str:
     secret = _runtime_token()
     if not secret:
         return ""
     current_time = int(time.time() if now is None else now)
     expires_at = current_time + WORKSPACE_RAW_TOKEN_TTL_SECONDS
-    signature = _workspace_raw_token_signature(path, expires_at, secret)
+    signature = _workspace_raw_token_signature(path, workspace_root, expires_at, secret)
     return f"{expires_at}.{signature}"
 
 
@@ -113,7 +119,8 @@ def _is_workspace_raw_token_authorized(request: Request) -> bool:
         return False
     raw_token = request.query_params.get("raw_token", "").strip()
     raw_path = request.query_params.get("path", "").strip()
-    if not raw_token or not raw_path:
+    workspace_root = request.query_params.get("workspace_root", "").strip()
+    if not raw_token or not raw_path or not workspace_root:
         return False
     expires_at_text, separator, supplied_signature = raw_token.partition(".")
     if not separator or not supplied_signature:
@@ -124,5 +131,82 @@ def _is_workspace_raw_token_authorized(request: Request) -> bool:
         return False
     if expires_at < int(time.time()):
         return False
-    expected_signature = _workspace_raw_token_signature(raw_path, expires_at, secret)
+    expected_signature = _workspace_raw_token_signature(raw_path, workspace_root, expires_at, secret)
+    return _constant_time_equal(supplied_signature, expected_signature)
+
+
+def _skill_asset_token_signature(skill_path: str, variant: str, expires_at: int, secret: str) -> str:
+    payload = f"skill_asset:v1:{skill_path}:{variant}:{expires_at}".encode("utf-8")
+    digest = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def _build_skill_asset_token(
+    skill_path: str,
+    variant: str,
+    *,
+    now: int | None = None,
+) -> str:
+    secret = _runtime_token()
+    if not secret:
+        return ""
+    current_time = int(time.time() if now is None else now)
+    expires_at = current_time + SKILL_ASSET_TOKEN_TTL_SECONDS
+    signature = _skill_asset_token_signature(skill_path, variant, expires_at, secret)
+    return f"{expires_at}.{signature}"
+
+
+def _is_skill_asset_request(request: Request) -> bool:
+    path = request.scope.get("path", "")
+    return path in {"/api/skills/asset", "/api/v1/skills/asset"}
+
+
+def _is_skill_asset_token_authorized(request: Request) -> bool:
+    secret = _runtime_token()
+    if not secret or not _is_skill_asset_request(request):
+        return False
+    asset_token = request.query_params.get("asset_token", "").strip()
+    skill_path = request.query_params.get("skill_path", "").strip()
+    variant = request.query_params.get("variant", "").strip().lower()
+    if not asset_token or not skill_path or variant not in {"small", "large"}:
+        return False
+    expires_at_text, separator, supplied_signature = asset_token.partition(".")
+    if not separator or not supplied_signature:
+        return False
+    try:
+        expires_at = int(expires_at_text)
+    except ValueError:
+        return False
+    if expires_at < int(time.time()):
+        return False
+    expected_signature = _skill_asset_token_signature(skill_path, variant, expires_at, secret)
+    return _constant_time_equal(supplied_signature, expected_signature)
+
+
+def _plugin_asset_token_signature(plugin_path: str, variant: str, expires_at: int, secret: str) -> str:
+    payload = f"plugin_asset:v1:{plugin_path}:{variant}:{expires_at}".encode("utf-8")
+    digest = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def _is_plugin_asset_token_authorized(request: Request) -> bool:
+    secret = _runtime_token()
+    path = request.scope.get("path", "")
+    if not secret or path not in {"/api/plugins/asset", "/api/v1/plugins/asset"}:
+        return False
+    asset_token = request.query_params.get("asset_token", "").strip()
+    plugin_path = request.query_params.get("plugin_path", "").strip()
+    variant = request.query_params.get("variant", "").strip()
+    if not asset_token or not plugin_path or variant not in {"composer", "logo", "logo-dark"}:
+        return False
+    expires_at_text, separator, supplied_signature = asset_token.partition(".")
+    if not separator or not supplied_signature:
+        return False
+    try:
+        expires_at = int(expires_at_text)
+    except ValueError:
+        return False
+    if expires_at < int(time.time()):
+        return False
+    expected_signature = _plugin_asset_token_signature(plugin_path, variant, expires_at, secret)
     return _constant_time_equal(supplied_signature, expected_signature)

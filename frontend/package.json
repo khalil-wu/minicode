@@ -6,10 +6,12 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "check:bundle-budget": "node scripts/check-bundle-budget.mjs",
     "check:ui-debt": "node scripts/check-ui-debt.mjs",
     "preview": "vite preview",
     "test": "npm exec vitest run",
-    "test:e2e:electron": "playwright test tests/e2e/electron-multi-agent.spec.ts --config=playwright.config.ts --workers=1"
+    "test:e2e:electron": "playwright test tests/e2e/electron-multi-agent.spec.ts --config=playwright.config.ts --workers=1",
+    "test:e2e:real-provider": "playwright test tests/e2e/electron-real-provider.spec.ts --config=playwright.config.ts --workers=1"
   },
   "dependencies": {
     "@iconify-icons/logos": "^1.2.36",
@@ -19,6 +21,8 @@
     "@lobehub/icons": "^1.80.0",
     "@lobehub/icons-static-svg": "^1.94.0",
     "@monaco-editor/react": "^4.7.0",
+    "@noble/hashes": "^2.2.0",
+    "@tanstack/react-virtual": "3.13.12",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "katex": "^0.17.0",
@@ -32,6 +36,7 @@
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.0",
     "remark-math": "^6.0.0",
+    "strip-ansi": "^7.2.0",
     "zustand": "^5.0.0"
   },
   "devDependencies": {

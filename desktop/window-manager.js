@@ -36,6 +36,7 @@ let getAppRoot = () => process.cwd();
 let onMainWindowCreated = null;
 let onDeepLink = null;
 let getPendingDeepLink = () => null;
+let onDiagnosticIncident = null;
 
 // ---------------------------------------------------------------------------
 // Initialization
@@ -52,6 +53,7 @@ function init(deps) {
   if (typeof deps.onMainWindowCreated === "function") onMainWindowCreated = deps.onMainWindowCreated;
   if (typeof deps.onDeepLink === "function") onDeepLink = deps.onDeepLink;
   if (typeof deps.getPendingDeepLink === "function") getPendingDeepLink = deps.getPendingDeepLink;
+  if (typeof deps.onDiagnosticIncident === "function") onDiagnosticIncident = deps.onDiagnosticIncident;
 }
 
 // ---------------------------------------------------------------------------
@@ -171,6 +173,13 @@ function attachRendererDiagnostics(window, label) {
   });
   window.webContents.on("render-process-gone", (_event, details) => {
     appendDesktopLog(`[renderer:gone][${label}] reason=${details.reason} exitCode=${details.exitCode}`);
+    if (onDiagnosticIncident) {
+      onDiagnosticIncident("render-process-gone", {
+        label,
+        reason: details.reason,
+        exitCode: details.exitCode,
+      });
+    }
   });
 }
 

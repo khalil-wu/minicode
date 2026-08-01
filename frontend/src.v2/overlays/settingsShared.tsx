@@ -1,9 +1,9 @@
 import React from "react";
-import type { EffortLevel, PromptPersona } from "../stores/types";
+import type { EffortLevel } from "../stores/types";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
-export type ProviderId = "anthropic" | "openai" | "deepseek" | "openrouter" | "custom";
+export type ProviderId = "anthropic" | "openai" | "custom";
 export type Tab = "general" | "provider" | "connectors" | "scheduler" | "features" | "plugins" | "advanced";
 export type CustomWireApi = "chat" | "responses" | "anthropic";
 export type BackendProvider = "openai" | "anthropic" | "custom";
@@ -35,7 +35,6 @@ export type ProviderHistoryEntry = ProviderSection & {
 export type LLMSettingsPayload = {
   provider?: string;
   active_model?: string;
-  prompt_persona?: "minicode" | "codex" | string;
   openai?: ProviderSection;
   anthropic?: ProviderSection;
   custom?: ProviderSection;
@@ -69,35 +68,30 @@ export type LLMModelsRefreshResult = {
 // ── Constants ──────────────────────────────────────────────────────────
 
 export const PROVIDERS = [
-  { id: "anthropic", label: "Anthropic", placeholder: "sk-ant-...", hasBaseUrl: true, defaultUrl: "", defaultModel: "claude-sonnet-4-6" },
-  { id: "openai", label: "OpenAI", placeholder: "sk-...", hasBaseUrl: true, defaultUrl: "https://api.openai.com/v1", defaultModel: "gpt-5.4" },
-  { id: "deepseek", label: "DeepSeek", placeholder: "sk-...", hasBaseUrl: true, defaultUrl: "https://api.deepseek.com/v1", defaultModel: "deepseek-v4-pro" },
-  { id: "openrouter", label: "OpenRouter", placeholder: "sk-or-...", hasBaseUrl: true, defaultUrl: "https://openrouter.ai/api/v1", defaultModel: "anthropic/claude-sonnet-4" },
-  { id: "custom", label: "Custom", placeholder: "API key", hasBaseUrl: true, defaultUrl: "", defaultModel: "" },
+  { id: "anthropic", label: "Anthropic", placeholder: "sk-ant-...", hasBaseUrl: true, defaultUrl: "", defaultModel: "" },
+  { id: "openai", label: "OpenAI", placeholder: "sk-...", hasBaseUrl: true, defaultUrl: "https://api.openai.com/v1", defaultModel: "" },
+  { id: "custom", label: "自定义", placeholder: "API 密钥", hasBaseUrl: true, defaultUrl: "", defaultModel: "" },
 ] as const;
 
 export const EFFORT_LEVELS: { id: EffortLevel; label: string; desc: string }[] = [
-  { id: "none", label: "none", desc: "Provider effort: none" },
-  { id: "minimal", label: "minimal", desc: "Provider effort: minimal" },
-  { id: "low", label: "low", desc: "Provider effort: low" },
-  { id: "medium", label: "medium", desc: "Provider effort: medium" },
-  { id: "high", label: "high", desc: "Provider effort: high" },
-  { id: "xhigh", label: "xhigh", desc: "Provider effort: xhigh" },
-  { id: "max", label: "max", desc: "Provider effort: max" },
+  { id: "none", label: "关闭", desc: "不使用额外推理" },
+  { id: "minimal", label: "最低", desc: "最低推理强度" },
+  { id: "low", label: "低", desc: "较低推理强度" },
+  { id: "medium", label: "中", desc: "中等推理强度" },
+  { id: "high", label: "高", desc: "较高推理强度" },
+  { id: "xhigh", label: "极高", desc: "极高推理强度" },
+  { id: "max", label: "最高", desc: "最高推理强度" },
 ];
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
 export const toUiProvider = (payload: unknown): ProviderId => {
-  const value = payload as { provider?: string; custom?: { base_url?: string } };
-  if (value.provider === "anthropic") return "anthropic";
-  if (value.provider === "custom") {
-    const host = value.custom?.base_url ?? "";
-    if (host.includes("deepseek.com")) return "deepseek";
-    if (host.includes("openrouter.ai")) return "openrouter";
-    return "custom";
-  }
-  return "openai";
+  const value = payload as LLMSettingsPayload;
+  const rawProvider = String(value.provider || "custom").trim().toLowerCase();
+  if (rawProvider === "anthropic") return "anthropic";
+  if (rawProvider === "openai") return "openai";
+  if (rawProvider === "custom") return "custom";
+  return "custom";
 };
 
 export const backendProvider = (provider: ProviderId): "openai" | "anthropic" | "custom" =>
@@ -112,30 +106,21 @@ export const defaultSectionForProvider = (provider: ProviderId): ProviderSection
     wire_api: provider === "anthropic" ? "anthropic" : provider === "openai" ? "responses" : "chat",
     thinking_budget: 0,
     responses_reasoning_summary: "off",
-    responses_stateful_continuation: provider === "openai",
-    prompt_cache_retention: provider === "openai" ? "24h" : "",
+    responses_stateful_continuation: false,
+    prompt_cache_retention: "",
   };
 };
 
 export const sectionForUiProvider = (payload: LLMSettingsPayload | null, provider: ProviderId): ProviderSection | undefined => {
   if (!payload) return undefined;
-  const bp = backendProvider(provider);
-  if (bp !== "custom") return payload[bp];
-  const section = payload.custom;
-  const host = section?.base_url ?? "";
-  if (provider === "deepseek") return host.includes("deepseek.com") ? section : undefined;
-  if (provider === "openrouter") return host.includes("openrouter.ai") ? section : undefined;
-  return section;
+  return payload[backendProvider(provider)];
 };
 
 const historyProviderForEntry = (entry: ProviderHistoryEntry): ProviderId => {
   const provider = String(entry.provider || "").trim().toLowerCase();
   const providerId = String(entry.provider_id || "").trim().toLowerCase();
-  const host = String(entry.base_url || "").trim().toLowerCase();
-  if (provider === "anthropic" || providerId === "anthropic_off") return "anthropic";
-  if (provider === "openai" || providerId === "openai_official") return "openai";
-  if (host.includes("deepseek.com") || providerId === "deepseek") return "deepseek";
-  if (host.includes("openrouter.ai") || providerId === "openrouter") return "openrouter";
+  if (provider === "anthropic" || providerId === "anthropic") return "anthropic";
+  if (provider === "openai" || providerId === "openai") return "openai";
   return "custom";
 };
 
@@ -195,44 +180,25 @@ export const effectiveCustomWireApi = (
   baseUrl: string,
   wireApi: CustomWireApi,
 ): CustomWireApi => {
+  void baseUrl;
   if (provider === "anthropic") return "anthropic";
   if (provider === "openai") return wireApi === "responses" ? "responses" : "chat";
-  const host = baseUrl.trim().toLowerCase();
-  if (provider === "deepseek" || host.includes("api.deepseek.com")) return "chat";
   return wireApi;
 };
 
-export const isGptLikeModelId = (model: string): boolean => {
-  const normalized = String(model || "").trim().replace(/_/g, "-").toLowerCase();
-  return Boolean(
-    normalized.startsWith("gpt-") ||
-    normalized.includes("/gpt-") ||
-    normalized.startsWith("codex") ||
-    normalized.includes("/codex"),
-  );
+export const canChooseApiFormat = (provider: ProviderId, baseUrl: string): boolean => {
+  void baseUrl;
+  return provider !== "anthropic";
 };
 
-export const canChooseApiFormat = (provider: ProviderId, baseUrl: string): boolean =>
-  provider === "openai" ||
-  (backendProvider(provider) === "custom" && effectiveCustomWireApi(provider, baseUrl, "responses") === "responses");
+export const defaultResponsesStatefulContinuation = (wireApi: string): boolean => {
+  void wireApi;
+  return false;
+};
 
-export const defaultResponsesStatefulContinuation = (wireApi: string): boolean =>
-  String(wireApi || "").trim().toLowerCase() === "responses";
-
-export const defaultPromptCacheRetention = (wireApi: string): string =>
-  defaultResponsesStatefulContinuation(wireApi) ? "24h" : "";
-
-export const shouldShowResponsesFastPathHint = (
-  provider: ProviderId,
-  baseUrl: string,
-  model: string,
-  wireApi: string,
-): boolean => {
-  if (!isGptLikeModelId(model)) return false;
-  if (!canChooseApiFormat(provider, baseUrl)) return false;
-  const normalizedWire = String(wireApi || "chat").trim().toLowerCase();
-  if (normalizedWire === "responses") return false;
-  return effectiveCustomWireApi(provider, baseUrl, "responses") === "responses";
+export const defaultPromptCacheRetention = (wireApi: string): string => {
+  void wireApi;
+  return "";
 };
 
 export const runtimeCapabilityEffortLevels = (value: unknown): EffortLevel[] => {
@@ -254,19 +220,13 @@ export const formatProviderError = (error: unknown): string => {
   const raw = error instanceof Error ? error.message : String(error);
   const text = raw.replace(/^Error:\s*/i, "").trim();
   if (/your request was blocked/i.test(text)) {
-    return "gateway blocked the request. Check the gateway allowlist, Base URL, API format, and selected model.";
+    return "网关阻止了请求，请检查网关白名单、Base URL、API 格式和所选模型。";
   }
-  return text || "check key, URL, API format, and model";
-};
-
-export const normalizePromptPersona = (value: unknown): PromptPersona | undefined => {
-  const text = String(value ?? "").trim().toLowerCase();
-  if (text === "codex" || text === "minicode") return text;
-  return undefined;
+  return text || "请检查密钥、URL、API 格式和模型";
 };
 
 export const formatProviderCheckSummary = (result: LLMCheckResult): string => {
-  if (result.ok) return `\u9274\u6743\u901A\u8FC7 \u00B7 ${result.provider_id} \u00B7 ${result.model || "\u672A\u9009\u62E9\u6A21\u578B"}`;
+  if (result.ok) return `\u751F\u6210\u6D4B\u8BD5\u901A\u8FC7 \u00B7 ${result.provider_id} \u00B7 ${result.model || "\u672A\u9009\u62E9\u6A21\u578B"}`;
   const status = result.status_code ? `HTTP ${result.status_code}` : "\u672A\u901A\u8FC7";
   return `${status} \u00B7 ${result.provider_id} \u00B7 ${result.hint || result.message || "\u8BF7\u68C0\u67E5 key\u3001URL \u548C\u6A21\u578B\u662F\u5426\u5339\u914D"}`;
 };
@@ -277,7 +237,7 @@ export const Section = ({ title, description, children }: { title: string; descr
   <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
     <div>
       <div style={{ fontSize: "var(--text-sm)", fontWeight: 600, color: "var(--text-primary)" }}>{title}</div>
-      {description && <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{description}</div>}
+      {description && <div style={{ fontSize: "var(--text-2xs)", color: "var(--text-muted)", marginTop: 2 }}>{description}</div>}
     </div>
     {children}
   </div>
@@ -292,13 +252,13 @@ export const SettingRow = ({ label, children }: { label: string; children: React
 
 export const ProviderCheckPanel = ({ result }: { result: LLMCheckResult }) => (
   <div style={providerCheckPanelStyle}>
-    <div style={providerCheckTitleStyle}>{result.ok ? "\u6A21\u578B\u9274\u6743\u901A\u8FC7" : "\u6A21\u578B\u9274\u6743\u5931\u8D25"}</div>
+    <div style={providerCheckTitleStyle}>{result.ok ? "\u8FDE\u63A5\u4E0E\u751F\u6210\u6D4B\u8BD5\u901A\u8FC7" : "\u8FDE\u63A5\u6216\u751F\u6210\u6D4B\u8BD5\u5931\u8D25"}</div>
     <div style={providerCheckGridStyle}>
-      <span>Provider</span><code>{result.provider_id || result.provider}</code>
-      <span>Base URL</span><code>{result.base_url || "\u672A\u8BBE\u7F6E"}</code>
-      <span>Model</span><code>{result.model || "\u672A\u8BBE\u7F6E"}</code>
-      <span>Key</span><code>{result.has_api_key ? "\u5DF2\u914D\u7F6E" : "\u672A\u914D\u7F6E"}</code>
-      {result.status_code != null && <><span>Status</span><code>{result.status_code}</code></>}
+      <span>提供商</span><code>{result.provider_id || result.provider}</code>
+      <span>接口地址</span><code>{result.base_url || "\u672A\u8BBE\u7F6E"}</code>
+      <span>模型</span><code>{result.model || "\u672A\u8BBE\u7F6E"}</code>
+      <span>密钥</span><code>{result.has_api_key ? "\u5DF2\u914D\u7F6E" : "\u672A\u914D\u7F6E"}</code>
+      {result.status_code != null && <><span>状态</span><code>{result.status_code}</code></>}
     </div>
     {!result.ok && (result.hint || result.message) && (
       <div style={providerCheckHintStyle}>{result.hint || result.message}</div>
@@ -337,11 +297,11 @@ export const providerCheckHintStyle: React.CSSProperties = { color: "var(--state
 
 export const subTabBarStyle: React.CSSProperties = { display: "inline-flex", alignSelf: "flex-start", gap: 2, padding: 3, backgroundColor: "var(--surface-soft)", border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm, 8px)" };
 export const subTabStyle = (active: boolean): React.CSSProperties => ({ display: "inline-flex", alignItems: "center", gap: 7, height: 30, padding: "0 10px", border: 0, borderRadius: "var(--radius-sm, 6px)", backgroundColor: active ? "var(--surface-base)" : "transparent", color: active ? "var(--text-primary)" : "var(--text-secondary)", cursor: "pointer", fontSize: "var(--text-sm)", fontWeight: 650 });
-export const subTabCountStyle: React.CSSProperties = { color: "var(--text-muted)", fontSize: 11, fontFamily: "var(--font-mono)" };
+export const subTabCountStyle: React.CSSProperties = { color: "var(--text-muted)", fontSize: "var(--text-2xs)", fontFamily: "var(--font-mono)" };
 export const emptyInlineStyle: React.CSSProperties = { padding: "12px 0", color: "var(--text-muted)", fontSize: "var(--text-sm)" };
 export const mcpServerRowStyle: React.CSSProperties = { display: "flex", alignItems: "center", gap: 10, minHeight: 44, padding: "8px 10px", backgroundColor: "var(--surface-soft)", border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm, 7px)" };
 export const mcpNameStyle: React.CSSProperties = { flexShrink: 1, minWidth: 0, fontWeight: 650, fontSize: "var(--text-sm)", color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
-export const mcpErrorStyle: React.CSSProperties = { fontSize: 11, color: "var(--state-danger)", marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
+export const mcpErrorStyle: React.CSSProperties = { fontSize: "var(--text-2xs)", color: "var(--state-danger)", marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 const mcpTone = (state: string): string => {
   if (state === "connected") return "var(--state-success)";
   if (state === "error" || state === "failed" || state === "expired") return "var(--state-danger)";
@@ -349,12 +309,12 @@ const mcpTone = (state: string): string => {
   return "var(--text-muted)";
 };
 export const mcpDotStyle = (status: string): React.CSSProperties => ({ width: 8, height: 8, borderRadius: "50%", flexShrink: 0, backgroundColor: mcpTone(status) });
-export const statusChipStyle = (status: string): React.CSSProperties => ({ flexShrink: 0, padding: "1px 6px", borderRadius: "999px", border: "1px solid var(--border-subtle)", color: mcpTone(status), fontSize: 10, fontWeight: 700, textTransform: "uppercase" });
-export const miniMetaStyle: React.CSSProperties = { flexShrink: 0, color: "var(--text-muted)", fontSize: 11, fontFamily: "var(--font-mono)" };
+export const statusChipStyle = (status: string): React.CSSProperties => ({ flexShrink: 0, padding: "1px 6px", borderRadius: "999px", border: "1px solid var(--border-subtle)", color: mcpTone(status), fontSize: "var(--text-3xs)", fontWeight: 700, textTransform: "uppercase" });
+export const miniMetaStyle: React.CSSProperties = { flexShrink: 0, color: "var(--text-muted)", fontSize: "var(--text-2xs)", fontFamily: "var(--font-mono)" };
 export const mcpActionBtnStyle: React.CSSProperties = { backgroundColor: "transparent", border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm, 5px)", width: 28, height: 28, cursor: "pointer", color: "var(--text-muted)", display: "flex", alignItems: "center", justifyContent: "center", padding: 0 };
 export const marketplaceListStyle: React.CSSProperties = { display: "grid", gap: 1, border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm, 8px)", overflow: "hidden" };
 export const marketplaceRowStyle: React.CSSProperties = { display: "flex", alignItems: "center", gap: 10, minHeight: 54, padding: "9px 11px", backgroundColor: "var(--surface-soft)", borderBottom: "1px solid var(--border-subtle)" };
 export const marketplaceTitleStyle: React.CSSProperties = { fontSize: "var(--text-sm)", fontWeight: 650, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
-export const marketplaceDescStyle: React.CSSProperties = { fontSize: 12, color: "var(--text-muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
-export const installedPillStyle: React.CSSProperties = { flexShrink: 0, padding: "3px 8px", borderRadius: "999px", color: "var(--state-success)", border: "1px solid color-mix(in oklch, var(--state-success) 35%, var(--border-subtle))", fontSize: 11, fontWeight: 650 };
+export const marketplaceDescStyle: React.CSSProperties = { fontSize: "var(--text-xxs)", color: "var(--text-muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
+export const installedPillStyle: React.CSSProperties = { flexShrink: 0, padding: "3px 8px", borderRadius: "999px", color: "var(--state-success)", border: "1px solid color-mix(in oklch, var(--state-success) 35%, var(--border-subtle))", fontSize: "var(--text-2xs)", fontWeight: 650 };
 export const compactInstallStyle: React.CSSProperties = { flexShrink: 0, height: 30, padding: "0 12px", borderRadius: "var(--radius-sm, 6px)", border: "1px solid var(--border-subtle)", backgroundColor: "var(--surface-base)", color: "var(--text-secondary)", fontSize: "var(--text-xs)", fontWeight: 650, cursor: "pointer" };

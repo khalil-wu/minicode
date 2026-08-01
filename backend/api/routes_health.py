@@ -131,9 +131,9 @@ def _build_doctor_payload() -> dict[str, Any]:
 
 def _build_preview_doctor_payload() -> list[dict[str, Any]]:
     try:
-        from backend.preview import running_preview_processes
+        from backend.preview import all_running_preview_processes
 
-        return [process.to_dict() for process in running_preview_processes()]
+        return [process.to_dict() for process in all_running_preview_processes()]
     except Exception as exc:
         logger.warning("Preview doctor payload failed: %s", exc)
         return []

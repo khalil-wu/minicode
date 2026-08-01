@@ -1,16 +1,15 @@
 """Agent event and WebSocket command conversion helpers.
 
-Output-protocol note (vs. Codex): the agent loop routes model text by phase at
-the event source. Commentary/preamble text is emitted as timeline/process
-activity, while accepted answers are emitted on the final-answer path. The
-legacy `text_chunk` event name is retained for frontend and transcript
-compatibility. Runtimes may send provisional answer drafts for unphased provider
-text when configured; if a later tool call proves the text was a preamble, the
-draft is withdrawn and preserved as process output.
+Provider text with an explicit phase is projected at its source. Providers that
+do not expose phases are resolved within one provider response: text preceding
+a tool call is process output, while text from a response without tools is the
+answer. Assistant text follows the same item lifecycle used by Codex and pi:
+started, delta, completed.
 """
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -40,6 +39,8 @@ class AgentEvent:
         user_message_id: str = "",
         position: int = 0,
         reason: str = "",
+        target_message_id: str = "",
+        turn_mode: str = "",
     ) -> AgentEvent:
         data: dict[str, Any] = {
             "status": status,
@@ -52,57 +53,63 @@ class AgentEvent:
             data["position"] = position
         if reason:
             data["reason"] = reason
+        if target_message_id:
+            data["target_message_id"] = target_message_id
+        if turn_mode:
+            data["turn_mode"] = turn_mode
         return cls(type="user_message.queue.updated", data=data)
 
     @classmethod
-    def text_chunk(
+    def agent_message_started(
         cls,
-        content: str,
         *,
-        source: str = "",
-        visibility: str = "",
-        role: str = "",
-        phase: str = "",
-        finalize: bool = False,
-        metadata: dict[str, Any] | None = None,
+        item_id: str = "agent-message",
     ) -> AgentEvent:
-        data: dict[str, Any] = {"content": content}
-        if source:
-            data["source"] = source
-        if visibility:
-            data["visibility"] = visibility
-        if role:
-            data["role"] = role
-        if phase:
-            data["phase"] = phase
-        if finalize:
-            # Contentless seal: re-tag the last streamed text block as the
-            # final answer without re-emitting content (already streamed live).
-            data["finalize"] = True
-        if metadata:
-            data["metadata"] = metadata
-        return cls(type="text_chunk", data=data)
+        return cls(type="item.started", data={
+            "item": {
+                "id": item_id,
+                "type": "agent_message",
+                "text": "",
+                "status": "in_progress",
+            },
+        })
 
     @classmethod
-    def text_replace(
+    def agent_message_delta(
         cls,
-        content: str = "",
+        delta: str,
         *,
-        source: str = "",
-        visibility: str = "",
-        phase: str = "",
-        metadata: dict[str, Any] | None = None,
+        item_id: str = "agent-message",
     ) -> AgentEvent:
-        data: dict[str, Any] = {"content": content}
-        if source:
-            data["source"] = source
-        if visibility:
-            data["visibility"] = visibility
-        if phase:
-            data["phase"] = phase
-        if metadata:
-            data["metadata"] = metadata
-        return cls(type="text_replace", data=data)
+        return cls(type="agent_message.delta", data={
+            "item_id": item_id,
+            "delta": delta,
+        })
+
+    @classmethod
+    def agent_message_completed(
+        cls,
+        text: str,
+        *,
+        item_id: str = "agent-message",
+        source: str = "model_final",
+        status: str = "completed",
+        finish_reason: str = "",
+        provider_raw: dict[str, Any] | None = None,
+    ) -> AgentEvent:
+        item: dict[str, Any] = {
+            "id": item_id,
+            "type": "agent_message",
+            "text": text,
+            "source": source,
+            "status": status,
+        }
+        data: dict[str, Any] = {"item": item}
+        if finish_reason:
+            data["finish_reason"] = finish_reason
+        if provider_raw:
+            data["provider_raw"] = dict(provider_raw)
+        return cls(type="item.completed", data=data)
 
     @classmethod
     def thinking_chunk(
@@ -142,7 +149,6 @@ class AgentEvent:
         status: str = "running",
         started_at: int | None = None,
         display_hint: str = "",
-        input_summary: str = "",
         result_kind: str = "",
         activity_kind: str = "",
         group_id: str = "",
@@ -150,9 +156,6 @@ class AgentEvent:
         turn_id: str = "",
         iteration_id: str = "",
         phase: str = "",
-        display_scope: str = "activity",
-        panel_hint: str = "inspector",
-        requires_attention: bool = False,
         side_effect_kind: str = "",
         idempotent: bool | None = None,
         idempotency_key: str = "",
@@ -162,16 +165,11 @@ class AgentEvent:
             "name": name,
             "args": args,
             "status": status,
-            "display_scope": display_scope,
-            "panel_hint": panel_hint,
-            "requires_attention": requires_attention,
         }
         if started_at is not None:
             data["started_at"] = started_at
         if display_hint:
             data["display_hint"] = display_hint
-        if input_summary:
-            data["input_summary"] = input_summary
         if result_kind:
             data["result_kind"] = result_kind
         if activity_kind:
@@ -249,22 +247,18 @@ class AgentEvent:
         turn_id: str = "",
         iteration_id: str = "",
         phase: str = "",
-        display_scope: str = "activity",
-        panel_hint: str = "inspector",
-        requires_attention: bool = False,
         side_effect_kind: str = "",
         idempotent: bool | None = None,
         idempotency_key: str = "",
-        outcome: dict[str, Any] | None = None,
+        output_files: list[dict[str, Any]] | None = None,
+        superseded_tool_call_ids: list[str] | None = None,
+        removed_file_paths: list[str] | None = None,
     ) -> AgentEvent:
         result: dict[str, Any] = {
             "id": id,
             "summary": summary,
             "is_error": is_error,
             "status": status or ("failed" if is_error else "success"),
-            "display_scope": display_scope,
-            "panel_hint": panel_hint,
-            "requires_attention": requires_attention,
         }
         if artifact_id:
             result["artifact_id"] = artifact_id
@@ -284,6 +278,8 @@ class AgentEvent:
             result["display_summary"] = display_summary
         if result_kind:
             result["result_kind"] = result_kind
+        if activity_kind:
+            result["activity_kind"] = activity_kind
         if group_id:
             result["group_id"] = group_id
         if step_id:
@@ -318,76 +314,13 @@ class AgentEvent:
             result["idempotent"] = idempotent
         if idempotency_key:
             result["idempotency_key"] = idempotency_key
-        if outcome is not None:
-            result["outcome"] = outcome
+        if output_files:
+            result["output_files"] = [dict(item) for item in output_files]
+        if superseded_tool_call_ids:
+            result["superseded_tool_call_ids"] = list(superseded_tool_call_ids)
+        if removed_file_paths:
+            result["removed_file_paths"] = list(removed_file_paths)
         return cls(type="tool_result", data=result)
-
-    @classmethod
-    def loop_started(
-        cls,
-        *,
-        loop_id: str,
-        iteration_id: str = "",
-        title: str = "Working",
-        summary: str = "",
-        started_at: int | None = None,
-        default_collapsed: bool = False,
-        transition_reason: str = "",
-        transition_details: dict[str, Any] | None = None,
-    ) -> AgentEvent:
-        payload: dict[str, Any] = {
-            "item_id": loop_id,
-            "loop_id": loop_id,
-            "iteration_id": iteration_id or loop_id,
-            "status": "running",
-            "title": title,
-            "summary": summary or title,
-            "default_collapsed": default_collapsed,
-        }
-        if started_at is not None:
-            payload["started_at"] = started_at
-        if transition_reason:
-            payload["transition_reason"] = transition_reason
-        if transition_details:
-            payload["transition_details"] = transition_details
-        return cls(type="agent.loop.started", data=payload)
-
-    @classmethod
-    def loop_completed(
-        cls,
-        *,
-        loop_id: str,
-        iteration_id: str = "",
-        status: str = "completed",
-        title: str = "Processed",
-        summary: str = "",
-        started_at: int | None = None,
-        completed_at: int | None = None,
-        duration_ms: int | None = None,
-        item_count: int | None = None,
-        tool_call_count: int | None = None,
-        default_collapsed: bool = True,
-    ) -> AgentEvent:
-        payload: dict[str, Any] = {
-            "item_id": loop_id,
-            "loop_id": loop_id,
-            "iteration_id": iteration_id or loop_id,
-            "status": status,
-            "title": title,
-            "summary": summary or title,
-            "default_collapsed": default_collapsed,
-        }
-        if started_at is not None:
-            payload["started_at"] = started_at
-        if completed_at is not None:
-            payload["completed_at"] = completed_at
-        if duration_ms is not None:
-            payload["duration_ms"] = duration_ms
-        if item_count is not None:
-            payload["item_count"] = item_count
-        if tool_call_count is not None:
-            payload["tool_call_count"] = tool_call_count
-        return cls(type="agent.loop.completed", data=payload)
 
     @classmethod
     def agent_item(
@@ -412,9 +345,6 @@ class AgentEvent:
         group_id: str = "",
         step_id: str = "",
         tool_call_ids: list[str] | None = None,
-        display_scope: str = "",
-        panel_hint: str = "",
-        requires_attention: bool = False,
         skill_name: str = "",
         trigger_mode: str = "",
         source_level: str = "",
@@ -428,12 +358,7 @@ class AgentEvent:
             "role": role,
             "status": status,
             "visibility": visibility,
-            "requires_attention": requires_attention,
         }
-        if display_scope:
-            payload["display_scope"] = display_scope
-        if panel_hint:
-            payload["panel_hint"] = panel_hint
         if source:
             payload["source"] = source
         if content:
@@ -493,9 +418,6 @@ class AgentEvent:
         group_id: str = "",
         step_id: str = "",
         iteration_id: str = "",
-        display_scope: str = "",
-        panel_hint: str = "",
-        requires_attention: bool = False,
         ephemeral: bool = False,
     ) -> AgentEvent:
         payload: dict[str, Any] = {
@@ -507,14 +429,9 @@ class AgentEvent:
             "label": label,
             "summary": summary or message,
             "visibility": visibility,
-            "requires_attention": requires_attention,
         }
         if ephemeral:
             payload["ephemeral"] = True
-        if display_scope:
-            payload["display_scope"] = display_scope
-        if panel_hint:
-            payload["panel_hint"] = panel_hint
         if detail:
             payload["detail"] = detail
         if tool_call_id:
@@ -534,81 +451,30 @@ class AgentEvent:
     @classmethod
     def agent_run_started(cls, record: Any) -> AgentEvent:
         payload = record.to_dict() if hasattr(record, "to_dict") else dict(record or {})
+        cls._add_canonical_lifecycle(payload, kind="agent")
         return cls(type="agent.run.started", data=payload)
-
-    @classmethod
-    def agent_run_updated(cls, record: Any) -> AgentEvent:
-        payload = record.to_dict() if hasattr(record, "to_dict") else dict(record or {})
-        return cls(type="agent.run.updated", data=payload)
 
     @classmethod
     def agent_run_completed(cls, record: Any) -> AgentEvent:
         payload = record.to_dict() if hasattr(record, "to_dict") else dict(record or {})
+        cls._add_canonical_lifecycle(payload, kind="agent")
         return cls(type="agent.run.completed", data=payload)
 
-    @classmethod
-    def agent_phase_updated(
-        cls,
-        run_id: str,
-        phase: str,
-        *,
-        status: str = "running",
-        summary: str = "",
-        role: str = "",
-        conversation_id: str = "",
-    ) -> AgentEvent:
-        payload: dict[str, Any] = {
-            "run_id": run_id,
-            "phase": phase,
-            "status": status,
-        }
-        if summary:
-            payload["summary"] = summary
-        if role:
-            payload["role"] = role
-        if conversation_id:
-            payload["conversation_id"] = conversation_id
-        return cls(type="agent.phase.updated", data=payload)
-
-    @classmethod
-    def verification_started(
-        cls,
-        run_id: str,
-        *,
-        command: str = "",
-        conversation_id: str = "",
-    ) -> AgentEvent:
-        payload: dict[str, Any] = {"run_id": run_id}
-        payload["display_scope"] = "activity"
-        payload["panel_hint"] = "plan"
-        payload["requires_attention"] = False
-        if command:
-            payload["command"] = command
-        if conversation_id:
-            payload["conversation_id"] = conversation_id
-        return cls(type="verification.started", data=payload)
-
-    @classmethod
-    def verification_result(
-        cls,
-        run_id: str,
-        *,
-        passed: bool,
-        output: str = "",
-        command: str = "",
-        conversation_id: str = "",
-    ) -> AgentEvent:
-        payload: dict[str, Any] = {"run_id": run_id, "passed": passed}
-        payload["display_scope"] = "activity" if passed else "notice"
-        payload["panel_hint"] = "plan"
-        payload["requires_attention"] = not passed
-        if output:
-            payload["output"] = output
-        if command:
-            payload["command"] = command
-        if conversation_id:
-            payload["conversation_id"] = conversation_id
-        return cls(type="verification.result", data=payload)
+    @staticmethod
+    def _add_canonical_lifecycle(payload: dict[str, Any], *, kind: str) -> None:
+        run_id = str(payload.get("run_id") or payload.get("subagent_id") or "")
+        mailbox_epoch = int(payload.get("mailbox_epoch") or 0)
+        agent_path = str(payload.get("agent_path") or "")
+        owner = str(payload.get("runtime_owner_token") or "")
+        payload.setdefault("run_id", run_id)
+        payload.setdefault("task_id", str(payload.get("task_id") or run_id))
+        payload.setdefault("parent_run_id", str(payload.get("parent_run_id") or payload.get("parent_id") or ""))
+        payload.setdefault("incarnation", f"{agent_path or run_id}:{mailbox_epoch}:{owner}")
+        payload.setdefault("kind", kind)
+        payload.setdefault("phase", str(payload.get("phase") or "running"))
+        payload.setdefault("status", str(payload.get("status") or "running"))
+        payload.setdefault("updated_at", int(payload.get("completed_at") or payload.get("last_progress_at") or time.time() * 1000))
+        payload.setdefault("result", {})
 
     @classmethod
     def plan_step_updated(
@@ -735,17 +601,23 @@ class AgentEvent:
         output_tokens: int = 0,
         cache_creation_input_tokens: int = 0,
         cache_read_input_tokens: int = 0,
+        cache_deleted_input_tokens: int = 0,
         reasoning_output_tokens: int = 0,
+        input_includes_cache_read: bool = True,
         provider_raw: dict[str, Any] | None = None,
         status: str = "completed",
         reason: str = "",
+        duration_ms: int | None = None,
     ) -> AgentEvent:
         usage = {
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "cache_creation_input_tokens": cache_creation_input_tokens,
             "cache_read_input_tokens": cache_read_input_tokens,
+            "input_includes_cache_read": bool(input_includes_cache_read),
         }
+        if cache_deleted_input_tokens:
+            usage["cache_deleted_input_tokens"] = cache_deleted_input_tokens
         if reasoning_output_tokens:
             usage["reasoning_output_tokens"] = reasoning_output_tokens
         if cache_read_input_tokens or cache_creation_input_tokens:
@@ -754,6 +626,8 @@ class AgentEvent:
         data: dict[str, Any] = {"usage": usage, "status": normalized_status}
         if reason:
             data["reason"] = reason
+        if duration_ms is not None:
+            data["duration_ms"] = max(0, int(duration_ms))
         if provider_raw:
             data["providerRaw"] = provider_raw
         return cls(
@@ -820,7 +694,7 @@ class AgentEvent:
         conversation_id: str,
         message_id: str | None,
         tool_calls_pending: list[dict[str, Any]] | None = None,
-        accumulated_text: str = "",
+        content_blocks: list[dict[str, Any]] | None = None,
     ) -> AgentEvent:
         return cls(
             type="stream_resume",
@@ -828,7 +702,7 @@ class AgentEvent:
                 "conversation_id": conversation_id,
                 "message_id": message_id,
                 "tool_calls_pending": tool_calls_pending or [],
-                "accumulated_text": accumulated_text,
+                "content_blocks": content_blocks or [],
             },
         )
 
@@ -877,26 +751,27 @@ class AgentEvent:
         *,
         current_activity: str = "",
         waiting_on: str = "",
-        blocks_final_reply: bool | None = None,
         last_progress_at: int | None = None,
+        agent_path: str = "",
+        mailbox_epoch: int | None = None,
     ) -> AgentEvent:
         data: dict[str, Any] = {
             "subagent_id": subagent_id,
             "parent_id": parent_id,
             "role": role,
             "prompt": prompt,
-            "display_scope": "agents",
-            "panel_hint": "subagents",
-            "requires_attention": False,
         }
         if current_activity:
             data["current_activity"] = current_activity
         if waiting_on:
             data["waiting_on"] = waiting_on
-        if blocks_final_reply is not None:
-            data["blocks_final_reply"] = blocks_final_reply
         if last_progress_at is not None:
             data["last_progress_at"] = last_progress_at
+        if agent_path:
+            data["agent_path"] = agent_path
+        if mailbox_epoch is not None:
+            data["mailbox_epoch"] = max(0, int(mailbox_epoch))
+        cls._add_canonical_lifecycle(data, kind="subagent")
         return cls(type="subagent.start", data=data)
 
     @classmethod
@@ -910,16 +785,17 @@ class AgentEvent:
         detail: str = "",
         current_activity: str = "",
         waiting_on: str = "",
-        blocks_final_reply: bool | None = None,
         last_progress_at: int | None = None,
+        activity_kind: str = "",
+        activity_summary: str = "",
+        user_visible: bool | None = None,
+        agent_path: str = "",
+        mailbox_epoch: int | None = None,
     ) -> AgentEvent:
         """Emitted during subagent execution to report intermediate progress."""
         data: dict[str, Any] = {
             "subagent_id": subagent_id,
             "iteration": iteration,
-            "display_scope": "agents",
-            "panel_hint": "subagents",
-            "requires_attention": False,
         }
         if max_iterations:
             data["max_iterations"] = max_iterations
@@ -931,10 +807,19 @@ class AgentEvent:
             data["current_activity"] = current_activity
         if waiting_on:
             data["waiting_on"] = waiting_on
-        if blocks_final_reply is not None:
-            data["blocks_final_reply"] = blocks_final_reply
         if last_progress_at is not None:
             data["last_progress_at"] = last_progress_at
+        if activity_kind:
+            data["activity_kind"] = activity_kind
+        if activity_summary:
+            data["activity_summary"] = activity_summary
+        if user_visible is not None:
+            data["user_visible"] = user_visible
+        if agent_path:
+            data["agent_path"] = agent_path
+        if mailbox_epoch is not None:
+            data["mailbox_epoch"] = max(0, int(mailbox_epoch))
+        cls._add_canonical_lifecycle(data, kind="subagent")
         return cls(type="subagent.progress", data=data)
 
     @classmethod
@@ -952,13 +837,12 @@ class AgentEvent:
         termination_reason: str = "success",
         initiator: str = "runtime",
         usage: dict[str, Any] | None = None,
+        agent_path: str = "",
+        mailbox_epoch: int | None = None,
     ) -> AgentEvent:
         data: dict[str, Any] = {
             "subagent_id": subagent_id,
             "summary": summary,
-            "display_scope": "agents",
-            "panel_hint": "subagents",
-            "requires_attention": bool(error or timed_out),
             "status": status,
             "termination_reason": termination_reason,
             "initiator": initiator,
@@ -975,6 +859,13 @@ class AgentEvent:
             data["timed_out"] = True
         if usage:
             data["usage"] = dict(usage)
+        if agent_path:
+            data["agent_path"] = agent_path
+        if mailbox_epoch is not None:
+            data["mailbox_epoch"] = max(0, int(mailbox_epoch))
+        data["phase"] = "completed"
+        data["result"] = {"summary": summary} if summary else {}
+        cls._add_canonical_lifecycle(data, kind="subagent")
         return cls(type="subagent.done", data=data)
 
     @classmethod
@@ -1051,7 +942,7 @@ class AgentEvent:
         iteration_id: str = "",
         tool_call_ids: list[str] | None = None,
         tool_count: int = 0,
-        generated_by: str = "heuristic",
+        generated_by: str = "runtime",
     ) -> AgentEvent:
         data: dict[str, Any] = {
             "summary": summary,
@@ -1084,22 +975,12 @@ class AgentEvent:
         target_kind: str,
         target_id: str,
         payload: dict[str, Any],
-        *,
-        display_scope: str = "",
-        panel_hint: str = "",
-        requires_attention: bool = False,
     ) -> AgentEvent:
         data: dict[str, Any] = {
             "target_kind": target_kind,
             "target_id": target_id,
             "payload": payload,
         }
-        if display_scope:
-            data["display_scope"] = display_scope
-        if panel_hint:
-            data["panel_hint"] = panel_hint
-        if requires_attention:
-            data["requires_attention"] = True
         return cls(
             type="inspector.update",
             data=data,

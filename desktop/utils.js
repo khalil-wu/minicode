@@ -4,7 +4,9 @@ const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const { TextDecoder } = require("node:util");
 const { app } = require("electron");
+const writeFileAtomic = require("write-file-atomic");
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -61,16 +63,29 @@ function isProbablyTextBuffer(buffer, filePath) {
   if (BINARY_READ_DENY_EXTENSIONS.has(extension)) {
     return false;
   }
-  const sample = buffer.subarray(0, Math.min(buffer.length, 4096));
-  if (sample.includes(0)) {
+  if (buffer.includes(0)) {
     return false;
   }
-  const decoded = sample.toString("utf8");
-  return !decoded.includes("\uFFFD");
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function hashFileContent(content) {
   return crypto.createHash("sha256").update(String(content), "utf8").digest("hex");
+}
+
+async function atomicWriteText(filePath, content) {
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+  await writeFileAtomic(filePath, String(content), { encoding: "utf8", fsync: true });
+}
+
+function atomicWriteTextSync(filePath, content) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  writeFileAtomic.sync(filePath, String(content), { encoding: "utf8", fsync: true });
 }
 
 async function countDirEntries(dirPath, limit) {
@@ -178,6 +193,8 @@ module.exports = {
   // File helpers
   isProbablyTextBuffer,
   hashFileContent,
+  atomicWriteText,
+  atomicWriteTextSync,
   countDirEntries,
 
   // General

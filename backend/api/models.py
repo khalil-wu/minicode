@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -11,7 +11,9 @@ from pydantic import BaseModel, Field
 class ChatRequest(BaseModel):
     """Chat request payload."""
     message: str = Field(min_length=1)
-    max_iterations: int = Field(default=10, ge=1, le=50)
+    # Caller-owned iteration bound. Omitting the field inherits the configured
+    # server value; zero explicitly means no host iteration ceiling.
+    max_iterations: int | None = Field(default=None, ge=0)
 
 
 class ToolCallRecord(BaseModel):
@@ -21,12 +23,20 @@ class ToolCallRecord(BaseModel):
     tool_output: str | None = None
     artifact_id: str | None = None
     status: str = "success"
+    error_kind: str | None = None
+    user_summary: str | None = None
+    developer_detail: str | None = None
+    recoverable: bool = True
+    projection: str | None = None
+    model_observation: str | None = None
 
 
 class ChatResponse(BaseModel):
     """Chat response payload."""
     reply: str
     stopped_reason: str
+    status: Literal["completed", "partial", "cancelled", "failed"] = "completed"
+    errors: list[str] = Field(default_factory=list)
     iterations: int
     tool_calls: list[ToolCallRecord] = Field(default_factory=list)
 
@@ -37,7 +47,6 @@ class UploadResponse(BaseModel):
     file_name: str
     doc_id: str
     artifact_id: str
-    indexed_chunks: int
     attachment: dict[str, Any]
 
 
@@ -48,11 +57,11 @@ class OpenAISettingsPayload(BaseModel):
     model: str = ""
     available_models: list[str] = Field(default_factory=list)
     models_source: str = ""
-    reasoning_effort: str = "low"
+    reasoning_effort: str = ""
     responses_reasoning_summary: str = "off"
-    max_tokens: int = 8192
-    wire_api: str = "chat"
-    responses_stateful_continuation: bool = True
+    max_tokens: int = 0
+    wire_api: str = "responses"
+    responses_stateful_continuation: bool = False
     prompt_cache_retention: str = ""
     reasoning_effort_levels: list[str] = Field(default_factory=list)
 
@@ -64,7 +73,7 @@ class AnthropicSettingsPayload(BaseModel):
     model: str = ""
     available_models: list[str] = Field(default_factory=list)
     models_source: str = ""
-    max_tokens: int = 8192
+    max_tokens: int = 8000
     thinking_budget: int = 0
 
 
@@ -75,9 +84,9 @@ class CustomSettingsPayload(BaseModel):
     model: str = ""
     available_models: list[str] = Field(default_factory=list)
     models_source: str = ""
-    reasoning_effort: str = "low"
+    reasoning_effort: str = ""
     responses_reasoning_summary: str = "off"
-    max_tokens: int = 8192
+    max_tokens: int = 0
     thinking_budget: int = 0
     wire_api: str = "chat"
     responses_stateful_continuation: bool = False
@@ -86,11 +95,10 @@ class CustomSettingsPayload(BaseModel):
 
 
 class LLMSettingsUpdateRequest(BaseModel):
-    provider: str = "openai"
+    provider: str = "custom"
     openai: OpenAISettingsPayload = Field(default_factory=OpenAISettingsPayload)
     anthropic: AnthropicSettingsPayload = Field(default_factory=AnthropicSettingsPayload)
     custom: CustomSettingsPayload = Field(default_factory=CustomSettingsPayload)
-    prompt_persona: str | None = None
     confirm_sensitive_change: bool = False
 
 

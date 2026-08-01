@@ -1,84 +1,116 @@
-import { Boxes, Plug, RefreshCw, Search, Sparkles, Trash2, Wrench, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  ArrowLeft,
+  Blend,
+  Check,
+  CircleEllipsis,
+  RefreshCw,
+  Search,
+  Trash2,
+} from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAppStore } from "../stores";
+import type { MarketplaceSkill, SkillInfo } from "../stores/types";
 import { getWebSocket } from "../hooks/useWebSocket";
-import { sendClientCommand } from "../protocol/ws-outbox";
 import { pushToast } from "./ToastContainer";
 import { apiBase, authHeaders } from "../protocol/api";
-import { normalizeSkillList } from "../lib/catalog-normalizers";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { BrandIcon } from "../components/BrandIcon";
+import "./SkillsMarketplace.css";
 
-type Category = "skills" | "skills-market" | "mcp" | "mcp-market";
+type Scope = "public" | "personal";
+type MarketplaceSourceStatus = Record<string, { ok?: boolean; error?: string }>;
 
-const CATEGORIES: { id: Category; label: string; icon: React.ReactNode }[] = [
-  { id: "skills", label: "技能", icon: <Wrench size={14} /> },
-  { id: "skills-market", label: "技能市场", icon: <Sparkles size={14} /> },
-  { id: "mcp", label: "MCP 服务", icon: <Plug size={14} /> },
-  { id: "mcp-market", label: "MCP 市场", icon: <Boxes size={14} /> },
-];
+const sourceLabel = (source?: string) => ({
+  global: "全局",
+  user: "个人",
+  workspace: "工作区",
+  project: "项目",
+  builtin: "内置",
+}[source ?? ""] ?? source);
+
+const marketplaceLoadWarning = (sourceStatus: MarketplaceSourceStatus | undefined): string => {
+  if (!sourceStatus) return "";
+  const failed = Object.entries(sourceStatus).filter(([source, status]) => source === "openai_skills" && status?.ok === false);
+  if (failed.length === 0) return "";
+  return failed.map(([source, status]) => {
+    const label = source === "openai_skills" ? "OpenAI 技能目录" : source;
+    return `${label} 暂不可用${status.error ? `：${status.error}` : ""}`;
+  }).join("；");
+};
 
 export const SkillsMarketplace = () => {
   const skillsMarketplaceOpen = useAppStore((s) => s.skillsMarketplaceOpen);
   const toggleSkillsMarketplace = useAppStore((s) => s.toggleSkillsMarketplace);
   const availableSkills = useAppStore((s) => s.availableSkills);
   const marketplaceSkills = useAppStore((s) => s.marketplaceSkills);
-  const mcpServers = useAppStore((s) => s.mcpServers);
-  const marketplaceConnectors = useAppStore((s) => s.marketplaceConnectors);
-  const [category, setCategory] = useState<Category>("skills");
+  const [scope, setScope] = useState<Scope>("public");
   const [query, setQuery] = useState("");
   const [installing, setInstalling] = useState<Set<string>>(new Set());
   const [removing, setRemoving] = useState<Set<string>>(new Set());
   const [loadState, setLoadState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [loadError, setLoadError] = useState("");
+  const [loadWarning, setLoadWarning] = useState("");
   const loadEpochRef = useRef(0);
-  const dialogRef = useFocusTrap(skillsMarketplaceOpen);
+  const loadAbortRef = useRef<AbortController | null>(null);
+  const pageRef = useFocusTrap(skillsMarketplaceOpen);
 
-  const loadSkills = async () => {
+  const loadMarketplace = useCallback(async (forceRefresh = false) => {
+    loadAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadAbortRef.current = controller;
     const epoch = ++loadEpochRef.current;
     setLoadState("loading");
     setLoadError("");
+    setLoadWarning("");
     try {
-      const [statusRes, marketplaceRes] = await Promise.all([
-        fetch(`${apiBase()}/api/status`, { cache: "no-store", headers: authHeaders() }),
-        fetch(`${apiBase()}/api/skills/marketplace`, { cache: "no-store", headers: authHeaders() }),
-      ]);
-      if (!statusRes.ok) throw new Error(`Skills status request failed (${statusRes.status})`);
-      if (!marketplaceRes.ok) throw new Error(`Skills marketplace request failed (${marketplaceRes.status})`);
-      const [statusPayload, marketplacePayload] = await Promise.all([statusRes.json(), marketplaceRes.json()]);
+      const refreshQuery = forceRefresh ? "?refresh=true" : "";
+      const marketplaceRes = await fetch(`${apiBase()}/api/extensions/marketplace${refreshQuery}`, {
+        cache: "no-store",
+        headers: authHeaders(),
+        signal: controller.signal,
+      });
+      if (!marketplaceRes.ok) throw new Error(`市场请求失败（${marketplaceRes.status}）`);
+      const marketplacePayload = await marketplaceRes.json();
       if (epoch !== loadEpochRef.current) return;
-      useAppStore.getState().setAvailableSkills(normalizeSkillList(statusPayload.skills));
       const skills = Array.isArray(marketplacePayload.skills) ? marketplacePayload.skills : [];
       useAppStore.getState().setMarketplaceSkills(skills.map((skill: any) => ({
-          name: String(skill.name ?? ""),
-          title: String(skill.title ?? skill.name ?? ""),
-          description: String(skill.description ?? ""),
-          triggers: Array.isArray(skill.triggers) ? skill.triggers.map(String) : [],
-          installed: Boolean(skill.installed),
-        })).filter((skill: { name: string }) => skill.name));
+        name: String(skill.name ?? ""),
+        title: String(skill.title ?? skill.name ?? ""),
+        description: String(skill.description ?? ""),
+        triggers: Array.isArray(skill.triggers) ? skill.triggers.map(String) : [],
+        installed: Boolean(skill.installed),
+        source: String(skill.source ?? ""),
+        path: String(skill.path ?? ""),
+        iconUrl: String(skill.iconUrl ?? ""),
+        websiteUrl: String(skill.websiteUrl ?? ""),
+      })).filter((skill: { name: string }) => skill.name));
+      setLoadWarning(marketplaceLoadWarning(marketplacePayload.source_status as MarketplaceSourceStatus | undefined));
       setLoadState("ready");
     } catch (error) {
+      if (controller.signal.aborted) return;
       if (epoch !== loadEpochRef.current) return;
-      const message = `Failed to load skills: ${error instanceof Error ? error.message : String(error)}`;
+      const message = `能力数据加载失败：${error instanceof Error ? error.message : String(error)}`;
       setLoadError(message);
       setLoadState("error");
       pushToast(message, "warning");
     }
-  };
+  }, []);
 
-  const refreshAll = () => {
-    void loadSkills();
+  const refreshAll = useCallback((forceRefresh = false) => {
+    void loadMarketplace(forceRefresh);
     const ws = getWebSocket();
     ws?.send({ type: "skills.list" });
-    ws?.send({ type: "skills.marketplace.list" });
-    ws?.send({ type: "mcp.list" });
-    sendClientCommand({ type: "connectors.marketplace.list" });
-  };
+  }, [loadMarketplace]);
 
   useEffect(() => {
     if (!skillsMarketplaceOpen) return;
-    refreshAll();
-    return () => { loadEpochRef.current += 1; };
-  }, [skillsMarketplaceOpen]);
+    refreshAll(false);
+    return () => {
+      loadEpochRef.current += 1;
+      loadAbortRef.current?.abort();
+      loadAbortRef.current = null;
+    };
+  }, [refreshAll, skillsMarketplaceOpen]);
 
   useEffect(() => {
     if (!skillsMarketplaceOpen) return;
@@ -92,384 +124,255 @@ export const SkillsMarketplace = () => {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [skillsMarketplaceOpen, toggleSkillsMarketplace]);
 
-  const q = query.toLowerCase();
-
-  const installedFiltered = useMemo(() => (
-    q ? availableSkills.filter((s) => s.name.toLowerCase().includes(q) || s.description.toLowerCase().includes(q)) : availableSkills
-  ), [availableSkills, q]);
-
-  const discoverFiltered = useMemo(() => (
-    q ? marketplaceSkills.filter((s) => s.name.toLowerCase().includes(q) || s.title.toLowerCase().includes(q) || s.description.toLowerCase().includes(q) || s.triggers.some((t) => t.toLowerCase().includes(q))) : marketplaceSkills
-  ), [marketplaceSkills, q]);
-
-  const serversFiltered = useMemo(() => (
-    q ? mcpServers.filter((s) => s.name.toLowerCase().includes(q)) : mcpServers
-  ), [mcpServers, q]);
-
-  const connectorsFiltered = useMemo(() => (
-    q ? marketplaceConnectors.filter((c) => c.name.toLowerCase().includes(q) || c.title.toLowerCase().includes(q) || c.description.toLowerCase().includes(q)) : marketplaceConnectors
-  ), [marketplaceConnectors, q]);
+  const q = query.trim().toLowerCase();
+  const installedFiltered = useMemo(() => availableSkills.filter((skill) => (
+    !q || `${skill.name} ${skill.display_name ?? ""} ${skill.description}`.toLowerCase().includes(q)
+  )), [availableSkills, q]);
+  const discoverFiltered = useMemo(() => marketplaceSkills.filter((skill) => (
+    !q || `${skill.name} ${skill.title} ${skill.description} ${skill.triggers.join(" ")}`.toLowerCase().includes(q)
+  )), [marketplaceSkills, q]);
 
   if (!skillsMarketplaceOpen) return null;
 
   const installSkill = async (name: string) => {
-    setInstalling((prev) => new Set(prev).add(name));
+    setInstalling((previous) => new Set(previous).add(name));
     try {
-      const res = await fetch(`${apiBase()}/api/skills/install`, {
+      const response = await fetch(`${apiBase()}/api/skills/install`, {
         method: "POST",
         headers: authHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({ skill_name: name }),
       });
-      if (!res.ok) throw new Error(await res.text());
-      pushToast(`Installed skill: ${name}`, "success");
-      await loadSkills();
+      if (!response.ok) throw new Error(await response.text());
+      pushToast(`已安装技能：${name}`, "success");
+      await loadMarketplace(true);
     } catch (error) {
-      pushToast(`Failed to install skill: ${error instanceof Error ? error.message : String(error)}`, "error");
+      pushToast(`技能安装失败：${error instanceof Error ? error.message : String(error)}`, "error");
     } finally {
-      setInstalling((prev) => {
-        const next = new Set(prev);
+      setInstalling((previous) => {
+        const next = new Set(previous);
         next.delete(name);
         return next;
       });
       getWebSocket()?.send({ type: "skills.list" });
-      getWebSocket()?.send({ type: "skills.marketplace.list" });
     }
   };
 
   const removeSkill = async (name: string) => {
-    setRemoving((prev) => new Set(prev).add(name));
+    setRemoving((previous) => new Set(previous).add(name));
     try {
-      const res = await fetch(`${apiBase()}/api/skills/${encodeURIComponent(name)}`, {
+      const response = await fetch(`${apiBase()}/api/skills/${encodeURIComponent(name)}`, {
         method: "DELETE",
         headers: authHeaders(),
       });
-      if (!res.ok) throw new Error(await res.text());
-      pushToast(`Removed skill: ${name}`, "success");
-      await loadSkills();
+      if (!response.ok) throw new Error(await response.text());
+      pushToast(`已移除技能：${name}`, "success");
+      await loadMarketplace(true);
     } catch (error) {
-      pushToast(`Failed to remove skill: ${error instanceof Error ? error.message : String(error)}`, "error");
+      pushToast(`技能移除失败：${error instanceof Error ? error.message : String(error)}`, "error");
     } finally {
-      setRemoving((prev) => {
-        const next = new Set(prev);
+      setRemoving((previous) => {
+        const next = new Set(previous);
         next.delete(name);
         return next;
       });
       getWebSocket()?.send({ type: "skills.list" });
-      getWebSocket()?.send({ type: "skills.marketplace.list" });
     }
   };
 
-  const installConnector = (name: string) => {
-    sendClientCommand({ type: "connectors.marketplace.install", name });
-    pushToast(`Installing connector: ${name}`, "info");
-    setTimeout(() => {
-      getWebSocket()?.send({ type: "mcp.list" });
-      sendClientCommand({ type: "connectors.marketplace.list" });
-    }, 1000);
-  };
-
-  const counts: Record<Category, number> = {
-    skills: availableSkills.length,
-    "skills-market": marketplaceSkills.length,
-    mcp: mcpServers.length,
-    "mcp-market": marketplaceConnectors.length,
-  };
-
-  const searchPlaceholder = category === "skills" ? "搜索已安装技能"
-    : category === "skills-market" ? "搜索技能市场"
-    : category === "mcp" ? "搜索 MCP 服务"
-    : "搜索 MCP 市场";
+  const installedItems = availableSkills;
+  const resultCount = scope === "public" ? discoverFiltered.length : installedFiltered.length;
+  const loadingMarketplace = loadState === "loading";
+  const failedMarketplace = loadState === "error";
+  const catalogSourceCount = scope === "public" ? marketplaceSkills.length : availableSkills.length;
+  // A refresh must not blank already usable backend state. Keep cached rows
+  // interactive while the HTTP catalog and websocket status refresh in the
+  // background; reserve the blocking loader for a true first load.
+  const blockingMarketplaceLoad = loadingMarketplace && catalogSourceCount === 0;
 
   return (
-    <div className="overlay-backdrop" onClick={toggleSkillsMarketplace} style={backdropStyle}>
-      <div ref={dialogRef} className="modal-content" role="dialog" aria-modal="true" aria-label="能力中心" tabIndex={-1} onClick={(e) => e.stopPropagation()} style={modalStyle}>
-        <div style={headerStyle}>
-          <div>
-            <h2 style={{ margin: 0, fontSize: "var(--text-lg)", color: "var(--text-primary)", fontWeight: 700 }}>能力中心</h2>
-            <div style={{ marginTop: 2, fontSize: "var(--text-xs)", color: "var(--text-muted)" }}>
-              管理技能与 MCP 连接器。用 @skill 或 /skills 在对话里临时挂载技能。
-            </div>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <button onClick={refreshAll} aria-label="刷新" title="刷新" style={closeBtn}><RefreshCw size={15} /></button>
-            <button onClick={toggleSkillsMarketplace} aria-label="关闭" style={closeBtn}><X size={16} /></button>
-          </div>
+    <main ref={pageRef} className="skills-workspace" role="dialog" aria-modal="true" aria-label="技能" tabIndex={-1}>
+      <header className="skills-workspace-toolbar">
+        <button type="button" className="skills-icon-button skills-back" onClick={toggleSkillsMarketplace} aria-label="返回应用" title="返回应用">
+          <ArrowLeft />
+        </button>
+        <strong className="skills-workspace-title">技能</strong>
+        <div className="skills-toolbar-actions">
+          <button type="button" className="skills-icon-button" onClick={() => refreshAll(true)} aria-label="刷新" title="刷新"><RefreshCw /></button>
         </div>
+      </header>
 
-        <div style={toolbarStyle}>
-          <div style={tabBarStyle}>
-            {CATEGORIES.map((c) => (
-              <button key={c.id} onClick={() => setCategory(c.id)} style={tabStyle(category === c.id)}>
-                {c.icon}
-                <span>{c.label}</span>
-                <span style={countTagStyle(category === c.id)}>{counts[c.id]}</span>
-              </button>
-            ))}
-          </div>
-          <div style={searchWrapStyle}>
-            <Search size={14} />
-            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={searchPlaceholder} style={searchStyle} />
-          </div>
-        </div>
+      <div className="skills-workspace-scroll">
+        <div className="skills-workspace-content">
+          <header className="skills-page-heading">
+            <h1>技能</h1>
+            <p>按需加载 SKILL.md 中的专门知识与工作流。</p>
+          </header>
 
-        <div style={listWrapStyle}>
-          {loadState === "loading" && (category === "skills" || category === "skills-market") && (
-            <EmptyState title="正在加载" hint="正在获取技能与市场数据。" />
-          )}
-          {loadState === "error" && (category === "skills" || category === "skills-market") && (
-            <div role="alert" style={{ padding: 24, color: "var(--state-danger)", textAlign: "center" }}>
-              <div>{loadError}</div>
-              <button type="button" onClick={refreshAll} style={{ ...closeBtn, marginTop: 12, width: "auto", padding: "0 12px" }}>重试</button>
+          <label className="skills-search">
+            <Search aria-hidden="true" />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索技能" aria-label="搜索技能" />
+            {query && <span>{resultCount} 项</span>}
+          </label>
+
+          <section className="skills-installed-summary" aria-label="已安装摘要">
+            <div className="skills-section-title-row">
+              <h2>已安装</h2>
+            </div>
+            {installedItems.length > 0 ? (
+              <div className="skills-icon-strip">
+                {installedItems.slice(0, 8).map((item, index) => (
+                  <button key={item.name} type="button" className={`skills-logo skills-logo-${index % 5}`} title={item.name} onClick={() => setScope("personal")}>
+                    <BrandIcon
+                      value={`${item.name} ${item.display_name || ""}`}
+                      iconUrl={item.icon}
+                      fallback="skill"
+                      size={20}
+                    />
+                  </button>
+                ))}
+                {installedItems.length > 8 && <span className="skills-installed-more">+{installedItems.length - 8}</span>}
+              </div>
+            ) : (
+              <p className="skills-installed-empty">还没有已安装的技能</p>
+            )}
+          </section>
+
+          <div className="skills-catalog-toolbar">
+            <div className="skills-scope-tabs" role="tablist" aria-label="来源">
+              <button type="button" role="tab" aria-selected={scope === "public"} onClick={() => setScope("public")}>公开</button>
+              <button type="button" role="tab" aria-selected={scope === "personal"} onClick={() => setScope("personal")}>个人</button>
+            </div>
+            <button type="button" className="skills-icon-button" aria-label="筛选" title="筛选当前列表"><CircleEllipsis /></button>
+          </div>
+
+          {loadWarning && !failedMarketplace && <div className="skills-warning" role="status">{loadWarning}，当前显示可用的本地精选内容。</div>}
+          {blockingMarketplaceLoad && <EmptyState title="正在加载" hint="正在同步技能和安装状态。" />}
+          {failedMarketplace && (
+            <div className="skills-error" role="alert">
+              <span>{loadError}</span>
+              <button type="button" onClick={() => refreshAll(true)}>重试</button>
             </div>
           )}
-          {loadState === "ready" && category === "skills" && (
-            installedFiltered.length === 0 ? (
-              <EmptyState title={availableSkills.length === 0 ? "尚未安装技能" : "无匹配项"} hint="在「技能市场」安装精选技能,或在本地添加 SKILL.md 文件。" />
-            ) : (
-              <div style={listStyle}>
-                {installedFiltered.map((skill) => (
-                  <InstalledRow key={skill.name} skill={skill} removing={removing.has(skill.name)} onRemove={() => removeSkill(skill.name)} />
-                ))}
-              </div>
-            )
+          {!blockingMarketplaceLoad && !failedMarketplace && scope === "public" && (
+            <CatalogSections
+              items={discoverFiltered}
+              emptyTitle={marketplaceSkills.length === 0 ? "市场暂无技能" : "没有匹配的技能"}
+              renderItem={(skill, index) => <DiscoverRow key={skill.name} skill={skill} index={index} installing={installing.has(skill.name)} onInstall={() => void installSkill(skill.name)} />}
+            />
           )}
-
-          {loadState === "ready" && category === "skills-market" && (
-            discoverFiltered.length === 0 ? (
-              <EmptyState title={marketplaceSkills.length === 0 ? "市场暂无条目" : "无匹配项"} hint="连接后端后会自动填充精选技能。" />
-            ) : (
-              <div style={listStyle}>
-                {discoverFiltered.map((skill) => (
-                  <DiscoverRow key={skill.name} skill={skill} installing={installing.has(skill.name)} onInstall={() => installSkill(skill.name)} />
-                ))}
-              </div>
-            )
-          )}
-
-          {category === "mcp" && (
-            serversFiltered.length === 0 ? (
-              <EmptyState title={mcpServers.length === 0 ? "尚未配置 MCP 服务" : "无匹配项"} hint="在「MCP 市场」一键安装,或在设置 → 连接器里添加自定义服务器。" />
-            ) : (
-              <div style={listStyle}>
-                {serversFiltered.map((server) => (
-                  <ServerRow key={server.name} server={server} />
-                ))}
-              </div>
-            )
-          )}
-
-          {category === "mcp-market" && (
-            connectorsFiltered.length === 0 ? (
-              <EmptyState title={marketplaceConnectors.length === 0 ? "市场暂无连接器" : "无匹配项"} hint="连接后端后会自动填充精选 MCP 连接器。" />
-            ) : (
-              <div style={listStyle}>
-                {connectorsFiltered.map((c) => (
-                  <ConnectorRow key={c.name} connector={c} onInstall={() => installConnector(c.name)} />
-                ))}
-              </div>
-            )
+          {!blockingMarketplaceLoad && !failedMarketplace && scope === "personal" && (
+            <CatalogSection title="已安装">
+              {installedFiltered.length > 0
+                ? installedFiltered.map((skill, index) => <InstalledRow key={skill.name} skill={skill} index={index} removing={removing.has(skill.name)} onRemove={() => void removeSkill(skill.name)} />)
+                : <EmptyState title={availableSkills.length === 0 ? "尚未安装技能" : "没有匹配的技能"} hint="从公开目录安装技能，或在本地添加 SKILL.md。" />}
+            </CatalogSection>
           )}
         </div>
       </div>
-    </div>
+    </main>
   );
 };
 
-const InstalledRow = ({
-  skill,
-  removing,
-  onRemove,
+const CatalogSections = <T extends { name: string }>({
+  items,
+  emptyTitle,
+  renderItem,
 }: {
-  skill: {
-    name: string;
-    description: string;
-    display_name?: string;
-    icon?: string;
-    version?: string;
-    triggers?: string[];
-    source_level?: string;
-    active?: boolean;
-    allow_implicit_invocation?: boolean;
-    mcp_required?: string[];
-    mcp_dependencies?: string[];
-    usage?: { load_count?: number };
-  };
-  removing: boolean;
-  onRemove: () => void;
+  items: T[];
+  emptyTitle: string;
+  renderItem: (item: T, index: number) => React.ReactNode;
 }) => {
+  if (items.length === 0) return <EmptyState title={emptyTitle} hint="调整搜索条件，或稍后刷新目录。" />;
+  const splitAt = Math.min(4, items.length);
+  return (
+    <>
+      <CatalogSection title="精选">{items.slice(0, splitAt).map(renderItem)}</CatalogSection>
+      {items.length > splitAt && <CatalogSection title="效率工具">{items.slice(splitAt).map((item, index) => renderItem(item, index + splitAt))}</CatalogSection>}
+    </>
+  );
+};
+
+const CatalogSection = ({ title, children }: { title: string; children: React.ReactNode }) => (
+  <section className="skills-catalog-section">
+    <h2>{title}</h2>
+    <div className="skills-catalog-grid">{children}</div>
+  </section>
+);
+
+const ItemLogo = ({
+  index,
+  kind,
+  value,
+  iconUrl,
+  websiteUrl,
+}: {
+  index: number;
+  kind: "plugin" | "skill";
+  value: string;
+  iconUrl?: string;
+  websiteUrl?: string;
+}) => (
+  <span className={`skills-logo skills-logo-${index % 5}`} aria-hidden="true">
+    <BrandIcon
+      value={value}
+      fallback={kind === "plugin" ? "plugin" : "skill"}
+      size={22}
+      iconUrl={iconUrl}
+      websiteUrl={websiteUrl}
+    />
+  </span>
+);
+
+const InstalledRow = ({ skill, removing, onRemove, index }: { skill: SkillInfo; removing: boolean; onRemove: () => void; index: number }) => {
   const canRemove = skill.source_level === "global" || skill.source_level === "user";
   const activate = () => {
-    useAppStore.getState().addSelectedSkill({
-      name: skill.name,
-      description: skill.description,
-      sourceLevel: skill.source_level,
-    });
-    getWebSocket()?.send({ type: "load_skill", skill_name: skill.name });
+    useAppStore.getState().addSelectedSkill({ name: skill.name, path: skill.path, description: skill.description, sourceLevel: skill.source_level });
   };
   return (
-  <div style={rowStyle}>
-    <span style={rowIconStyle}><Wrench size={15} /></span>
-    <div style={{ flex: 1, minWidth: 0 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
-        <span style={skillNameStyle}>{skill.display_name || skill.name}</span>
-        {skill.display_name && <span style={tagStyle}>{skill.name}</span>}
-        {skill.active && <span style={activeTagStyle}>active</span>}
-        {skill.allow_implicit_invocation === false && <span style={tagStyle}>explicit only</span>}
-        {skill.source_level && <span style={tagStyle}>{skill.source_level}</span>}
-        {skill.version && <span style={tagStyle}>v{skill.version}</span>}
-        {Number(skill.usage?.load_count ?? 0) > 0 && <span style={tagStyle}>used {skill.usage?.load_count}</span>}
+    <article className="skills-catalog-row">
+      <ItemLogo index={index} kind="skill" value={skill.display_name || skill.name} iconUrl={skill.icon} />
+      <div className="skills-item-copy">
+        <div className="skills-item-title">
+          <strong>{skill.display_name || skill.name}</strong>
+          {skill.active && <span className="skills-state-label"><Check />已启用</span>}
+          {skill.source_level && <span>{sourceLabel(skill.source_level)}</span>}
+        </div>
+        <p>{skill.description || "暂无说明"}</p>
       </div>
-      <p style={descStyle}>{skill.description || "(no description)"}</p>
-      {skill.triggers && skill.triggers.length > 0 && <TagList tags={skill.triggers} />}
-      {[...(skill.mcp_required ?? []), ...(skill.mcp_dependencies ?? [])].length > 0 && (
-        <TagList tags={[...(skill.mcp_required ?? []), ...(skill.mcp_dependencies ?? [])].map((name) => `MCP: ${name}`)} />
-      )}
-    </div>
-    <div style={rowActionsStyle}>
-      <button type="button" onClick={activate} style={secondaryButtonStyle}>
-        Use
-      </button>
-      <button
-        type="button"
-        onClick={onRemove}
-        disabled={!canRemove || removing}
-        title={canRemove ? `Uninstall ${skill.name}` : "Only user-installed skills can be removed here"}
-        style={removeButtonStyle(!canRemove || removing)}
-      >
-        {removing ? "Removing..." : "Uninstall"}
-      </button>
-    </div>
-  </div>
+      <div className="skills-item-actions">
+        <button type="button" className="skills-text-button" onClick={activate}>使用</button>
+        <button type="button" className="skills-icon-button" onClick={onRemove} disabled={!canRemove || removing} aria-label={`卸载技能 ${skill.name}`} title={canRemove ? "卸载" : "内置技能不能卸载"}><Trash2 /></button>
+      </div>
+    </article>
   );
 };
 
-const DiscoverRow = ({ skill, installing, onInstall }: {
-  skill: { name: string; title: string; description: string; triggers: string[]; installed: boolean };
-  installing: boolean;
-  onInstall: () => void;
-}) => (
-  <div style={rowStyle}>
-    <span style={rowIconStyle}><Wrench size={15} /></span>
-    <div style={{ flex: 1, minWidth: 0 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-        <div style={{ fontWeight: 650, color: "var(--text-primary)", fontSize: "var(--text-sm)" }}>{skill.title}</div>
-        <span style={tagStyle}>{skill.name}</span>
-      </div>
-      <p style={descStyle}>{skill.description}</p>
-      {skill.triggers.length > 0 && <TagList tags={skill.triggers} />}
+const DiscoverRow = ({ skill, installing, onInstall, index }: { skill: MarketplaceSkill; installing: boolean; onInstall: () => void; index: number }) => (
+  <article className="skills-catalog-row">
+    <ItemLogo
+      index={index}
+      kind="skill"
+      value={`${skill.title} ${skill.name} ${skill.source || ""}`}
+      iconUrl={skill.iconUrl}
+      websiteUrl={skill.websiteUrl}
+    />
+    <div className="skills-item-copy">
+      <div className="skills-item-title"><strong>{skill.title}</strong>{skill.name !== skill.title && <span>{skill.name}</span>}</div>
+      <p>{skill.description || "暂无说明"}</p>
     </div>
-    <div style={rowActionsStyle}>
-      <button onClick={onInstall} disabled={skill.installed || installing} style={installButtonStyle(skill.installed || installing)}>
-        {skill.installed ? "Installed" : installing ? "Installing..." : "Install"}
+    <div className="skills-item-actions">
+      <button type="button" className="skills-text-button" onClick={onInstall} disabled={skill.installed || installing}>
+        {skill.installed ? "已安装" : installing ? "安装中…" : "安装"}
       </button>
     </div>
-  </div>
+  </article>
 );
 
-const ServerRow = ({ server }: { server: import("../stores/types").McpServerStatus }) => {
-  const phase = server.phase ?? server.status;
-  return (
-    <div style={rowStyle}>
-      <span style={rowIconStyle}><Plug size={15} /></span>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
-          <span style={statusDotStyle(phase)} />
-          <span style={skillNameStyle}>{server.name}</span>
-          <span style={tagStyle}>{String(phase).replace(/_/g, " ")}</span>
-          <span style={tagStyle}>{server.transport || "stdio"}</span>
-          <span style={tagStyle}>{server.tools ?? 0} tools</span>
-          {server.requiresUserAction && <span style={warnTagStyle}>需要操作</span>}
-        </div>
-        {server.lastError && <p style={{ ...descStyle, color: "var(--state-danger)" }}>{server.lastError}</p>}
-        {server.requiresUserAction && server.setupHint && <p style={descStyle}>{server.setupHint}</p>}
-      </div>
-      <div style={rowActionsStyle}>
-        <button onClick={() => sendClientCommand({ type: "mcp.restart", name: server.name })} style={iconActionStyle} title="重启" aria-label={`Restart ${server.name}`}><RefreshCw size={14} /></button>
-        <button onClick={() => sendClientCommand({ type: "mcp.remove", name: server.name })} style={iconActionStyle} title="移除" aria-label={`Remove ${server.name}`}><Trash2 size={14} /></button>
-      </div>
-    </div>
-  );
-};
-
-const ConnectorRow = ({ connector, onInstall }: {
-  connector: import("../stores/types").MarketplaceConnector;
-  onInstall: () => void;
-}) => {
-  const authLabel = !connector.auth || connector.auth === "none" ? null : connector.auth === "local_app" ? "local app" : connector.auth.replace(/_/g, " ");
-  return (
-    <div style={rowStyle}>
-      <span style={rowIconStyle}><Boxes size={15} /></span>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
-          <div style={{ fontWeight: 650, color: "var(--text-primary)", fontSize: "var(--text-sm)" }}>{connector.title}</div>
-          <span style={tagStyle}>{connector.transport}</span>
-          {authLabel && <span style={tagStyle}>{authLabel}</span>}
-          {connector.requiresUserAction && <span style={warnTagStyle}>需要配置</span>}
-        </div>
-        <p style={descStyle}>{connector.description}</p>
-        {connector.setupHint && <p style={descStyle}>{connector.setupHint}</p>}
-        {connector.docsUrl && (
-          <a href={connector.docsUrl} target="_blank" rel="noreferrer" style={{ ...tagStyle, display: "inline-block", marginTop: 6, color: "var(--accent-primary)" }}>Docs</a>
-        )}
-      </div>
-      <div style={rowActionsStyle}>
-        {connector.installed ? (
-          <span style={installButtonStyle(true)}>Installed</span>
-        ) : (
-          <button onClick={onInstall} style={installButtonStyle(false)}>Install</button>
-        )}
-      </div>
-    </div>
-  );
-};
-
-const TagList = ({ tags }: { tags: string[] }) => (
-  <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 7 }}>
-    {tags.slice(0, 4).map((t) => <span key={t} style={tagStyle}>{t}</span>)}
-  </div>
-);
 
 const EmptyState = ({ title, hint }: { title: string; hint: string }) => (
-  <div style={{ padding: "30px 16px", textAlign: "center" }}>
-    <div style={{ fontSize: "var(--text-sm)", color: "var(--text-secondary)", marginBottom: 6 }}>{title}</div>
-    <div style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)" }}>{hint}</div>
+  <div className="skills-empty-state">
+    <Blend aria-hidden="true" />
+    <strong>{title}</strong>
+    <span>{hint}</span>
   </div>
 );
-
-const backdropStyle: React.CSSProperties = { position: "fixed", inset: 0, background: "var(--backdrop-overlay)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: "var(--z-modal)", pointerEvents: "auto" };
-const modalStyle: React.CSSProperties = { width: "min(820px, 94vw)", maxHeight: "84vh", background: "var(--surface-base)", border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-md, 10px)", boxShadow: "var(--shadow-md)", overflow: "hidden", display: "flex", flexDirection: "column", pointerEvents: "auto" };
-const headerStyle: React.CSSProperties = { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 18px", borderBottom: "1px solid var(--border-subtle)" };
-const toolbarStyle: React.CSSProperties = { display: "flex", alignItems: "center", gap: 12, padding: "10px 18px", borderBottom: "1px solid var(--border-subtle)", flexWrap: "wrap" };
-const tabBarStyle: React.CSSProperties = { display: "inline-flex", gap: 3, padding: 3, background: "var(--surface-soft)", border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm, 8px)" };
-const closeBtn: React.CSSProperties = { background: "var(--surface-soft)", border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm, 6px)", color: "var(--text-muted)", cursor: "pointer", width: 30, height: 30, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center" };
-const searchWrapStyle: React.CSSProperties = { flex: 1, minWidth: 180, height: 34, display: "flex", alignItems: "center", gap: 8, padding: "0 10px", background: "var(--surface-soft)", border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm, 7px)", color: "var(--text-muted)" };
-const searchStyle: React.CSSProperties = { width: "100%", background: "transparent", border: 0, color: "var(--text-primary)", fontSize: "var(--text-sm)", outline: "none", boxSizing: "border-box" };
-const listWrapStyle: React.CSSProperties = { flex: 1, overflowY: "auto", padding: "12px 18px" };
-const listStyle: React.CSSProperties = { display: "grid", gap: 1, border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm, 8px)", overflow: "hidden" };
-const rowStyle: React.CSSProperties = { display: "flex", alignItems: "flex-start", gap: 11, padding: "11px 12px", background: "var(--surface-soft)", borderBottom: "1px solid var(--border-subtle)" };
-const rowIconStyle: React.CSSProperties = { width: 26, height: 26, display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: "var(--radius-sm, 6px)", background: "var(--surface-base)", color: "var(--text-muted)", border: "1px solid var(--border-subtle)", flexShrink: 0 };
-const rowActionsStyle: React.CSSProperties = { display: "flex", alignItems: "center", gap: 6, flexShrink: 0 };
-const skillNameStyle: React.CSSProperties = { fontFamily: "var(--font-mono)", fontWeight: 650, color: "var(--text-primary)", fontSize: "var(--text-sm)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
-const descStyle: React.CSSProperties = { margin: "4px 0 0", fontSize: "var(--text-xs)", color: "var(--text-secondary)", lineHeight: 1.45 };
-const tagStyle: React.CSSProperties = { fontSize: 10, fontFamily: "var(--font-mono)", padding: "1px 6px", borderRadius: "var(--radius-sm, 4px)", background: "var(--surface-base)", color: "var(--text-muted)", border: "1px solid var(--border-subtle)" };
-const activeTagStyle: React.CSSProperties = { ...tagStyle, color: "var(--state-success)", border: "1px solid color-mix(in oklch, var(--state-success) 35%, var(--border-subtle))" };
-const warnTagStyle: React.CSSProperties = { ...tagStyle, color: "var(--state-warning)", border: "1px solid color-mix(in oklch, var(--state-warning) 35%, var(--border-subtle))" };
-
-const statusDotStyle = (phase: string): React.CSSProperties => {
-  const ok = phase === "connected" || phase === "ready";
-  const bad = phase === "error" || phase === "offline" || phase === "disconnected";
-  return {
-    width: 7,
-    height: 7,
-    borderRadius: "50%",
-    flexShrink: 0,
-    background: ok ? "var(--state-success)" : bad ? "var(--state-danger)" : "var(--state-warning)",
-  };
-};
-
-const tabStyle = (active: boolean): React.CSSProperties => ({ height: 30, padding: "0 11px", display: "inline-flex", alignItems: "center", gap: 6, background: active ? "var(--surface-base)" : "transparent", border: 0, borderRadius: "var(--radius-sm, 6px)", color: active ? "var(--text-primary)" : "var(--text-muted)", cursor: "pointer", fontSize: "var(--text-sm)", fontWeight: 650 });
-const countTagStyle = (active: boolean): React.CSSProperties => ({ fontSize: 10, fontFamily: "var(--font-mono)", padding: "0 5px", borderRadius: 999, background: active ? "var(--accent-soft, var(--surface-soft))" : "var(--surface-base)", color: active ? "var(--accent-primary)" : "var(--text-muted)", minWidth: 16, textAlign: "center", lineHeight: "16px" });
-const installButtonStyle = (disabled: boolean): React.CSSProperties => ({ background: disabled ? "var(--surface-base)" : "var(--accent-primary)", color: disabled ? "var(--text-muted)" : "var(--text-primary)", border: disabled ? "1px solid var(--border-subtle)" : 0, borderRadius: "var(--radius-sm, 4px)", padding: "5px 12px", fontSize: "var(--text-xs)", fontWeight: 600, cursor: disabled ? "default" : "pointer" });
-const secondaryButtonStyle: React.CSSProperties = { background: "var(--surface-base)", color: "var(--accent-primary)", border: "1px solid color-mix(in oklch, var(--accent-primary) 35%, var(--border-subtle))", borderRadius: "var(--radius-sm, 4px)", padding: "5px 10px", fontSize: "var(--text-xs)", fontWeight: 600, cursor: "pointer" };
-const removeButtonStyle = (disabled: boolean): React.CSSProperties => ({ background: "var(--surface-base)", color: disabled ? "var(--text-muted)" : "var(--state-danger)", border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm, 4px)", padding: "5px 10px", fontSize: "var(--text-xs)", fontWeight: 600, cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.6 : 1 });
-const iconActionStyle: React.CSSProperties = { background: "var(--surface-base)", color: "var(--text-muted)", border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm, 4px)", padding: "5px 7px", cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center" };

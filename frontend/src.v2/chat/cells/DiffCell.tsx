@@ -122,7 +122,7 @@ export function DiffCell({ cell }: { cell: DiffCellState }) {
           aria-expanded={expanded}
           aria-label={expanded ? "收起文件更改" : "展开文件更改"}
         >
-          {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
           <span className="diff-cell-icon-tile" aria-hidden="true">
             <FileDiff size={15} />
           </span>
@@ -135,8 +135,8 @@ export function DiffCell({ cell }: { cell: DiffCellState }) {
                 </span>
               )}
               <span className="diff-cell-stats diff-cell-header-stats">
-                <RollingNumber value={cell.summary.added} prefix="+" className="diff-cell-added" />
-                <RollingNumber value={cell.summary.deleted} prefix="-" className="diff-cell-removed" />
+                <RollingNumber value={cell.summary.added} prefix="+" className="diff-cell-added" animateOnMount />
+                <RollingNumber value={cell.summary.deleted} prefix="-" className="diff-cell-removed" animateOnMount />
               </span>
               {breakdownLabel && (
                 <span className="diff-cell-breakdown">{breakdownLabel}</span>
@@ -151,7 +151,7 @@ export function DiffCell({ cell }: { cell: DiffCellState }) {
             className="diff-cell-action-button diff-cell-action-button-danger"
             title="撤销这些更改"
           >
-            <RotateCcw size={12} />
+            <RotateCcw size={14} />
             撤销
           </button>
           {reviewableFiles.length > 0 && (
@@ -161,7 +161,7 @@ export function DiffCell({ cell }: { cell: DiffCellState }) {
               className="diff-cell-action-button diff-cell-action-button-accent"
               title="在审核面板查看更改"
             >
-              <FileSearch size={12} />
+              <FileSearch size={14} />
               审核
             </button>
           )}
@@ -243,8 +243,8 @@ function DiffFileRow({
         {changeLabel}
       </span>
       <span className="diff-cell-stats">
-        <RollingNumber value={file.additions} prefix="+" className="diff-cell-added" />
-        <RollingNumber value={file.deletions} prefix="-" className="diff-cell-removed" />
+        <RollingNumber value={file.additions} prefix="+" className="diff-cell-added" animateOnMount />
+        <RollingNumber value={file.deletions} prefix="-" className="diff-cell-removed" animateOnMount />
       </span>
       {file.patch ? (
         <button

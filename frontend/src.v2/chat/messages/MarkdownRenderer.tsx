@@ -26,8 +26,10 @@ import { useAppStore } from "../../stores";
 import type { Citation } from "../../stores/types";
 import { pushToast } from "../../overlays/ToastContainer";
 import { isPreviewableHttpUrl, openWebInPreview } from "../openWebInPreview";
+import { openWebTarget } from "../openWebTarget";
 import { normalizeCitationText } from "./citationText";
 import { ImageLightbox } from "../../components/ImageLightbox";
+import { BrandIcon } from "../../components/BrandIcon";
 import { workspaceRawResourceUrlWithToken } from "../../protocol/api";
 import { openPath, revealPath } from "../../desktop/runtime";
 import { useContextMenu } from "../../components/useContextMenu";
@@ -252,9 +254,11 @@ const CODE_FILE_EXTENSIONS = [
 const GENERIC_FILE_EXTENSIONS = [
   "7z", "avif", "bmp", "csv", "doc", "docx", "gif", "gz", "ico", "jpeg", "jpg",
   "mov", "mp3", "mp4", "odt", "pdf", "png", "ppt", "pptx", "svg", "tar", "tif", "tiff",
-  "tsv", "wav", "webm", "webp", "xls", "xlsx", "zip",
+  "conf", "ini", "jsonl", "log", "ndjson", "rst", "txt", "tsv", "wav", "webm", "webp",
+  "xls", "xlsx", "zip",
 ].join("|");
 const anyFilePathPattern = new RegExp(String.raw`\.(?:${CODE_FILE_EXTENSIONS}|${GENERIC_FILE_EXTENSIONS})$`, "i");
+const externalDeliverablePathPattern = /\.(?:7z|aac|avif|bmp|csv|doc|docx|epub|flac|gif|ico|jpe?g|json|m4a|md|mov|mp3|mp4|odp|ods|odt|ogg|pdf|png|ppt|pptx|rtf|tar|tiff?|tsv|txt|wav|webm|webp|xls|xlsx|xml|ya?ml|zip)$/i;
 
 const bareFileRefPattern = new RegExp(
   String.raw`(^|[\s([{'"，。；：、])((?:[A-Za-z]:[\\/]|\.{1,2}[\\/]|[/\\])?(?:[^\s` + "`" + String.raw`"'<>()[\]{}|:]+[\\/])*[^\s` + "`" + String.raw`"'<>()[\]{}|:]+\.(?:${CODE_FILE_EXTENSIONS}))(?::(\d+)(?::(\d+))?)?(?=$|[\s,，。;；:：)）\]}])`,
@@ -652,23 +656,43 @@ const textFromReactNode = (children: React.ReactNode): string => {
   return pieces.join("").trim();
 };
 
+const normalizePathLexically = (value: string): string => {
+  const normalized = normalizeSlashes(value).trim();
+  const driveMatch = /^([A-Za-z]:)(?:\/(.*))?$/.exec(normalized);
+  if (!driveMatch) return normalized.replace(/\/+$/, "");
+
+  const segments: string[] = [];
+  for (const segment of (driveMatch[2] ?? "").split("/")) {
+    if (!segment || segment === ".") continue;
+    if (segment === "..") {
+      segments.pop();
+      continue;
+    }
+    segments.push(segment);
+  }
+  return `${driveMatch[1]}/${segments.join("/")}`.replace(/\/+$/, "");
+};
+
 const pathWithinWorkspace = (path: string, workspaceRoot: string): boolean => {
-  const root = normalizeSlashes(workspaceRoot).replace(/\/+$/, "").toLowerCase();
-  const target = normalizeSlashes(path).toLowerCase();
+  const root = normalizePathLexically(workspaceRoot).toLowerCase();
+  const target = normalizePathLexically(path).toLowerCase();
   return Boolean(root) && (target === root || target.startsWith(`${root}/`));
 };
 
 const absoluteWorkspacePath = (path: string, workspaceRoot: string): string | null => {
   const normalized = normalizeSlashes(path).replace(/^\.\/+/, "");
-  if (/^[A-Za-z]:\//.test(normalized)) return pathWithinWorkspace(normalized, workspaceRoot) ? normalized : null;
+  if (/^[A-Za-z]:\//.test(normalized)) {
+    const absolute = normalizePathLexically(normalized);
+    return pathWithinWorkspace(absolute, workspaceRoot) ? absolute : null;
+  }
   if (!isWorkspaceRelativeEditorPath(normalized)) return null;
-  const root = normalizeSlashes(workspaceRoot).replace(/\/+$/, "");
+  const root = normalizePathLexically(workspaceRoot);
   return root ? `${root}/${normalized}` : null;
 };
 
 const workspaceRelativePath = (path: string, workspaceRoot: string): string | null => {
-  const root = normalizeSlashes(workspaceRoot).replace(/\/+$/, "");
-  const target = normalizeSlashes(path);
+  const root = normalizePathLexically(workspaceRoot);
+  const target = normalizePathLexically(path);
   if (!root || !pathWithinWorkspace(target, root)) return null;
   if (target.toLowerCase() === root.toLowerCase()) return ".";
   return target.slice(root.length).replace(/^\/+/, "");
@@ -685,16 +709,16 @@ const isWorkspaceRawResourceUrl = (url: string): boolean => {
   }
 };
 
-const workspacePathFromHref = (href: string, options: { allowLineTarget?: boolean } = {}): string | null => {
+const workspacePathFromHref = (
+  href: string,
+  options: { allowLineTarget?: boolean; allowExternalDeliverable?: boolean } = {},
+): string | null => {
   const trimmed = href.trim();
   if (!trimmed) return null;
   const workingDirectory = String(useAppStore.getState().workingDirectory || "");
   let candidate = "";
   let fromLocalFrontend = false;
-  let encodedLocalFile = false;
-
   if (trimmed.startsWith("minicode-local-file:")) {
-    encodedLocalFile = true;
     try {
       candidate = decodeURIComponent(trimmed.slice("minicode-local-file:".length));
     } catch {
@@ -734,7 +758,10 @@ const workspacePathFromHref = (href: string, options: { allowLineTarget?: boolea
     ? parseEditorPathTarget(candidate)?.path ?? candidate
     : candidate;
   if (/^[A-Za-z]:\//.test(safetyPath)) {
-    return encodedLocalFile || pathWithinWorkspace(safetyPath, workingDirectory) ? candidate : null;
+    return pathWithinWorkspace(safetyPath, workingDirectory)
+      || (options.allowExternalDeliverable && externalDeliverablePathPattern.test(safetyPath))
+      ? candidate
+      : null;
   }
   if (!isWorkspaceRelativeEditorPath(safetyPath)) return null;
   return candidate;
@@ -749,7 +776,7 @@ const localImageUrlWithinWorkspace = (url: string): string | null => {
   const absolutePath = absoluteWorkspacePath(candidate, workingDirectory);
   if (!absolutePath) return null;
   const relativePath = workspaceRelativePath(absolutePath, workingDirectory);
-  return relativePath ? workspaceRawResourceUrlWithToken(relativePath) : null;
+  return relativePath ? workspaceRawResourceUrlWithToken(relativePath, workingDirectory) : null;
 };
 
 const workspaceFileTargetFromHref = (href: string): { path: string; line?: number; column?: number } | null => {
@@ -759,7 +786,7 @@ const workspaceFileTargetFromHref = (href: string): { path: string; line?: numbe
 };
 
 const workspaceGenericFileTargetFromHref = (href: string): FileTarget | null => {
-  const candidate = workspacePathFromHref(href);
+  const candidate = workspacePathFromHref(href, { allowExternalDeliverable: true });
   if (!candidate || isCodeFilePath(candidate) || !anyFilePathPattern.test(candidate)) return null;
   return { path: candidate };
 };
@@ -1047,7 +1074,7 @@ const FolderReferenceChip = ({ target, children }: { target: FolderTarget; child
       className={`${fileChipClassName} md-folder-chip`}
       data-kind="folder"
     >
-      <Folder aria-hidden="true" size={13} strokeWidth={2} className="md-folder-chip-icon" />
+      <Folder aria-hidden="true" size={14} strokeWidth={1.8} className="md-folder-chip-icon" />
       <span className="md-file-chip-label">
         {directory ? <span className="md-file-chip-directory">{directory}</span> : null}
         <span className="md-file-chip-name">{name}</span>
@@ -1220,6 +1247,10 @@ const mdComponents = (resolvedTheme: ResolvedTheme): MarkdownComponents => ({
     if (inlineEditorTarget) {
       return <FileReferenceChip target={inlineEditorTarget}>{children}</FileReferenceChip>;
     }
+    const inlineFileTarget = workspaceGenericFileTargetFromHref(text);
+    if (inlineFileTarget) {
+      return <GenericFileReferenceChip target={inlineFileTarget}>{children}</GenericFileReferenceChip>;
+    }
     if (isProseOptionList(text)) {
       return <InlineOptionList text={text} />;
     }
@@ -1246,7 +1277,7 @@ const mdComponents = (resolvedTheme: ResolvedTheme): MarkdownComponents => ({
       : workspaceFolderTargetFromHref(href) ?? (
           canUseLinkTextAsEditorTarget(href) ? workspaceFolderTargetFromHref(childrenText) : null
         );
-    const opensInPreview = isPreviewableHttpUrl(href);
+    const opensInApp = isPreviewableHttpUrl(href);
     if (href.startsWith("minicode-file-ref:") && !editorTarget) {
       return <span className="font-[var(--font-mono)] text-[0.9em]">{props.children}</span>;
     }
@@ -1262,15 +1293,24 @@ const mdComponents = (resolvedTheme: ResolvedTheme): MarkdownComponents => ({
     return (
       <a
         {...props}
-        target={opensInPreview ? undefined : "_blank"}
+        target={opensInApp ? undefined : "_blank"}
         rel="noreferrer"
-        className="text-[var(--accent-primary)] underline"
+        className={opensInApp ? "md-web-link" : "text-[var(--accent-primary)] underline"}
         onClick={(event) => {
           props.onClick?.(event);
           if (event.defaultPrevented) return;
-          if (openWebInPreview(href)) event.preventDefault();
+          if (openWebTarget(href)) event.preventDefault();
         }}
       >
+        {opensInApp && (
+          <BrandIcon
+            value={`${childrenText} ${href}`}
+            websiteUrl={href}
+            fallback="web"
+            size={14}
+            className="md-web-link-icon"
+          />
+        )}
         {props.children}
       </a>
     );
@@ -1299,12 +1339,12 @@ const mdComponents = (resolvedTheme: ResolvedTheme): MarkdownComponents => ({
     <td {...props} className="border border-[var(--border-subtle)] px-2.5 py-1.5" />
   ),
   blockquote: ({ node: _node, ...props }: MarkdownElementProps<React.BlockquoteHTMLAttributes<HTMLQuoteElement>>) => (
-    <blockquote {...props} className="border-l-[3px] border-[var(--accent-primary)] bg-[var(--surface-soft)] px-3.5 py-2 my-2 text-[var(--text-secondary)]" />
+    <blockquote {...props} className="border border-[var(--border-subtle)] rounded-[10px] bg-[var(--surface-soft)] px-3.5 py-2.5 my-2 text-[var(--text-secondary)]" />
   ),
   h1: ({ node: _node, ...props }: MarkdownElementProps<React.HTMLAttributes<HTMLHeadingElement>>) => <h1 {...props} className="text-[length:var(--text-2xl)] font-bold mt-5 mb-2.5 first:mt-0" />,
   h2: ({ node: _node, ...props }: MarkdownElementProps<React.HTMLAttributes<HTMLHeadingElement>>) => <h2 {...props} className="text-[length:var(--text-xl)] font-semibold mt-5 mb-2 first:mt-0" />,
   h3: ({ node: _node, ...props }: MarkdownElementProps<React.HTMLAttributes<HTMLHeadingElement>>) => <h3 {...props} className="text-[length:var(--text-lg)] font-semibold mt-4 mb-1.5 first:mt-0" />,
-  hr: () => <hr className="border-0 border-t border-[var(--border-subtle)] my-3" />,
+  hr: () => <hr className="border-0 h-px my-4 bg-gradient-to-r from-transparent via-[var(--border-subtle)] to-transparent" />,
   img: ({ node: _node, ...props }: MarkdownElementProps<React.ImgHTMLAttributes<HTMLImageElement>>) => {
     return <MarkdownImage {...props} />;
   },
@@ -1345,6 +1385,26 @@ const preserveWindowsMarkdownFileLinks = (content: string): string => content.re
  * - Completed list items (line starting with dash, bullet, or 1. followed by \n)
  * - Heading boundaries (# ...\n)
  */
+/**
+ * Index of the opening ``` of a fence that is still unclosed, or -1.
+ *
+ * Fences alternate open/close, so an odd count means the last one is still
+ * open. Used to keep a mid-stream code block out of the syntax highlighter.
+ */
+function findUnclosedFenceStart(content: string): number {
+  let searchFrom = 0;
+  let lastOpen = -1;
+  let open = false;
+  for (;;) {
+    const idx = content.indexOf("```", searchFrom);
+    if (idx < 0) break;
+    open = !open;
+    lastOpen = open ? idx : -1;
+    searchFrom = idx + 3;
+  }
+  return open ? lastOpen : -1;
+}
+
 function findStableSplitPoint(content: string): number {
   let bestSplit = -1;
 
@@ -1404,25 +1464,6 @@ const PlainText = memo(({ content }: { content: string }) => (
 ));
 PlainText.displayName = "PlainText";
 
-// ── Cross-mount markdown render cache ───────────────────────────────
-// react-markdown's internal parsing is expensive (~2-3ms for typical
-// assistant messages). memo() only survives while the component stays
-// mounted; virtual scroll / conversation switch unmounts → re-parse.
-// This module-level cache keyed by content hash avoids re-parsing
-// previously-rendered messages. Mirrors cc's tokenCache (Markdown.tsx:22).
-const MD_RENDER_CACHE_MAX = 300;
-const mdRenderCache = new Map<string, string>();
-
-function hashContent(content: string): string {
-  // Simple FNV-1a hash — fast, good enough for cache keys
-  let hash = 2166136261;
-  for (let i = 0; i < content.length; i++) {
-    hash ^= content.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(36);
-}
-
 /** Memoized renderer for the stable (completed) portion of streaming content. */
 const StableMarkdown = memo(({ content, components }: { content: string; components: MarkdownComponents }) => {
   // Check if this is plain text — skip react-markdown entirely
@@ -1437,18 +1478,42 @@ const StableMarkdown = memo(({ content, components }: { content: string; compone
 });
 StableMarkdown.displayName = "StableMarkdown";
 
-const StreamingTailMarkdown = ({ content, components }: { content: string; components: MarkdownComponents }) => {
+const StreamingTailMarkdown = memo(({ content, components }: { content: string; components: MarkdownComponents }) => {
   // Plain-text fast path for the streaming tail too — short tails like
   // a few words being typed don't need the full markdown pipeline.
   if (!hasMarkdownSyntax(content)) {
     return <PlainText content={content} />;
+  }
+  // An unclosed fence means a code block is still streaming. Sending it through
+  // react-markdown re-runs the syntax highlighter over the whole block on every
+  // token, which is the dominant cost of a long streamed code block. Render the
+  // open fence as unhighlighted text until it closes; the closed block then
+  // moves into the stable (memoized, highlighted) prefix on the next split.
+  const openFence = findUnclosedFenceStart(content);
+  if (openFence >= 0) {
+    const before = content.slice(0, openFence);
+    const fenceBody = content.slice(openFence);
+    const newlineIdx = fenceBody.indexOf("\n");
+    const infoString = newlineIdx >= 0 ? fenceBody.slice(3, newlineIdx).trim() : "";
+    const codeText = newlineIdx >= 0 ? fenceBody.slice(newlineIdx + 1) : "";
+    return (
+      <>
+        {before.trim() && (
+          <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={components} urlTransform={markdownUrlTransform}>
+            {before}
+          </ReactMarkdown>
+        )}
+        <PlainCodeBlock hasLanguage={Boolean(infoString)} text={codeText} />
+      </>
+    );
   }
   return (
     <ReactMarkdown remarkPlugins={remarkPlugins} rehypePlugins={rehypePlugins} components={components} urlTransform={markdownUrlTransform}>
       {content}
     </ReactMarkdown>
   );
-};
+});
+StreamingTailMarkdown.displayName = "StreamingTailMarkdown";
 
 export const MarkdownRenderer = memo(({ content, isStreaming, citations }: Props) => {
   const resolved = useResolvedTheme();
@@ -1496,18 +1561,6 @@ export const MarkdownRenderer = memo(({ content, isStreaming, citations }: Props
       </div>
     );
   }
-
-  // Cache check: if we've seen this exact content before (same hash),
-  // we know it's not plain text and can skip the syntax re-check. The
-  // actual react-markdown render is memoized by React.memo on this
-  // component, but cross-unmount remounts lose that memo. The hash cache
-  // just skips the hasMarkdownSyntax regex on re-mounts.
-  const contentHash = hashContent(displayContent);
-  if (!mdRenderCache.has(contentHash) && mdRenderCache.size >= MD_RENDER_CACHE_MAX) {
-    const firstKey = mdRenderCache.keys().next().value;
-    if (firstKey) mdRenderCache.delete(firstKey);
-  }
-  mdRenderCache.set(contentHash, displayContent);
 
   return (
     <div className="md-body">

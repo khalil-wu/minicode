@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from backend.agent.policies import (
-        ReflectionPolicy,
         StreamRetryPolicy,
     )
 
@@ -76,30 +75,76 @@ class SettingsError(RuntimeError):
     """配置加载失败时抛出。"""
 
 
+# Claude Code's Messages API requires max_tokens and uses this capped default;
+# OpenAI Responses/Chat APIs leave the field out when the user did not set it.
+CLAUDE_CODE_CAPPED_DEFAULT_MAX_TOKENS = 8_000
+
+
 @dataclass(frozen=True)
 class LLMSettings:
     """LLM 连接配置。"""
 
     api_key: str
-    base_url: str = "https://api.openai.com/v1"
-    model: str = "gpt-5.4"
-    reasoning_effort: str = "low"
+    provider: str = "custom"
+    base_url: str = ""
+    model: str = ""
+    reasoning_effort: str = ""
     responses_reasoning_summary: str = "off"
-    max_tokens: int = 8192
+    max_tokens: int = 0
     wire_api: str = "chat"  # "responses", "chat", or "anthropic"
-    responses_stateful_continuation: bool = True
+    responses_stateful_continuation: bool = False
     prompt_cache_retention: str = ""
     reasoning_effort_levels: tuple[str, ...] = ()
+    seed: int | None = None
 
 
-# 模型上下文窗口解析（参照 cc utils/context.ts getContextWindowForModel）。
+# Claude Code's default when a provider does not publish a context window.
 MODEL_CONTEXT_WINDOW_DEFAULT = 200_000
+
+# Well-known model-family context windows, matched by longest-prefix-first so a
+# specific id beats a generic family. Mirrors Claude Code's per-model capability
+# resolution (getContextWindowForModel) for the models users actually configure;
+# unknown/custom ids keep the 200K default (which the env override can raise).
+_KNOWN_MODEL_CONTEXT_WINDOWS: tuple[tuple[str, int], ...] = (
+    # Anthropic Claude 4 / 3.x families
+    ("claude-opus-4", 200_000),
+    ("claude-sonnet-4", 200_000),
+    ("claude-3-7", 200_000),
+    ("claude-3-5", 200_000),
+    ("claude-3-", 200_000),
+    ("claude-instant-", 100_000),
+    # OpenAI GPT families
+    ("gpt-5", 400_000),
+    ("gpt-4o", 128_000),
+    ("gpt-4-turbo", 128_000),
+    ("gpt-4-", 128_000),
+    ("o1-", 200_000),
+    ("o3-", 200_000),
+    ("o4-", 200_000),
+    # Small local / open models — the ones a 200K default actively breaks
+    # compaction for. Longest-prefix-first means a variant id beats the family.
+    ("qwen3-32b", 128_000),
+    ("qwen-32b", 128_000),
+    ("qwen2.5-", 128_000),
+    ("deepseek-v3", 128_000),
+    ("deepseek-r1", 128_000),
+    ("llama-3.3", 128_000),
+    ("llama-3.1", 128_000),
+    ("llama-3", 8_000),
+    ("mistral-", 32_000),
+    ("gemma-", 8_000),
+    ("phi-3", 128_000),
+    ("phi-4", 16_000),
+    ("grok-", 131_000),
+)
 
 
 def resolve_context_window(model: str) -> int:
-    """按模型名解析上下文窗口大小。
+    """Resolve the effective context window for a model id.
 
-    优先级：MINICODE_MAX_CONTEXT_TOKENS 环境变量 > `[1m]` 后缀 → 1M > 默认 200K。
+    Precedence: explicit host override > known model family > 200K default.
+    Unknown ids are treated as 200K (Claude Code's default for providers that
+    do not publish a window); the override exists for custom gateways.
     """
     override = os.environ.get("MINICODE_MAX_CONTEXT_TOKENS", "").strip()
     if override:
@@ -109,23 +154,36 @@ def resolve_context_window(model: str) -> int:
                 return value
         except ValueError:
             pass
-    if "[1m]" in str(model or "").lower():
+    model_id = str(model or "").strip()
+    if not model_id:
+        return MODEL_CONTEXT_WINDOW_DEFAULT
+    lowered = model_id.lower()
+    # Explicit [1m] suffix opt-in wins over the family window (Claude Code's
+    # has1mContext behavior). e.g. claude-opus-4-1m → 1M, not the 200K family.
+    if lowered.endswith("-1m") or "-1m-" in lowered:
         return 1_000_000
+    # Longest prefix wins so a specific id beats its family.
+    matched = 0
+    for prefix, window in _KNOWN_MODEL_CONTEXT_WINDOWS:
+        if lowered.startswith(prefix) and len(prefix) > matched:
+            matched = len(prefix)
+            result = window
+    if matched:
+        return result
     return MODEL_CONTEXT_WINDOW_DEFAULT
 
 
 @dataclass(frozen=True)
 class TokenBudget:
-    """Token 预算分配（默认按 128K 窗口；load_config 会按模型动态解析 total）。"""
+    """Context accounting plus Pi's response reserve."""
 
-    total: int = 128_000
+    total: int = MODEL_CONTEXT_WINDOW_DEFAULT
     system_prompt: int = 2_000
     active_skills: int = 4_000
     memory_index: int = 1_000
     tool_schemas: int = 6_000
     agent_state: int = 2_000
-    rag_chunks: int = 8_000
-    response_reserve: int = 8_000
+    response_reserve: int = 16_384
 
     @property
     def history_budget(self) -> int:
@@ -136,7 +194,6 @@ class TokenBudget:
             + self.memory_index
             + self.tool_schemas
             + self.agent_state
-            + self.rag_chunks
             + self.response_reserve
         )
         return self.total - used
@@ -155,7 +212,6 @@ class PermissionSettings:
             "ask_user",
             "read_artifact",
             "read_memory",
-            "list_skills",
             "tool_search",
             "go_to_definition",
             "find_references",
@@ -169,8 +225,6 @@ class PermissionSettings:
             "run_command",
             "terminal_*",
             "remember_*",
-            "load_skill",
-            "unload_skill",
             "git_commit",
             "git_push",
             "git_stage_*",
@@ -184,13 +238,31 @@ class PermissionSettings:
         default_factory=lambda: [
             "write_file",
             "edit_file",
+            "apply_patch",
             "save_*",
         ]
     )
     always_deny: list[str] = field(default_factory=list)
     path_allowlist: list[str] = field(default_factory=lambda: ["."])
     path_denylist: list[str] = field(
-        default_factory=lambda: [".env", ".mcp.json", "settings.json", ".git/**", "*.key", "*.pem", "secrets/"]
+        default_factory=lambda: [
+            ".env",
+            # Per-environment dotenv variants (.env.staging, .env.ci, …) carry
+            # the same secrets as .env, which the bare pattern does not cover.
+            ".env.*",
+            # Conventional templates document variable names and are meant to be
+            # committed, so they stay readable. Keep the exceptions exact.
+            "!.env.example",
+            "!.env.sample",
+            "!.env.template",
+            "!.env.dist",
+            ".mcp.json",
+            "settings.json",
+            ".git/**",
+            "*.key",
+            "*.pem",
+            "secrets/",
+        ]
     )
     # Content-level rules in Tool(content) syntax, e.g. Bash(npm run:*), Edit(src/**).
     # allow rules force AUTO (in non-plan modes); deny rules ALWAYS_DENY in every
@@ -203,69 +275,35 @@ class PermissionSettings:
 class AgentSettings:
     """Agent Loop 运行参数。"""
 
-    max_iterations: int = 30
-    max_tool_calls: int = 200  # 单次 run 工具调用总数硬上限；复杂代码库调研不能被过早截断
-    turn_error_budget: int = 5  # 单轮最多允许的内部重试/恢复次数
-    compaction_threshold: float = 0.75  # token 使用率阈值
-    stagnation_limit: int = 3  # 同一工具+参数调用 N 次判定停滞
-    history_keep_recent: int = 15  # compaction 后保留最近 N 轮
+    # Optional host-owned limits. Zero follows Pi/Codex session behavior: the
+    # agent loop itself does not invent task-size or cost thresholds.
+    max_iterations: int = 0
+    max_tool_calls: int = 0
+    turn_error_budget: int = 0
+    max_turn_tokens: int = 0
+    max_turn_cost_usd: float = 0.0
+    max_turn_seconds: float = 0.0
+    compaction_keep_recent_tokens: int = 20_000
     fallback_providers: tuple[str, ...] = ()  # 主 LLM 失败时按顺序尝试的备用 provider
-    reflection_pass: bool = False  # 完成回复后是否执行一次自我审查和修正（默认关闭，减少不必要的"注意"提示）
-    reflection_multi_perspective: bool = True  # 高风险回合（有 mutation/web 断言）用对抗式双维度复核；低风险回合零开销跳过
     agent_mode: str = "react"
 
     # Stream assistant text live (token-by-token) instead of buffering and
-    # emitting once at turn end. When on, text_chunk deltas are yielded during
-    # streaming, the process_text agent.item emission is skipped (live text
-    # replaces it), and a contentless text_chunk(finalize=True) seals the last
-    # streamed block as the final answer. Default on for Codex-like live turn
-    # updates; set agent.live_text_streaming=false to force final-only output.
+    # emitting once at turn end. When enabled, agent_message.delta events are
+    # yielded during the provider's explicit final-answer phase and the
+    # authoritative text arrives in item.completed. Set false for final-only
+    # output.
     live_text_streaming: bool = True
-    # Stream provider text without an explicit phase as a provisional answer
-    # draft. The low-level/library default remains conservative, while
-    # load_config() enables it for the desktop app because Chat-Completions-
-    # compatible providers usually do not expose a Codex-style message phase.
-    # If a tool call follows, the provisional draft is cleared.
-    speculative_unphased_streaming: bool = False
-
-    # Action-level verification: run this command after workspace mutations and
-    # feed failures back to the model before accepting the final answer.
-    # Empty = disabled. Example: "npx tsc -b && npx vitest run" / "python -m pytest -q".
-    verify_command: str = ""
-    verify_timeout_seconds: float = 120.0
-
-    # Stream retry fields (match current module-level constants in loop.py)
-    stream_timeout_seconds: float = 180.0
-    first_byte_warning_seconds: float = 12.0
+    # Provider retry behavior is opt-in and host-configured.
+    stream_timeout_seconds: float = 90.0
     first_byte_timeout_seconds: float = 0.0
-    stream_max_attempts: int = 2
-    stream_retry_delay_seconds: float = 0.8
-    stream_retryable_substrings: tuple[str, ...] = (
-        "concurrency limit exceeded",
-        "retry later",
-        "rate limit",
-        "too many requests",
-        "429",
-    )
-    # Provider prompt-cache settling. DeepSeek documents that cache construction
-    # takes seconds; for large low-hit prompts, waiting briefly before the next
-    # model request lets the just-finished request boundary become reusable.
-    prompt_cache_settle_enabled: bool = False
-    prompt_cache_settle_delay_seconds: float = 0.8
-    prompt_cache_settle_min_prompt_tokens: int = 12_000
-    prompt_cache_settle_target_hit_rate: float = 0.92
-
-    # Start broad desktop iteration budgets with a small ReAct window, then let
-    # the loop extend only when tools produce new progress. Explicit low limits
-    # stay exact.
-    dynamic_max_iterations_enabled: bool = False
-    dynamic_max_iterations_min_configured: int = 30
-    dynamic_max_iterations_simple: int = 6
+    stream_max_attempts: int = 1
+    stream_retry_delay_seconds: float = 0.0
+    stream_retryable_substrings: tuple[str, ...] = ()
+    # Deprecated compatibility fields. Iteration budgets are explicit and are
+    # never inferred from request text, tool signatures, or output heuristics.
 
     # Policy slots — None means the Loop_Core fills in the default implementation
-    reflection_policy: "ReflectionPolicy | None" = None
     stream_retry_policy: "StreamRetryPolicy | None" = None
-
 
 @dataclass(frozen=True)
 class UISettings:
@@ -295,9 +333,7 @@ def _normalize_provider(provider: str) -> str:
     value = provider.strip().lower()
     if value in {"openai", "anthropic", "custom"}:
         return value
-    if value in {"deepseek", "openrouter", "groq", "together", "fireworks", "moonshot", "qwen"}:
-        return "custom"
-    return "openai"
+    return "custom"
 
 
 def _provider_key_scope(base_url: str) -> str:
@@ -308,6 +344,12 @@ def _provider_key_scope(base_url: str) -> str:
     import hashlib
 
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12].upper()
+
+
+def _provider_key_base_url_candidates(base_url: str) -> tuple[str, ...]:
+    """Return the exact endpoint scope for a provider credential."""
+    raw = str(base_url or "").strip()
+    return (raw,) if raw else ()
 
 
 def _scoped_vault_name(provider: str, base_url: str) -> str:
@@ -408,69 +450,44 @@ def _vault_api_key(name: str) -> str:
     return str(value or "").strip()
 
 
-def _same_url_host(left: str, right: str) -> bool:
-    try:
-        left_host = urlsplit(left.strip()).netloc.lower()
-        right_host = urlsplit(right.strip()).netloc.lower()
-    except Exception:
-        return False
-    return bool(left_host and right_host and left_host == right_host)
-
-
-def _custom_allows_openai_key_fallback(base_url: str) -> bool:
-    if os.getenv("CUSTOM_ALLOW_OPENAI_KEY_FALLBACK", "").strip().lower() in {"1", "true", "yes"}:
-        return True
-    host = urlsplit(base_url.strip()).netloc.lower()
-    if host == "api.openai.com":
-        return True
-    return _same_url_host(base_url, os.getenv("OPENAI_BASE_URL", ""))
-
-
 def _provider_api_key_for_base_url(provider: str, base_url: str) -> str:
     provider = _normalize_provider(provider)
     if provider == "custom":
         return _custom_provider_api_key(base_url)
 
     env_name = "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY"
-    scoped_name = _scoped_vault_name(provider, base_url)
-    if scoped_name:
-        scoped = _vault_api_key(scoped_name).strip()
-        if scoped:
-            return scoped
+    for candidate in _provider_key_base_url_candidates(base_url):
+        scoped_name = _scoped_vault_name(provider, candidate)
+        if scoped_name:
+            scoped = _vault_api_key(scoped_name).strip()
+            if _is_api_key_replacement(scoped):
+                return scoped
 
     direct = os.getenv(env_name, "").strip()
-    if direct:
+    if _is_api_key_replacement(direct):
         return direct
 
-    return _vault_api_key(env_name).strip()
+    saved = _vault_api_key(env_name).strip()
+    return saved if _is_api_key_replacement(saved) else ""
 
 
 def _custom_provider_api_key(base_url: str, *, allow_scoped: bool = True) -> str:
     if allow_scoped:
-        scoped_name = _scoped_vault_name("custom", base_url)
-        if scoped_name:
-            scoped = _vault_api_key(scoped_name).strip()
-            if scoped:
-                return scoped
+        for candidate in _provider_key_base_url_candidates(base_url):
+            scoped_name = _scoped_vault_name("custom", candidate)
+            if scoped_name:
+                scoped = _vault_api_key(scoped_name).strip()
+                if _is_api_key_replacement(scoped):
+                    return scoped
 
     direct = os.getenv("CUSTOM_API_KEY", "").strip()
-    if direct:
+    if _is_api_key_replacement(direct):
         return direct
 
     direct = _vault_api_key("CUSTOM_API_KEY").strip()
-    if direct:
+    if _is_api_key_replacement(direct):
         return direct
 
-    if _custom_allows_openai_key_fallback(base_url):
-        openai_scoped_name = _scoped_vault_name("openai", base_url)
-        if openai_scoped_name:
-            openai_scoped = _vault_api_key(openai_scoped_name).strip()
-            if openai_scoped:
-                return openai_scoped
-        openai_env = os.getenv("OPENAI_API_KEY", "").strip()
-        if openai_env:
-            return openai_env
-        return _vault_api_key("OPENAI_API_KEY").strip()
     return ""
 
 
@@ -500,25 +517,11 @@ def _coerce_int(value: Any, default: int) -> int:
 
 
 _SUPPORTED_AGENT_MODES = {"react", "auto"}
-_SUPPORTED_PROMPT_PERSONAS = {"minicode", "codex"}
-
-
-def _normalize_prompt_persona(value: Any) -> str:
-    persona = str(value or "").strip().lower()
-    return persona if persona in _SUPPORTED_PROMPT_PERSONAS else "codex"
 
 
 def _normalize_agent_mode(value: Any) -> str:
     mode = str(value or "react").strip().lower() or "react"
     return mode if mode in _SUPPORTED_AGENT_MODES else "react"
-
-
-def get_prompt_persona(settings_data: dict[str, Any] | None = None) -> str:
-    env_value = str(os.getenv("MINICODE_PROMPT_PERSONA", "")).strip().lower()
-    if env_value in _SUPPORTED_PROMPT_PERSONAS:
-        return env_value
-    raw = settings_data if settings_data is not None else _load_settings_json()
-    return _normalize_prompt_persona(raw.get("prompt_persona") if isinstance(raw, dict) else "")
 
 
 def _coerce_model_list(value: Any) -> list[str]:
@@ -546,16 +549,20 @@ def _normalize_wire_api(value: str, default: str) -> str:
     return default
 
 
-def _is_deepseek_base_url(base_url: str) -> bool:
-    host = urlsplit(base_url.strip()).netloc.lower()
-    return host == "api.deepseek.com" or host.endswith(".api.deepseek.com")
-
-
 def normalize_custom_wire_api(base_url: str, value: str, default: str = "chat") -> str:
-    wire_api = _normalize_wire_api(value, default)
-    if _is_deepseek_base_url(base_url):
-        return "chat"
-    return wire_api
+    del base_url
+    return _normalize_wire_api(value, default)
+
+
+def _is_api_key_replacement(value: Any) -> bool:
+    """Only a newly entered secret may replace the key stored in the vault."""
+    text = str(value or "").strip()
+    if not text or text == "••••":
+        return False
+    # Compatibility with older settings payloads that returned shortened keys.
+    if len(text) == 8 and text[3] == "…":
+        return False
+    return True
 
 
 def provider_supports_reasoning_effort(provider: str, section: dict[str, Any] | None) -> bool:
@@ -566,8 +573,12 @@ def provider_supports_reasoning_effort(provider: str, section: dict[str, Any] | 
     data = section if isinstance(section, dict) else {}
     default_wire_api = "responses" if normalized == "openai" else "chat"
     wire_api = str(data.get("wire_api") or default_wire_api).strip().lower()
-    if normalized == "custom":
-        wire_api = normalize_custom_wire_api(str(data.get("base_url") or ""), wire_api, "chat")
+    if normalized != "anthropic":
+        wire_api = normalize_custom_wire_api(
+            str(data.get("base_url") or ""),
+            wire_api,
+            default_wire_api,
+        )
     else:
         wire_api = _normalize_wire_api(wire_api, default_wire_api)
     from backend.llm.reasoning_effort import reasoning_effort_levels
@@ -586,17 +597,17 @@ def active_provider_supports_reasoning_effort(payload: dict[str, Any] | None = N
     return provider_supports_reasoning_effort(provider, section if isinstance(section, dict) else None)
 
 
-def _is_anthropic_model_id(model: str) -> bool:
-    return model.strip().lower().startswith("claude-")
+def _select_custom_model(model: str, available_models: list[str]) -> str:
+    """Select a model without inferring its vendor from the wire protocol.
 
-
-def _select_anthropic_model(model: str, available_models: list[str], fallback: str = "claude-sonnet-4-6") -> str:
-    if _is_anthropic_model_id(model):
-        return model.strip()
-    for candidate in available_models:
-        if _is_anthropic_model_id(candidate):
-            return candidate.strip()
-    return fallback
+    Codex keeps the model slug and provider ``wire_api`` as independent
+    configuration fields.  Anthropic-compatible gateways may expose non-Claude
+    model ids, so a Messages transport must not synthesize a Claude model.
+    """
+    current = str(model or "").strip()
+    if current:
+        return current
+    return next((str(item).strip() for item in available_models if str(item).strip()), "")
 
 
 def _write_settings_json(data: dict[str, Any]) -> None:
@@ -632,36 +643,6 @@ def get_llm_provider(settings_data: dict[str, Any] | None = None) -> str:
     return _normalize_provider(os.getenv("LLM_PROVIDER", "openai"))
 
 
-def _normalize_custom_model(base_url: str, model: str) -> str:
-    """Keep OpenAI-compatible presets usable when the upstream has strict IDs.
-
-    DeepSeek V4 正式模型名: deepseek-v4-pro, deepseek-v4-flash
-    过渡别名(2026-07-24 废弃): deepseek-chat -> deepseek-v4-flash
-    """
-    normalized = model.strip()
-    host = urlsplit(base_url).netloc.lower()
-    if "deepseek.com" in host:
-        # 只有空字符串和旧的废弃模型名才回退到 deepseek-v4-flash
-        if normalized in {"", "deepseek-coder"}:
-            return "deepseek-v4-flash"
-        # 保留所有已知的正式模型名（不转换）
-        # deepseek-v4-pro, deepseek-v4-flash, deepseek-chat, deepseek-reasoner 等
-    return normalized
-
-
-def _filter_deepseek_models(models: list[str]) -> list[str]:
-    filtered: list[str] = []
-    for item in models:
-        candidate = str(item or "").strip()
-        lowered = candidate.lower()
-        if not candidate:
-            continue
-        if lowered.startswith("deepseek-") or lowered in {"deepseek-chat", "deepseek-reasoner"}:
-            if candidate not in filtered:
-                filtered.append(candidate)
-    return filtered
-
-
 def _provider_display_name(provider_data: dict[str, Any]) -> str:
     for key in ("display_name", "name", "label"):
         value = str(provider_data.get(key) or "").strip()
@@ -680,21 +661,33 @@ def _normalize_prompt_cache_retention(value: Any, default: str = "") -> str:
 
 
 def _responses_stateful_default(enabled: bool) -> bool:
-    return coerce_feature_bool(os.getenv("OPENAI_RESPONSES_STATEFUL"), True) if enabled else False
+    return coerce_feature_bool(os.getenv("OPENAI_RESPONSES_STATEFUL"), False) if enabled else False
 
 
 def _responses_prompt_cache_retention_default(enabled: bool) -> str:
     if not enabled:
         return ""
-    return _normalize_prompt_cache_retention(os.getenv("OPENAI_PROMPT_CACHE_RETENTION", "24h"), "24h")
+    return _normalize_prompt_cache_retention(os.getenv("OPENAI_PROMPT_CACHE_RETENTION", ""), "")
 
 
-def _llm_history(settings_data: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def _history_profile_identity(
+    provider: str,
+    base_url: str,
+    wire_api: str,
+) -> tuple[str, str, str]:
+    return _history_identity(provider, base_url, wire_api)
+
+
+def _llm_history(
+    settings_data: dict[str, Any] | None = None,
+    *,
+    include_api_keys: bool = False,
+) -> list[dict[str, Any]]:
     llm_data = _get_llm_section(settings_data)
     raw_history = llm_data.get("provider_history", [])
     if not isinstance(raw_history, list):
         return []
-    history: list[dict[str, Any]] = []
+    normalized_history: list[dict[str, Any]] = []
     for raw in raw_history:
         if not isinstance(raw, dict):
             continue
@@ -708,17 +701,16 @@ def _llm_history(settings_data: dict[str, Any] | None = None) -> list[dict[str, 
         available_models = _coerce_model_list(raw.get("available_models"))
         api_key = _provider_api_key_for_base_url(provider, base_url)
         has_api_key = bool(raw.get("has_api_key")) or bool(api_key)
-        history.append({
+        entry = {
             "provider": provider,
-            "provider_id": str(raw.get("provider_id") or "").strip(),
+            "provider_id": _provider_id_for_history(provider, base_url, wire_api),
             "display_name": _provider_display_name(raw),
-            "api_key": api_key,
             "base_url": base_url,
             "model": model,
             "available_models": available_models,
             "models_source": str(raw.get("models_source") or "").strip(),
             "wire_api": wire_api,
-            "responses_reasoning_summary": str(raw.get("responses_reasoning_summary") or "auto").strip(),
+            "responses_reasoning_summary": str(raw.get("responses_reasoning_summary") or "off").strip(),
             "responses_stateful_continuation": coerce_feature_bool(
                 raw.get("responses_stateful_continuation", responses_stateful_default),
                 responses_stateful_default,
@@ -731,36 +723,33 @@ def _llm_history(settings_data: dict[str, Any] | None = None) -> list[dict[str, 
             "thinking_budget": _coerce_int(raw.get("thinking_budget", 0), 0),
             "has_api_key": has_api_key,
             "updated_at": float(raw.get("updated_at") or 0),
-        })
-    history.sort(key=lambda item: float(item.get("updated_at") or 0), reverse=True)
+        }
+        if include_api_keys:
+            entry["api_key"] = api_key
+        normalized_history.append(entry)
+    normalized_history.sort(key=lambda item: float(item.get("updated_at") or 0), reverse=True)
+    history: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for entry in normalized_history:
+        identity = _history_profile_identity(
+            str(entry.get("provider") or ""),
+            str(entry.get("base_url") or ""),
+            str(entry.get("wire_api") or ""),
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        history.append(entry)
     return history[:16]
 
 
 def _provider_id_for_history(provider: str, base_url: str, wire_api: str) -> str:
+    del base_url
     if provider == "anthropic":
-        return "anthropic_off"
+        return "anthropic"
     if provider == "custom" and wire_api == "anthropic":
         return "custom_anthropic"
-    return _resolve_provider_id_for_config(base_url)
-
-
-def _resolve_provider_id_for_config(base_url: str) -> str:
-    host = urlsplit(str(base_url or "").strip()).netloc.lower()
-    if "lucen.cc" in host:
-        return "lucen"
-    if "api.openai.com" in host:
-        return "openai_official"
-    if "api.deepseek.com" in host:
-        return "deepseek"
-    if "dashscope" in host or "aliyuncs.com" in host:
-        return "qwen"
-    if "bigmodel.cn" in host:
-        return "zhipu"
-    if "openrouter.ai" in host:
-        return "openrouter"
-    if "siliconflow.cn" in host:
-        return "siliconflow"
-    return "custom_openai"
+    return provider
 
 
 def _upsert_llm_history(
@@ -777,7 +766,7 @@ def _upsert_llm_history(
         return _llm_history(settings_data)
 
     provider_id = _provider_id_for_history(provider, base_url, wire_api)
-    key = (provider, base_url.lower().rstrip("/"), wire_api)
+    key = _history_profile_identity(provider, base_url, wire_api)
     responses_defaults_enabled = wire_api == "responses"
     responses_stateful_default = _responses_stateful_default(responses_defaults_enabled)
     prompt_cache_retention_default = _responses_prompt_cache_retention_default(responses_defaults_enabled)
@@ -807,10 +796,10 @@ def _upsert_llm_history(
 
     merged: list[dict[str, Any]] = [next_entry]
     for entry in _llm_history(settings_data):
-        entry_key = (
-            _normalize_provider(str(entry.get("provider") or "")),
-            str(entry.get("base_url") or "").lower().rstrip("/"),
-            str(entry.get("wire_api") or "").strip(),
+        entry_key = _history_profile_identity(
+            str(entry.get("provider") or ""),
+            str(entry.get("base_url") or ""),
+            str(entry.get("wire_api") or ""),
         )
         if entry_key == key:
             continue
@@ -833,35 +822,28 @@ def _history_identity(provider: str, base_url: str, wire_api: str) -> tuple[str,
     if normalized_provider == "custom":
         normalized_wire_api = normalize_custom_wire_api(normalized_base_url, raw_wire_api, "chat")
     elif normalized_provider == "openai":
-        normalized_wire_api = _normalize_wire_api(raw_wire_api, "responses")
+        normalized_wire_api = normalize_custom_wire_api(
+            normalized_base_url,
+            raw_wire_api,
+            "responses",
+        )
     else:
         normalized_wire_api = "anthropic"
     return normalized_provider, normalized_base_url, normalized_wire_api
 
 
 def _history_entry_matches_delete(entry: dict[str, Any], target: dict[str, Any]) -> bool:
-    entry_identity = _history_identity(
+    entry_identity = _history_profile_identity(
         str(entry.get("provider") or ""),
         str(entry.get("base_url") or ""),
         str(entry.get("wire_api") or ""),
     )
-    target_identity = _history_identity(
+    target_identity = _history_profile_identity(
         str(target.get("provider") or ""),
         str(target.get("base_url") or ""),
         str(target.get("wire_api") or ""),
     )
-    if entry_identity != target_identity:
-        return False
-
-    target_provider_id = str(target.get("provider_id") or "").strip()
-    if target_provider_id and str(entry.get("provider_id") or "").strip() != target_provider_id:
-        return False
-
-    target_model = str(target.get("model") or "").strip()
-    if target_model and str(entry.get("model") or "").strip() != target_model:
-        return False
-
-    return True
+    return entry_identity == target_identity
 
 
 def delete_llm_provider_history(payload: dict[str, Any]) -> dict[str, Any]:
@@ -918,29 +900,45 @@ def get_openai_settings(settings_data: dict[str, Any] | None = None) -> dict[str
 
     base_url = str(provider_data.get("base_url") or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")).strip()
     api_key = _provider_api_key_for_base_url("openai", base_url)
-    model = str(provider_data.get("model") or os.getenv("OPENAI_MODEL", "gpt-5.4")).strip()
+    model = str(provider_data.get("model") or os.getenv("OPENAI_MODEL", "")).strip()
     reasoning_effort = str(
-        provider_data.get("reasoning_effort") or os.getenv("OPENAI_REASONING_EFFORT", "low")
+        provider_data.get("reasoning_effort") or os.getenv("OPENAI_REASONING_EFFORT", "")
     ).strip()
     responses_reasoning_summary = str(
         provider_data.get("responses_reasoning_summary")
         or os.getenv("OPENAI_RESPONSES_REASONING_SUMMARY", "off")
     ).strip()
-    wire_api = str(provider_data.get("wire_api") or os.getenv("OPENAI_WIRE_API", "responses")).strip()
-    max_tokens = _coerce_int(provider_data.get("max_tokens", os.getenv("OPENAI_MAX_TOKENS", "8192")), 8192)
-    responses_stateful_continuation = coerce_feature_bool(
-        provider_data.get(
-            "responses_stateful_continuation",
-            os.getenv("OPENAI_RESPONSES_STATEFUL", "true"),
-        ),
-        _responses_stateful_default(True),
+    wire_api = normalize_custom_wire_api(
+        base_url,
+        str(provider_data.get("wire_api") or os.getenv("OPENAI_WIRE_API", "responses")),
+        "responses",
     )
-    prompt_cache_retention = _normalize_prompt_cache_retention(
-        provider_data.get(
-            "prompt_cache_retention",
-            os.getenv("OPENAI_PROMPT_CACHE_RETENTION", "24h"),
-        ),
-        _responses_prompt_cache_retention_default(True),
+    responses_defaults_enabled = wire_api == "responses"
+    max_tokens = max(
+        0,
+        _coerce_int(provider_data.get("max_tokens", os.getenv("OPENAI_MAX_TOKENS", "0")), 0),
+    )
+    responses_stateful_continuation = (
+        coerce_feature_bool(
+            provider_data.get(
+                "responses_stateful_continuation",
+                os.getenv("OPENAI_RESPONSES_STATEFUL", "false"),
+            ),
+            _responses_stateful_default(False),
+        )
+        if responses_defaults_enabled
+        else False
+    )
+    prompt_cache_retention = (
+        _normalize_prompt_cache_retention(
+            provider_data.get(
+                "prompt_cache_retention",
+                os.getenv("OPENAI_PROMPT_CACHE_RETENTION", ""),
+            ),
+            _responses_prompt_cache_retention_default(False),
+        )
+        if responses_defaults_enabled
+        else ""
     )
 
     available_models = _coerce_model_list(provider_data.get("available_models"))
@@ -976,12 +974,17 @@ def get_anthropic_settings(settings_data: dict[str, Any] | None = None) -> dict[
     base_url = str(provider_data.get("base_url") or os.getenv("ANTHROPIC_BASE_URL", "")).strip()
     api_key = _provider_api_key_for_base_url("anthropic", base_url)
     model = str(
-        provider_data.get("model") or os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+        provider_data.get("model") or os.getenv("ANTHROPIC_MODEL", "")
     ).strip()
     max_tokens = _coerce_int(
-        provider_data.get("max_tokens", os.getenv("ANTHROPIC_MAX_TOKENS", "8192")),
-        8192,
+        provider_data.get(
+            "max_tokens",
+            os.getenv("ANTHROPIC_MAX_TOKENS", str(CLAUDE_CODE_CAPPED_DEFAULT_MAX_TOKENS)),
+        ),
+        CLAUDE_CODE_CAPPED_DEFAULT_MAX_TOKENS,
     )
+    if max_tokens <= 0:
+        max_tokens = CLAUDE_CODE_CAPPED_DEFAULT_MAX_TOKENS
     thinking_budget = _coerce_int(
         provider_data.get("thinking_budget", os.getenv("ANTHROPIC_THINKING_BUDGET", "0")),
         0,
@@ -1007,29 +1010,43 @@ def get_anthropic_settings(settings_data: dict[str, Any] | None = None) -> dict[
 
 
 def get_custom_settings(settings_data: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Read settings for custom/OpenAI-compatible providers (deepseek, openrouter, etc.)."""
+    """Read the explicitly configured custom provider transport."""
     llm_data = _get_llm_section(settings_data)
     raw = llm_data.get("custom", {})
     provider_data = raw if isinstance(raw, dict) else {}
 
-    base_url = str(provider_data.get("base_url") or os.getenv("OPENAI_BASE_URL", "")).strip()
+    base_url = str(provider_data.get("base_url") or os.getenv("CUSTOM_BASE_URL", "")).strip()
     api_key = _custom_provider_api_key(base_url)
-    model = str(provider_data.get("model") or os.getenv("OPENAI_MODEL", "")).strip()
+    model = str(provider_data.get("model") or os.getenv("CUSTOM_MODEL", "")).strip()
     reasoning_effort = str(
-        provider_data.get("reasoning_effort") or os.getenv("OPENAI_REASONING_EFFORT", "low")
-    ).strip()
-    responses_reasoning_summary = str(
-        provider_data.get("responses_reasoning_summary")
-        or os.getenv("OPENAI_RESPONSES_REASONING_SUMMARY", "off")
+        provider_data.get("reasoning_effort") or os.getenv("CUSTOM_REASONING_EFFORT", "")
     ).strip()
     wire_api = normalize_custom_wire_api(base_url, str(provider_data.get("wire_api", "chat")), "chat")
-    max_tokens = _coerce_int(provider_data.get("max_tokens", os.getenv("OPENAI_MAX_TOKENS", "8192")), 8192)
+    responses_reasoning_summary = str(
+        provider_data.get("responses_reasoning_summary")
+        or os.getenv("CUSTOM_RESPONSES_REASONING_SUMMARY", "off")
+    ).strip()
+    custom_default_max_tokens = (
+        CLAUDE_CODE_CAPPED_DEFAULT_MAX_TOKENS if wire_api == "anthropic" else 0
+    )
+    max_tokens = max(
+        0,
+        _coerce_int(
+            provider_data.get(
+                "max_tokens",
+                os.getenv("CUSTOM_MAX_TOKENS", str(custom_default_max_tokens)),
+            ),
+            custom_default_max_tokens,
+        ),
+    )
+    if wire_api == "anthropic" and max_tokens <= 0:
+        max_tokens = CLAUDE_CODE_CAPPED_DEFAULT_MAX_TOKENS
     responses_defaults_enabled = wire_api == "responses"
     responses_stateful_continuation = coerce_feature_bool(
         provider_data.get(
             "responses_stateful_continuation",
             os.getenv(
-                "OPENAI_RESPONSES_STATEFUL",
+                "CUSTOM_RESPONSES_STATEFUL",
                 "true" if _responses_stateful_default(responses_defaults_enabled) else "false",
             ),
         ),
@@ -1039,28 +1056,19 @@ def get_custom_settings(settings_data: dict[str, Any] | None = None) -> dict[str
         provider_data.get(
             "prompt_cache_retention",
             os.getenv(
-                "OPENAI_PROMPT_CACHE_RETENTION",
+                "CUSTOM_PROMPT_CACHE_RETENTION",
                 _responses_prompt_cache_retention_default(responses_defaults_enabled),
             ),
         ),
         _responses_prompt_cache_retention_default(responses_defaults_enabled),
     )
     thinking_budget = _coerce_int(
-        provider_data.get("thinking_budget", os.getenv("ANTHROPIC_THINKING_BUDGET", "0")),
+        provider_data.get("thinking_budget", os.getenv("CUSTOM_THINKING_BUDGET", "0")),
         0,
     )
 
     available_models = _coerce_model_list(provider_data.get("available_models"))
-    if wire_api == "anthropic":
-        model = _select_anthropic_model(model, available_models)
-        available_models = [item for item in available_models if _is_anthropic_model_id(item)]
-    else:
-        model = _normalize_custom_model(base_url, model)
-    if "deepseek.com" in urlsplit(base_url).netloc.lower():
-        available_models = _filter_deepseek_models(available_models)
-        for preset in ("deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"):
-            if preset not in available_models:
-                available_models.append(preset)
+    model = _select_custom_model(model, available_models)
     if model and model not in available_models:
         available_models.insert(0, model)
     models_source = str(provider_data.get("models_source") or "").strip()
@@ -1146,19 +1154,13 @@ def get_llm_settings_payload(settings_data: dict[str, Any] | None = None) -> dic
         "openai": openai["model"],
     }
 
-    def mask_api_key(value: str) -> str:
-        value = str(value or "")
-        if len(value) <= 8:
-            return "" if not value else "••••"
-        return f"{value[:3]}…{value[-4:]}"
-
     return {
         "provider": provider,
         "providers": ["openai", "anthropic", "custom"],
         "openai": {
             "display_name": openai["display_name"],
             "has_api_key": bool(openai["api_key"]),
-            "api_key": mask_api_key(openai["api_key"]),
+            "api_key": openai["api_key"],
             "base_url": openai["base_url"],
             "model": openai["model"],
             "available_models": openai["available_models"],
@@ -1174,7 +1176,7 @@ def get_llm_settings_payload(settings_data: dict[str, Any] | None = None) -> dic
         "anthropic": {
             "display_name": anthropic["display_name"],
             "has_api_key": bool(anthropic["api_key"]),
-            "api_key": mask_api_key(anthropic["api_key"]),
+            "api_key": anthropic["api_key"],
             "base_url": anthropic["base_url"],
             "model": anthropic["model"],
             "available_models": anthropic["available_models"],
@@ -1185,7 +1187,7 @@ def get_llm_settings_payload(settings_data: dict[str, Any] | None = None) -> dic
         "custom": {
             "display_name": custom["display_name"],
             "has_api_key": bool(custom["api_key"]),
-            "api_key": mask_api_key(custom["api_key"]),
+            "api_key": custom["api_key"],
             "base_url": custom["base_url"],
             "model": custom["model"],
             "available_models": custom["available_models"],
@@ -1199,22 +1201,14 @@ def get_llm_settings_payload(settings_data: dict[str, Any] | None = None) -> dic
             "prompt_cache_retention": custom["prompt_cache_retention"],
             "reasoning_effort_levels": custom["reasoning_effort_levels"],
         },
-        "provider_history": [
-            {
-                **entry,
-                "api_key": mask_api_key(str(entry.get("api_key") or "")),
-            }
-            for entry in _llm_history(settings_data)
-        ],
+        "provider_history": _llm_history(settings_data, include_api_keys=True),
         "active_model": active_by_provider.get(provider, openai["model"]),
-        "prompt_persona": get_prompt_persona(settings_data),
     }
 
 
 def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
     settings_data = _load_settings_json()
-    if "prompt_persona" in payload:
-        settings_data["prompt_persona"] = _normalize_prompt_persona(payload.get("prompt_persona"))
+    settings_data.pop("prompt_persona", None)
     current_openai = get_openai_settings(settings_data)
     current_anthropic = get_anthropic_settings(settings_data)
     current_custom = get_custom_settings(settings_data)
@@ -1227,7 +1221,7 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
     openai_api_key_provided = "api_key" in openai_updates
     openai_api_key = str(openai_updates.get("api_key", "")).strip()
     openai_base_url = str(openai_updates.get("base_url", current_openai["base_url"])).strip()
-    if openai_api_key_provided:
+    if openai_api_key_provided and _is_api_key_replacement(openai_api_key):
         _set_runtime_api_key("openai", openai_api_key, openai_base_url)
     openai_model = str(openai_updates.get("model", current_openai["model"])).strip()
     openai_capabilities_match = (
@@ -1244,8 +1238,13 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
         )
     ).strip()
     openai_wire_api = str(openai_updates.get("wire_api", current_openai["wire_api"])).strip()
-    current_openai_wire_api = _normalize_wire_api(str(current_openai["wire_api"]), "responses")
-    next_openai_wire_api = _normalize_wire_api(
+    current_openai_wire_api = normalize_custom_wire_api(
+        str(current_openai.get("base_url") or openai_base_url),
+        str(current_openai["wire_api"]),
+        "responses",
+    )
+    next_openai_wire_api = normalize_custom_wire_api(
+        openai_base_url,
         openai_wire_api or current_openai["wire_api"],
         current_openai["wire_api"],
     )
@@ -1282,9 +1281,12 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
             openai_responses_reasoning_summary
             or current_openai["responses_reasoning_summary"]
         ),
-        "max_tokens": _coerce_int(
-            openai_updates.get("max_tokens", current_openai["max_tokens"]),
-            current_openai["max_tokens"],
+        "max_tokens": max(
+            0,
+            _coerce_int(
+                openai_updates.get("max_tokens", current_openai["max_tokens"]),
+                current_openai["max_tokens"],
+            ),
         ),
         "wire_api": next_openai_wire_api,
         "responses_stateful_continuation": (
@@ -1314,7 +1316,7 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
     anthropic_api_key_provided = "api_key" in anthropic_updates
     anthropic_api_key = str(anthropic_updates.get("api_key", "")).strip()
     anthropic_base_url = str(anthropic_updates.get("base_url", current_anthropic["base_url"])).strip()
-    if anthropic_api_key_provided:
+    if anthropic_api_key_provided and _is_api_key_replacement(anthropic_api_key):
         _set_runtime_api_key("anthropic", anthropic_api_key, anthropic_base_url)
     anthropic_model = str(anthropic_updates.get("model", current_anthropic["model"])).strip()
     next_anthropic = {
@@ -1335,6 +1337,8 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
             current_anthropic["thinking_budget"],
         ),
     }
+    if next_anthropic["max_tokens"] <= 0:
+        next_anthropic["max_tokens"] = CLAUDE_CODE_CAPPED_DEFAULT_MAX_TOKENS
     if next_anthropic["model"] and next_anthropic["model"] not in next_anthropic["available_models"]:
         next_anthropic["available_models"].insert(0, next_anthropic["model"])
 
@@ -1343,7 +1347,7 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
     custom_api_key_provided = "api_key" in custom_updates
     custom_api_key = str(custom_updates.get("api_key", "")).strip()
     custom_base_url = str(custom_updates.get("base_url", current_custom["base_url"])).strip()
-    if custom_api_key_provided:
+    if custom_api_key_provided and _is_api_key_replacement(custom_api_key):
         _set_runtime_api_key("custom", custom_api_key, custom_base_url)
     custom_model = str(custom_updates.get("model", current_custom["model"])).strip()
     custom_wire_api = normalize_custom_wire_api(
@@ -1370,15 +1374,31 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
     next_custom_available = _coerce_model_list(
         custom_updates.get("available_models", current_custom["available_models"])
     )
-    if custom_wire_api == "anthropic":
-        next_custom_available = [item for item in next_custom_available if _is_anthropic_model_id(item)]
-        next_custom_model = _select_anthropic_model(custom_model or current_custom["model"], next_custom_available)
-    else:
-        next_custom_model = _normalize_custom_model(custom_base_url, custom_model or current_custom["model"])
+    next_custom_model = _select_custom_model(
+        custom_model or current_custom["model"],
+        next_custom_available,
+    )
     custom_capabilities_match = (
         next_custom_model == current_custom["model"]
         and custom_base_url.rstrip("/") == str(current_custom["base_url"]).rstrip("/")
     )
+    custom_max_tokens_default = (
+        CLAUDE_CODE_CAPPED_DEFAULT_MAX_TOKENS if custom_wire_api == "anthropic" else 0
+    )
+    if "max_tokens" in custom_updates:
+        custom_max_tokens = _coerce_int(
+            custom_updates.get("max_tokens"),
+            custom_max_tokens_default,
+        )
+    elif custom_wire_api == current_custom_wire_api:
+        custom_max_tokens = _coerce_int(
+            current_custom.get("max_tokens"),
+            custom_max_tokens_default,
+        )
+    else:
+        custom_max_tokens = custom_max_tokens_default
+    if custom_wire_api == "anthropic" and custom_max_tokens <= 0:
+        custom_max_tokens = CLAUDE_CODE_CAPPED_DEFAULT_MAX_TOKENS
 
     next_custom = {
         "display_name": str(custom_updates.get("display_name", current_custom["display_name"])).strip(),
@@ -1398,10 +1418,7 @@ def save_llm_settings(payload: dict[str, Any]) -> dict[str, Any]:
                 current_custom["responses_reasoning_summary"],
             )
         ).strip(),
-        "max_tokens": _coerce_int(
-            custom_updates.get("max_tokens", current_custom["max_tokens"]),
-            current_custom["max_tokens"],
-        ),
+        "max_tokens": max(0, custom_max_tokens),
         "thinking_budget": _coerce_int(
             custom_updates.get("thinking_budget", current_custom["thinking_budget"]),
             current_custom["thinking_budget"],
@@ -1477,6 +1494,21 @@ def add_permission_content_rule(rule: str, *, deny: bool = False) -> list[str]:
     rule = str(rule or "").strip()
     if not rule:
         return []
+    # Never persist a broad shell-wrapper rule generated by a client.  The
+    # content matcher is intentionally conservative, but rejecting it here
+    # also protects older clients/runtimes that may not share that matcher.
+    from backend.permissions.content_rules import (
+        command_prefix_uses_unsafe_wrapper,
+        parse_content_rule,
+    )
+
+    parsed_rule = parse_content_rule(rule)
+    if parsed_rule is None:
+        raise ValueError("Invalid permission content rule")
+    if parsed_rule.tool_glob in {"run_command", "terminal_*"} and parsed_rule.content:
+        command_prefix = parsed_rule.content[:-2].strip() if parsed_rule.content.endswith(":*") else ""
+        if command_prefix_uses_unsafe_wrapper(command_prefix):
+            raise ValueError("Refusing a permanent permission rule for a shell or command wrapper")
     settings_data = _load_settings_json()
     perms = settings_data.setdefault("permissions", {})
     key = "content_deny_rules" if deny else "content_allow_rules"
@@ -1499,6 +1531,7 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSetting
             raise SettingsError("Missing ANTHROPIC_API_KEY")
         return LLMSettings(
             api_key=anthropic["api_key"],
+            provider="anthropic",
             base_url=anthropic["base_url"],
             model=anthropic["model"],
             reasoning_effort="",
@@ -1516,6 +1549,7 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSetting
             raise SettingsError("Missing API key for custom provider")
         return LLMSettings(
             api_key=custom["api_key"],
+            provider="custom",
             base_url=custom["base_url"],
             model=custom["model"],
             reasoning_effort=custom["reasoning_effort"],
@@ -1533,6 +1567,7 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None) -> LLMSetting
 
     return LLMSettings(
         api_key=openai["api_key"],
+        provider="openai",
         base_url=openai["base_url"],
         model=openai["model"],
         reasoning_effort=openai["reasoning_effort"],
@@ -1603,53 +1638,38 @@ def load_config() -> AppConfig:
     if isinstance(raw_stream_retryable, str):
         raw_stream_retryable = [item.strip() for item in raw_stream_retryable.split(",")]
 
+    max_iterations = max(0, int(agent_data.get("max_iterations", AgentSettings.max_iterations)))
+    max_tool_calls = max(0, int(agent_data.get("max_tool_calls", AgentSettings.max_tool_calls)))
+    max_turn_tokens = max(0, int(agent_data.get("max_turn_tokens", AgentSettings.max_turn_tokens)))
+    max_turn_cost_usd = max(0.0, float(agent_data.get("max_turn_cost_usd", AgentSettings.max_turn_cost_usd)))
+    max_turn_seconds = max(0.0, float(agent_data.get("max_turn_seconds", AgentSettings.max_turn_seconds)))
     agent = AgentSettings(
-        max_iterations=agent_data.get("max_iterations", 30),
-        max_tool_calls=agent_data.get("max_tool_calls", 200),
-        compaction_threshold=agent_data.get("compaction_threshold", 0.75),
-        stagnation_limit=agent_data.get("stagnation_limit", 3),
-        history_keep_recent=agent_data.get("history_keep_recent", 15),
-        fallback_providers=tuple(fallback_providers),
-        reflection_pass=bool(agent_data.get("reflection_pass", False)),
-        reflection_multi_perspective=bool(agent_data.get("reflection_multi_perspective", True)),
-        agent_mode=_normalize_agent_mode(agent_data.get("agent_mode", "react")),
-        verify_command=str(agent_data.get("verify_command", "") or "").strip(),
-        verify_timeout_seconds=float(agent_data.get("verify_timeout_seconds", 120.0)),
-        live_text_streaming=coerce_feature_bool(agent_data.get("live_text_streaming", True), True),
-        speculative_unphased_streaming=coerce_feature_bool(
-            agent_data.get("speculative_unphased_streaming", False),
-            False,
+        max_iterations=max_iterations,
+        max_tool_calls=max_tool_calls,
+        turn_error_budget=int(agent_data.get("turn_error_budget", AgentSettings.turn_error_budget)),
+        max_turn_tokens=max_turn_tokens,
+        max_turn_cost_usd=max_turn_cost_usd,
+        max_turn_seconds=max_turn_seconds,
+        compaction_keep_recent_tokens=int(
+            agent_data.get("compaction_keep_recent_tokens", 20_000)
         ),
-        stream_timeout_seconds=float(agent_data.get("stream_timeout_seconds", 180.0)),
-        first_byte_warning_seconds=float(agent_data.get("first_byte_warning_seconds", 12.0)),
+        fallback_providers=tuple(fallback_providers),
+        agent_mode=_normalize_agent_mode(agent_data.get("agent_mode", "react")),
+        live_text_streaming=coerce_feature_bool(agent_data.get("live_text_streaming", True), True),
+        stream_timeout_seconds=float(agent_data.get("stream_timeout_seconds", AgentSettings.stream_timeout_seconds)),
         first_byte_timeout_seconds=float(agent_data.get("first_byte_timeout_seconds", 0.0)),
-        stream_max_attempts=int(agent_data.get("stream_max_attempts", 2)),
-        stream_retry_delay_seconds=float(agent_data.get("stream_retry_delay_seconds", 0.8)),
+        stream_max_attempts=int(agent_data.get("stream_max_attempts", AgentSettings.stream_max_attempts)),
+        stream_retry_delay_seconds=float(agent_data.get("stream_retry_delay_seconds", AgentSettings.stream_retry_delay_seconds)),
         stream_retryable_substrings=tuple(
             str(item).strip()
             for item in raw_stream_retryable
             if str(item).strip()
         ),
-        prompt_cache_settle_enabled=coerce_feature_bool(
-            agent_data.get("prompt_cache_settle_enabled", False),
-            False,
-        ),
-        prompt_cache_settle_delay_seconds=float(agent_data.get("prompt_cache_settle_delay_seconds", 0.8)),
-        prompt_cache_settle_min_prompt_tokens=int(agent_data.get("prompt_cache_settle_min_prompt_tokens", 12_000)),
-        prompt_cache_settle_target_hit_rate=float(agent_data.get("prompt_cache_settle_target_hit_rate", 0.92)),
-        dynamic_max_iterations_enabled=coerce_feature_bool(
-            agent_data.get("dynamic_max_iterations_enabled", False),
-            False,
-        ),
-        dynamic_max_iterations_min_configured=int(
-            agent_data.get("dynamic_max_iterations_min_configured", 30)
-        ),
-        dynamic_max_iterations_simple=int(agent_data.get("dynamic_max_iterations_simple", 6)),
     )
 
     # Token 预算
     budget_data = settings_data.get("token_budget", {})
-    # 未显式配置 total 时，按当前模型能力动态解析（1M 模型不再被按 128K 预算）。
+    # Unknown providers use Claude Code's 200K default unless the host overrides it.
     default_total = resolve_context_window(getattr(llm, "model", ""))
     token_budget = TokenBudget(
         total=budget_data.get("total", default_total),
@@ -1658,8 +1678,7 @@ def load_config() -> AppConfig:
         memory_index=budget_data.get("memory_index", 1_000),
         tool_schemas=budget_data.get("tool_schemas", 6_000),
         agent_state=budget_data.get("agent_state", 2_000),
-        rag_chunks=budget_data.get("rag_chunks", 8_000),
-        response_reserve=budget_data.get("response_reserve", 8_000),
+        response_reserve=budget_data.get("response_reserve", 16_384),
     )
 
     return AppConfig(

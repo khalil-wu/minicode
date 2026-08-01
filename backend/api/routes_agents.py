@@ -35,7 +35,10 @@ def _no_store(response: Response) -> None:
 async def list_agents_api(response: Response) -> dict[str, Any]:
     """List all discovered custom agents."""
     _no_store(response)
-    return list_agents()
+    try:
+        return list_agents()
+    except AgentEditorServiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/api/agents")

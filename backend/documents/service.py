@@ -11,14 +11,36 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from xml.etree import ElementTree
+from defusedxml import ElementTree
 
 from backend.artifact.store import ArtifactStore
-from backend.mcp.servers.docparse import _parse_docx, _parse_pdf, _split_sections
-from backend.memory.vector_memory import VectorMemory
-from backend.rag.chunker import ChunkMode, Chunker
+from backend.mcp.servers.docparse import _parse_docx, _parse_pdf
 
 logger = logging.getLogger(__name__)
+
+MAX_ZIP_ENTRIES = 2_000
+MAX_ZIP_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
+MAX_ZIP_MEMBER_BYTES = 10 * 1024 * 1024
+MAX_ZIP_COMPRESSION_RATIO = 200
+
+
+def _validate_zip_archive(archive: zipfile.ZipFile) -> None:
+    entries = archive.infolist()
+    if len(entries) > MAX_ZIP_ENTRIES:
+        raise ValueError(f"Archive contains too many entries (max {MAX_ZIP_ENTRIES}).")
+    total = 0
+    for info in entries:
+        if info.is_dir():
+            continue
+        total += info.file_size
+        if total > MAX_ZIP_UNCOMPRESSED_BYTES:
+            raise ValueError("Archive uncompressed content exceeds the 100 MB limit.")
+        if info.file_size > MAX_ZIP_MEMBER_BYTES:
+            raise ValueError(f"Archive member '{info.filename}' exceeds the 10 MB limit.")
+        if info.file_size and info.compress_size == 0:
+            raise ValueError(f"Archive member '{info.filename}' has an invalid compression size.")
+        if info.compress_size and info.file_size / info.compress_size > MAX_ZIP_COMPRESSION_RATIO:
+            raise ValueError(f"Archive member '{info.filename}' exceeds the compression-ratio limit.")
 
 
 @dataclass(frozen=True)
@@ -29,7 +51,6 @@ class AttachmentRecord:
     media_type: str
     artifact_id: str
     doc_id: str
-    indexed_chunks: int
     size_bytes: int
     title: str
     summary: str = ""
@@ -44,7 +65,6 @@ class AttachmentRecord:
             "media_type": self.media_type,
             "artifact_id": self.artifact_id,
             "doc_id": self.doc_id,
-            "indexed_chunks": self.indexed_chunks,
             "size_bytes": self.size_bytes,
             "title": self.title,
             "summary": self.summary,
@@ -61,7 +81,6 @@ class UploadedDocument:
     file_name: str
     doc_id: str
     artifact_id: str
-    indexed_chunks: int
     title: str
     full_text: str
     attachment: AttachmentRecord
@@ -120,12 +139,20 @@ def ingest_uploaded_document(
     file_name: str,
     raw_content: bytes,
     artifact_store: ArtifactStore,
+    conversation_id: str = "",
+    workspace_root: str | Path | None = None,
 ) -> UploadedDocument:
     import base64 as _b64
+    from backend.security.sensitive_files import is_sensitive_file
 
+    submitted_path = Path(file_name or "upload.txt")
+    if is_sensitive_file(submitted_path):
+        raise ValueError("Sensitive files cannot be uploaded as attachments.")
     safe_name = Path(file_name or "upload.txt").name
     if not safe_name:
         raise ValueError("Uploaded file name is required.")
+    if is_sensitive_file(Path(safe_name)):
+        raise ValueError("Sensitive files cannot be uploaded as attachments.")
     if not raw_content:
         raise ValueError("Uploaded file is empty.")
 
@@ -149,22 +176,9 @@ def ingest_uploaded_document(
         full_text,
         source=f"upload:{safe_name}",
         type=str(parsed.get("kind") or "document"),
+        conversation_id=conversation_id,
+        workspace_root=workspace_root,
     )
-    indexed_chunks = 0
-    if not parse_error:
-        try:
-            indexed_chunks = _index_document_chunks(
-                doc_id=doc_id,
-                file_name=safe_name,
-                title=str(parsed.get("title") or Path(safe_name).stem),
-                full_text=full_text,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Vector indexing failed for '%s' (possibly ChromaDB is unavailable): %s. Falling back to plain ingestion without vector search.",
-                safe_name,
-                exc,
-            )
     attachment = AttachmentRecord(
         id=f"att_{doc_id[4:]}",
         kind=str(parsed.get("kind") or "document"),
@@ -172,7 +186,6 @@ def ingest_uploaded_document(
         media_type=str(parsed.get("media_type") or _guess_media_type(safe_name)),
         artifact_id=artifact_id,
         doc_id=doc_id,
-        indexed_chunks=indexed_chunks,
         size_bytes=len(raw_content),
         title=str(parsed.get("title") or Path(safe_name).stem),
         summary=str(parsed.get("summary") or ""),
@@ -184,7 +197,6 @@ def ingest_uploaded_document(
         file_name=safe_name,
         doc_id=doc_id,
         artifact_id=artifact_id,
-        indexed_chunks=indexed_chunks,
         title=str(parsed.get("title") or Path(safe_name).stem),
         full_text=full_text,
         attachment=attachment,
@@ -305,6 +317,7 @@ def _parse_image_document(file_name: str, raw_content: bytes) -> dict[str, Any]:
 def _parse_xlsx_workbook(file_name: str, raw_content: bytes) -> dict[str, Any]:
     try:
         with zipfile.ZipFile(io.BytesIO(raw_content)) as archive:
+            _validate_zip_archive(archive)
             shared_strings = _read_xlsx_shared_strings(archive)
             sheets = _read_xlsx_sheets(archive, shared_strings)
     except zipfile.BadZipFile as exc:
@@ -331,6 +344,7 @@ def _parse_xlsx_workbook(file_name: str, raw_content: bytes) -> dict[str, Any]:
 def _parse_pptx_presentation(file_name: str, raw_content: bytes) -> dict[str, Any]:
     try:
         with zipfile.ZipFile(io.BytesIO(raw_content)) as archive:
+            _validate_zip_archive(archive)
             slide_names = sorted(
                 name for name in archive.namelist() if name.startswith("ppt/slides/slide") and name.endswith(".xml")
             )
@@ -385,6 +399,7 @@ def _parse_zip_archive(file_name: str, raw_content: bytes, depth: int = 0) -> di
 
     try:
         with zipfile.ZipFile(io.BytesIO(raw_content)) as archive:
+            _validate_zip_archive(archive)
             file_entries = [info for info in archive.infolist() if not info.is_dir()]
             preview_names = [info.filename for info in file_entries[:20]]
             sections = ["Archive contents:", *[f"- {name}" for name in preview_names]]
@@ -640,47 +655,3 @@ def _extract_image_dimensions(raw_content: bytes) -> tuple[int | None, int | Non
         width, height = struct.unpack("<HH", raw_content[6:10])
         return width, height
     return None, None
-
-
-def _index_document_chunks(
-    *,
-    doc_id: str,
-    file_name: str,
-    title: str,
-    full_text: str,
-) -> int:
-    sections = _split_sections(full_text)
-    chunker = Chunker()
-    vector_memory = VectorMemory(collection_name="documents")
-
-    indexed_chunks = 0
-    for section_index, section in enumerate(sections):
-        section_title = section.get("title") or f"Section {section_index + 1}"
-        section_content = section.get("content", "").strip()
-        if not section_content:
-            continue
-
-        source = f"{file_name}#{section_title}"
-        chunks = chunker.chunk(
-            section_content,
-            mode=ChunkMode.GENERAL,
-            source=source,
-        )
-
-        for chunk in chunks:
-            vector_memory.remember(
-                chunk.content,
-                tags=["document", doc_id, file_name],
-                importance=3,
-                metadata={
-                    "doc_id": doc_id,
-                    "title": title,
-                    "source": file_name,
-                    "section_title": section_title,
-                    "section_index": section_index,
-                    "chunk_index": int(chunk.metadata.get("chunk_index", indexed_chunks)),
-                },
-            )
-            indexed_chunks += 1
-
-    return indexed_chunks

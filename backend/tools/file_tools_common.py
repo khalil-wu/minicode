@@ -6,12 +6,8 @@ ReadFile/WriteFile/EditFile/ListFiles. Path resolution lives in path_resolution.
 from __future__ import annotations
 
 import difflib
-import asyncio
 import os
-import tempfile
-import time
 import hashlib
-from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -20,39 +16,33 @@ from typing import Any
 from backend.artifact.store import ArtifactStore
 from backend.permissions.context import ToolExecutionContext
 from backend.security.sensitive_files import is_protected_write_path, is_sensitive_file
-from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
+from backend.atomic_io import atomic_write_text
+from backend.tools.base import (
+    MAX_TOOL_RESULT_BYTES,
+    MAX_TOOL_RESULT_LINES,
+    BaseTool,
+    PermissionLevel,
+    ToolResult,
+    ToolSchema,
+)
 from backend.tools.path_resolution import PathTraversalError, _is_bypass_mode, _resolve_path
-from backend.workspace.file_state_cache import get_global_file_cache
 from backend.workspace.path_filters import is_windows_reserved_path
 
-# Inline-read budget in estimated tokens (len//4). cc's Read default is 25000
-# tokens; 2000 was far too low and forced normal source files into artifacts,
-# leaving the model with only a preview. Raised to 8000 tokens (~32K chars) to
-# keep ordinary files inline while still artifact-izing very large ones.
-READ_FILE_TOKEN_LIMIT = 8000  # ~32000 characters (estimated at len//4).
-# Preview kept consistent with the inline budget so artifact-ized files still
-# surface a substantial head (~32K chars ≈ the inline token budget).
-READ_FILE_CONTEXT_PREVIEW_CHARS = 32_000
-LIST_FILES_MAX_ENTRIES = 100
-LIST_FILES_CACHE_TTL_SECONDS = 8.0
-LIST_FILES_CACHE_MAX_ENTRIES = 128
-WRITE_DIFF_EVENT_MAX_CHARS = 80_000
-
-
-@dataclass
-class _ListFilesCacheEntry:
-    expires_at: float
-    directory_mtime_ns: int
-    result: str
-
-
-_list_files_cache: OrderedDict[str, _ListFilesCacheEntry] = OrderedDict()
-_list_files_cache_lock = Lock()
-
+# Pi's Read contract: complete lines up to 2000 lines or 50 KiB, then continue
+# with offset/limit. Keep the old token names as derived compatibility aliases.
+READ_FILE_MAX_LINES = MAX_TOOL_RESULT_LINES
+READ_FILE_MAX_BYTES = MAX_TOOL_RESULT_BYTES
+READ_FILE_TOKEN_LIMIT = READ_FILE_MAX_BYTES // 4
+READ_FILE_CONTEXT_PREVIEW_CHARS = READ_FILE_MAX_BYTES
+# Pi's ls contract: the caller may choose the entry limit and the default is
+# 500. This is an output contract, not a hidden traversal cap.
+LIST_FILES_MAX_ENTRIES = 500
+# Diff previews use the same output budget as other tool results (Pi's
+# 50-KiB/2000-line contract) instead of a second local threshold.
+WRITE_DIFF_EVENT_MAX_CHARS = MAX_TOOL_RESULT_BYTES
 
 def _path_arg(args: dict[str, Any]) -> str:
-    """Accept common path aliases while keeping file_path canonical."""
-    value = args.get("file_path") or args.get("path") or args.get("target") or args.get("filename") or ""
+    value = args.get("file_path") or ""
     return str(value).strip()
 
 
@@ -73,7 +63,7 @@ def _validate_text_arg(args: dict[str, Any], *names: str, role: str) -> str:
 
 
 def _validate_path_arg_type(args: dict[str, Any]) -> str:
-    name, value = _first_present_arg(args, "file_path", "path", "target", "filename")
+    name, value = _first_present_arg(args, "file_path")
     if value is None:
         return ""
     if not isinstance(value, str):
@@ -81,90 +71,100 @@ def _validate_path_arg_type(args: dict[str, Any]) -> str:
     return ""
 
 
-def _list_files_cache_key(path: Path, recursive: bool) -> str:
-    return f"{path.resolve().as_posix()}::recursive={int(bool(recursive))}"
+@dataclass(frozen=True)
+class _ListFilesCacheEntry:
+    dependencies: tuple[Path, ...]
+    signature: tuple[tuple[str, int, int, int], ...]
+    result: str
 
 
-def _get_cached_list_files_result(path: Path, recursive: bool) -> str | None:
-    result, _stale = _lookup_list_files_cache_result(path, recursive)
-    return result
+_LIST_FILES_CACHE: dict[tuple[str, bool, int | None], _ListFilesCacheEntry] = {}
+_LIST_FILES_CACHE_LOCK = Lock()
 
 
-def _lookup_list_files_cache_result(path: Path, recursive: bool) -> tuple[str | None, bool]:
-    cache_key = _list_files_cache_key(path, recursive)
-    now = time.monotonic()
-
-    with _list_files_cache_lock:
-        entry = _list_files_cache.get(cache_key)
-        if entry is None:
-            return None, False
-        if now > entry.expires_at:
-            _list_files_cache.pop(cache_key, None)
-            return None, True
-
+def _list_files_signature(paths: tuple[Path, ...]) -> tuple[tuple[str, int, int, int], ...] | None:
+    signature: list[tuple[str, int, int, int]] = []
     try:
-        current_mtime_ns = path.stat().st_mtime_ns
+        for dependency in paths:
+            stat = dependency.stat()
+            signature.append((str(dependency), stat.st_mtime_ns, stat.st_size, stat.st_mode))
     except OSError:
-        with _list_files_cache_lock:
-            _list_files_cache.pop(cache_key, None)
-        return None, True
-
-    with _list_files_cache_lock:
-        entry = _list_files_cache.get(cache_key)
-        if entry is None:
-            return None, False
-        if current_mtime_ns != entry.directory_mtime_ns:
-            _list_files_cache.pop(cache_key, None)
-            return None, True
-        _list_files_cache.move_to_end(cache_key)
-        return entry.result, False
+        return None
+    return tuple(signature)
 
 
-def _put_list_files_cache(path: Path, recursive: bool, result: str) -> None:
-    try:
-        directory_mtime_ns = path.stat().st_mtime_ns
-    except OSError:
-        return
+def _get_cached_list_files_result(
+    path: Path,
+    recursive: bool,
+    *,
+    limit: int | None = None,
+) -> str | None:
+    result, found = _lookup_list_files_cache_result(path, recursive, limit=limit)
+    return result if found else None
 
-    cache_key = _list_files_cache_key(path, recursive)
-    entry = _ListFilesCacheEntry(
-        expires_at=time.monotonic() + LIST_FILES_CACHE_TTL_SECONDS,
-        directory_mtime_ns=directory_mtime_ns,
-        result=result,
+
+def _lookup_list_files_cache_result(
+    path: Path,
+    recursive: bool,
+    *,
+    limit: int | None = None,
+) -> tuple[str | None, bool]:
+    key = (str(path.resolve()), bool(recursive), limit)
+    with _LIST_FILES_CACHE_LOCK:
+        entry = _LIST_FILES_CACHE.get(key)
+    if entry is None:
+        return None, False
+    current_signature = _list_files_signature(entry.dependencies)
+    if current_signature is None or current_signature != entry.signature:
+        with _LIST_FILES_CACHE_LOCK:
+            _LIST_FILES_CACHE.pop(key, None)
+        return None, False
+    return entry.result, True
+
+
+def _put_list_files_cache(
+    path: Path,
+    recursive: bool,
+    result: str,
+    *,
+    limit: int | None = None,
+    dependencies: tuple[Path, ...] | None = None,
+) -> None:
+    resolved = path.resolve()
+    dependency_paths = dependencies or (resolved,)
+    normalized_dependencies = tuple(
+        sorted({dependency.resolve() for dependency in dependency_paths}, key=lambda item: str(item).casefold())
     )
-
-    with _list_files_cache_lock:
-        _list_files_cache[cache_key] = entry
-        _list_files_cache.move_to_end(cache_key)
-        while len(_list_files_cache) > LIST_FILES_CACHE_MAX_ENTRIES:
-            _list_files_cache.popitem(last=False)
+    signature = _list_files_signature(normalized_dependencies)
+    if signature is None:
+        return
+    key = (str(resolved), bool(recursive), limit)
+    with _LIST_FILES_CACHE_LOCK:
+        _LIST_FILES_CACHE[key] = _ListFilesCacheEntry(
+            dependencies=normalized_dependencies,
+            signature=signature,
+            result=result,
+        )
 
 
 def clear_list_files_cache() -> None:
-    """Clear in-memory list_files cache."""
-    with _list_files_cache_lock:
-        _list_files_cache.clear()
-    # Also invalidate grep/glob result caches: an edit/write/patch changes file
-    # contents, so a cached grep would otherwise return stale results for up to
-    # the search-cache TTL (edit → grep verification bug). Lazy import avoids a
-    # module-load cycle.
-    try:
-        from backend.tools.search_tools import clear_search_caches
-
-        clear_search_caches()
-    except Exception:
-        pass
+    """Invalidate cached directory listings after workspace mutations."""
+    with _LIST_FILES_CACHE_LOCK:
+        _LIST_FILES_CACHE.clear()
 
 
 def _add_line_numbers(content: str, start_line: int = 1) -> str:
     """Add cat -n style line numbers (Claude Code pattern).
 
-    Format: right-aligned 6-digit line number + "→" + content.
-    Skip for content over 2000 lines to keep output manageable.
+    Format: right-aligned 6-digit line number + "→" + content. Claude Code's
+    addLineNumbers (utils/file.ts) never opts out — it bounds the *read*
+    (MAX_LINES_TO_READ) instead of silently dropping the prefix. We bound the
+    read via the Pi line/byte contract, so always number here: previously a file
+    over 2000 lines was returned without line numbers, yet edit_file tells the
+    model to strip the line-number prefix — so the model had nothing to strip
+    and risked mangling real content.
     """
     lines = content.split("\n")
-    if len(lines) > 2000:
-        return content
     width = max(6, len(str(len(lines) + start_line - 1)))
     result = []
     for i, line in enumerate(lines):
@@ -255,20 +255,7 @@ def _workspace_display_path(path: Path, raw_path: str, context: ToolExecutionCon
     return raw_path
 
 
-def _partial_text(value: str, ratio: float) -> str:
-    if ratio >= 1:
-        return value
-    if not value:
-        return ""
-    lines = value.splitlines(keepends=True)
-    if len(lines) > 1:
-        count = max(1, min(len(lines), int(len(lines) * ratio)))
-        return "".join(lines[:count])
-    count = max(1, min(len(value), int(len(value) * ratio)))
-    return value[:count]
-
-
-async def _emit_write_preview_progress(
+async def _emit_write_diff(
     context: ToolExecutionContext | None,
     *,
     file_path: str,
@@ -280,36 +267,30 @@ async def _emit_write_preview_progress(
     if emit is None:
         return
     tool_call_id = str((context.metadata or {}).get("_current_tool_call_id") or "file-write")
-    ratios = (0.24, 0.58, 1.0)
-    for index, ratio in enumerate(ratios, start=1):
-        preview_content = _partial_text(new_content, ratio)
-        patch, additions, deletions, truncated = _generate_limited_unified_diff(
-            old_content,
-            preview_content,
-            display_path or file_path,
-            max_chars=WRITE_DIFF_EVENT_MAX_CHARS,
-        )
-        if not patch.strip() and additions == 0 and deletions == 0:
-            continue
-        try:
-            await emit("diff.git_working_tree", {
-                "files": [{
-                    "path": display_path or file_path,
-                    "patch": patch,
-                    "additions": additions,
-                    "deletions": deletions,
-                    "is_binary": False,
-                    "is_truncated": truncated,
-                }],
-                "untracked": [],
-                "preview": True,
-                "tool_call_id": tool_call_id,
-                "progress": ratio,
-            })
-        except Exception:
-            return
-        if index < len(ratios):
-            await asyncio.sleep(0.06)
+    patch, additions, deletions, truncated = _generate_limited_unified_diff(
+        old_content,
+        new_content,
+        display_path or file_path,
+        max_chars=WRITE_DIFF_EVENT_MAX_CHARS,
+    )
+    if not patch.strip() and additions == 0 and deletions == 0:
+        return
+    try:
+        await emit("diff.git_working_tree", {
+            "files": [{
+                "path": display_path or file_path,
+                "patch": patch,
+                "additions": additions,
+                "deletions": deletions,
+                "is_binary": False,
+                "is_truncated": truncated,
+            }],
+            "untracked": [],
+            "preview": True,
+            "tool_call_id": tool_call_id,
+        })
+    except Exception:
+        return
 
 
 def content_hash(content: str) -> str:
@@ -317,27 +298,8 @@ def content_hash(content: str) -> str:
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
-    """Write UTF-8 text via a same-directory temp file, then atomically replace."""
-    tmp_name = ""
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        dir=str(path.parent),
-        text=True,
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_name, path)
-        tmp_name = ""
-    finally:
-        if tmp_name:
-            try:
-                os.unlink(tmp_name)
-            except FileNotFoundError:
-                pass
+    """Compatibility wrapper for the shared durable writer."""
+    atomic_write_text(path, content)
 
 
 def _validate_expected_hash(path: Path, expected_hash: Any) -> tuple[bool, str]:
@@ -357,7 +319,7 @@ def _validate_expected_hash(path: Path, expected_hash: Any) -> tuple[bool, str]:
     except UnicodeDecodeError:
         return False, "Only UTF-8 text files support guarded writes"
     except OSError as exc:
-        return False, f"Unable to read current file for guarded write: {exc}"
+        return False, f"Unable to read current file for guarded write ({type(exc).__name__}, errno={exc.errno})"
 
     actual_hash = content_hash(current_content)
     if actual_hash != normalized:
@@ -418,17 +380,16 @@ def _format_size(size: int) -> str:
         return f"{size / (1024 * 1024):.1f} MB"
 
 __all__ = [
-    "READ_FILE_TOKEN_LIMIT", "READ_FILE_CONTEXT_PREVIEW_CHARS",
-    "LIST_FILES_MAX_ENTRIES", "LIST_FILES_CACHE_TTL_SECONDS",
-    "LIST_FILES_CACHE_MAX_ENTRIES", "WRITE_DIFF_EVENT_MAX_CHARS",
+    "READ_FILE_MAX_LINES", "READ_FILE_MAX_BYTES", "READ_FILE_TOKEN_LIMIT", "READ_FILE_CONTEXT_PREVIEW_CHARS",
+    "LIST_FILES_MAX_ENTRIES", "WRITE_DIFF_EVENT_MAX_CHARS",
     "MAX_FILE_READ_BYTES",
-    "_ListFilesCacheEntry", "_path_arg", "_first_present_arg",
+    "_path_arg", "_first_present_arg",
     "_validate_text_arg", "_validate_path_arg_type",
-    "_list_files_cache_key", "_get_cached_list_files_result",
+    "_get_cached_list_files_result",
     "_lookup_list_files_cache_result", "_put_list_files_cache", "clear_list_files_cache",
     "_add_line_numbers", "_generate_unified_diff",
     "_generate_limited_unified_diff", "_count_unified_diff_changes",
-    "_workspace_display_path", "_partial_text", "_emit_write_preview_progress",
+    "_workspace_display_path", "_emit_write_diff",
     "content_hash", "_atomic_write_text", "_validate_expected_hash",
     "_coerce_line_number", "_read_text_range", "_format_size",
 ]

@@ -32,7 +32,6 @@ def runtime_span(
     blocking_reason: str = "",
     ui_visible: bool = True,
     debug_only: bool = False,
-    requires_attention: bool = False,
     data: dict[str, Any] | None = None,
 ) -> AgentEvent:
     payload: dict[str, Any] = {
@@ -41,7 +40,6 @@ def runtime_span(
         "status": status,
         "ui_visible": bool(ui_visible),
         "debug_only": bool(debug_only),
-        "requires_attention": bool(requires_attention),
     }
     if run_id:
         payload["run_id"] = run_id
@@ -97,7 +95,6 @@ def runtime_span_from_tool_context(
     blocking_reason: str = "",
     ui_visible: bool = True,
     debug_only: bool = False,
-    requires_attention: bool = False,
     data: dict[str, Any] | None = None,
 ) -> AgentEvent:
     metadata = getattr(tool_ctx, "metadata", None)
@@ -122,7 +119,6 @@ def runtime_span_from_tool_context(
         blocking_reason=blocking_reason,
         ui_visible=ui_visible,
         debug_only=debug_only,
-        requires_attention=requires_attention,
         data=data,
     )
 

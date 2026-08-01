@@ -5,7 +5,9 @@ export const createApprovalSlice: StateCreator<AppStore, [], [], ApprovalSlice> 
   pendingApproval: null,
   approvalQueue: [],
   pendingDiffReview: null,
+  diffReviewQueue: [],
   pendingAskUser: null,
+  askUserQueue: [],
   setApproval: (a) =>
     set((s) => {
       if (
@@ -70,8 +72,83 @@ export const createApprovalSlice: StateCreator<AppStore, [], [], ApprovalSlice> 
         approvalQueue: pendingApproval ? approvalQueue : rest,
       };
     }),
-  setDiffReview: (d) => set({ pendingDiffReview: d }),
-  clearDiffReview: () => set({ pendingDiffReview: null }),
-  setAskUser: (a) => set({ pendingAskUser: a }),
-  clearAskUser: () => set({ pendingAskUser: null }),
+  setDiffReview: (d) =>
+    set((s) => {
+      if (
+        s.pendingDiffReview?.requestId === d.requestId ||
+        s.diffReviewQueue.some((queued) => queued.requestId === d.requestId)
+      ) {
+        return s;
+      }
+      if (!s.pendingDiffReview) {
+        return {
+          pendingDiffReview: d,
+          ...(d.reviewState ? { diffReview: d.reviewState } : {}),
+        };
+      }
+      return { diffReviewQueue: [...s.diffReviewQueue, d] };
+    }),
+  clearDiffReview: (requestId) =>
+    set((s) => {
+      if (requestId && s.pendingDiffReview?.requestId !== requestId) {
+        return {
+          diffReviewQueue: s.diffReviewQueue.filter((queued) => queued.requestId !== requestId),
+        };
+      }
+      const [next, ...rest] = s.diffReviewQueue;
+      return {
+        pendingDiffReview: next ?? null,
+        diffReviewQueue: rest,
+        ...(next?.reviewState ? { diffReview: next.reviewState } : {}),
+      };
+    }),
+  clearDiffReviews: (requestIds) =>
+    set((s) => {
+      if (requestIds.length === 0) return s;
+      const ids = new Set(requestIds);
+      const pending = s.pendingDiffReview && ids.has(s.pendingDiffReview.requestId)
+        ? null
+        : s.pendingDiffReview;
+      const queue = s.diffReviewQueue.filter((queued) => !ids.has(queued.requestId));
+      if (pending) return { pendingDiffReview: pending, diffReviewQueue: queue };
+      const [next, ...rest] = queue;
+      return {
+        pendingDiffReview: next ?? null,
+        diffReviewQueue: rest,
+        ...(next?.reviewState ? { diffReview: next.reviewState } : {}),
+      };
+    }),
+  setAskUser: (a) =>
+    set((s) => {
+      if (
+        s.pendingAskUser?.requestId === a.requestId ||
+        s.askUserQueue.some((queued) => queued.requestId === a.requestId)
+      ) {
+        return s;
+      }
+      if (!s.pendingAskUser) return { pendingAskUser: a };
+      return { askUserQueue: [...s.askUserQueue, a] };
+    }),
+  clearAskUser: (requestId) =>
+    set((s) => {
+      if (requestId && s.pendingAskUser?.requestId !== requestId) {
+        return {
+          askUserQueue: s.askUserQueue.filter((queued) => queued.requestId !== requestId),
+        };
+      }
+      const [next, ...rest] = s.askUserQueue;
+      return { pendingAskUser: next ?? null, askUserQueue: rest };
+    }),
+  clearAskUsers: (requestIds) =>
+    set((s) => {
+      if (requestIds.length === 0) return s;
+      const ids = new Set(requestIds);
+      const pending = s.pendingAskUser && ids.has(s.pendingAskUser.requestId)
+        ? null
+        : s.pendingAskUser;
+      const queue = s.askUserQueue.filter((queued) => !ids.has(queued.requestId));
+      if (pending) return { pendingAskUser: pending, askUserQueue: queue };
+      const [next, ...rest] = queue;
+      return { pendingAskUser: next ?? null, askUserQueue: rest };
+    }),
 });

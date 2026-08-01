@@ -15,6 +15,9 @@ class ScheduleCronTool(BaseTool):
     """Register a recurring prompt task on a cron schedule."""
 
     name = "schedule_cron"
+    result_kind = "status"
+    activity_kind = "genericTool"
+    display_label = "Schedule task"
     mutates_workspace = False
     read_only = False
     permission = PermissionLevel.CONFIRM
@@ -34,7 +37,6 @@ class ScheduleCronTool(BaseTool):
                     "name": {"type": "string", "description": "Short task name."},
                     "prompt": {"type": "string", "description": "Prompt to run on each fire."},
                     "cron": {"type": "string", "description": "5-field cron expression, e.g. '0 9 * * 1-5'."},
-                    "permission_mode": {"type": "string", "enum": ["auto_approve", "ask", "bypass"], "description": "Permission mode for fired runs. Defaults to auto_approve."},
                 },
                 "required": ["name", "prompt", "cron"],
             },
@@ -46,7 +48,7 @@ class ScheduleCronTool(BaseTool):
         cron = str(args.get("cron") or "").strip()
         if not name or not prompt or not cron:
             return self._error_result("name, prompt, and cron are all required")
-        permission_mode = str(args.get("permission_mode") or "auto_approve").strip() or "auto_approve"
+        permission_mode = "confirm"
 
         # Validate the cron expression via the scheduler's parser before registering.
         from backend.tasks.scheduler import _parse_cron_expression, get_global_scheduler
@@ -55,7 +57,17 @@ class ScheduleCronTool(BaseTool):
 
         try:
             scheduler = get_global_scheduler()
-            task = scheduler.add_task(name=name, prompt=prompt, schedule=cron, permission_mode=permission_mode)
+            workspace_root = str(getattr(context, "workspace_root", "") or "") if context else ""
+            if not workspace_root:
+                return self._error_result("Open a workspace before scheduling a recurring task")
+            task = scheduler.add_task(
+                name=name,
+                prompt=prompt,
+                schedule=cron,
+                permission_mode=permission_mode,
+                workspace_root=workspace_root,
+                conversation_id=str(getattr(context, "conversation_id", "") or ""),
+            )
         except Exception as exc:
             return self._error_result(f"Failed to schedule task: {exc}")
 

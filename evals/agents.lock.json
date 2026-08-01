@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-07-24",
+  "agents": {
+    "minicode": {
+      "driver": "backend.evals.minicode_driver",
+      "revision": "workspace"
+    },
+    "codex": {
+      "package": "@openai/codex",
+      "version": "0.144.4"
+    },
+    "claude": {
+      "package": "@anthropic-ai/claude-code",
+      "version": "2.1.210"
+    },
+    "pi": {
+      "package": "@mariozechner/pi-coding-agent",
+      "version": "0.73.1",
+      "integrity": "sha512-gXQh3SaZmWTfVMc4Ao5+LGbVeKvzyO7tolok0nLsZgq9nGjZx/EEU3NM8C+qUnB4Nvs2rswG5qOVgLzQkq0fHQ=="
+    }
+  },
+  "seeds": [11, 29, 47],
+  "task_catalog": "repository-tasks/swebench-lite/catalog.json"
+}

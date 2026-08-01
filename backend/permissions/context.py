@@ -66,3 +66,7 @@ class ToolExecutionContext:
     conversation_id: str = ""
     llm: Any | None = None  # LLMAdapter for tools that need model calls (e.g. web_fetch prompt extraction)
     artifact_store: Any | None = None
+    # Absolute monotonic deadline owned by the enclosing turn supervisor.
+    # Tool-level timeouts are capped to this value so a tool started near the
+    # end of a turn cannot silently extend the whole turn by minutes.
+    deadline_monotonic: float | None = None

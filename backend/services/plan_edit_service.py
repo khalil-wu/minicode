@@ -10,10 +10,6 @@ TASK_STATUSES = {"pending", "in_progress", "completed", "blocked"}
 PLAN_ACTIONS = {"accept", "reject"}
 PLAN_STEP_STATUSES = {"pending", "running", "done", "skipped", "failed"}
 
-PLAN_ACCEPTED_MESSAGE = (
-    "用户已批准当前执行计划。请按这个计划开始实施；先把第一步标记为 in_progress，"
-    "然后执行、验证，并在推进时持续更新计划状态。"
-)
 PLAN_REJECTED_MESSAGE = "Plan rejected. Ask the agent for a revised plan with the desired changes."
 
 
@@ -22,7 +18,6 @@ class PlanEditResult:
     plan_id: str
     action: str
     event: AgentEvent
-    followup_message: str
     rejection_message: str
 
 
@@ -84,6 +79,5 @@ def build_plan_edit_result(data: dict[str, Any], *, conversation_id: str = "") -
         plan_id=plan_id,
         action=action,
         event=event,
-        followup_message=PLAN_ACCEPTED_MESSAGE,
         rejection_message=PLAN_REJECTED_MESSAGE,
     )

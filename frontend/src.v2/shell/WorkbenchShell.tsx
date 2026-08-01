@@ -4,18 +4,21 @@ import { X } from "lucide-react";
 import { HeaderBar } from "./HeaderBar";
 import { SidebarLeft } from "./SidebarLeft";
 import { SidebarRight } from "./SidebarRight";
+import { BottomDock } from "./BottomDock";
 import { MainSlots } from "./MainSlots";
 import { SideChatPanel } from "../panels/SideChatPanel";
 import { ChatPane } from "../chat/ChatPane";
-import { CoworkHome } from "./CoworkHome";
 import { useAppStore } from "../stores";
+import { LEFT_SIDEBAR_DEFAULT_WIDTH } from "../stores/shared-helpers";
 import { SafeBoundary } from "./ChunkErrorBoundary";
 import { ChatErrorFallback } from "../components/ChatErrorFallback";
 import { isDesktop, runtime } from "../desktop/runtime";
-import { hasVisibleActiveConversation } from "../chat/activeConversation";
 import { useEscapeKey, useFocusTrap } from "../hooks/useFocusTrap";
 
-const COMPACT_WORKBENCH_MAX_WIDTH = 1023;
+// Keep enough horizontal room for the normal chat canvas and its expanded
+// context card. Below this width the project sidebar becomes an on-demand
+// drawer instead of squeezing the context card down to its icon-only state.
+const COMPACT_WORKBENCH_MAX_WIDTH = 1599;
 
 const isCompactWorkbench = () => (
   typeof window !== "undefined" && window.innerWidth <= COMPACT_WORKBENCH_MAX_WIDTH
@@ -36,20 +39,20 @@ const connectionBannerMessage = (): string => {
   const runtimeInfo = runtime();
   const hasToken = Boolean(runtimeInfo?.runtimeToken?.trim());
   if (isDesktop()) return "Connecting to MiniCode backend...";
-  if (!hasToken) return "Development browser is missing the Electron runtime token. Open the MiniCode desktop app for full access.";
-  return "Backend unavailable. Check that the MiniCode backend is running.";
+  if (!hasToken) return "当前网页预览未连接桌面运行环境。请在 MiniCode 桌面应用中打开，以使用完整功能。";
+  return "后端不可用。请确认 MiniCode 后端正在运行。";
 };
 
 const ConnectionBanner = () => {
   const isConnected = useAppStore((s) => s.isConnected);
   const previousConnectedRef = useRef(isConnected);
   const [announcement, setAnnouncement] = useState(
-    isConnected ? "Backend connected" : connectionBannerMessage(),
+    isConnected ? "后端已连接" : connectionBannerMessage(),
   );
   useEffect(() => {
     if (previousConnectedRef.current === isConnected) return;
     previousConnectedRef.current = isConnected;
-    setAnnouncement(isConnected ? "Backend connected" : connectionBannerMessage());
+    setAnnouncement(isConnected ? "后端已连接" : connectionBannerMessage());
   }, [isConnected]);
   return (
     <>
@@ -91,51 +94,18 @@ const ChatModeShell = () => (
   </div>
 );
 
-const CoworkModeShell = ({
-  isEmptyConversation,
-  showDesktopPanels,
-}: {
-  isEmptyConversation: boolean;
-  showDesktopPanels: boolean;
-}) => {
-  const rightPanelOpen = useAppStore((s) => s.rightPanelOpen);
-  return (
-    <div
-      className="flex-1 flex overflow-hidden min-h-0"
-      style={{ flex: 1, display: "flex", overflow: "hidden", minHeight: 0 }}
-    >
-      {isEmptyConversation ? (
-        <CoworkHome />
-      ) : (
-        <ChatModeShell />
-      )}
-      {showDesktopPanels && rightPanelOpen && !isEmptyConversation && <SidebarRight />}
-    </div>
-  );
-};
-
-const CodeModeShell = ({
-  activeMaximized,
-  isEmptyConversation,
-  showDesktopPanels,
-}: {
-  activeMaximized: boolean;
-  isEmptyConversation: boolean;
-  showDesktopPanels: boolean;
-}) => {
-  const rightPanelOpen = useAppStore((s) => s.rightPanelOpen);
+const WorkbenchModeShell = ({ mode }: { mode: "cowork" | "code" }) => {
   const ensureCodeLayout = useAppStore((s) => s.ensureCodeLayout);
   useEffect(() => {
-    ensureCodeLayout();
-  }, [ensureCodeLayout]);
+    if (mode === "code") ensureCodeLayout();
+  }, [ensureCodeLayout, mode]);
   return (
     <>
       <div
         className="flex-1 flex overflow-hidden min-h-0"
         style={{ flex: 1, display: "flex", overflow: "hidden", minHeight: 0 }}
       >
-        <MainSlots mode="tabs" />
-        {showDesktopPanels && !activeMaximized && rightPanelOpen && !isEmptyConversation && <SidebarRight />}
+        <MainSlots mode="tabs" forceChat={mode === "cowork"} />
       </div>
     </>
   );
@@ -158,6 +128,8 @@ const NarrowSidebarDrawer = ({
   useEscapeKey(onClose);
   return (
     <div
+      className="mc-narrow-drawer-backdrop"
+      data-side={side}
       onMouseDown={onClose}
       style={{
         position: "fixed",
@@ -170,6 +142,8 @@ const NarrowSidebarDrawer = ({
       }}
     >
       <div
+        className="mc-narrow-drawer-surface"
+        data-side={side}
         ref={dialogRef}
         id={id}
         role="dialog"
@@ -178,7 +152,7 @@ const NarrowSidebarDrawer = ({
         tabIndex={-1}
         onMouseDown={(event) => event.stopPropagation()}
         style={{
-          width: "min(380px, calc(100vw - 16px))",
+          width: side === "right" ? "min(480px, calc(100vw - 16px))" : "min(380px, calc(100vw - 16px))",
           minWidth: 0,
           display: "flex",
           flexDirection: "column",
@@ -202,8 +176,8 @@ const NarrowSidebarDrawer = ({
           <button
             type="button"
             className="btn-ghost mc-icon-button"
-            aria-label={`Close ${label.toLowerCase()}`}
-            title={`Close ${label.toLowerCase()}`}
+            aria-label={`关闭${label}`}
+            title={`关闭${label}`}
             onClick={onClose}
           >
             <X size={16} />
@@ -219,9 +193,6 @@ export const WorkbenchShell = () => {
   const sideChatOpen = useAppStore((s) => s.sideChatOpen);
   const toggleSideChat = useAppStore((s) => s.toggleSideChat);
   const appMode = useAppStore((s) => s.appMode);
-  const conversations = useAppStore((s) => s.conversations);
-  const conversationId = useAppStore((s) => s.conversationId);
-  const messages = useAppStore((s) => s.messages);
   const leftSidebarWidth = useAppStore((s) => s.leftSidebarWidth);
   const panelSlots = useAppStore((s) => s.panelSlots);
   const rightPanelOpen = useAppStore((s) => s.rightPanelOpen);
@@ -235,18 +206,15 @@ export const WorkbenchShell = () => {
   const sideChatFallbackButtonRef = useRef<HTMLButtonElement>(null);
   const sideChatDialogRef = useFocusTrap(sideChatOpen, sideChatFallbackButtonRef);
   useEscapeKey(toggleSideChat, sideChatOpen);
-  const coworkConversationEmpty =
-    !hasVisibleActiveConversation(conversationId, conversations) || messages.length === 0;
   const activeCodeSlot =
     panelSlots.find((slot) => slot.focused) ??
     panelSlots.find((slot) => slot.kind !== "chat") ??
     panelSlots.find((slot) => slot.kind === "chat");
-  const codePanelMaximized = Boolean(activeCodeSlot?.maximized && activeCodeSlot.kind !== "chat");
-  const codeConversationEmpty = activeCodeSlot?.kind === "chat" && coworkConversationEmpty;
+  const codePanelMaximized = Boolean(
+    appMode === "code" && activeCodeSlot?.maximized && activeCodeSlot.kind !== "chat",
+  );
   const leftPanelAvailable = appMode === "cowork" || (appMode === "code" && !codePanelMaximized);
-  const rightPanelAvailable =
-    (appMode === "cowork" && !coworkConversationEmpty) ||
-    (appMode === "code" && !codePanelMaximized && !codeConversationEmpty);
+  const rightPanelAvailable = appMode === "cowork" || (appMode === "code" && !codePanelMaximized);
 
   useEffect(() => {
     if (!compact) setCompactPanel(null);
@@ -274,7 +242,7 @@ export const WorkbenchShell = () => {
       setCompactPanel((current) => current === "left" ? null : "left");
       return;
     }
-    setLeftSidebarWidth(leftSidebarWidth > 0 ? 0 : 320);
+    setLeftSidebarWidth(leftSidebarWidth > 0 ? 0 : LEFT_SIDEBAR_DEFAULT_WIDTH);
   };
 
   const toggleWorkbenchRightPanel = () => {
@@ -314,27 +282,33 @@ export const WorkbenchShell = () => {
       {appMode === "chat" && <ChatModeShell />}
       {appMode !== "chat" && (
         <div className="workbench-mode-body" style={{ flex: 1, minHeight: 0, display: "flex", overflow: "hidden" }}>
-          {!compact && leftPanelAvailable && <SidebarLeft />}
-          <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-            {appMode === "code" && <CodeModeShell activeMaximized={codePanelMaximized} isEmptyConversation={codeConversationEmpty} showDesktopPanels={!compact} />}
-            {appMode === "cowork" && <CoworkModeShell isEmptyConversation={coworkConversationEmpty} showDesktopPanels={!compact} />}
+          {!compact && leftPanelAvailable && leftSidebarWidth > 0 && <SidebarLeft />}
+          <div className="workbench-stage" style={{ position: "relative", flex: 1, minWidth: 0, minHeight: 0, display: "flex", overflow: "hidden" }}>
+            <div className="workbench-primary" style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+              <div className="workbench-content" style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", overflow: "hidden" }}>
+                <WorkbenchModeShell mode={appMode === "code" ? "code" : "cowork"} />
+              </div>
+              {!codePanelMaximized && <BottomDock />}
+            </div>
+            {!compact && rightPanelAvailable && <SidebarRight />}
           </div>
         </div>
       )}
 
       {compact && !sideChatOpen && leftPanelAvailable && compactPanel === "left" && (
-        <NarrowSidebarDrawer id="left-sidebar-drawer" label="Left sidebar" side="left" onClose={() => setCompactPanel(null)}>
+        <NarrowSidebarDrawer id="left-sidebar-drawer" label="左侧栏" side="left" onClose={() => setCompactPanel(null)}>
           <SidebarLeft embedded onNavigate={() => setCompactPanel(null)} />
         </NarrowSidebarDrawer>
       )}
       {compact && !sideChatOpen && rightPanelAvailable && compactPanel === "right" && (
-        <NarrowSidebarDrawer id="right-panel-drawer" label="Right panel" side="right" onClose={() => setCompactPanel(null)}>
+        <NarrowSidebarDrawer id="right-panel-drawer" label="右侧面板" side="right" onClose={() => setCompactPanel(null)}>
           <SidebarRight key={rightStackTab} embedded initialTab={rightStackTab} />
         </NarrowSidebarDrawer>
       )}
 
       {sideChatOpen && (
         <div
+          className="mc-side-chat-backdrop"
           onMouseDown={toggleSideChat}
           style={{
             position: "fixed",
@@ -348,6 +322,7 @@ export const WorkbenchShell = () => {
           }}
         >
           <div
+            className="mc-side-chat-surface"
             ref={sideChatDialogRef}
             role="dialog"
             aria-modal="true"

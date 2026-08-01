@@ -1,8 +1,6 @@
 import { extractInlineCitationIndexes } from "../chat/citationProjection";
-import { shouldShowInActivity } from "../lib/display-intent";
 import { getContentBlocks, getToolCallsFromMessage } from "../lib/content-blocks";
 import { planStepProgressStatus, shouldSurfacePlanProgress } from "../lib/planVisibility";
-import { isAgentControlToolName } from "../lib/tool-call-reducer";
 import type {
   AgentProgressEntry,
   ArtifactContentState,
@@ -20,6 +18,7 @@ import type {
   PreviewVerificationInfo,
   ReplyAttachmentMeta,
   ScheduledTaskEntry,
+  ScheduledTaskRunEntry,
   SubagentState,
   TerminalSessionInfo,
   TerminalSnapshotInfo,
@@ -115,7 +114,7 @@ export interface RuntimeItem {
   label: string;
   kind: "terminal" | "background-command" | "preview" | "agent" | "automation";
   detail?: string;
-  status: "running" | "completed" | "failed" | "idle";
+  status: "running" | "completed" | "failed" | "cancelled" | "idle";
   terminalId?: string;
   automationId?: string;
   previewId?: string;
@@ -164,6 +163,7 @@ export interface ActivitySidebarStateInput {
   backgroundTasks?: BackgroundTaskEntry[];
   subagents?: SubagentState[];
   scheduledTasks?: ScheduledTaskEntry[];
+  scheduledTaskRuns?: ScheduledTaskRunEntry[];
   browserAnnotations?: BrowserAnnotation[];
 }
 
@@ -322,28 +322,11 @@ function buildProgress(input: ActivitySidebarStateInput): ActivityProgressItem[]
     }
   }
 
-  const conversationKey = input.conversationId || "__active__";
+  const conversationKey = input.conversationId?.trim();
   const scopedProgress = input.agentProgress
-    .filter((entry) =>
-      (entry.conversationId === conversationKey || entry.conversationId === "__active__" || !entry.conversationId) &&
-      entry.visibility !== "debug" &&
-      !isDelegatedAgentProgress(entry) &&
-      !isInternalAgentPhaseProgress(entry) &&
-      shouldShowInActivity(entry) &&
-      (entry.stage === "planning" || entry.stage === "verification" || entry.stage === "final" || entry.stage === "approval" || entry.stage === "tool"),
-    );
-  const phaseRunIds = new Set(
-    scopedProgress
-      .map((entry) => agentPhaseRunId(entry.id))
-      .filter((runId): runId is string => Boolean(runId)),
-  );
+    .filter((entry) => Boolean(conversationKey) && entry.conversationId === conversationKey && entry.visibility !== "debug");
   const compactProgress = serializeMainAgentProgress(
-    scopedProgress
-      .filter((entry) => {
-        const runId = agentRunId(entry.id);
-        return !runId || !phaseRunIds.has(runId);
-      })
-      .slice(-8),
+    scopedProgress.slice(-8),
   ).slice(-4);
 
   for (const entry of compactProgress) {
@@ -352,7 +335,7 @@ function buildProgress(input: ActivitySidebarStateInput): ActivityProgressItem[]
     progress.push({
       id: entry.id,
       label,
-      detail: entry.detail,
+      detail: formatProgressDetail(entry.detail),
       status: progressStatus(entry.status, Boolean(input.isStreaming)),
     });
   }
@@ -360,34 +343,21 @@ function buildProgress(input: ActivitySidebarStateInput): ActivityProgressItem[]
   return dedupeBy(progress, (item) => item.id);
 }
 
-function isDelegatedAgentProgress(entry: AgentProgressEntry): boolean {
-  if (isAgentControlToolName(entry.toolName || "")) return true;
-  const text = [entry.id, entry.label, entry.message, entry.summary]
-    .filter(Boolean)
-    .join(" ");
-  return /(?:subagent|delegated task|子代理|子任务)/i.test(text);
+function formatProgressDetail(detail?: string): string | undefined {
+  const value = String(detail || "").trim();
+  if (!value) return undefined;
+  return value
+    .replace(/duration_ms=(\d+)/gi, (_, raw: string) => `${formatDuration(Number(raw))}`)
+    .replace(/provider_wait_ms=(\d+)/gi, (_, raw: string) => `${formatDuration(Number(raw))}`)
+    .replace(/waiting_on=/gi, "等待：")
+    .replace(/blocking_reason=/gi, "原因：");
 }
 
-function agentRunId(id: string): string {
-  return id.match(/^agent-run:([^:]+)/)?.[1] ?? "";
-}
-
-function agentPhaseRunId(id: string): string {
-  return id.match(/^agent-phase:([^:]+)/)?.[1] ?? "";
-}
-
-function isInternalAgentPhaseProgress(entry: AgentProgressEntry): boolean {
-  if (entry.requiresAttention) return false;
-  if (entry.visibility === "compact") return false;
-  const id = String(entry.id || "");
-  const label = String(entry.summary || entry.message || entry.label || "").trim().toLowerCase();
-  if (/^agent-run:/.test(id) || /^agent-phase:/.test(id)) return true;
-  return [
-    "agent run started",
-    "agent run completed",
-    "preparing agent context",
-    "model deciding next action",
-  ].includes(label);
+function formatDuration(durationMs: number): string {
+  if (!Number.isFinite(durationMs) || durationMs < 0) return "";
+  if (durationMs < 1000) return `${Math.round(durationMs)} 毫秒`;
+  const seconds = durationMs / 1000;
+  return `${seconds >= 10 ? Math.round(seconds) : seconds.toFixed(1)} 秒`;
 }
 
 function serializeMainAgentProgress(entries: AgentProgressEntry[]): AgentProgressEntry[] {
@@ -505,7 +475,6 @@ function buildSources(messages: ChatMessage[]): ActivitySourceItem[] {
 
   for (const message of assistantMessages) {
     for (const record of getToolCallsFromMessage(message)) {
-      if (!shouldShowInActivity(record)) continue;
       const webUrl = toolSourceUrl(record);
       if (webUrl && !seen.has(`web:${webUrl}`)) {
         seen.add(`web:${webUrl}`);
@@ -594,6 +563,9 @@ function buildRuns(input: ActivitySidebarStateInput): ActivityRunItem[] {
   }
 
   for (const task of input.backgroundTasks ?? []) {
+    if (task.conversationId !== input.conversationId) {
+      continue;
+    }
     items.push({
       id: `background:${task.id}`,
       kind: "background-command",
@@ -618,20 +590,6 @@ function buildRuns(input: ActivitySidebarStateInput): ActivityRunItem[] {
     });
   }
 
-  for (const agent of input.subagents ?? []) {
-    const running = ["pending", "running", "blocked"].includes(agent.status);
-    items.push({
-      id: `agent:${agent.id}`,
-      agentId: agent.id,
-      kind: "agent",
-      label: cleanDisplayText(agent.objective || agent.summary || agent.role) || "Subagent",
-      detail: agent.currentActivity || agent.detail,
-      status: running ? "running" : agent.status === "done" ? "completed" : "failed",
-      startedAt: agent.lastProgressAt || agent.lastEventAt,
-      attention: agent.status === "blocked" || agent.status === "partial" || agent.status === "error",
-    });
-  }
-
   for (const task of input.scheduledTasks ?? []) {
     items.push({
       id: `automation:${task.id}`,
@@ -640,6 +598,21 @@ function buildRuns(input: ActivitySidebarStateInput): ActivityRunItem[] {
       label: cleanDisplayText(task.name) || "Automation",
       detail: task.schedule || task.prompt,
       status: task.enabled ? "idle" : "completed",
+    });
+  }
+
+  for (const run of input.scheduledTaskRuns ?? []) {
+    const task = (input.scheduledTasks ?? []).find((candidate) => candidate.id === run.task_id);
+    const running = run.status === "pending" || run.status === "running";
+    items.push({
+      id: `automation-run:${run.id}`,
+      automationId: run.task_id,
+      kind: "automation",
+      label: cleanDisplayText(task?.name || "计划任务"),
+      detail: cleanDisplayText(run.error || run.result_summary || "定时执行"),
+      status: running ? "running" : run.status === "completed" ? "completed" : "failed",
+      startedAt: Date.parse(run.started_at || run.scheduled_at) || undefined,
+      attention: run.status === "failed" || run.status === "cancelled",
     });
   }
 
@@ -656,10 +629,7 @@ function toolSourceUrl(record: ReturnType<typeof getToolCallsFromMessage>[number
   const candidate = record.sourceUrl || stringArg(record.args.url) || stringArg(record.args.source_url);
   if (!/^https?:\/\//i.test(candidate)) return "";
   const evidence = String(record.evidenceType || "").toLowerCase();
-  if (evidence === "candidate") return "";
-  if (evidence === "fetched") return candidate;
-  if (/fetch/i.test(`${record.name} ${record.resultKind || ""}`)) return candidate;
-  return "";
+  return evidence === "fetched" ? candidate : "";
 }
 
 function toolSourcePath(record: ReturnType<typeof getToolCallsFromMessage>[number]): string {
@@ -670,16 +640,10 @@ function toolSourcePath(record: ReturnType<typeof getToolCallsFromMessage>[numbe
 }
 
 function isFileEvidenceTool(record: ReturnType<typeof getToolCallsFromMessage>[number]): boolean {
-  const name = String(record.name || "");
-  if (/(?:write|edit|patch|delete|remove|create|move|rename|save|apply_patch|run_command|terminal|shell|bash|powershell|cmd)/i.test(name)) {
-    return false;
-  }
-  if (/(?:read|grep|glob|search|list|find|scan|inspect|cat|select-string)/i.test(name)) {
-    return true;
-  }
-  const kind = String(record.resultKind || record.activityKind || "");
-  if (/(?:edit|command|terminal|process)/i.test(kind)) return false;
-  return /(?:file|source|search)/i.test(kind);
+  const resultKind = String(record.resultKind || "").toLowerCase();
+  const activityKind = String(record.activityKind || "").toLowerCase();
+  return ["file", "code", "search", "workspace"].includes(resultKind)
+    || ["fileread", "workspacesearch"].includes(activityKind);
 }
 
 function isNonGitWorkspaceError(error?: string): boolean {

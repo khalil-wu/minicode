@@ -5,17 +5,18 @@ import os
 from typing import Any
 
 from backend.agent.message import AgentEvent
-from backend.agent.evidence_claims import evidence_conflict_feedback
 from backend.agent.runtime import default_runtime
 from backend.permissions.context import ToolExecutionContext
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
-from backend.tools.subagent_result import compact_subagent_result, full_subagent_result
+from backend.tools.subagent_result import full_subagent_result
 from backend.tools.subagent_runtime import runtime_from_context
 
 
 def _authorized_subagent(runtime: Any, subagent_id: str, context: ToolExecutionContext | None) -> bool:
     record = runtime.get_subagent(subagent_id)
-    if record is None:
+    get_task_metadata = getattr(runtime, "get_subagent_task_metadata", None)
+    task_metadata = get_task_metadata(subagent_id) if callable(get_task_metadata) else None
+    if record is None and not isinstance(task_metadata, dict):
         return False
     metadata = context.metadata if context and isinstance(context.metadata, dict) else {}
     parent_run_id = str(metadata.get("run_id") or "").strip()
@@ -25,7 +26,12 @@ def _authorized_subagent(runtime: Any, subagent_id: str, context: ToolExecutionC
     # control (or read) arbitrary subagents, so we deny by default.
     if not parent_run_id:
         return bool(os.environ.get("PYTEST_CURRENT_TEST"))
-    if str(getattr(record, "parent_run_id", "") or "") != parent_run_id:
+    record_parent_run_id = (
+        str(getattr(record, "parent_run_id", "") or "")
+        if record is not None
+        else str(task_metadata.get("parent_run_id") or "")
+    )
+    if record_parent_run_id != parent_run_id:
         return False
     parent = runtime.get_run(parent_run_id) if hasattr(runtime, "get_run") else None
     conversation_id = str(getattr(context, "conversation_id", "") or "").strip()
@@ -38,10 +44,10 @@ class TaskStopTool(BaseTool):
     """Cancel a background subagent started by TaskTool."""
 
     name = "task_stop"
+    should_defer = False
     result_kind = "subagent"
     activity_kind = "genericTool"
     display_label = "Stop task"
-    panel_hint = "inspector"
     description = "Cancel a running background subagent by id."
     permission = PermissionLevel.AUTO
 
@@ -93,6 +99,9 @@ class TaskStopTool(BaseTool):
                     AgentEvent.subagent_progress(
                         subagent_id=subagent_id,
                         detail="cancelling",
+                        activity_kind="lifecycle",
+                        activity_summary="正在停止子任务",
+                        user_visible=True,
                     ).data,
                 )
             return ToolResult(
@@ -132,18 +141,19 @@ class TaskStatusTool(BaseTool):
     """Inspect or collect a background subagent result."""
 
     name = "task_status"
+    should_defer = False
     result_kind = "subagent"
     activity_kind = "genericTool"
     display_label = "Task status"
-    panel_hint = "inspector"
     description = (
         "List background subagents when no id is provided, inspect one subagent with subagent_id, "
-        "or collect several concurrently with subagent_ids. Set wait_seconds to wait briefly before "
-        "returning status and retained results."
+        "or collect several concurrently with subagent_ids. Set wait_seconds to wait briefly; batch waits "
+        "return as soon as any selected subagent finishes, then include current status for the whole batch."
     )
     permission = PermissionLevel.AUTO
     read_only = True
     mutates_workspace = False
+    max_result_chars = None
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -159,13 +169,14 @@ class TaskStatusTool(BaseTool):
                     "subagent_ids": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "maxItems": 5,
-                        "description": "Optional batch of up to 5 ids. Prefer this after parallel delegation so all workers are waited for and collected in one call.",
+                        "maxItems": 8,
+                        "description": "Optional batch of up to 8 ids. Prefer this after parallel delegation so all workers are waited for and collected in one call.",
                     },
                     "wait_seconds": {
                         "type": "number",
                         "default": 0,
-                        "description": "Wait up to this many seconds for the selected subagent to finish; max 30.",
+                        "maximum": 600,
+                        "description": "Wait up to this many seconds for the selected subagent to finish; max 600.",
                     },
                     "include_completed": {
                         "type": "boolean",
@@ -187,17 +198,6 @@ class TaskStatusTool(BaseTool):
                         "default": False,
                         "description": "After returning an available result, release the retained result cache.",
                     },
-                    "detail_level": {
-                        "type": "string",
-                        "enum": ["summary", "full"],
-                        "default": "summary",
-                        "description": "summary returns a compact coordinator-ready result; full returns retained raw detail up to max_chars.",
-                    },
-                    "max_chars": {
-                        "type": "number",
-                        "default": 4000,
-                        "description": "Maximum result characters to return. summary caps at 12000; full caps at 24000.",
-                    },
                 },
             },
         )
@@ -213,17 +213,45 @@ class TaskStatusTool(BaseTool):
                 str(value or "").strip()
                 for value in raw_subagent_ids
                 if str(value or "").strip()
-            ))[:5]
+            ))
             if subagent_ids:
+                if len(subagent_ids) > 8:
+                    return ToolResult(
+                        content=f"Too many subagent ids ({len(subagent_ids)}). Max is 8.",
+                        is_error=True,
+                        status="blocked",
+                        result_kind="subagent",
+                    )
+                runtime = runtime_from_context(context) or default_runtime()
+                unauthorized = [
+                    subagent_id
+                    for subagent_id in subagent_ids
+                    if not _authorized_subagent(runtime, subagent_id, context)
+                ]
+                if unauthorized:
+                    return ToolResult(
+                        content="One or more subagents are not owned by the current task.",
+                        is_error=True,
+                        status="forbidden",
+                        result_kind="subagent",
+                    )
                 child_args = dict(args)
                 child_args.pop("subagent_ids", None)
+                try:
+                    wait_seconds = max(0.0, min(float(child_args.pop("wait_seconds", 0) or 0), 600.0))
+                except (TypeError, ValueError):
+                    wait_seconds = 0.0
+                if wait_seconds:
+                    wait_for_any = getattr(runtime, "wait_for_any_subagent", None)
+                    if callable(wait_for_any):
+                        await wait_for_any(subagent_ids, wait_seconds)
                 results = await asyncio.gather(*(
                     self.execute({**child_args, "subagent_id": subagent_id}, context=context)
                     for subagent_id in subagent_ids
                 ))
                 statuses = {str(result.status or "") for result in results}
                 overall_status = (
-                    "running" if "running" in statuses
+                    "running" if statuses & {"pending", "running"}
                     else "blocked" if statuses & {"blocked", "failed", "error", "not_found"}
                     else "completed"
                 )
@@ -247,6 +275,10 @@ class TaskStatusTool(BaseTool):
                     content="\n\n".join(
                         f"### {subagent_id}\n{result.content}"
                         for subagent_id, result in zip(subagent_ids, results)
+                    ) + (
+                        "\n\nOne or more subagents are still running."
+                        if overall_status == "running"
+                        else ""
                     ),
                     is_error=any(result.is_error for result in results),
                     display_summary=display_summary,
@@ -260,18 +292,11 @@ class TaskStatusTool(BaseTool):
 
         include_result = bool(args.get("include_result", True))
         consume = bool(args.get("consume", False))
-        detail_level = str(args.get("detail_level") or "summary").strip().lower()
-        if detail_level not in {"summary", "full"}:
-            detail_level = "summary"
-        try:
-            max_chars = int(args.get("max_chars") or (12_000 if detail_level == "full" else 4_000))
-        except (TypeError, ValueError):
-            max_chars = 12_000 if detail_level == "full" else 4_000
         runtime = runtime_from_context(context) or default_runtime()
         if not _authorized_subagent(runtime, subagent_id, context):
             return ToolResult(content="Subagent is not owned by the current task.", is_error=True, status="forbidden", result_kind="subagent")
         try:
-            wait_seconds = max(0.0, min(float(args.get("wait_seconds") or 0), 30.0))
+            wait_seconds = max(0.0, min(float(args.get("wait_seconds") or 0), 600.0))
         except (TypeError, ValueError):
             wait_seconds = 0.0
         if wait_seconds:
@@ -310,24 +335,13 @@ class TaskStatusTool(BaseTool):
                 lines.append(f"Error: {error}")
             if content:
                 lines.append("Result:")
-                if detail_level == "full":
-                    rendered, omitted = full_subagent_result(content, max_chars=max_chars)
-                    lines.append(rendered)
-                    if omitted:
-                        lines.append("Full result was truncated to the requested max_chars.")
-                else:
-                    rendered, omitted = compact_subagent_result(content, max_chars=max_chars)
-                    lines.append(rendered)
-                    if omitted:
-                        lines.append('Use detail_level="full" to inspect the retained raw detail if needed.')
-                parent_run_id = str(snapshot.get("parent_run_id") or "").strip()
-                list_subagent_results = getattr(runtime, "list_subagent_results", None)
-                conflict_feedback = evidence_conflict_feedback(
-                    item.get("content", "")
-                    for item in (list_subagent_results(parent_run_id) if callable(list_subagent_results) else [])
-                )
-                if conflict_feedback:
-                    lines.append(conflict_feedback)
+                rendered, omitted = full_subagent_result(content)
+                lines.append(rendered)
+                artifact_id = str(result.get("artifact_id") or "").strip()
+                if artifact_id:
+                    lines.append(f"Full result artifact: {artifact_id}.")
+                elif omitted:
+                    lines.append("The retained tool details contain the full result.")
             token_total = int(result.get("total_tokens") or 0)
             stats = (
                 "Stats: "
@@ -348,7 +362,7 @@ class TaskStatusTool(BaseTool):
         elif result_available:
             lines.append("Result is available. Call task_status with include_result=true to collect it.")
         else:
-            if status == "running":
+            if status in {"pending", "running"}:
                 lines.append("Result is not available yet.")
             else:
                 lines.append("No retained result is available.")
@@ -383,11 +397,11 @@ class TaskStatusTool(BaseTool):
             if isinstance(item, dict)
             and bool(item.get("background", False))
             and (not parent_run_id or str(item.get("parent_run_id") or "") == parent_run_id)
-            and (include_completed or str(item.get("status") or "running") == "running")
+            and (include_completed or str(item.get("status") or "running") in {"pending", "running"})
         ]
         items.sort(
             key=lambda item: (
-                str(item.get("status") or "running") != "running",
+                str(item.get("status") or "running") not in {"pending", "running"},
                 -int(item.get("started_at") or 0),
             )
         )
@@ -409,7 +423,11 @@ class TaskStatusTool(BaseTool):
                 f"- {subagent} [{status}]{result_note}"
                 + (f": {task}" if task else "")
             )
-        overall = "running" if any(str(item.get("status") or "") == "running" for item in items) else "completed"
+        overall = (
+            "running"
+            if any(str(item.get("status") or "") in {"pending", "running"} for item in items)
+            else "completed"
+        )
         return ToolResult(
             content="\n".join(lines),
             display_summary=f"{len(items)} background subagent(s)",

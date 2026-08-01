@@ -10,7 +10,6 @@ from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.subagent_runtime import runtime_from_context
 
 TASK_STATUSES = ("pending", "in_progress", "blocked", "completed", "cancelled")
-COORDINATION_DEFERRED_CATALOG_SCOPES = ("coordination",)
 
 # Subagent statuses with no live task loop: mail sent to these recipients is
 # persisted but never consumed unless the agent is resumed (cc SendMessageTool
@@ -39,6 +38,18 @@ def _actor_id(context: ToolExecutionContext | None, explicit: Any = None) -> str
     return "main"
 
 
+def _actor_mailbox_epoch(context: ToolExecutionContext | None) -> int | None:
+    if context is None or not isinstance(context.metadata, dict):
+        return None
+    raw = context.metadata.get("mailbox_epoch")
+    if raw is None:
+        return None
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return None
+
+
 def _message_recipient_allowed(
     runtime: AgentRuntime,
     *,
@@ -62,8 +73,16 @@ def _message_recipient_allowed(
     if sender_record is not None:
         return bool(sender_record.parent_run_id) and sender_record.parent_run_id == target.parent_run_id
     parent_run = runtime.get_run(sender)
+    target_parent_run = runtime.get_run(str(target.parent_run_id or ""))
+    same_conversation_handoff = bool(
+        parent_run is not None
+        and target_parent_run is not None
+        and parent_run.conversation_id
+        and parent_run.conversation_id == target_parent_run.conversation_id
+        and (target.background or target.detach_from_parent)
+    )
     return bool(
-        target.parent_run_id == sender
+        (target.parent_run_id == sender or same_conversation_handoff)
         and (
             parent_run is None
             or not conversation_id
@@ -84,87 +103,8 @@ async def _emit_swarm_event(
     payload = {
         "subagent_id": subagent_id or "swarm",
         "event": event,
-        "display_scope": "agents",
-        "panel_hint": "subagents",
     }
     await emit("subagent.event", payload)
-
-
-async def _maybe_advance_workflow(
-    context: ToolExecutionContext | None,
-    task: Any,
-) -> dict[str, Any] | None:
-    status = str(getattr(task, "status", "") or "")
-    if status not in {"completed", "cancelled"}:
-        return None
-    workflow_id = str(getattr(task, "workflow_id", "") or "").strip()
-    if not workflow_id:
-        return None
-
-    runtime = _runtime(context)
-    conversation_id = str(getattr(task, "conversation_id", "") or _conversation_id(context))
-    if status == "cancelled":
-        cancellation = await runtime.cancel_workflow_dependents(
-            workflow_id,
-            conversation_id=conversation_id,
-        )
-        cancelled_tasks = cancellation.get("cancelled_tasks") if isinstance(cancellation, dict) else None
-        if isinstance(cancelled_tasks, list):
-            for cancelled_task in cancelled_tasks:
-                if not isinstance(cancelled_task, dict):
-                    continue
-                await _emit_swarm_event(
-                    context,
-                    subagent_id=str(cancelled_task.get("assignee") or "swarm"),
-                    event={"type": "task_updated", "task": cancelled_task},
-                )
-        if bool(cancellation.get("workflow_cancelled")):
-            await _emit_swarm_event(
-                context,
-                subagent_id=workflow_id,
-                event={"type": "workflow_cancelled", **cancellation},
-            )
-        return {"cancellation": cancellation}
-
-    result = await runtime.advance_workflow(
-        workflow_id,
-        conversation_id=conversation_id,
-    )
-    ready_tasks = result.get("ready_tasks") if isinstance(result, dict) else None
-    if isinstance(ready_tasks, list) and ready_tasks:
-        for ready_task in ready_tasks:
-            if not isinstance(ready_task, dict):
-                continue
-            await _emit_swarm_event(
-                context,
-                subagent_id=str(ready_task.get("assignee") or "swarm"),
-                event={"type": "task_updated", "task": ready_task},
-            )
-
-        await _emit_swarm_event(
-            context,
-            subagent_id=workflow_id,
-            event={
-                "type": "workflow_nodes_unblocked",
-                "workflow_id": workflow_id,
-                "tasks": ready_tasks,
-                "launched": bool(result.get("launched")),
-                "launch_summary": str(result.get("launch_summary") or ""),
-                "launch_error": str(result.get("launch_error") or ""),
-            },
-        )
-
-    completion = runtime.complete_workflow_if_ready(
-        workflow_id,
-        conversation_id=conversation_id,
-    )
-    if completion is not None:
-        await _emit_swarm_event(
-            context,
-            subagent_id=workflow_id,
-            event={"type": "workflow_completed", **completion},
-        )
-    return {"advance": result, "completion": completion}
 
 
 def _conversation_id(context: ToolExecutionContext | None) -> str:
@@ -215,6 +155,7 @@ class SendMessageTool(BaseTool):
     """Send a coordination message between agents."""
 
     name = "send_message"
+    should_defer = False
     description = (
         "Send a coordination message to another agent or the parent agent. "
         "Use for parent-to-subagent or subagent-to-parent updates that should be visible in the Agents panel."
@@ -222,9 +163,6 @@ class SendMessageTool(BaseTool):
     permission = PermissionLevel.AUTO
     result_kind = "subagent"
     activity_kind = "genericTool"
-    display_scope = "agents"
-    panel_hint = "subagents"
-    deferred_catalog_scopes = COORDINATION_DEFERRED_CATALOG_SCOPES
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -285,12 +223,7 @@ class SendMessageTool(BaseTool):
         conversation_id = _conversation_id(context)
         summary = str(args.get("summary") or "").strip()
         if explicit_sender and explicit_sender != derived_sender:
-            candidate_record = runtime.get_subagent(explicit_sender)
-            if candidate_record is None or (
-                derived_sender
-                and str(candidate_record.parent_run_id or "") != derived_sender
-            ):
-                return self._error_result("Sender must match the current task identity")
+            return self._error_result("Sender must match the current task identity")
         if not _message_recipient_allowed(
             runtime,
             sender=sender,
@@ -298,14 +231,31 @@ class SendMessageTool(BaseTool):
             conversation_id=conversation_id,
         ):
             return self._error_result("Recipient is not part of the current task tree")
-        record = runtime.send_swarm_message(
-            sender_id=sender,
-            recipient_id=recipient,
-            content=message,
-            conversation_id=conversation_id,
-            team_name=str(args.get("team_name") or "").strip(),
-            task_id=str(args.get("task_id") or "").strip(),
+        recipient_record = runtime.get_subagent(recipient)
+        recipient_ended = bool(
+            recipient_record is not None
+            and str(recipient_record.status or "") in _ENDED_SUBAGENT_STATUSES
         )
+        recipient_epoch = (
+            None
+            if recipient_ended
+            else int(recipient_record.mailbox_epoch or 0)
+            if recipient_record is not None
+            else None
+        )
+        try:
+            record = runtime.send_swarm_message(
+                sender_id=sender,
+                recipient_id=recipient,
+                content=message,
+                conversation_id=conversation_id,
+                team_name=str(args.get("team_name") or "").strip(),
+                task_id=str(args.get("task_id") or "").strip(),
+                sender_mailbox_epoch=_actor_mailbox_epoch(context),
+                recipient_mailbox_epoch=recipient_epoch,
+            )
+        except ValueError as exc:
+            return self._error_result(str(exc))
         payload = record.to_dict()
         if summary:
             payload["summary"] = summary
@@ -315,141 +265,22 @@ class SendMessageTool(BaseTool):
             event={"type": "message", "message": payload},
         )
 
-        # cc SendMessageTool: a stopped agent is auto-resumed with the message
-        # as new input. Running/parent recipients consume mail live; an ended
-        # subagent never would, so try a checkpoint resume. The message is
-        # already persisted above — on failure it stays pending, never dropped.
-        recipient_record = runtime.get_subagent(recipient)
-        if (
-            recipient_record is not None
-            and str(recipient_record.status or "") in _ENDED_SUBAGENT_STATUSES
-        ):
-            resume_note = await self._resume_ended_recipient(
-                recipient=recipient,
-                recipient_record=recipient_record,
-                message=message,
-                sender=sender,
-                context=context,
-            )
+        if recipient_ended:
             return ToolResult(
                 content=(
                     f"Message {record.message_id} sent from {sender} to {recipient}. "
-                    f"{resume_note}"
+                    f"Recipient has already ended ({recipient_record.status}); "
+                    "the message was stored but was not delivered to a running agent."
                 ),
                 display_summary=summary or f"Message to {recipient}",
                 result_kind="subagent",
-                display_scope="agents",
             )
 
         return ToolResult(
             content=f"Message {record.message_id} sent from {sender} to {recipient}.",
             display_summary=summary or f"Message to {recipient}",
             result_kind="subagent",
-            display_scope="agents",
         )
-
-    @staticmethod
-    async def _resume_ended_recipient(
-        *,
-        recipient: str,
-        recipient_record: Any,
-        message: str,
-        sender: str,
-        context: ToolExecutionContext | None,
-    ) -> str:
-        """Resume an ended subagent from its checkpoint with the message as input.
-
-        Returns a user-facing note. When the resume chain is unavailable (no
-        checkpoint, no runtime dependencies), the message stays persisted in the
-        mailbox and the note says so explicitly instead of silently dropping it.
-        """
-        pending_note = (
-            f"Recipient {recipient} has already ended ({recipient_record.status}); "
-            "the message is stored in its mailbox pending resume. "
-            f"Use task with resume_subagent_id={recipient} to resume it."
-        )
-        try:
-            from backend.agent.checkpoint import load_latest_run_checkpoint
-
-            if load_latest_run_checkpoint(recipient) is None:
-                return (
-                    f"Recipient {recipient} has already ended ({recipient_record.status}) "
-                    "and left no resume checkpoint; the message is stored in its mailbox."
-                )
-        except Exception:
-            return pending_note
-
-        llm = getattr(context, "llm", None)
-        artifact_store = getattr(context, "artifact_store", None)
-        if context is None or llm is None or artifact_store is None:
-            return pending_note
-
-        try:
-            from backend.config import load_config
-            from backend.permissions.checker import PermissionChecker
-            from backend.tools.agent_tools import TaskTool
-            from backend.tools.subagent_runtime import runtime_from_context
-
-            def _registry():
-                try:
-                    from backend.api import _state
-
-                    bootstrap = getattr(_state, "bootstrap", None)
-                except Exception:
-                    bootstrap = None
-                if bootstrap is not None:
-                    return bootstrap.create_tool_registry(artifact_store)
-                from backend.services.tool_registry_factory import build_tool_registry
-
-                return build_tool_registry(artifact_store, llm_provider=lambda: llm)
-
-            tool = TaskTool(
-                llm_provider=lambda: llm,
-                tool_registry_provider=_registry,
-                artifact_store=artifact_store,
-                permission_checker_provider=lambda: (
-                    getattr(context, "permission_checker", None)
-                    or PermissionChecker(load_config().permissions)
-                ),
-                agent_settings_provider=lambda: load_config().agent,
-                token_budget_provider=lambda: load_config().token_budget,
-            )
-            description = (
-                str(recipient_record.objective or recipient_record.prompt_summary or "").strip()
-                or "Continue delegated task"
-            )
-            result = await tool.execute(
-                {
-                    "description": description,
-                    "prompt": (
-                        f"New message from {sender} while you were stopped:\n{message}\n\n"
-                        "Continue your retained task, taking this message into account."
-                    ),
-                    "agent_type": recipient_record.agent_type,
-                    "resume_subagent_id": recipient,
-                    "run_in_background": True,
-                    "required_for_final": recipient_record.required_for_final,
-                    "read_only": recipient_record.read_only,
-                    "write_scope": list(recipient_record.write_scope or []),
-                },
-                context=context,
-            )
-            if result.is_error:
-                return (
-                    f"Recipient {recipient} had ended ({recipient_record.status}) and could not "
-                    f"be resumed ({result.content[:200]}); the message is stored in its mailbox."
-                )
-            return (
-                f"Recipient {recipient} had ended ({recipient_record.status}); resumed it from "
-                "its checkpoint in the background with your message. Collect the result via "
-                f"task_status with subagent_id={recipient}."
-            )
-        except Exception as exc:  # noqa: BLE001
-            return (
-                f"Recipient {recipient} had ended and resume failed "
-                f"({type(exc).__name__}: {exc}); the message is stored in its mailbox."
-            )
-
 
 class MessageListTool(BaseTool):
     """Read the shared swarm mailbox for an agent or team participant."""
@@ -463,9 +294,6 @@ class MessageListTool(BaseTool):
     read_only = True
     result_kind = "subagent"
     activity_kind = "genericTool"
-    display_scope = "agents"
-    panel_hint = "subagents"
-    deferred_catalog_scopes = COORDINATION_DEFERRED_CATALOG_SCOPES
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -491,17 +319,37 @@ class MessageListTool(BaseTool):
         )
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
-        participant_id = str(args.get("participant_id") or "").strip()
+        runtime = _runtime(context)
+        actor_id = _actor_id(context)
+        actor_record = runtime.get_subagent(actor_id)
+        if actor_record is not None and not runtime.accepts_subagent_incarnation(
+            actor_id,
+            agent_path=str((context.metadata if context and isinstance(context.metadata, dict) else {}).get("agent_path") or ""),
+            mailbox_epoch=_actor_mailbox_epoch(context),
+            require_running=True,
+        ):
+            return self._error_result("Stale subagent incarnation cannot read the current mailbox")
+        default_participant = actor_id if actor_record is not None else "parent"
+        participant_id = str(args.get("participant_id") or default_participant).strip()
+        if actor_record is not None and participant_id != actor_id:
+            return self._error_result("Subagents may only read their own mailbox")
         since_seq = int(args.get("since_seq") or 0)
         limit = int(args.get("limit") or 20)
-        messages = _runtime(context).list_swarm_messages(
+        participant_record = runtime.get_subagent(participant_id)
+        mailbox_epoch = (
+            int(participant_record.mailbox_epoch or 0)
+            if participant_record is not None
+            else None
+        )
+        messages = runtime.list_swarm_messages(
             participant_id=participant_id,
             conversation_id=_conversation_id(context),
             since_seq=since_seq,
             limit=limit,
+            mailbox_epoch=mailbox_epoch,
         )
         if not messages:
-            return ToolResult(content="No swarm mailbox messages matched.", result_kind="subagent", display_scope="agents")
+            return ToolResult(content="No swarm mailbox messages matched.", result_kind="subagent")
         lines = [f"{len(messages)} swarm mailbox message(s):"]
         for message in messages:
             lines.append(
@@ -509,7 +357,7 @@ class MessageListTool(BaseTool):
                 + (f" (task {message.task_id})" if message.task_id else "")
             )
         lines.append(f"High-water: {max(message.seq for message in messages)}")
-        return ToolResult(content="\n".join(lines), result_kind="subagent", display_scope="agents")
+        return ToolResult(content="\n".join(lines), result_kind="subagent")
 
 
 class TeamCreateTool(BaseTool):
@@ -518,9 +366,6 @@ class TeamCreateTool(BaseTool):
     permission = PermissionLevel.AUTO
     result_kind = "subagent"
     activity_kind = "genericTool"
-    display_scope = "agents"
-    panel_hint = "subagents"
-    deferred_catalog_scopes = COORDINATION_DEFERRED_CATALOG_SCOPES
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -574,7 +419,6 @@ class TeamCreateTool(BaseTool):
             content=f"Created swarm team {team.team_name} with {len(team.members)} member(s).",
             display_summary=f"Team created: {team.team_name}",
             result_kind="subagent",
-            display_scope="agents",
         )
 
 
@@ -585,9 +429,6 @@ class TeamListTool(BaseTool):
     read_only = True
     result_kind = "subagent"
     activity_kind = "genericTool"
-    display_scope = "agents"
-    panel_hint = "subagents"
-    deferred_catalog_scopes = COORDINATION_DEFERRED_CATALOG_SCOPES
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -613,7 +454,7 @@ class TeamListTool(BaseTool):
                 limit=int(args.get("limit") or 50),
             )
         ]
-        return ToolResult(content=_team_lines(teams), result_kind="subagent", display_scope="agents")
+        return ToolResult(content=_team_lines(teams), result_kind="subagent")
 
 
 class TeamDeleteTool(BaseTool):
@@ -622,9 +463,6 @@ class TeamDeleteTool(BaseTool):
     permission = PermissionLevel.AUTO
     result_kind = "subagent"
     activity_kind = "genericTool"
-    display_scope = "agents"
-    panel_hint = "subagents"
-    deferred_catalog_scopes = COORDINATION_DEFERRED_CATALOG_SCOPES
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -659,7 +497,6 @@ class TeamDeleteTool(BaseTool):
             content=f"Deleted swarm team {team.team_name}.",
             display_summary=f"Team deleted: {team.team_name}",
             result_kind="subagent",
-            display_scope="agents",
         )
 
 
@@ -668,9 +505,6 @@ class TaskCreateTool(BaseTool):
     description = "Create a shared swarm task that multiple agents can list, claim, update, and attach outputs to."
     permission = PermissionLevel.AUTO
     result_kind = "subagent"
-    display_scope = "agents"
-    panel_hint = "subagents"
-    deferred_catalog_scopes = COORDINATION_DEFERRED_CATALOG_SCOPES
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -729,7 +563,6 @@ class TaskCreateTool(BaseTool):
             content=f"Created shared swarm task {task.task_id}: {task.title}",
             display_summary=f"Task created: {task.title}",
             result_kind="subagent",
-            display_scope="agents",
         )
 
 
@@ -739,9 +572,6 @@ class TaskListTool(BaseTool):
     permission = PermissionLevel.AUTO
     read_only = True
     result_kind = "subagent"
-    display_scope = "agents"
-    panel_hint = "subagents"
-    deferred_catalog_scopes = COORDINATION_DEFERRED_CATALOG_SCOPES
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -778,7 +608,6 @@ class TaskListTool(BaseTool):
         return ToolResult(
             content=_task_lines(tasks),
             result_kind="subagent",
-            display_scope="agents",
         )
 
 
@@ -788,9 +617,6 @@ class TaskGetTool(BaseTool):
     permission = PermissionLevel.AUTO
     read_only = True
     result_kind = "subagent"
-    display_scope = "agents"
-    panel_hint = "subagents"
-    deferred_catalog_scopes = COORDINATION_DEFERRED_CATALOG_SCOPES
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -830,7 +656,7 @@ class TaskGetTool(BaseTool):
             lines.append("Outputs:")
             for output in outputs[-10:]:
                 lines.append(f"- {output.get('author_id')}: {output.get('content')}")
-        return ToolResult(content="\n".join(lines), result_kind="subagent", display_scope="agents")
+        return ToolResult(content="\n".join(lines), result_kind="subagent")
 
 
 class TaskUpdateTool(BaseTool):
@@ -838,9 +664,6 @@ class TaskUpdateTool(BaseTool):
     description = "Update a shared swarm task's status, assignee, priority, title, or description."
     permission = PermissionLevel.AUTO
     result_kind = "subagent"
-    display_scope = "agents"
-    panel_hint = "subagents"
-    deferred_catalog_scopes = COORDINATION_DEFERRED_CATALOG_SCOPES
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -891,13 +714,10 @@ class TaskUpdateTool(BaseTool):
             subagent_id=task.assignee or "swarm",
             event={"type": "task_updated", "task": payload},
         )
-        if str(patch.get("status") or "").strip() in {"completed", "cancelled"}:
-            await _maybe_advance_workflow(context, task)
         return ToolResult(
             content=f"Updated shared swarm task {task.task_id}: {task.status}",
             display_summary=f"Task updated: {task.title}",
             result_kind="subagent",
-            display_scope="agents",
         )
 
 
@@ -906,9 +726,6 @@ class TaskOutputTool(BaseTool):
     description = "Attach an output, finding, or handoff note to a shared swarm task."
     permission = PermissionLevel.AUTO
     result_kind = "subagent"
-    display_scope = "agents"
-    panel_hint = "subagents"
-    deferred_catalog_scopes = COORDINATION_DEFERRED_CATALOG_SCOPES
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -954,11 +771,8 @@ class TaskOutputTool(BaseTool):
             subagent_id=task.assignee or "swarm",
             event={"type": "task_output", "task": payload, "output": payload["outputs"][-1]},
         )
-        if raw_status in {"completed", "cancelled"}:
-            await _maybe_advance_workflow(context, task)
         return ToolResult(
             content=f"Attached output to shared swarm task {task.task_id}.",
             display_summary=f"Task output: {task.title}",
             result_kind="subagent",
-            display_scope="agents",
         )

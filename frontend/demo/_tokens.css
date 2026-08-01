@@ -1,0 +1,227 @@
+/*
+ * _tokens.css — shared token base for the three style demos.
+ *
+ * Values copied from src.v2/styles/tokens.css so the demos are honest about
+ * the palette the app already has. The three demo files differ ONLY in
+ * typography, border/shadow/radius treatment and motion intensity — never in
+ * color or content. That keeps the comparison about visual language.
+ *
+ * Fonts are loaded from ../public/fonts via relative paths so these files work
+ * when opened directly with file://. Note JetBrains Mono is declared here but
+ * NOT in the real app (that is one of the bugs the plan fixes) — so these demos
+ * show what the app is supposed to look like once mono actually loads.
+ */
+
+@font-face {
+  font-family: "Manrope";
+  src: url("../public/fonts/manrope-variable.ttf") format("truetype-variations");
+  font-weight: 200 800;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("../public/fonts/jetbrains-mono-variable.woff2") format("woff2-variations");
+  font-weight: 100 800;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("../public/fonts/inter-variable.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: dark;
+
+  --surface-sunken:  oklch(0.100 0.002 250);
+  --surface-base:    oklch(0.120 0.002 250);
+  --surface-sidebar: oklch(0.140 0.003 250);
+  --surface-page:    oklch(0.160 0.003 250);
+  --surface-soft:    oklch(0.180 0.004 250);
+  --surface-panel:   oklch(0.200 0.004 250);
+  --surface-raised:  oklch(0.220 0.005 250);
+  --surface-hover:   oklch(0.255 0.005 250);
+  --surface-active:  oklch(0.290 0.006 250);
+
+  --text-primary:   oklch(0.995 0.002 250);
+  --text-secondary: oklch(0.930 0.003 250);
+  --text-muted:     oklch(0.800 0.004 250);
+  --text-on-accent: oklch(0.985 0.005 250);
+
+  --border-subtle: oklch(0.870 0.006 250 / 0.15);
+  --border-soft:   oklch(0.870 0.006 250 / 0.22);
+  --border-strong: oklch(0.870 0.006 250 / 0.40);
+
+  --accent-primary: oklch(0.68 0.12 250);
+  --accent-hover:   oklch(0.78 0.11 250);
+  --accent-strong:  oklch(0.64 0.18 255);
+  --accent-active:  oklch(0.58 0.13 252);
+  --accent-soft:    oklch(0.68 0.12 250 / 0.12);
+
+  --state-success: oklch(0.74 0.13 142);
+  --state-success-soft: oklch(0.74 0.13 142 / 0.12);
+  --state-warning: oklch(0.76 0.14 305);
+  --state-danger:  oklch(0.71 0.16 28);
+  --state-info:    oklch(0.74 0.10 240);
+
+  --text-disabled: oklch(0.995 0.002 250 / 0.48);
+
+  --font-ui:   "Manrope", "Noto Sans SC", "Microsoft YaHei UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+
+  --text-3xs: 10px;
+  --text-2xs: 11px;
+  --text-xxs: 12px;
+  --text-chrome: 13px;
+  --text-xs: 14px;
+  --text-sm: 15px;
+  --text-base: 16px;
+  --text-md: 17px;
+  --text-lg: 19px;
+  --text-xl: 22px;
+
+  --leading-tight: 1.28;
+  --leading-snug: 1.42;
+  --leading-normal: 1.55;
+  --leading-relaxed: 1.68;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 14px;
+  --radius-full: 9999px;
+
+  --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.10), 0 1px 2px -1px rgba(0, 0, 0, 0.10);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.10), 0 2px 4px -2px rgba(0, 0, 0, 0.10);
+
+  --easing-standard: cubic-bezier(0.2, 0, 0, 1);
+  --easing-enter: cubic-bezier(0.16, 1, 0.3, 1);
+  --easing-exit: cubic-bezier(0.4, 0, 1, 1);
+  --easing-pulse: cubic-bezier(0.42, 0, 0.18, 1);
+  --duration-micro: 100ms;
+  --duration-fast: 150ms;
+  --duration-base: 200ms;
+  --duration-slow: 250ms;
+
+  --transition-micro:  var(--duration-micro) var(--easing-standard);
+  --transition-fast:   var(--duration-fast) var(--easing-standard);
+  --transition-normal: var(--duration-base) var(--easing-standard);
+  --transition-slow:   var(--duration-slow) var(--easing-standard);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+
+  --surface-sunken:  oklch(0.975 0.002 250);
+  --surface-base:    oklch(1.000 0.000 250);
+  --surface-sidebar: oklch(0.985 0.002 250);
+  --surface-page:    oklch(0.975 0.003 250);
+  --surface-soft:    oklch(0.955 0.003 250);
+  --surface-panel:   oklch(0.935 0.004 250);
+  --surface-raised:  oklch(0.915 0.004 250);
+  --surface-hover:   oklch(0.890 0.005 250);
+  --surface-active:  oklch(0.860 0.006 250);
+
+  --text-primary:   oklch(0.110 0.010 250);
+  --text-secondary: oklch(0.220 0.010 250);
+  --text-muted:     oklch(0.340 0.010 250);
+
+  --border-subtle: oklch(0.200 0.006 250 / 0.10);
+  --border-soft:   oklch(0.200 0.006 250 / 0.18);
+  --border-strong: oklch(0.200 0.006 250 / 0.30);
+
+  --accent-primary: oklch(0.52 0.16 255);
+  --accent-hover:   oklch(0.44 0.17 255);
+  --accent-strong:  oklch(0.46 0.18 258);
+  --accent-active:  oklch(0.40 0.17 258);
+  --accent-soft:    oklch(0.52 0.16 255 / 0.10);
+
+  --state-success: oklch(0.52 0.14 142);
+  --state-warning: oklch(0.50 0.16 305);
+  --state-danger:  oklch(0.52 0.18 28);
+  --state-info:    oklch(0.50 0.12 240);
+}
+
+/* ── Demo chrome (identical in all three, deliberately neutral) ───── */
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--surface-sunken);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+}
+
+.demo-bar {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-sunken);
+  font-family: var(--font-ui);
+  font-size: var(--text-chrome);
+  color: var(--text-muted);
+}
+
+.demo-bar strong {
+  color: var(--text-primary);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+.demo-bar nav { display: flex; gap: 4px; margin-left: auto; }
+
+.demo-bar a,
+.demo-bar button {
+  padding: 5px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--surface-base);
+  color: var(--text-secondary);
+  font: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.demo-bar a:hover,
+.demo-bar button:hover { border-color: var(--border-strong); color: var(--text-primary); }
+.demo-bar a[aria-current="page"] { border-color: var(--accent-primary); color: var(--accent-primary); }
+
+.demo-section-label {
+  margin: 0;
+  padding: 22px 0 10px;
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.demo-stage { padding: 0 20px 60px; }
+.demo-frame {
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--surface-base);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

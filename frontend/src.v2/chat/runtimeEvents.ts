@@ -1,10 +1,8 @@
 import { useAppStore } from "../stores";
 import type {
-  AgentPhaseUpdatedEvent,
   AgentProgressEvent,
   AgentRunCompletedEvent,
   AgentRunStartedEvent,
-  AgentRunUpdatedEvent,
   PlanStepUpdatedEvent,
   PlanUpdatedEvent,
   RateLimitEvent,
@@ -13,36 +11,24 @@ import type {
   SessionStateEvent,
   StreamEventEvent,
   SubagentEventEvent,
+  SubagentMailboxEvent,
   SubagentProgressEvent,
   SubagentStartEvent,
   TaskUpdateEvent,
   ToolUseSummaryEvent,
-  VerificationResultEvent,
-  VerificationStartedEvent,
 } from "../protocol/events";
-import type { McpServerStatus, ProgressContentBlock, SubagentMessageState, SubagentState, TodoItem } from "../stores/types";
+import type { McpServerStatus, SubagentMessageState, SubagentState, TodoItem } from "../stores/types";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { fromBackendPermissionMode } from "../protocol/permissions";
 import { withDerivedCapabilitySummary } from "../protocol/capabilities";
 import { pushToast } from "../overlays/ToastContainer";
-import { addInspectorPayload, maybeAutoRoutePanel } from "./displayRouting";
+import { addInspectorPayload } from "./inspectorEntries";
 import { normalizeSkillList, normalizeSlashCommands } from "../lib/catalog-normalizers";
 import { normalizeContextLedger } from "./contextLedger";
 
-const INTERNAL_SUBAGENT_PROGRESS_RE = /\bcall_[a-z0-9_-]{8,}\b/i;
-const ELAPSED_ONLY_RE = /^\d+(?:\.\d+)?s elapsed$/i;
-
-const userVisibleSubagentProgress = (value?: string): string => {
+const userVisibleSubagentProgress = (value?: string, explicitVisible?: boolean): string => {
   const text = String(value ?? "").trim();
-  if (
-    !text
-    || INTERNAL_SUBAGENT_PROGRESS_RE.test(text)
-    || ELAPSED_ONLY_RE.test(text)
-    || /^tool started\s*:/i.test(text)
-    || /^running\s+[a-z0-9_.:-]+$/i.test(text)
-  ) {
-    return "";
-  }
+  if (explicitVisible === false) return "";
   return text;
 };
 
@@ -66,6 +52,8 @@ const swarmMessageState = (value: unknown): SubagentMessageState | null => {
     content,
     createdAt: maybeNumber(message.created_at) ?? Date.now(),
     seq: maybeNumber(message.seq),
+    senderMailboxEpoch: maybeNumber(message.sender_mailbox_epoch),
+    recipientMailboxEpoch: maybeNumber(message.recipient_mailbox_epoch),
     deliveryStatus: "sent",
   };
 };
@@ -92,31 +80,15 @@ const snapshotMessages = (event: unknown): SubagentMessageState[] => {
   return Array.isArray(raw) ? raw.map(swarmMessageState).filter((item): item is SubagentMessageState => Boolean(item)) : [];
 };
 
-const semanticSubagentActivity = (
-  toolName?: string,
+const explicitSubagentActivity = (
   currentActivity?: string,
   detail?: string,
+  activitySummary?: string,
+  explicitVisible?: boolean,
 ): string => {
-  const activity = userVisibleSubagentProgress(currentActivity)
-    || userVisibleSubagentProgress(detail);
-  const tool = String(toolName || "").trim().toLowerCase();
-  if (/^call_[a-z0-9_-]+$/i.test(tool)) return activity;
-  if (/^(?:web_search|search_web)$/.test(tool)) return `搜索：${activity || "查找相关资料"}`;
-  if (/^(?:web_fetch|read_artifact)$/.test(tool)) return `读取来源：${activity || "核对来源内容"}`;
-  if (/^(?:read_file|grep_files|glob_files)$/.test(tool)) return `检查资料：${activity || "查看相关内容"}`;
-  if (/^(?:run_command|shell_command)$/.test(tool)) return `执行验证：${activity || "运行检查"}`;
-  return activity;
-};
-
-const terminalSubagentActivity = (
-  status: SubagentState["status"],
-  timedOut: boolean,
-): string => {
-  if (timedOut) return "达到时限，已保留可用结果";
-  if (status === "done") return "已完成并返回结果";
-  if (status === "partial") return "已完成部分工作";
-  if (status === "cancelled") return "任务已停止";
-  return "执行未完成";
+  return userVisibleSubagentProgress(activitySummary, explicitVisible)
+    || userVisibleSubagentProgress(currentActivity, explicitVisible)
+    || userVisibleSubagentProgress(detail, explicitVisible);
 };
 
 const subagentProgressSummary = (ev: {
@@ -124,19 +96,50 @@ const subagentProgressSummary = (ev: {
   tool_name?: string;
   iteration?: number;
   max_iterations?: number;
+  activity_summary?: string;
+  user_visible?: boolean;
 }): string => {
-  const detail = userVisibleSubagentProgress(ev.detail);
+  const detail = userVisibleSubagentProgress(ev.activity_summary, ev.user_visible)
+    || userVisibleSubagentProgress(ev.detail, ev.user_visible);
   if (detail) return detail;
   return "正在执行子任务";
 };
 
 const subagentResultPayload = (event: unknown): Record<string, unknown> | null => {
-  const direct = (event as { result?: unknown }).result;
+  const source = event as {
+    result?: unknown;
+    record?: unknown;
+    snapshot?: unknown;
+  };
+  const direct = source.result;
   if (direct && typeof direct === "object") return direct as Record<string, unknown>;
-  const snapshot = (event as { snapshot?: unknown }).snapshot;
-  if (!snapshot || typeof snapshot !== "object") return null;
-  const result = (snapshot as { result?: unknown }).result;
-  return result && typeof result === "object" ? result as Record<string, unknown> : null;
+  const snapshot = source.snapshot;
+  if (snapshot && typeof snapshot === "object") {
+    const result = (snapshot as { result?: unknown }).result;
+    if (result && typeof result === "object") return result as Record<string, unknown>;
+  }
+  // Durable status snapshots and older live events may carry only the
+  // completed runtime record. Treat its result summary as a successful result
+  // payload instead of manufacturing a generic failure row when the live
+  // result field was lost during reconnect.
+  const record = source.record
+    ?? (snapshot && typeof snapshot === "object"
+      ? (snapshot as { record?: unknown }).record
+      : undefined);
+  if (!record || typeof record !== "object") return null;
+  const recordObject = record as Record<string, unknown>;
+  const content = recordObject.content
+    ?? recordObject.result_content
+    ?? recordObject.result_summary;
+  const error = recordObject.error ?? recordObject.result_error;
+  if (content == null && error == null) return null;
+  return {
+    content,
+    error,
+    status: recordObject.status,
+    duration_ms: recordObject.duration_ms,
+    tool_call_count: recordObject.tool_call_count ?? recordObject.tool_count,
+  };
 };
 
 const maybeString = (value: unknown): string | undefined => {
@@ -179,6 +182,30 @@ const subagentStatusFromTask = (status: string): SubagentState["status"] => {
 const isTerminalSubagentStatus = (status: SubagentState["status"]): boolean =>
   status === "done" || status === "partial" || status === "cancelled" || status === "error";
 
+const subagentIncarnation = (
+  payload: Record<string, unknown>,
+  record?: Record<string, unknown> | null,
+): { agentPath?: string; mailboxEpoch?: number } => ({
+  agentPath: maybeString(payload.agent_path) ?? maybeString(record?.agent_path),
+  mailboxEpoch: maybeNumber(payload.mailbox_epoch) ?? maybeNumber(record?.mailbox_epoch),
+});
+
+const isStaleSubagentIncarnation = (
+  existing: SubagentState | undefined,
+  payload: Record<string, unknown>,
+  record?: Record<string, unknown> | null,
+): boolean => {
+  if (!existing) return false;
+  const incoming = subagentIncarnation(payload, record);
+  const currentHasFence = Boolean(existing.agentPath) && typeof existing.mailboxEpoch === "number";
+  const incomingHasFence = Boolean(incoming.agentPath) && typeof incoming.mailboxEpoch === "number";
+  if (!currentHasFence) return false;
+  if (!incomingHasFence) return true;
+  if (incoming.mailboxEpoch! < existing.mailboxEpoch!) return true;
+  return incoming.mailboxEpoch === existing.mailboxEpoch
+    && incoming.agentPath !== existing.agentPath;
+};
+
 const subagentMetadataPatch = (
   payload: Record<string, unknown>,
   record?: Record<string, unknown> | null,
@@ -186,10 +213,6 @@ const subagentMetadataPatch = (
   const value = (key: string, altKey?: string): unknown => payload[key] ?? (altKey ? payload[altKey] : undefined) ?? record?.[key] ?? (altKey ? record?.[altKey] : undefined);
   const now = Date.now();
   const patch: Partial<SubagentState> = { lastEventAt: now, lastProgressAt: now };
-  const workflowId = maybeString(value("workflow_id"));
-  const workflowName = maybeString(value("workflow_name"));
-  const workflowMode = maybeString(value("workflow_mode"));
-  const nodeId = maybeString(value("node_id"));
   const taskId = maybeString(value("task_id"));
   const objective = maybeString(value("objective")) ?? maybeString(value("prompt_summary"));
   const currentActivity = userVisibleSubagentProgress(maybeString(value("current_activity"))) || undefined;
@@ -199,13 +222,11 @@ const subagentMetadataPatch = (
   const dependsOn = maybeStringList(value("depends_on"));
   const blockedBy = maybeStringList(value("blocked_by"));
   const writeScope = maybeStringList(value("write_scope"));
-  const requiredForFinal = maybeBoolean(value("required_for_final"));
-  const blocksFinalReply = maybeBoolean(value("blocks_final_reply", "blocksFinalReply"));
+  const background = maybeBoolean(value("background"));
   const readOnly = maybeBoolean(value("read_only"));
-  if (workflowId) patch.workflowId = workflowId;
-  if (workflowName) patch.workflowName = workflowName;
-  if (workflowMode) patch.workflowMode = workflowMode;
-  if (nodeId) patch.nodeId = nodeId;
+  const { agentPath, mailboxEpoch } = subagentIncarnation(payload, record);
+  if (agentPath) patch.agentPath = agentPath;
+  if (typeof mailboxEpoch === "number") patch.mailboxEpoch = mailboxEpoch;
   if (taskId) patch.taskId = taskId;
   if (objective) patch.objective = objective;
   if (currentActivity) patch.currentActivity = currentActivity;
@@ -215,140 +236,48 @@ const subagentMetadataPatch = (
   if (dependsOn) patch.dependsOn = dependsOn;
   if (blockedBy) patch.blockedBy = blockedBy;
   if (writeScope) patch.writeScope = writeScope;
-  if (typeof requiredForFinal === "boolean") patch.requiredForFinal = requiredForFinal;
-  if (typeof blocksFinalReply === "boolean") patch.blocksFinalReply = blocksFinalReply;
-  else if (typeof requiredForFinal === "boolean") patch.blocksFinalReply = requiredForFinal;
+  if (typeof background === "boolean") patch.background = background;
   if (typeof readOnly === "boolean") patch.readOnly = readOnly;
   return patch;
 };
 
 const visibleSubagentsForConversation = (conversationId?: string): SubagentState[] => {
   const currentState = useAppStore.getState();
-  return conversationId && conversationId !== currentState.conversationId
+  if (!conversationId?.trim()) return [];
+  return conversationId !== currentState.conversationId
     ? currentState.conversationAgentStates?.[conversationId]?.subagents ?? []
     : currentState.subagents;
 };
 
-const findWorkflowNodeSubagent = (
-  subagents: SubagentState[],
-  workflowId: string,
-  nodeId?: string,
-  taskId?: string,
-): SubagentState | undefined =>
-  subagents.find((subagent) =>
-    Boolean(taskId && (subagent.id === taskId || subagent.taskId === taskId)) ||
-    Boolean(workflowId && nodeId && subagent.workflowId === workflowId && subagent.nodeId === nodeId),
-  );
-
 const isActiveConversationEvent = (conversationId?: string): boolean => {
-  if (!conversationId) return true;
-  return useAppStore.getState().conversationId === conversationId;
+  if (!conversationId?.trim()) return false;
+  return useAppStore.getState().conversationId === conversationId.trim();
 };
 
 const TURN_SCOPED_RUNTIME_EVENTS = new Set<string>([
   "agent.progress",
   "runtime.span",
   "agent.run.started",
-  "agent.run.updated",
   "agent.run.completed",
-  "agent.phase.updated",
-  "verification.started",
-  "verification.result",
   "plan_updated",
   "plan_step_updated",
   "task.update",
   "subagent.start",
   "subagent.event",
+  "subagent.mailbox",
   "subagent.progress",
   "subagent.done",
 ]);
 
-const LATE_TURN_FINALIZATION_EVENTS = new Set<string>([
+const LATE_TURN_TERMINAL_EVENTS = new Set<string>([
   "agent.run.completed",
-  "agent.phase.updated",
-  "verification.result",
   "task.update",
 ]);
-
-const normalizeRuntimeSpanStatus = (status?: string): AgentProgressEvent["status"] => {
-  const normalized = String(status || "").trim().toLowerCase();
-  if (normalized === "completed" || normalized === "success" || normalized === "done") return "completed";
-  if (normalized === "failed" || normalized === "error" || normalized === "blocked" || normalized === "timeout") return "failed";
-  if (normalized === "running" || normalized === "pending") return "running";
-  return "info";
-};
 
 const runtimeSpanBasePhase = (ev: RuntimeSpanEvent): string => {
   const explicit = String(ev.phase || "").trim().toLowerCase();
   if (explicit) return explicit;
   return String(ev.event || "").split(".")[0]?.trim().toLowerCase() || "";
-};
-
-const runtimeSpanProgressPhase = (ev: RuntimeSpanEvent): AgentProgressEvent["phase"] => {
-  const phase = runtimeSpanBasePhase(ev);
-  const event = String(ev.event || "").toLowerCase();
-  if (phase === "context") return "planning";
-  if (phase === "provider" || phase === "model") return "model";
-  if (phase === "tool" || event.startsWith("tool.")) return "tool";
-  if (phase === "approval" || event.includes("approval")) return "approval";
-  if (phase === "verification" || phase === "verify") return "verify";
-  if (phase === "final") return "final";
-  if (phase === "recovery" || phase === "recover") return "recover";
-  if (phase === "iteration") return "iteration";
-  if (phase === "subagent") return "subagent";
-  if (phase === "workflow") return "workflow";
-  if (phase === "cache") return "cache";
-  return "status";
-};
-
-const runtimeSpanProgressStage = (ev: RuntimeSpanEvent): AgentProgressEvent["stage"] => {
-  const phase = runtimeSpanProgressPhase(ev);
-  if (phase === "tool") return "tool";
-  if (phase === "approval") return "approval";
-  if (phase === "verify") return "verification";
-  if (phase === "final") return "final";
-  if (phase === "planning" || phase === "model" || phase === "orienting") return "planning";
-  return "status";
-};
-
-const runtimeSpanProgressId = (ev: RuntimeSpanEvent): string => {
-  const toolCallId = String(ev.tool_call_id || "").trim();
-  if (toolCallId) {
-    return `${runtimeSpanProgressPhase(ev) === "approval" ? "approval" : "tool"}:${toolCallId}`;
-  }
-  const iterationId = String(ev.iteration_id || "").trim();
-  const event = String(ev.event || "").toLowerCase();
-  if (event.startsWith("provider.") || runtimeSpanBasePhase(ev) === "provider") {
-    return `provider-request:${iterationId || ev.span_id}`;
-  }
-  if (event.startsWith("context.") || runtimeSpanBasePhase(ev) === "context") {
-    return `context:${iterationId || ev.turn_id || ev.run_id || ev.span_id}`;
-  }
-  if (event.startsWith("subagent.") || runtimeSpanBasePhase(ev) === "subagent") {
-    return `subagent:${ev.agent_id || ev.span_id}`;
-  }
-  if (event.startsWith("workflow.") || runtimeSpanBasePhase(ev) === "workflow") {
-    return `workflow:${ev.agent_id || ev.span_id}`;
-  }
-  if (event.startsWith("cache.") || runtimeSpanBasePhase(ev) === "cache") {
-    return ev.span_id.startsWith("cache:") ? ev.span_id : `cache:${ev.span_id}`;
-  }
-  return `span:${ev.span_id}`;
-};
-
-const humanizeRuntimeSpanEvent = (value: string): string =>
-  String(value || "runtime span")
-    .replace(/[._-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-const runtimeSpanDetail = (ev: RuntimeSpanEvent): string | undefined => {
-  const parts = [
-    ev.waiting_on ? `waiting_on=${ev.waiting_on}` : "",
-    ev.blocking_reason ? `blocking_reason=${ev.blocking_reason}` : "",
-    typeof ev.duration_ms === "number" ? `duration_ms=${Math.max(0, Math.round(ev.duration_ms))}` : "",
-  ].filter(Boolean);
-  return parts.length ? parts.join(" · ") : undefined;
 };
 
 const inspectorTargetForRuntimeSpan = (ev: RuntimeSpanEvent): { kind: "message" | "tool_call" | "provider" | "subagent" | "cache"; id: string } => {
@@ -358,7 +287,7 @@ const inspectorTargetForRuntimeSpan = (ev: RuntimeSpanEvent): { kind: "message" 
   if (phase === "provider" || String(ev.event || "").toLowerCase().startsWith("provider.")) {
     return { kind: "provider", id: ev.span_id };
   }
-  if (phase === "subagent" || phase === "workflow") {
+  if (phase === "subagent") {
     return { kind: "subagent", id: String(ev.agent_id || ev.span_id).trim() || ev.span_id };
   }
   if (phase === "cache") {
@@ -376,9 +305,8 @@ const eventMessageId = (event: unknown): string | undefined => {
 const hasStreamingAssistantForMessage = (conversationId: string | undefined, messageId: string): boolean => {
   const state = useAppStore.getState();
   const targetId = conversationId?.trim();
-  const messages = !targetId
-    ? state.messages
-    : targetId === state.conversationId
+  if (!targetId) return false;
+  const messages = targetId === state.conversationId
       ? state.messages
       : state.sideChats[targetId]?.messages ?? state.conversationMessages[targetId] ?? [];
   return messages.some((message) =>
@@ -388,17 +316,16 @@ const hasStreamingAssistantForMessage = (conversationId: string | undefined, mes
   );
 };
 
-const canApplyLateTurnFinalization = (
+const canApplyLateTerminalEvent = (
   conversationId: string | undefined,
   messageId: string,
   eventType: string,
 ): boolean => {
-  if (!LATE_TURN_FINALIZATION_EVENTS.has(eventType)) return false;
+  if (!LATE_TURN_TERMINAL_EVENTS.has(eventType)) return false;
   const state = useAppStore.getState();
   const targetId = conversationId?.trim();
-  const messages = !targetId
-    ? state.messages
-    : targetId === state.conversationId
+  if (!targetId) return false;
+  const messages = targetId === state.conversationId
       ? state.messages
       : state.sideChats[targetId]?.messages ?? state.conversationMessages[targetId] ?? [];
   const matchingAssistant = messages.find((message) => message.role === "assistant" && message.id === messageId);
@@ -553,23 +480,38 @@ const mergeRegressiveTodoSnapshot = (incoming: TodoItem[], current: TodoItem[]):
 };
 
 export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boolean => {
+  const eventOwner = (e as unknown as { conversation_id?: unknown }).conversation_id;
+  conversationId = typeof eventOwner === "string" && eventOwner.trim()
+    ? eventOwner.trim()
+    : conversationId?.trim() || undefined;
   const s = useAppStore.getState();
   const messageId = eventMessageId(e);
+  const globalSessionSnapshot = e.type === "task.update"
+    && Boolean((e as unknown as { session?: unknown }).session);
+  if (TURN_SCOPED_RUNTIME_EVENTS.has(e.type) && !conversationId && !globalSessionSnapshot) {
+    addInspectorPayload("message", `unowned:${e.type}:${messageId || "event"}`, {
+      event: e.type,
+      unowned: true,
+      payload: e,
+    });
+    return true;
+  }
   if (
     messageId
     && TURN_SCOPED_RUNTIME_EVENTS.has(e.type)
     && !hasStreamingAssistantForMessage(conversationId, messageId)
-    && !canApplyLateTurnFinalization(conversationId, messageId, e.type)
+    && !canApplyLateTerminalEvent(conversationId, messageId, e.type)
   ) {
     return true;
   }
   switch (e.type) {
-        case "agent.progress": {
+    case "agent.progress": {
       const ev = e as AgentProgressEvent;
       const message = String(ev.message ?? "").trim();
-      // Don't show debug-visibility progress in chat timeline (e.g. iteration counters)
-      const isDebug = ev.visibility === "debug";
-      const showInChatTimeline = ev.visibility === "timeline";
+      // Main chat is owned by typed message/tool/approval events. Keep legacy
+      // progress available to the activity/inspector surfaces without creating
+      // a second transcript item for the same lifecycle.
+      if (ev.tool_call_id) return true;
       if (message) {
         const progress = {
           id: String(ev.id || `${ev.stage || "status"}:${message}`),
@@ -586,20 +528,9 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
           groupId: ev.group_id,
           stepId: ev.step_id,
           count: ev.count,
-          displayScope: ev.display_scope,
-          panelHint: ev.panel_hint,
-          requiresAttention: ev.requires_attention,
           ephemeral: ev.ephemeral,
         };
-        if (showInChatTimeline) {
-          if (ev.ephemeral && ev.group_id) {
-            s.replaceEphemeralProgress(progress, conversationId, messageId);
-          } else {
-            s.appendProgress(progress, conversationId, messageId);
-          }
-        }
         s.appendAgentProgress(progress, conversationId);
-        maybeAutoRoutePanel(ev);
       }
       return true;
     }
@@ -607,48 +538,6 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       const ev = e as RuntimeSpanEvent;
       const spanId = String(ev.span_id || "").trim();
       if (!spanId) return true;
-
-      const stage = runtimeSpanProgressStage(ev);
-      const phase = runtimeSpanProgressPhase(ev);
-      const status = normalizeRuntimeSpanStatus(ev.status);
-      const message = String(ev.summary || ev.label || humanizeRuntimeSpanEvent(ev.event)).trim();
-      const basePhase = runtimeSpanBasePhase(ev);
-      const hidden = Boolean(ev.debug_only || (basePhase === "cache" && ev.requires_attention !== true));
-      const silent = ev.ui_visible === false;
-      const visibility: ProgressContentBlock["visibility"] = hidden
-        ? "debug"
-        : stage === "tool" || silent
-          ? "compact"
-          : "timeline";
-      const progress: Omit<ProgressContentBlock, "type" | "timestamp"> = {
-        id: runtimeSpanProgressId(ev),
-        stage,
-        phase,
-        status,
-        message,
-        label: ev.label || ev.tool_name || runtimeSpanBasePhase(ev) || undefined,
-        summary: ev.summary,
-        visibility,
-        detail: runtimeSpanDetail(ev),
-        toolCallId: ev.tool_call_id,
-        toolName: ev.tool_name,
-        groupId: ev.iteration_id,
-        stepId: ev.tool_call_id || spanId,
-        iterationId: ev.iteration_id,
-        displayScope: ev.display_scope || (hidden || silent ? "silent" : "activity"),
-        panelHint: ev.panel_hint || (stage === "approval" ? "diff" : "inspector"),
-        requiresAttention: ev.requires_attention,
-      };
-      if (message) {
-        if (visibility === "timeline") s.appendProgress(progress, conversationId, messageId);
-        s.appendAgentProgress(progress, conversationId);
-        maybeAutoRoutePanel({
-          ...ev,
-          display_scope: progress.displayScope,
-          panel_hint: progress.panelHint,
-          requires_attention: progress.requiresAttention,
-        });
-      }
       const target = inspectorTargetForRuntimeSpan(ev);
       addInspectorPayload(target.kind, target.id, {
         ...ev,
@@ -658,108 +547,16 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       return true;
     }
     case "agent.run.started":
-    case "agent.run.updated":
     case "agent.run.completed": {
-      const ev = e as AgentRunStartedEvent | AgentRunUpdatedEvent | AgentRunCompletedEvent;
+      const ev = e as AgentRunStartedEvent | AgentRunCompletedEvent;
       const runId = String(ev.run_id || "").trim();
       if (!runId) return true;
       const runMessageId = String((ev as unknown as { message_id?: string }).message_id || "").trim();
       s.bindStreamingTurn(ev.conversation_id || conversationId, runMessageId || undefined, runId);
-      const status = ev.type === "agent.run.completed"
-        ? (ev.status === "completed" ? "completed" : "failed")
-        : "running";
-      s.appendAgentProgress({
-        id: `agent-run:${runId}`,
-        stage: status === "completed" ? "final" : "planning",
-        phase: ev.phase === "verify" ? "verify" : ev.phase === "final" ? "final" : "planning",
-        status,
-        message: ev.summary || (status === "running" ? "代理已启动" : "代理已完成"),
-        label: ev.role || "代理",
-        summary: ev.error || ev.summary,
-        visibility: "timeline",
-        displayScope: ev.display_scope,
-        panelHint: ev.panel_hint,
-        requiresAttention: ev.requires_attention,
-      }, ev.conversation_id || conversationId);
-      maybeAutoRoutePanel(ev);
-      return true;
-    }
-    case "agent.phase.updated": {
-      const ev = e as AgentPhaseUpdatedEvent;
-      const runId = String(ev.run_id || "").trim();
-      if (!runId) return true;
-      const phase = ev.phase === "verify" ? "verify"
-        : ev.phase === "final" ? "final"
-          : ev.phase === "recover" ? "recover"
-            : ev.phase === "execute" ? "tool"
-              : "planning";
-      s.appendAgentProgress({
-        id: `agent-phase:${runId}:${ev.phase || "plan"}`,
-        stage: phase === "verify" ? "verification" : phase === "final" ? "final" : "planning",
-        phase,
-        status: (ev.status === "completed" || ev.status === "failed" ? ev.status : "running"),
-        message: ev.summary || `代理阶段：${ev.phase || "未知"}`,
-        label: ev.role || "agent",
-        summary: ev.summary,
-        visibility: "timeline",
-        displayScope: ev.display_scope,
-        panelHint: ev.panel_hint,
-        requiresAttention: ev.requires_attention,
-      }, ev.conversation_id || conversationId);
-      maybeAutoRoutePanel(ev);
-      return true;
-    }
-    case "verification.started": {
-      const ev = e as VerificationStartedEvent;
-      const runId = String(ev.run_id || "").trim();
-      if (!runId) return true;
-      s.appendAgentProgress({
-        id: `verification:${runId}`,
-        stage: "verification",
-        phase: "verify",
-        status: "running",
-        message: "正在验证",
-        label: "verify",
-        summary: ev.command,
-        visibility: "timeline",
-        displayScope: ev.display_scope,
-        panelHint: ev.panel_hint,
-        requiresAttention: ev.requires_attention,
-      }, ev.conversation_id || conversationId);
-      addInspectorPayload("message", `verification:${runId}`, {
-        event: "verification.started",
-        command: ev.command,
-        run_id: runId,
+      addInspectorPayload("message", runMessageId || runId, {
+        ...ev,
+        event: ev.type,
       });
-      maybeAutoRoutePanel(ev, "plan");
-      return true;
-    }
-    case "verification.result": {
-      const ev = e as VerificationResultEvent;
-      const runId = String(ev.run_id || "").trim();
-      if (!runId) return true;
-      s.appendAgentProgress({
-        id: `verification:${runId}`,
-        stage: "verification",
-        phase: "verify",
-        status: ev.passed ? "completed" : "failed",
-        message: ev.passed ? "验证通过" : "验证失败",
-        label: "verify",
-        summary: ev.command,
-        detail: ev.output,
-        visibility: "timeline",
-        displayScope: ev.display_scope,
-        panelHint: ev.panel_hint,
-        requiresAttention: ev.requires_attention ?? !ev.passed,
-      }, ev.conversation_id || conversationId);
-      addInspectorPayload("message", `verification:${runId}`, {
-        event: "verification.result",
-        run_id: runId,
-        passed: Boolean(ev.passed),
-        command: ev.command,
-        output: ev.output,
-      });
-      maybeAutoRoutePanel({ ...ev, requires_attention: ev.requires_attention ?? !ev.passed }, "plan");
       return true;
     }
     case "context_usage": {
@@ -946,23 +743,18 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
     case "subagent.start": {
       const ev = e as SubagentStartEvent;
       const record = maybeObject(ev.record);
+      const currentSubagents = visibleSubagentsForConversation(conversationId);
+      const existingById = currentSubagents.find((subagent) => subagent.id === ev.subagent_id);
+      if (isStaleSubagentIncarnation(
+        existingById,
+        ev as unknown as Record<string, unknown>,
+        record,
+      )) return true;
       const metadata = subagentMetadataPatch(ev as unknown as Record<string, unknown>, record);
-      const existingNode = findWorkflowNodeSubagent(
-        visibleSubagentsForConversation(conversationId),
-        metadata.workflowId ?? "",
-        metadata.nodeId,
-        metadata.taskId,
-      );
       const stableMetadata = {
         ...metadata,
-        order: metadata.order ?? existingNode?.order,
-        workflowName: metadata.workflowName ?? existingNode?.workflowName,
-        workflowMode: metadata.workflowMode ?? existingNode?.workflowMode,
-        objective: metadata.objective ?? existingNode?.objective ?? ev.prompt,
+        objective: metadata.objective ?? ev.prompt,
       };
-      if (existingNode && existingNode.id !== ev.subagent_id && existingNode.role !== "workflow") {
-        s.removeSubagent(existingNode.id, conversationId);
-      }
       s.addSubagent({
         id: ev.subagent_id,
         role: ev.role || "subagent",
@@ -973,7 +765,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         resultAvailable: false,
         resultContent: undefined,
         resultError: undefined,
-        activityLog: ev.prompt ? [`开始处理：${ev.prompt}`] : [],
+        activityLog: [],
         terminationReason: undefined,
         terminationInitiator: undefined,
         ...stableMetadata,
@@ -983,12 +775,9 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         role: ev.role,
         prompt: ev.prompt,
         parent_run_id: ev.parent_run_id,
-        workflow_id: metadata.workflowId,
-        node_id: metadata.nodeId,
         task_id: metadata.taskId,
         record: ev.record,
       });
-      if (isActiveConversationEvent(conversationId)) maybeAutoRoutePanel(ev, "subagents");
       return true;
     }
     case "subagent.event": {
@@ -998,7 +787,6 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       const message = maybeObject(eventPayload?.message);
       const task = maybeObject(eventPayload?.task);
       const output = maybeObject(eventPayload?.output);
-      const team = maybeObject(eventPayload?.team);
 
       if (eventType === "message" && message) {
         const sender = maybeString(message.sender_id) ?? "agent";
@@ -1026,22 +814,14 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         const title = maybeString(task.title) ?? taskId;
         const status = maybeString(task.status) ?? "pending";
         const latestOutput = maybeString(output?.content);
-        const workflowId = maybeString(task.workflow_id) ?? (maybeString(task.team_name)?.startsWith("workflow-") ? maybeString(task.team_name) : undefined);
         const taskMetadata = {
           ...task,
           task_id: taskId,
-          workflow_id: workflowId,
           current_activity: eventType.replace("_", " "),
         };
         const metadata = subagentMetadataPatch(taskMetadata, null);
         const visibleSubagents = visibleSubagentsForConversation(conversationId);
-        const existingNode = findWorkflowNodeSubagent(
-          visibleSubagents,
-          metadata.workflowId ?? "",
-          metadata.nodeId,
-          metadata.taskId ?? taskId,
-        );
-        const targetId = existingNode?.id || assignee || ev.subagent_id || taskId;
+        const targetId = assignee || ev.subagent_id || taskId;
         const subagentStatus = subagentStatusFromTask(status);
         const summary = `${eventType.replace("_", " ")}: [${status}] ${title}`;
         const existing = visibleSubagents.find((subagent) => subagent.id === targetId);
@@ -1053,267 +833,12 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
             resultAvailable: Boolean(latestOutput) || existing.resultAvailable,
             ...metadata,
           }, conversationId);
-        } else {
-          s.addSubagent({
-            id: targetId,
-            role: maybeString(task.role) || assignee || "swarm task",
-            status: subagentStatus,
-            summary,
-            detail: latestOutput || maybeString(task.description),
-            resultAvailable: Boolean(latestOutput),
-            ...metadata,
-          }, conversationId);
-        }
-      } else if ((eventType === "team_created" || eventType === "team_deleted") && team) {
-        const teamName = maybeString(team.team_name) ?? "team";
-        const teamId = `team:${teamName}`;
-        const members = Array.isArray(team.members) ? team.members : [];
-        const deleted = eventType === "team_deleted";
-        const summary = deleted
-          ? `Team ${teamName} deleted`
-          : `Team ${teamName}: ${members.length} member${members.length === 1 ? "" : "s"}`;
-        const detail = members
-          .map((member) => {
-            const item = maybeObject(member);
-            if (!item) return "";
-            const id = maybeString(item.id) ?? "";
-            const role = maybeString(item.role);
-            const agentType = maybeString(item.agent_type);
-            return [id, role, agentType ? `[${agentType}]` : ""].filter(Boolean).join(" ");
-          })
-          .filter(Boolean)
-          .join("\n");
-        const currentState = useAppStore.getState();
-        const visibleSubagents = conversationId && conversationId !== currentState.conversationId
-          ? currentState.conversationAgentStates?.[conversationId]?.subagents ?? []
-          : currentState.subagents;
-        const existing = visibleSubagents.find((subagent) => subagent.id === teamId);
-        if (existing) {
-          s.updateSubagent(teamId, {
-            status: deleted ? "done" : "running",
-            summary,
-            detail,
-          }, conversationId);
-        } else {
-          s.addSubagent({
-            id: teamId,
-            role: "team",
-            status: deleted ? "done" : "running",
-            summary,
-            detail,
-          }, conversationId);
-        }
-      } else if (eventType === "workflow_started" && eventPayload) {
-        const workflowId = maybeString(eventPayload.workflow_id) ?? (ev.subagent_id || "workflow");
-        const name = maybeString(eventPayload.name) ?? "Workflow";
-        const mode = maybeString(eventPayload.mode) ?? "workflow";
-        const steps = Array.isArray(eventPayload.steps) ? eventPayload.steps : [];
-        const ready = steps.filter((step) => Boolean(maybeObject(step)?.ready)).length;
-        const blocked = Math.max(0, steps.length - ready);
-        const summary = `${name} started (${mode}): ${ready}/${steps.length} ready, ${blocked} blocked`;
-        const visibleSubagents = visibleSubagentsForConversation(conversationId);
-        const existing = visibleSubagents.find((subagent) => subagent.id === workflowId);
-        const workflowPatch = {
-          workflowId,
-          workflowName: name,
-          workflowMode: mode,
-          objective: name,
-          currentActivity: `Workflow mode: ${mode}`,
-          lastEventAt: Date.now(),
-        };
-        if (existing) {
-          s.updateSubagent(workflowId, {
-            status: "running",
-            summary,
-            detail: `Workflow mode: ${mode}`,
-            ...workflowPatch,
-          }, conversationId);
-        } else {
-          s.addSubagent({
-            id: workflowId,
-            role: "workflow",
-            status: "running",
-            summary,
-            detail: `Workflow mode: ${mode}`,
-            ...workflowPatch,
-          }, conversationId);
-        }
-        steps.forEach((step, index) => {
-          const stepPayload = maybeObject(step);
-          if (!stepPayload) return;
-          const title = maybeString(stepPayload.title) ?? `Step ${index + 1}`;
-          const taskId = maybeString(stepPayload.task_id);
-          const nodeId = maybeString(stepPayload.node_id) ?? maybeString(stepPayload.step_id) ?? taskId ?? `step-${index + 1}`;
-          const isReady = Boolean(stepPayload.ready);
-          const metadata = subagentMetadataPatch({
-            workflow_id: workflowId,
-            workflow_name: name,
-            workflow_mode: mode,
-            node_id: nodeId,
-            task_id: taskId,
-            order: index,
-            objective: maybeString(stepPayload.objective) ?? title,
-            depends_on: maybeStringList(stepPayload.depends_on_nodes) ?? maybeStringList(stepPayload.depends_on),
-            blocked_by: maybeStringList(stepPayload.blocked_by) ?? maybeStringList(stepPayload.depends_on),
-            required_for_final: maybeBoolean(stepPayload.required_for_final),
-            read_only: maybeBoolean(stepPayload.read_only),
-            write_scope: maybeStringList(stepPayload.write_scope),
-            current_activity: isReady ? "Ready / launched" : "Waiting on dependencies",
-          }, null);
-          const latestSubagents = visibleSubagentsForConversation(conversationId);
-          const existingNode = findWorkflowNodeSubagent(latestSubagents, workflowId, nodeId, taskId);
-          const nodeEntryId = existingNode?.id ?? taskId ?? `${workflowId}:${nodeId}`;
-          const nodeStatus: SubagentState["status"] = existingNode?.status === "running" && isReady
-            ? "running"
-            : isReady ? "running" : "blocked";
-          const nodeSummary = `${isReady ? "ready" : "blocked"}: ${title}`;
-          if (existingNode) {
-            s.updateSubagent(existingNode.id, {
-              status: nodeStatus,
-              summary: existingNode.summary || nodeSummary,
-              detail: existingNode.detail || metadata.currentActivity,
-              ...metadata,
-            }, conversationId);
-          } else {
-            s.addSubagent({
-              id: nodeEntryId,
-              role: maybeString(stepPayload.role) ?? maybeString(stepPayload.agent_type) ?? "workflow step",
-              status: nodeStatus,
-              summary: nodeSummary,
-              detail: metadata.currentActivity,
-              ...metadata,
-            }, conversationId);
-          }
-        });
-      } else if (eventType === "workflow_completed" && eventPayload) {
-        const workflowId = maybeString(eventPayload.workflow_id) ?? (ev.subagent_id || "workflow");
-        const name = maybeString(eventPayload.workflow_name) ?? maybeString(eventPayload.name) ?? "Workflow";
-        const mode = maybeString(eventPayload.workflow_mode) ?? maybeString(eventPayload.mode) ?? "workflow";
-        const summary = maybeString(eventPayload.summary) ?? `${name} completed`;
-        const resultContent = maybeString(eventPayload.result_content);
-        const requiredCompleted = maybeNumber(eventPayload.required_completed);
-        const requiredTotal = maybeNumber(eventPayload.required_total);
-        const completedTotal = maybeNumber(eventPayload.completed_total);
-        const total = maybeNumber(eventPayload.total);
-        const counts = typeof requiredCompleted === "number" && typeof requiredTotal === "number"
-          ? `${requiredCompleted}/${requiredTotal} required`
-          : typeof completedTotal === "number" && typeof total === "number"
-            ? `${completedTotal}/${total} completed`
-            : "";
-        const detail = counts ? `Workflow complete · ${counts}` : "Workflow complete";
-        const visibleSubagents = visibleSubagentsForConversation(conversationId);
-        const existing = visibleSubagents.find((subagent) => subagent.id === workflowId);
-        const patch = {
-          status: "done" as const,
-          summary,
-          detail,
-          resultContent,
-          resultAvailable: Boolean(resultContent),
-          workflowId,
-          workflowName: name,
-          workflowMode: mode,
-          objective: name,
-          currentActivity: detail,
-          lastEventAt: Date.now(),
-        };
-        if (existing) {
-          s.updateSubagent(workflowId, patch, conversationId);
-        } else {
-          s.addSubagent({
-            id: workflowId,
-            role: "workflow",
-            ...patch,
-          }, conversationId);
-        }
-      } else if ((eventType === "workflow_nodes_resumed" || eventType === "workflow_nodes_unblocked") && eventPayload) {
-        const workflowId = maybeString(eventPayload.workflow_id) ?? (ev.subagent_id || "workflow");
-        const tasks = Array.isArray(eventPayload.tasks) ? eventPayload.tasks : [];
-        const launched = Boolean(eventPayload.launched);
-        const launchError = maybeString(eventPayload.launch_error);
-        const launchSummary = maybeString(eventPayload.launch_summary);
-        const visibleSubagents = visibleSubagentsForConversation(conversationId);
-        const existing = visibleSubagents.find((subagent) => subagent.id === workflowId);
-        const name = existing?.workflowName ?? workflowId;
-        const mode = existing?.workflowMode ?? "workflow";
-        const action = eventType === "workflow_nodes_resumed" ? "resumed" : "launched";
-        const checkLabel = eventType === "workflow_nodes_resumed" ? "resume" : "unblock";
-        const summary = launchError
-          ? `${name} ${checkLabel} failed`
-          : launched
-            ? `${name} ${action} ${tasks.length} node${tasks.length === 1 ? "" : "s"}`
-            : `${name} ${checkLabel} checked`;
-        const detail = launchError || launchSummary || `${tasks.length} workflow node${tasks.length === 1 ? "" : "s"} ${action}`;
-        const nextStatus: SubagentState["status"] = launchError
-          ? "error"
-          : launched
-            ? "running"
-            : existing?.status ?? "running";
-        const patch = {
-          status: nextStatus,
-          summary,
-          detail,
-          workflowId,
-          workflowName: name,
-          workflowMode: mode,
-          objective: existing?.objective ?? name,
-          currentActivity: detail,
-          lastEventAt: Date.now(),
-        };
-        if (existing) {
-          s.updateSubagent(workflowId, patch, conversationId);
-        } else {
-          s.addSubagent({
-            id: workflowId,
-            role: "workflow",
-            ...patch,
-          }, conversationId);
-        }
-      } else if (eventType === "workflow_cancelled" && eventPayload) {
-        const workflowId = maybeString(eventPayload.workflow_id) ?? (ev.subagent_id || "workflow");
-        const name = maybeString(eventPayload.workflow_name) ?? maybeString(eventPayload.name) ?? "Workflow";
-        const mode = maybeString(eventPayload.workflow_mode) ?? maybeString(eventPayload.mode) ?? "workflow";
-        const summary = maybeString(eventPayload.summary) ?? `${name} cancelled`;
-        const resultContent = maybeString(eventPayload.result_content);
-        const cancelledTotal = maybeNumber(eventPayload.cancelled_total);
-        const total = maybeNumber(eventPayload.total);
-        const detail = typeof cancelledTotal === "number" && typeof total === "number"
-          ? `Workflow cancelled · ${cancelledTotal}/${total} cancelled`
-          : "Workflow cancelled";
-        const visibleSubagents = visibleSubagentsForConversation(conversationId);
-        const existing = visibleSubagents.find((subagent) => subagent.id === workflowId);
-        const patch = {
-          status: "cancelled" as const,
-          summary,
-          detail,
-          resultContent,
-          resultAvailable: Boolean(resultContent),
-          terminationReason: "workflow_cancelled",
-          terminationInitiator: maybeString(eventPayload.initiator) ?? "parent",
-          workflowId,
-          workflowName: name,
-          workflowMode: mode,
-          objective: name,
-          currentActivity: detail,
-          lastEventAt: Date.now(),
-        };
-        if (existing) {
-          s.updateSubagent(workflowId, patch, conversationId);
-        } else {
-          s.addSubagent({
-            id: workflowId,
-            role: "workflow",
-            ...patch,
-          }, conversationId);
         }
       }
-
       addInspectorPayload("subagent", ev.subagent_id || "swarm", {
         event: "subagent.event",
         payload: ev.event,
       });
-      if (isActiveConversationEvent(conversationId)) {
-        maybeAutoRoutePanel(ev as unknown as { display_scope?: string; panel_hint?: string; requires_attention?: boolean }, "subagents");
-      }
       return true;
     }
     case "subagent.progress": {
@@ -1325,8 +850,11 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         ? currentState.conversationAgentStates?.[conversationId]?.subagents ?? []
         : currentState.subagents;
       const existing = visibleSubagents.find((subagent) => subagent.id === subagentId);
+      if (isStaleSubagentIncarnation(
+        existing,
+        ev as unknown as Record<string, unknown>,
+      )) return true;
       const now = Date.now();
-      const blocksFinalReply = maybeBoolean((ev as unknown as Record<string, unknown>).blocks_final_reply);
       const lastProgressAt = maybeNumber((ev as unknown as Record<string, unknown>).last_progress_at);
       if (existing && isTerminalSubagentStatus(existing.status)) {
         addInspectorPayload("subagent", subagentId, {
@@ -1338,15 +866,21 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         });
         return true;
       }
-      const currentActivity = userVisibleSubagentProgress(ev.current_activity)
-        || userVisibleSubagentProgress(ev.detail)
+      const currentActivity = userVisibleSubagentProgress(ev.activity_summary, ev.user_visible)
+        || userVisibleSubagentProgress(ev.current_activity, ev.user_visible)
+        || userVisibleSubagentProgress(ev.detail, ev.user_visible)
         || undefined;
-      const detail = userVisibleSubagentProgress(ev.detail) || undefined;
+      const reportedStatus = maybeString((ev as unknown as Record<string, unknown>).status);
+      const progressStatus: SubagentState["status"] = reportedStatus === "pending" || reportedStatus === "running" || reportedStatus === "blocked"
+        ? reportedStatus
+        : "running";
+      const detail = userVisibleSubagentProgress(ev.detail, ev.user_visible) || undefined;
       const waitingOn = userVisibleSubagentProgress(
         maybeString((ev as unknown as Record<string, unknown>).waiting_on),
+        ev.user_visible,
       ) || (ev.tool_name ? "tool" : undefined);
       const patch = {
-        status: "running" as const,
+        status: progressStatus,
         summary: subagentProgressSummary(ev),
         iteration: ev.iteration,
         maxIterations: ev.max_iterations,
@@ -1357,10 +891,14 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         currentActivity,
         activityLog: appendSubagentActivity(
           existing,
-          semanticSubagentActivity(ev.tool_name, ev.current_activity, ev.detail),
+          explicitSubagentActivity(
+            ev.current_activity,
+            ev.detail,
+            ev.activity_summary,
+            ev.user_visible,
+          ),
         ),
         waitingOn,
-        blocksFinalReply,
         lastEventAt: now,
         lastProgressAt: lastProgressAt ?? now,
         messages: mergeSubagentMessages(existing?.messages, snapshotMessages(e)),
@@ -1378,8 +916,10 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         tool_call_id: maybeString((ev as unknown as Record<string, unknown>).tool_call_id),
         source_event_type: maybeString((ev as unknown as Record<string, unknown>).source_event_type),
         detail: ev.detail,
+        activity_kind: ev.activity_kind,
+        activity_summary: ev.activity_summary,
+        user_visible: ev.user_visible,
       });
-      if (isActiveConversationEvent(conversationId)) maybeAutoRoutePanel(ev, "subagents");
       return true;
     }
     case "subagent.done": {
@@ -1394,7 +934,8 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       const terminationInitiator = maybeString((e as unknown as Record<string, unknown>).initiator);
       const checkpointId = maybeString((e as unknown as Record<string, unknown>).checkpoint_id);
       const timedOut = Boolean(e.timed_out);
-      const failed = Boolean(e.error || resultError || eventStatus === "failed");
+      const eventError = maybeString((e as unknown as Record<string, unknown>).error);
+      const failed = Boolean(eventError || resultError || eventStatus === "failed" || eventStatus === "error");
       const uiStatus = eventStatus === "partial" || timedOut
         ? "partial"
         : eventStatus === "cancelled"
@@ -1402,7 +943,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
           : failed
             ? "error"
             : "done";
-      const summary = e.error || e.summary;
+      const summary = eventError || e.summary;
       const record = maybeObject((e as unknown as { record?: unknown }).record);
       const metadata = subagentMetadataPatch(e as unknown as Record<string, unknown>, record);
       const currentState = useAppStore.getState();
@@ -1412,13 +953,14 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       // Completion events may use the runtime subagent id while task snapshots
       // were keyed by assignee/task id. Resolve by stable task metadata first
       // so a completed worker cannot leave its original row stuck at running.
-      const existing = visibleSubagents.find((subagent) => subagent.id === e.subagent_id)
-        || findWorkflowNodeSubagent(
-          visibleSubagents,
-          metadata.workflowId ?? "",
-          metadata.nodeId,
-          metadata.taskId,
-        );
+      const existing = visibleSubagents.find((subagent) =>
+        subagent.id === e.subagent_id || (metadata.taskId && subagent.taskId === metadata.taskId),
+      );
+      if (isStaleSubagentIncarnation(
+        existing,
+        e as unknown as Record<string, unknown>,
+        record,
+      )) return true;
       const targetSubagentId = existing?.id || e.subagent_id;
       const existingTerminal = Boolean(
         existing && ["done", "partial", "cancelled", "error"].includes(existing.status),
@@ -1429,10 +971,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
           && resultError === (existing?.resultError || ""))
       );
       if (duplicateTerminal) return true;
-      const activityLog = appendSubagentActivity(
-        existing,
-        terminalSubagentActivity(uiStatus, timedOut),
-      );
+      const activityLog = existing?.activityLog ?? [];
       const messages = mergeSubagentMessages(existing?.messages, snapshotMessages(e));
       if (existing) {
         s.updateSubagent(targetSubagentId, {
@@ -1482,9 +1021,6 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         initiator: terminationInitiator,
         checkpoint_id: checkpointId,
       });
-      if (isActiveConversationEvent(conversationId)) {
-        maybeAutoRoutePanel(e as unknown as { display_scope?: string; panel_hint?: string; requires_attention?: boolean }, "subagents");
-      }
       return true;
     }
     case "budget_update": {
@@ -1512,9 +1048,41 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       if (!isActiveConversationEvent(conversationId)) return true;
       const current = useAppStore.getState();
       s.setBudget(current.budgetBuckets, e.percent);
-      if (e.percent >= 0.9) {
-        pushToast(`Token budget at ${Math.round(e.percent * 100)}%`, "warning");
+      // The backend decides when a budget warning is warranted. The renderer
+      // only presents that event; it must not add its own percentage trigger.
+      const percentLabel = Number.isFinite(e.percent)
+        ? ` (${Math.round(e.percent * 100)}%)`
+        : "";
+      pushToast(
+        e.will_compact
+          ? `Context compaction is scheduled${percentLabel}`
+          : `Token budget warning${percentLabel}`,
+        "warning",
+      );
+      return true;
+    }
+    case "subagent.mailbox": {
+      const ev = e as SubagentMailboxEvent;
+      const subagentId = String(ev.subagent_id || "").trim();
+      if (!subagentId) return true;
+      const visibleSubagents = visibleSubagentsForConversation(conversationId);
+      const existing = visibleSubagents.find((subagent) => subagent.id === subagentId);
+      if (existing && !isStaleSubagentIncarnation(
+        existing,
+        ev as unknown as Record<string, unknown>,
+      )) {
+        s.updateSubagent(subagentId, {
+          mailboxEpoch: ev.mailbox_epoch ?? existing.mailboxEpoch,
+          lastEventAt: Date.now(),
+        }, conversationId);
       }
+      addInspectorPayload("subagent", subagentId, {
+        event: "subagent.mailbox",
+        count: ev.count,
+        high_water: ev.high_water,
+        mailbox_epoch: ev.mailbox_epoch,
+        stale_sealed: ev.stale_sealed,
+      });
       return true;
     }
     case "permission.mode.updated": {
@@ -1607,40 +1175,29 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
     default:
       // SDK-only events: stream_event is forwarded but not rendered
       if (e.type === "stream_event") return true;
+      // Delivery acknowledgement is durable control-plane state. Subagent
+      // start/progress/done events already own its user-facing projection.
+      if (e.type === "parent.notifications") return true;
       if (e.type === "session.state_changed") {
         const ev = e as unknown as SessionStateEvent;
         const isWorking = ev.state === "working";
         const setState = useAppStore.setState as (partial: Partial<typeof useAppStore.getState> | ((s: typeof useAppStore.getState) => Partial<typeof useAppStore.getState>)) => void;
         setState((s) => ({ ...s, _sessionState: ev.state }) as Partial<typeof useAppStore.getState>);
         if (!isWorking) {
-          // On idle, ensure streaming state is cleaned up. If done/error
-          // events were missed (network hiccup, backend crash), the UI
-          // would be stuck in streaming forever without this fallback.
-          const targetConvId = ev.conversation_id || conversationId;
+          // Idle releases session busy state only. Message terminal ownership
+          // belongs to the authoritative done event and may arrive later.
+          const targetConvId = maybeString(ev.conversation_id) || conversationId;
           const state = useAppStore.getState();
-          const hasStreaming = targetConvId
-            ? state.conversationStreaming[targetConvId]
-            : state.isStreaming;
-          if (hasStreaming) {
-            // done/error were missed — we cannot know whether the run actually
-            // finished, so treat it as interrupted rather than "completed".
-            // Passing "completed" would auto-finalize a still-draft trailing
-            // text block as the final answer, sealing a truncated/crashed run
-            // as if it succeeded.
-            s.finishAgentProgress(targetConvId, "failed");
-            s.finishStreaming(targetConvId, undefined, "interrupted");
+          const hasStreaming = targetConvId ? state.conversationStreaming[targetConvId] : false;
+          if (hasStreaming && targetConvId) {
+            useAppStore.setState((current) => ({
+              conversationStreaming: {
+                ...current.conversationStreaming,
+                [targetConvId]: false,
+              },
+              ...(targetConvId === current.conversationId ? { isStreaming: false } : {}),
+            }));
           }
-          s.appendAgentProgress({
-            id: `session-state:${Date.now()}`,
-            stage: "final",
-            phase: "final",
-            status: "info",
-            message: ev.reason || "idle",
-            label: "session",
-            summary: ev.reason || "Session idle",
-            visibility: "compact",
-            displayScope: "silent",
-          }, targetConvId);
         }
         return true;
       }
@@ -1653,6 +1210,14 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       if (e.type === "tool_use_summary") {
         const ev = e as unknown as ToolUseSummaryEvent;
         const summary = String(ev.summary || "").trim();
+        if (!conversationId) {
+          addInspectorPayload("message", `unowned:tool-use-summary:${ev.iteration_id || "event"}`, {
+            event: e.type,
+            unowned: true,
+            summary,
+          });
+          return true;
+        }
         if (summary) {
           s.appendProcessItem({
             id: `tool-use-summary:${ev.iteration_id || Date.now()}`,
@@ -1664,7 +1229,6 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
             role: "runtime",
             status: "completed",
             visibility: "compact",
-            displayScope: "activity",
             toolCallIds: ev.tool_call_ids,
           }, conversationId, messageId);
         }

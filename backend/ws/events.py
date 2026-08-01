@@ -22,21 +22,18 @@ from typing import Any, Literal, TypedDict
 
 ServerEventType = Literal[
     # Streaming text + tool execution
-    "text_chunk",
-    "text_replace",
+    "item.started",
+    "agent_message.delta",
+    "item.completed",
     "image_chunk",
     "thinking_delta",
     "thinking",
     "tool_call",
     "tool_output_delta",
     "tool_result",
-    "agent.loop.started",
-    "agent.loop.completed",
     "agent.run.started",
-    "agent.run.updated",
     "agent.run.completed",
     "user_message.queue.updated",
-    "agent.phase.updated",
     "agent.item",
     "agent.progress",
     "runtime.span",
@@ -46,9 +43,6 @@ ServerEventType = Literal[
     "approval.cancelled",
     "approval.file_diff",
     "ask_user",
-    # Skills
-    "skill_activated",
-    "skill_deactivated",
     # Context lifecycle
     "context_usage",
     "context_compacted",
@@ -100,6 +94,7 @@ ServerEventType = Literal[
     "terminal.snapshot",
     "terminal.resized",
     # Background commands
+    "background.started",
     "background.completed",
     # Guidelines / permissions
     "guidelines.updated",
@@ -130,10 +125,10 @@ ServerEventType = Literal[
     "plan_updated",
     "subagent.start",
     "subagent.event",
+    "subagent.mailbox",
     "subagent.progress",
     "subagent.done",
-    "verification.started",
-    "verification.result",
+    "parent.notifications",
     "citation.add",
     "inspector.update",
     # UI catalogs / notices
@@ -182,14 +177,14 @@ ClientCommandType = Literal[
     # Control plane
     "control_response",
     "control_cancel_request",
-    # Skills
-    "load_skill",
-    "unload_skill",
     # Artifacts / approvals
     "read_artifact",
     "approval.file_diff",
     # Conversation lifecycle
     "conversation.create",
+    "conversation.clone",
+    "conversation.merge",
+    "conversation.export",
     "conversation.switch",
     "conversation.list",
     "conversation.clear",
@@ -227,7 +222,6 @@ ClientCommandType = Literal[
     "checkpoint.rewind",
     "checkpoint.run.list",
     "agent.resume",
-    "verification.run",
     # Terminal
     "terminal.create",
     "terminal.input",
@@ -251,9 +245,7 @@ ClientCommandType = Literal[
     "task.stop",
     "subagent.cancel",           # user kills a subagent
     "subagent.status",           # user refreshes/collects a subagent result
-    "subagent.resume",           # user resumes a retained subagent checkpoint
     "send_message",              # user steers a running subagent through its mailbox
-    "workflow.resume",           # user resumes pending workflow nodes
     "inspector.focus",           # UI tells backend which target the user is viewing
     # Frontend UI commands
     "workspace.set",
@@ -284,16 +276,20 @@ ClientCommandType = Literal[
     "mcp.add",
     "mcp.remove",
     "mcp.restart",
+    "mcp.oauth.login",
     "env.list",
     "env.set",
     "env.delete",
     "git.pr_status",
-    "approval.respond",
+    "git.pr_automation.set",
     # Scheduler
     "scheduler.list",
     "scheduler.add",
     "scheduler.remove",
     "scheduler.toggle",
+    "scheduler.run_now",
+    "scheduler.retry",
+    "scheduler.cancel",
     # Connectors marketplace
     "connectors.marketplace.list",
     "connectors.marketplace.install",
@@ -303,6 +299,30 @@ ClientCommandType = Literal[
 # ──────────────────────────────────────────────────────────────────
 # TypedDict payloads for the new (Wave 1+) events
 # ──────────────────────────────────────────────────────────────────
+
+
+class AgentMessageItemData(TypedDict, total=False):
+    id: str
+    type: Literal["agent_message"]
+    text: str
+    source: Literal["model_final", "reply", "partial"]
+    status: Literal["in_progress", "completed", "partial"]
+
+
+class ItemStartedData(TypedDict, total=False):
+    item: AgentMessageItemData
+
+
+class AgentMessageDeltaData(TypedDict, total=False):
+    item_id: str
+    delta: str
+
+
+class ItemCompletedData(TypedDict, total=False):
+    item: AgentMessageItemData
+    finish_reason: str
+    provider_raw: dict[str, Any]
+    attachments: list[dict[str, Any]]
 
 
 class TaskUpdateData(TypedDict, total=False):
@@ -315,7 +335,7 @@ class TaskUpdateData(TypedDict, total=False):
 class AgentProgressData(TypedDict, total=False):
     id: str
     stage: Literal["status", "planning", "tool", "approval", "verification", "final"]
-    phase: Literal["orienting", "planning", "model", "tool", "approval", "verify", "final", "recover", "status", "iteration", "subagent", "workflow", "cache"]
+    phase: Literal["orienting", "planning", "model", "tool", "approval", "verify", "final", "recover", "status", "iteration", "subagent", "cache"]
     status: Literal["running", "completed", "failed", "info"]
     message: str
     label: str
@@ -327,9 +347,6 @@ class AgentProgressData(TypedDict, total=False):
     group_id: str
     step_id: str
     count: int
-    display_scope: Literal["chat", "activity", "notice", "agents", "inspector", "silent"]
-    panel_hint: Literal["plan", "subagents", "diff", "inspector", "tasks", "terminal", "preview"]
-    requires_attention: bool
     ephemeral: bool       # if True, UI should replace (not append) this progress message
 
 
@@ -355,7 +372,6 @@ class RuntimeSpanData(TypedDict, total=False):
     blocking_reason: str
     ui_visible: bool
     debug_only: bool
-    requires_attention: bool
     data: dict[str, Any]
 
 
@@ -387,9 +403,6 @@ class AgentRunData(TypedDict, total=False):
     session_id: str
     summary: str
     error: str
-    display_scope: Literal["chat", "activity", "notice", "agents", "inspector", "silent"]
-    panel_hint: Literal["plan", "subagents", "diff", "inspector", "tasks", "terminal", "preview"]
-    requires_attention: bool
 
 
 class AgentItemData(TypedDict, total=False):
@@ -412,9 +425,6 @@ class AgentItemData(TypedDict, total=False):
     group_id: str
     step_id: str
     tool_call_ids: list[str]
-    display_scope: Literal["chat", "activity", "notice", "agents", "inspector", "silent"]
-    panel_hint: Literal["plan", "subagents", "diff", "inspector", "tasks", "terminal", "preview"]
-    requires_attention: bool
     skill_name: str
     trigger_mode: str
     source_level: str
@@ -445,9 +455,6 @@ class ToolCallData(TypedDict, total=False):
     turn_id: str
     iteration_id: str
     phase: str
-    display_scope: Literal["chat", "activity", "notice", "agents", "inspector", "silent"]
-    panel_hint: Literal["plan", "subagents", "diff", "inspector", "tasks", "terminal", "preview"]
-    requires_attention: bool
 
 
 class ToolOutputDeltaData(TypedDict, total=False):
@@ -487,9 +494,6 @@ class ToolResultData(TypedDict, total=False):
     turn_id: str
     iteration_id: str
     phase: str
-    display_scope: Literal["chat", "activity", "notice", "agents", "inspector", "silent"]
-    panel_hint: Literal["plan", "subagents", "diff", "inspector", "tasks", "terminal", "preview"]
-    requires_attention: bool
 
 
 class SubagentStartData(TypedDict, total=False):
@@ -499,11 +503,7 @@ class SubagentStartData(TypedDict, total=False):
     prompt: str
     current_activity: str
     waiting_on: str
-    blocks_final_reply: bool
     last_progress_at: int
-    display_scope: Literal["agents", "activity", "inspector"]
-    panel_hint: Literal["subagents", "inspector"]
-    requires_attention: bool
 
 
 class SubagentEventData(TypedDict, total=False):
@@ -525,9 +525,6 @@ class SubagentDoneData(TypedDict, total=False):
     result: dict[str, Any]
     record: dict[str, Any]
     prompt_cache_fork: dict[str, Any]
-    display_scope: Literal["agents", "activity", "inspector"]
-    panel_hint: Literal["subagents", "inspector"]
-    requires_attention: bool
 
 
 class CitationData(TypedDict, total=False):
@@ -550,9 +547,6 @@ class InspectorUpdateData(TypedDict, total=False):
     target_kind: Literal["message", "tool_call", "artifact", "file", "diff", "subagent", "budget", "provider"]
     target_id: str
     payload: dict[str, Any]
-    display_scope: Literal["inspector", "silent"]
-    panel_hint: Literal["inspector"]
-    requires_attention: bool
 
 
 class BudgetWarningData(TypedDict, total=False):
@@ -590,7 +584,7 @@ class ToolUseSummaryData(TypedDict, total=False):
     iteration_id: str
     tool_call_ids: list[str]
     tool_count: int
-    generated_by: Literal["heuristic", "llm"]
+    generated_by: Literal["runtime", "llm"]
 
 
 class TaskEditCommand(TypedDict, total=False):
@@ -710,6 +704,10 @@ __all__ = [
     "CLIENT_COMMAND_TYPES",
     "is_server_event",
     "is_client_command",
+    "AgentMessageItemData",
+    "ItemStartedData",
+    "AgentMessageDeltaData",
+    "ItemCompletedData",
     "TaskUpdateData",
     "AgentProgressData",
     "AgentLoopData",

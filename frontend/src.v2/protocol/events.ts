@@ -23,23 +23,19 @@
 export type {
   StreamingServerEventType,
   StreamingClientCommandType,
-  TextChunkEvent,
-  TextReplaceEvent,
+  ItemStartedEvent,
+  AgentMessageDeltaEvent,
+  ItemCompletedEvent,
   ThinkingDeltaEvent,
   ToolCallEvent,
   ToolErrorInfo,
   ToolResultEvent,
   ToolOutputDeltaEvent,
-  AgentLoopEvent,
   AgentItemEvent,
   AgentProgressEvent,
   RuntimeSpanEvent,
   AgentRunStartedEvent,
-  AgentRunUpdatedEvent,
   AgentRunCompletedEvent,
-  AgentPhaseUpdatedEvent,
-  VerificationStartedEvent,
-  VerificationResultEvent,
   ApprovalRequestEvent,
   PermissionDecisionEvent,
     ApprovalFileDiffEvent,
@@ -54,6 +50,7 @@ export type {
   ToolUseSummaryEvent,
   SubagentStartEvent,
   SubagentEventEvent,
+  SubagentMailboxEvent,
   SubagentProgressEvent,
   SubagentDoneEvent,
   CitationAddEvent,
@@ -70,12 +67,9 @@ export type {
   TaskEditCommand,
   PlanEditCommand,
   AgentResumeCommand,
-  WorkflowResumeCommand,
-  VerificationRunCommand,
   SubagentCancelCommand,
   SubagentStatusCommand,
   SendMessageCommand,
-  SubagentResumeCommand,
   InspectorFocusCommand,
 } from "./streaming-types";
 
@@ -104,9 +98,13 @@ export type {
   PingCommand,
   ReadArtifactCommand,
   ConversationCreateCommand,
+  ConversationCloneCommand,
+  ConversationMergeCommand,
+  ConversationExportCommand,
   ConversationSwitchCommand,
   ConversationClearCommand,
   ConversationTruncateCommand,
+  ContextForkCommand,
   ConversationDeleteCommand,
   ConversationWorktreeCleanupCommand,
   ConversationWorktreeHandoffPreflightCommand,
@@ -157,6 +155,7 @@ export type {
   TerminalListEvent,
   TerminalSnapshotEvent,
   TerminalResizedEvent,
+  BackgroundStartedEvent,
   BackgroundCompletedEvent,
   TerminalCreateCommand,
   TerminalInputCommand,
@@ -192,8 +191,6 @@ export type {
 export type {
   CommonServerEventType,
   CommonClientCommandType,
-  SkillActivatedEvent,
-  SkillDeactivatedEvent,
   McpStatusEvent,
   McpLifecycleEvent,
   McpProgressEvent,
@@ -215,6 +212,9 @@ export type {
   SchedulerAddCommand,
   SchedulerRemoveCommand,
   SchedulerToggleCommand,
+  SchedulerRunNowCommand,
+  SchedulerRetryCommand,
+  SchedulerCancelCommand,
   ConnectorsMarketplaceListCommand,
   ConnectorsMarketplaceInstallCommand,
   RuntimeCapabilitiesInspectCommand,
@@ -267,20 +267,17 @@ export type ClientCommandType =
 export interface UntypedServerEvent {
   type: Exclude<
     ServerEventType,
-    | "text_chunk"
-    | "text_replace"
+    | "item.started"
+    | "agent_message.delta"
+    | "item.completed"
     | "thinking_delta"
     | "thinking"
     | "tool_call"
     | "tool_result"
     | "tool_output_delta"
-    | "agent.loop.started"
-    | "agent.loop.completed"
     | "agent.run.started"
-    | "agent.run.updated"
     | "agent.run.completed"
     | "user_message.queue.updated"
-    | "agent.phase.updated"
     | "agent.item"
     | "agent.progress"
     | "runtime.span"
@@ -299,21 +296,18 @@ export interface UntypedServerEvent {
     | "task.update"
     | "subagent.start"
     | "subagent.event"
+    | "subagent.mailbox"
     | "subagent.progress"
     | "subagent.done"
-    | "verification.started"
-    | "verification.result"
     | "citation.add"
     | "artifact.preview"
     | "inspector.update"
-    | "skill_activated"
-    | "skill_deactivated"
     | "mcp_status"
     | "mcp.lifecycle"
     | "mcp.progress"
     | "env.list"
     | "git.pr_status"
-    | "scheduler.list"
+  | "scheduler.list"
     | "file.changed"
     | "terminal.output"
     | "terminal.exit"
@@ -322,6 +316,7 @@ export interface UntypedServerEvent {
     | "terminal.list"
     | "terminal.snapshot"
     | "terminal.resized"
+    | "background.started"
     | "background.completed"
     | "command.result"
     | "goal.updated"
@@ -360,10 +355,7 @@ export interface UntypedClientCommand {
     | "ping"
     | "task.edit"
     | "agent.resume"
-    | "workflow.resume"
-    | "verification.run"
     | "subagent.cancel"
-    | "subagent.resume"
     | "inspector.focus"
     | "terminal.create"
     | "terminal.input"
@@ -383,7 +375,10 @@ export interface UntypedClientCommand {
     | "scheduler.list"
     | "scheduler.add"
     | "scheduler.remove"
-    | "scheduler.toggle"
+  | "scheduler.toggle"
+  | "scheduler.run_now"
+  | "scheduler.retry"
+  | "scheduler.cancel"
     | "connectors.marketplace.list"
     | "connectors.marketplace.install"
     | "env.list"
@@ -391,6 +386,9 @@ export interface UntypedClientCommand {
     | "env.delete"
     | "read_artifact"
     | "conversation.create"
+    | "conversation.clone"
+    | "conversation.merge"
+    | "conversation.export"
     | "conversation.switch"
     | "conversation.clear"
     | "conversation.truncate"
@@ -416,22 +414,18 @@ export interface UntypedClientCommand {
 // ──────────────────────────────────────────────────────────────────
 
 import type {
-  TextChunkEvent,
-  TextReplaceEvent,
+  ItemStartedEvent,
+  AgentMessageDeltaEvent,
+  ItemCompletedEvent,
   ThinkingDeltaEvent,
   ToolCallEvent,
   ToolResultEvent,
   ToolOutputDeltaEvent,
-  AgentLoopEvent,
   AgentItemEvent,
   AgentProgressEvent,
   RuntimeSpanEvent,
   AgentRunStartedEvent,
-  AgentRunUpdatedEvent,
   AgentRunCompletedEvent,
-  AgentPhaseUpdatedEvent,
-  VerificationStartedEvent,
-  VerificationResultEvent,
   ApprovalRequestEvent,
   PermissionDecisionEvent,
   ApprovalFileDiffEvent,
@@ -449,6 +443,7 @@ import type {
   TaskUpdateEvent,
   SubagentStartEvent,
   SubagentEventEvent,
+  SubagentMailboxEvent,
   SubagentProgressEvent,
   SubagentDoneEvent,
   CitationAddEvent,
@@ -492,6 +487,7 @@ import type {
   TerminalListEvent,
   TerminalSnapshotEvent,
   TerminalResizedEvent,
+  BackgroundStartedEvent,
   BackgroundCompletedEvent,
 } from "./terminal-types";
 
@@ -508,8 +504,6 @@ import type {
 } from "./workspace-types";
 
 import type {
-  SkillActivatedEvent,
-  SkillDeactivatedEvent,
   McpStatusEvent,
   McpLifecycleEvent,
   McpProgressEvent,
@@ -533,22 +527,18 @@ export interface ServerEventEnvelope {
 }
 
 type ServerEventPayload =
-  | TextChunkEvent
-  | TextReplaceEvent
+  | ItemStartedEvent
+  | AgentMessageDeltaEvent
+  | ItemCompletedEvent
   | ThinkingDeltaEvent
   | ToolCallEvent
   | ToolResultEvent
   | ToolOutputDeltaEvent
-  | AgentLoopEvent
   | AgentItemEvent
   | AgentProgressEvent
   | RuntimeSpanEvent
   | AgentRunStartedEvent
-  | AgentRunUpdatedEvent
   | AgentRunCompletedEvent
-  | AgentPhaseUpdatedEvent
-  | VerificationStartedEvent
-  | VerificationResultEvent
   | ApprovalRequestEvent
   | PermissionDecisionEvent
   | ApprovalFileDiffEvent
@@ -565,13 +555,12 @@ type ServerEventPayload =
   | TaskUpdateEvent
   | SubagentStartEvent
   | SubagentEventEvent
+  | SubagentMailboxEvent
   | SubagentProgressEvent
   | SubagentDoneEvent
   | CitationAddEvent
   | ArtifactPreviewEvent
   | InspectorUpdateEvent
-  | SkillActivatedEvent
-  | SkillDeactivatedEvent
   | McpStatusEvent
   | McpLifecycleEvent
   | McpProgressEvent
@@ -592,6 +581,7 @@ type ServerEventPayload =
   | TerminalListEvent
   | TerminalSnapshotEvent
   | TerminalResizedEvent
+  | BackgroundStartedEvent
   | BackgroundCompletedEvent
   | CommandResultEvent
   | GoalUpdatedEvent
@@ -634,9 +624,13 @@ import type {
   PingCommand,
   ReadArtifactCommand,
   ConversationCreateCommand,
+  ConversationCloneCommand,
+  ConversationMergeCommand,
+  ConversationExportCommand,
   ConversationSwitchCommand,
   ConversationClearCommand,
   ConversationTruncateCommand,
+  ContextForkCommand,
   ConversationDeleteCommand,
   ConversationWorktreeCleanupCommand,
   ConversationWorktreeHandoffPreflightCommand,
@@ -652,12 +646,9 @@ import type {
   TaskEditCommand,
   PlanEditCommand,
   AgentResumeCommand,
-  WorkflowResumeCommand,
-  VerificationRunCommand,
   SubagentCancelCommand,
   SubagentStatusCommand,
   SendMessageCommand,
-  SubagentResumeCommand,
   InspectorFocusCommand,
 } from "./streaming-types";
 
@@ -691,6 +682,9 @@ import type {
   SchedulerAddCommand,
   SchedulerRemoveCommand,
   SchedulerToggleCommand,
+  SchedulerRunNowCommand,
+  SchedulerRetryCommand,
+  SchedulerCancelCommand,
   ConnectorsMarketplaceListCommand,
   ConnectorsMarketplaceInstallCommand,
   RuntimeCapabilitiesInspectCommand,
@@ -700,6 +694,7 @@ import type {
   EnvListCommand,
   EnvSetCommand,
   EnvDeleteCommand,
+  GitPrAutomationSetCommand,
   RunCheckpointListCommand,
 } from "./workspace-types";
 
@@ -718,12 +713,9 @@ type ClientCommandPayload =
   | TaskEditCommand
   | PlanEditCommand
   | AgentResumeCommand
-  | WorkflowResumeCommand
-  | VerificationRunCommand
   | SubagentCancelCommand
   | SubagentStatusCommand
   | SendMessageCommand
-  | SubagentResumeCommand
   | InspectorFocusCommand
   | TerminalCreateCommand
   | TerminalInputCommand
@@ -743,18 +735,26 @@ type ClientCommandPayload =
   | SchedulerAddCommand
   | SchedulerRemoveCommand
   | SchedulerToggleCommand
+  | SchedulerRunNowCommand
+  | SchedulerRetryCommand
+  | SchedulerCancelCommand
   | ConnectorsMarketplaceListCommand
   | ConnectorsMarketplaceInstallCommand
   | RuntimeCapabilitiesInspectCommand
   | EnvListCommand
   | EnvSetCommand
   | EnvDeleteCommand
+  | GitPrAutomationSetCommand
   | RunCheckpointListCommand
   | ReadArtifactCommand
   | ConversationCreateCommand
+  | ConversationCloneCommand
+  | ConversationMergeCommand
+  | ConversationExportCommand
   | ConversationSwitchCommand
   | ConversationClearCommand
   | ConversationTruncateCommand
+  | ContextForkCommand
   | ConversationDeleteCommand
   | ConversationWorktreeCleanupCommand
   | ConversationWorktreeHandoffPreflightCommand
@@ -780,21 +780,18 @@ export type ClientCommand = ClientCommandPayload & ClientCommandEnvelope;
 
 export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEventType>([
   // Streaming text + tool execution
-  "text_chunk",
-  "text_replace",
+  "item.started",
+  "agent_message.delta",
+  "item.completed",
   "image_chunk",
   "thinking_delta",
   "thinking",
   "tool_call",
   "tool_result",
   "tool_output_delta",
-  "agent.loop.started",
-  "agent.loop.completed",
   "agent.run.started",
-  "agent.run.updated",
   "agent.run.completed",
   "user_message.queue.updated",
-  "agent.phase.updated",
   "agent.item",
   "agent.progress",
   "runtime.span",
@@ -814,10 +811,10 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   // Subagents + citations + inspector
   "subagent.start",
   "subagent.event",
+  "subagent.mailbox",
   "subagent.progress",
   "subagent.done",
-  "verification.started",
-  "verification.result",
+  "parent.notifications",
   "citation.add",
   "inspector.update",
   "plan_step_updated",
@@ -861,6 +858,7 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   "terminal.list",
   "terminal.snapshot",
   "terminal.resized",
+  "background.started",
   "background.completed",
   // Workspace / file watcher
   "file.changed",
@@ -881,8 +879,6 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   "permission.mode.updated",
   "permission.rules.updated",
   // Common / infrastructure
-  "skill_activated",
-  "skill_deactivated",
   "mcp_status",
   "mcp.lifecycle",
   "mcp.progress",
@@ -922,12 +918,13 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "control_response",
   "control_cancel_request",
   // Skills
-  "load_skill",
-  "unload_skill",
   "read_artifact",
   "approval.file_diff",
   // Conversation lifecycle
   "conversation.create",
+  "conversation.clone",
+  "conversation.merge",
+  "conversation.export",
   "conversation.switch",
   "conversation.list",
   "conversation.clear",
@@ -987,11 +984,8 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "plan.edit",
   "task.stop",
   "agent.resume",
-  "workflow.resume",
-  "verification.run",
   "subagent.cancel",
   "subagent.status",
-  "subagent.resume",
   "send_message",
   "inspector.focus",
   // Skills / commands catalog
@@ -1020,16 +1014,20 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "mcp.add",
   "mcp.remove",
   "mcp.restart",
+  "mcp.oauth.login",
   "env.list",
   "env.set",
   "env.delete",
   "git.pr_status",
-  "approval.respond",
+  "git.pr_automation.set",
   // Scheduler
   "scheduler.list",
   "scheduler.add",
   "scheduler.remove",
   "scheduler.toggle",
+  "scheduler.run_now",
+  "scheduler.retry",
+  "scheduler.cancel",
   // Connectors marketplace
   "connectors.marketplace.list",
   "connectors.marketplace.install",

@@ -102,13 +102,17 @@ def list_run_checkpoints(
     conversation_id: str = "",
     runtime: Any | None = None,
 ) -> RunCheckpointListResult:
-    from backend.agent.checkpoint import get_checkpoint_dir
+    from backend.agent.checkpoint import get_checkpoint_dir, validate_storage_id
     from backend.agent.runtime import default_runtime
 
     clean_session_id = str(session_id or "").strip()
     clean_conversation_id = str(conversation_id or "").strip()
     checkpoints: list[dict[str, Any]] = []
     if clean_session_id:
+        try:
+            clean_session_id = validate_storage_id(clean_session_id, field_name="session_id")
+        except ValueError as exc:
+            raise CheckpointServiceError(str(exc)) from exc
         checkpoint_dir = get_checkpoint_dir(clean_session_id)
         for path in sorted(checkpoint_dir.glob("*.json"), reverse=True)[:50]:
             try:
@@ -146,21 +150,28 @@ def prepare_run_checkpoint_resume(
     requested_conversation_id: str = "",
     active_conversation_id: str = "",
 ) -> RunCheckpointResumeResult | None:
-    from backend.agent.checkpoint import load_latest_run_checkpoint
+    from backend.agent.checkpoint import load_latest_run_checkpoint, validate_storage_id
 
     clean_session_id = str(session_id or "").strip()
     if not clean_session_id:
         raise CheckpointServiceError("No active session ID. Cannot resume.")
-
-    checkpoint = load_latest_run_checkpoint(clean_session_id)
-    if checkpoint is None:
-        return None
+    try:
+        clean_session_id = validate_storage_id(clean_session_id, field_name="session_id")
+    except ValueError as exc:
+        raise CheckpointServiceError(str(exc)) from exc
 
     conversation_id = str(
-        requested_conversation_id or checkpoint.conversation_id or active_conversation_id or ""
+        requested_conversation_id or active_conversation_id or ""
     ).strip()
     if not conversation_id:
         raise CheckpointServiceError("No active conversation. Cannot resume.")
+
+    checkpoint = load_latest_run_checkpoint(
+        clean_session_id,
+        conversation_id=conversation_id,
+    )
+    if checkpoint is None:
+        return None
 
     return RunCheckpointResumeResult(
         session_id=clean_session_id,

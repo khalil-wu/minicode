@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import re
+from pathlib import Path
 from typing import Any
 
-from backend.commands.plugins import get_plugin_composer_command_catalog
-from backend.skills.loader import SkillLoader
+import yaml
 
-
-_TEMPLATE_SKILL_LOADER = SkillLoader()
-
+from backend.agent.claude_md import _find_project_root, _get_managed_claude_dir
+from backend.workspace.state import get_explicit_active_workspace_root
 
 def _availability(
     *,
@@ -25,11 +25,14 @@ def _availability(
     return payload
 
 
-def _skill_template(skill_name: str) -> str:
-    full = _TEMPLATE_SKILL_LOADER.load_full(skill_name)
-    if full and full.content.strip():
-        return full.content.strip()
-    return f"Use the {skill_name} skill workflow for this slash command."
+_REVIEW_PROMPT = (
+    "Review the current code changes (staged, unstaged, and untracked files) "
+    "and provide prioritized findings."
+)
+
+_INIT_PROMPT = """Generate a file named AGENTS.md that serves as a contributor guide for this repository.
+Before writing, check whether AGENTS.md already exists in the current working directory. If it does, do not overwrite or modify it.
+Create a concise repository-specific guide with actionable sections for project structure, build/test/development commands, coding conventions, testing, and commit or pull-request guidance. Omit sections that do not apply and do not invent project facts."""
 
 
 _BUILTIN_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
@@ -214,24 +217,6 @@ _BUILTIN_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "availability": _availability(scope="websocket"),
     },
     {
-        "name": "load_skill",
-        "label": "load_skill",
-        "description": "Activate a skill for the current session.",
-        "type": "protocol",
-        "source": "builtin",
-        "enabled": True,
-        "availability": _availability(scope="websocket"),
-    },
-    {
-        "name": "unload_skill",
-        "label": "unload_skill",
-        "description": "Deactivate a skill for the current session.",
-        "type": "protocol",
-        "source": "builtin",
-        "enabled": True,
-        "availability": _availability(scope="websocket"),
-    },
-    {
         "name": "llm.model.set",
         "label": "llm.model.set",
         "description": "Change the selected model for the current session.",
@@ -250,57 +235,11 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "command": "review",
         "label": "/review",
         "description": "审查当前项目并按严重级别列出问题",
-        "template": _skill_template("code-review"),
+        "template": _REVIEW_PROMPT,
         "search_text": "review audit code quality bug risk",
         "type": "template",
         "kind": "template",
         "source": "builtin",
-        "skill_name": "code-review",
-        "enabled": True,
-        "availability": _availability(),
-    },
-    {
-        "id": "cmd-debug",
-        "name": "debug",
-        "command": "debug",
-        "label": "/debug",
-        "description": "端到端定位并修复当前问题",
-        "template": _skill_template("debug-mode"),
-        "search_text": "debug reproduce root cause fix verify",
-        "type": "template",
-        "kind": "template",
-        "source": "builtin",
-        "skill_name": "debug-mode",
-        "enabled": True,
-        "availability": _availability(),
-    },
-    {
-        "id": "cmd-refactor",
-        "name": "refactor",
-        "command": "refactor",
-        "label": "/refactor",
-        "description": "提出并执行小步重构方案",
-        "template": _skill_template("refactor"),
-        "search_text": "refactor architecture cleanup maintainability",
-        "type": "template",
-        "kind": "template",
-        "source": "builtin",
-        "skill_name": "refactor",
-        "enabled": True,
-        "availability": _availability(),
-    },
-    {
-        "id": "cmd-test",
-        "name": "test",
-        "command": "test",
-        "label": "/test",
-        "description": "补测试并保证回归通过",
-        "template": _skill_template("test-writer"),
-        "search_text": "test regression coverage vitest pytest",
-        "type": "template",
-        "kind": "template",
-        "source": "builtin",
-        "skill_name": "test-writer",
         "enabled": True,
         "availability": _availability(),
     },
@@ -380,9 +319,9 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "name": "skills",
         "command": "skills",
         "label": "/skills",
-        "description": "打开 Skills/MCP 市场和管理页",
+        "description": "浏览并选择技能",
         "template": "/skills",
-        "search_text": "local skills mcp marketplace store settings manage install",
+        "search_text": "local skills browse select install",
         "type": "local",
         "kind": "local",
         "source": "builtin",
@@ -390,49 +329,46 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "availability": _availability(scope="session"),
     },
     {
-        "id": "cmd-docs",
-        "name": "docs",
-        "command": "docs",
-        "label": "/docs",
-        "description": "阅读代码并产出结构化文档",
-        "template": _skill_template("docs-writer"),
-        "search_text": "docs documentation architecture data flow",
-        "type": "template",
-        "kind": "template",
+        "id": "cmd-model-local",
+        "name": "model",
+        "command": "model",
+        "label": "/model",
+        "description": "选择或配置当前模型",
+        "template": "/model",
+        "search_text": "local model provider reasoning",
+        "type": "local",
+        "kind": "local",
         "source": "builtin",
-        "skill_name": "docs-writer",
         "enabled": True,
-        "availability": _availability(),
+        "availability": _availability(scope="session"),
     },
     {
-        "id": "cmd-explain",
-        "name": "explain",
-        "command": "explain",
-        "label": "/explain",
-        "description": "解释关键模块和执行路径",
-        "template": _skill_template("docs-writer"),
-        "search_text": "explain walkthrough files control flow",
-        "type": "template",
-        "kind": "template",
+        "id": "cmd-mcp-local",
+        "name": "mcp",
+        "command": "mcp",
+        "label": "/mcp",
+        "description": "管理 MCP 连接器和工具",
+        "template": "/mcp",
+        "search_text": "local mcp connectors tools",
+        "type": "local",
+        "kind": "local",
         "source": "builtin",
-        "skill_name": "docs-writer",
         "enabled": True,
-        "availability": _availability(),
+        "availability": _availability(scope="session"),
     },
     {
-        "id": "cmd-commit",
-        "name": "commit",
-        "command": "commit",
-        "label": "/commit",
-        "description": "整理改动并生成提交说明",
-        "template": _skill_template("commit-message"),
-        "search_text": "commit summary changelog validation",
-        "type": "template",
-        "kind": "template",
+        "id": "cmd-plugins-local",
+        "name": "plugins",
+        "command": "plugins",
+        "label": "/plugins",
+        "description": "管理本地 Codex 插件",
+        "template": "/plugins",
+        "search_text": "local plugins bundles skills mcp apps hooks",
+        "type": "local",
+        "kind": "local",
         "source": "builtin",
-        "skill_name": "commit-message",
         "enabled": True,
-        "availability": _availability(),
+        "availability": _availability(scope="session"),
     },
     {
         "id": "cmd-new-local",
@@ -623,13 +559,12 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "name": "init",
         "command": "init",
         "label": "/init",
-        "description": "分析代码库并生成 CLAUDE.md 项目说明",
-        "template": _skill_template("init"),
-        "search_text": "template init claudemd documentation bootstrap",
+        "description": "分析代码库并生成 AGENTS.md 项目说明",
+        "template": _INIT_PROMPT,
+        "search_text": "template init agentsmd documentation bootstrap",
         "type": "template",
         "kind": "template",
         "source": "builtin",
-        "skill_name": "init",
         "enabled": True,
         "availability": _availability(scope="session"),
     },
@@ -672,20 +607,163 @@ def get_builtin_command_names() -> list[str]:
     return [str(entry["name"]) for entry in _BUILTIN_COMMAND_CATALOG]
 
 
-def get_composer_command_catalog() -> list[dict[str, Any]]:
-    entries = [deepcopy(entry) for entry in _COMPOSER_COMMAND_CATALOG]
-    seen_commands = {
-        str(entry.get("command", "")).strip().lower()
-        for entry in entries
-        if str(entry.get("command", "")).strip()
+_COMMAND_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
+
+
+def _project_command_dirs(workspace_root: Path | None) -> list[Path]:
+    if workspace_root is None:
+        return []
+    current = workspace_root.resolve()
+    boundary = _find_project_root(current)
+    home = Path.home().resolve()
+    result: list[Path] = []
+    while current != home:
+        directory = current / ".claude" / "commands"
+        if directory.is_dir():
+            result.append(directory)
+        if boundary is not None and current == boundary:
+            break
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return result
+
+
+def _file_command_dirs(workspace_root: Path | None) -> list[tuple[Path, str]]:
+    return [
+        (_get_managed_claude_dir() / ".claude" / "commands", "policySettings"),
+        *((path, "projectSettings") for path in _project_command_dirs(workspace_root)),
+        (Path.home() / ".claude" / "commands", "userSettings"),
+    ]
+
+
+def _parse_file_command(path: Path, source: str) -> dict[str, Any] | None:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    frontmatter: dict[str, Any] = {}
+    match = _COMMAND_FRONTMATTER_RE.match(raw)
+    if match:
+        try:
+            parsed = yaml.safe_load(match.group(1))
+        except yaml.YAMLError:
+            return None
+        if isinstance(parsed, dict):
+            frontmatter = parsed
+        raw = raw[match.end():]
+    template = raw.strip()
+    if not template:
+        return None
+    name = path.stem.strip().lower()
+    description = str(frontmatter.get("description") or "").strip()
+    if not description:
+        description = next(
+            (line.lstrip("# ").strip() for line in template.splitlines() if line.strip()),
+            f"Run project command {name}",
+        )[:160]
+    argument_hint = str(
+        frontmatter.get("argument-hint") or frontmatter.get("argument_hint") or ""
+    ).strip()
+    raw_argument_names = frontmatter.get("arguments")
+    if isinstance(raw_argument_names, str):
+        argument_names = [
+            item for item in raw_argument_names.split()
+            if item and not item.isdecimal()
+        ]
+    elif isinstance(raw_argument_names, list):
+        argument_names = [
+            str(item).strip() for item in raw_argument_names
+            if str(item).strip() and not str(item).strip().isdecimal()
+        ]
+    else:
+        argument_names = []
+    user_invocable = frontmatter.get("user-invocable", True)
+    if isinstance(user_invocable, str):
+        user_invocable = user_invocable.strip().lower() not in {"false", "no", "0"}
+    if not bool(user_invocable):
+        return None
+    return {
+        "id": f"file-command:{source}:{path}",
+        "name": name,
+        "command": name,
+        "label": f"/{name}",
+        "description": description,
+        "template": template,
+        "search_text": f"{name} {description} {source}",
+        "type": "template",
+        "kind": "template",
+        "source": source,
+        "source_path": str(path),
+        "argument_hint": argument_hint,
+        "argument_names": argument_names,
+        "base_dir": str(path.parent),
+        "is_skill_file": path.name.casefold() == "skill.md",
+        "enabled": True,
+        "availability": _availability(),
     }
-    for plugin_entry in get_plugin_composer_command_catalog():
-        command = str(plugin_entry.get("command", "")).strip().lower()
-        if not command or command in seen_commands:
+
+
+def get_file_command_catalog(
+    workspace_root: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    root = (
+        Path(workspace_root).resolve()
+        if workspace_root is not None
+        else get_explicit_active_workspace_root()
+    )
+    commands: dict[str, dict[str, Any]] = {}
+    for directory, source in _file_command_dirs(root):
+        if not directory.is_dir():
             continue
-        seen_commands.add(command)
-        entries.append(deepcopy(plugin_entry))
-    return entries
+        # CC's markdownConfigLoader recursively discovers commands and derives
+        # colon-separated namespaces from subdirectories (for example
+        # commands/review/security.md -> /review:security).
+        all_paths = sorted(directory.rglob("*.md"), key=lambda item: str(item).casefold())
+        # Match CC's transformSkillFiles: a directory containing SKILL.md is
+        # represented by that file alone; sibling markdown files are not
+        # exposed as separate commands.
+        skill_dirs = {
+            path.parent
+            for path in all_paths
+            if path.name.casefold() == "skill.md"
+        }
+        paths = [
+            path for path in all_paths
+            if path.parent not in skill_dirs or path.name.casefold() == "skill.md"
+        ]
+        for path in paths:
+            entry = _parse_file_command(path, source)
+            if entry is not None:
+                relative = path.relative_to(directory).with_suffix("")
+                if path.name.casefold() == "skill.md":
+                    skill_relative = path.parent.relative_to(directory)
+                    entry["name"] = ":".join(skill_relative.parts).strip().lower()
+                else:
+                    entry["name"] = ":".join(relative.parts).strip().lower()
+                if not entry["name"]:
+                    entry["name"] = path.parent.name.strip().lower()
+                entry["command"] = entry["name"]
+                entry["label"] = f"/{entry['name']}"
+                entry["search_text"] = (
+                    f"{entry['name']} {entry['description']} {source}"
+                )
+                commands.setdefault(str(entry["command"]), entry)
+    return list(commands.values())
+
+
+def get_composer_command_catalog() -> list[dict[str, Any]]:
+    builtins = [deepcopy(entry) for entry in _COMPOSER_COMMAND_CATALOG]
+    builtin_names = {str(entry.get("command") or "").casefold() for entry in builtins}
+    return [
+        *builtins,
+        *(
+            entry
+            for entry in get_file_command_catalog()
+            if str(entry.get("command") or "").casefold() not in builtin_names
+        ),
+    ]
 
 
 def get_enabled_composer_command_catalog() -> list[dict[str, Any]]:

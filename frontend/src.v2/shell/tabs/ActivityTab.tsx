@@ -1,14 +1,15 @@
 /**
- * Activity tab — compact runtime center for task progress, sources, and run context.
+ * Context tab — captured files, sources, workspace state, and runtime details.
  */
-import { ChevronRight, FileCode2, FileText, FileType, Folder, GitBranch, Image, Link, MonitorPlay, Layers, Paperclip, SquareTerminal, MessageSquare, CalendarClock } from 'lucide-react'
+import { ChevronRight, FileCode2, FileText, FileType, Folder, GitBranch, Image, MonitorPlay, Layers, Paperclip, SquareTerminal, MessageSquare, CalendarClock } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useAppStore } from '../../stores'
 import { getWebSocket } from '../../hooks/useWebSocket'
-import { openWebInPreview } from '../../chat/openWebInPreview'
+import { openWebTarget } from '../../chat/openWebTarget'
 import { hasVisibleActiveConversation } from '../../chat/activeConversation'
 import { openAutomations } from '../../lib/automations-navigation'
 import { ImageLightbox } from '../../components/ImageLightbox'
+import { BrandIcon } from '../../components/BrandIcon'
 import { previewUrlForPath } from '../fileTreeHelpers'
 import {
   buildActivitySidebarState,
@@ -33,8 +34,6 @@ import {
   RowCard,
   StatusMark,
 } from '../SidebarShared'
-import { projectMessagesToActivityItems, visibleActivityItems } from '../../agent-loop/projection/project-activity-items'
-import type { ActivityItem } from '../../agent-loop/activity-item'
 
 export const ActivityTab = () => {
   const conversationId = useAppStore((s) => s.conversationId)
@@ -61,12 +60,8 @@ export const ActivityTab = () => {
   const backgroundTasks = useAppStore((s) => s.backgroundTasks)
   const subagents = useAppStore((s) => s.subagents)
   const scheduledTasks = useAppStore((s) => s.scheduledTasks)
+  const scheduledTaskRuns = useAppStore((s) => s.scheduledTaskRuns)
   const browserAnnotations = useAppStore((s) => s.browserAnnotations)
-  const activityItems = useMemo(
-    () => projectMessagesToActivityItems(messages, { isStreaming }),
-    [isStreaming, messages],
-  )
-
   const state = useMemo(() => buildActivitySidebarState({
     conversationId: hasActiveConversation ? conversationId : null,
     messages,
@@ -91,6 +86,7 @@ export const ActivityTab = () => {
     backgroundTasks,
     subagents,
     scheduledTasks,
+    scheduledTaskRuns,
     browserAnnotations,
   }), [
     conversationId,
@@ -117,19 +113,19 @@ export const ActivityTab = () => {
     backgroundTasks,
     subagents,
     scheduledTasks,
+    scheduledTaskRuns,
     browserAnnotations,
   ])
 
   if (!state.hasConversation) {
     return (
       <div style={activityPanelStyle}>
-        <EmptyLine>No active conversation.</EmptyLine>
+        <EmptyLine>暂无当前会话。</EmptyLine>
       </div>
     )
   }
 
   const hasEvidence = state.output.length > 0 ||
-    activityItems.length > 0 ||
     state.summary.length > 0 ||
     state.workspace.length > 0 ||
     state.progress.length > 0 ||
@@ -142,42 +138,22 @@ export const ActivityTab = () => {
   if (!hasEvidence) {
     return (
       <div style={activityPanelStyle}>
-        <EmptyLine>No outputs or sources yet.</EmptyLine>
+        <EmptyLine>暂无上下文信息。</EmptyLine>
       </div>
     )
   }
 
   return (
     <div style={activityPanelStyle}>
-      <ActivitySummarySection items={state.summary} />
-      <ActivityProgressSection items={state.progress} />
-      <CanonicalActivitySection items={activityItems} />
       <ActivityWorkspaceSection items={state.workspace} />
-      <ActivityOutputSection items={state.output} />
+      <ActivityAttachmentsSection items={state.attachments} workingDirectory={workingDirectory} />
       <ActivitySourcesSection items={state.sources} />
-      <ActivityAttachmentsSection items={state.attachments} />
+      <ActivityOutputSection items={state.output} />
       <ActivityRunsSection items={state.runs} />
       <ActivityBrowserAnnotationsSection items={state.browserAnnotations} />
       <ActivityBrowserSection items={state.browser} />
-    </div>
-  )
-}
-
-const CanonicalActivitySection = ({ items }: { items: ActivityItem[] }) => {
-  const visible = visibleActivityItems(items)
-  if (visible.length === 0) return null
-  return (
-    <div style={{ display: 'grid', gap: 4 }} aria-label="Turn activity">
-      <PanelHeader title="活动" />
-      {visible.map((item) => (
-        <RowCard key={`${item.messageId || item.turnId || 'turn'}:${item.id}`} active={item.status === 'running' || item.status === 'failed' || item.status === 'blocked'}>
-          <StatusMark status={item.status} />
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={activityButtonLabelStyle}>{item.title}</div>
-            {item.summary ? <div style={activityMetaTextStyle}>{item.summary}</div> : null}
-          </div>
-        </RowCard>
-      ))}
+      <ActivitySummarySection items={state.summary} />
+      <ActivityProgressSection items={state.progress} />
     </div>
   )
 }
@@ -191,7 +167,7 @@ const ActivitySummarySection = ({ items }: { items: ActivitySummaryItem[] }) => 
         {items.map((item) => (
           <InfoRow
             key={item.id}
-            label={item.kind === 'goal' ? 'Goal' : 'Context'}
+            label={item.kind === 'goal' ? '目标' : '上下文'}
             value={item.detail ? `${item.label} - ${item.detail}` : item.label}
             tone={item.status === 'failed' ? 'warning' : item.status === 'running' ? 'accent' : 'muted'}
           />
@@ -204,9 +180,9 @@ const ActivitySummarySection = ({ items }: { items: ActivitySummaryItem[] }) => 
 const ActivityProgressSection = ({ items }: { items: ActivityProgressItem[] }) => {
   if (items.length === 0) return null
   return (
-    <div style={{ display: 'grid', gap: 4 }} aria-label="Current activity">
+    <div style={{ display: 'grid', gap: 4 }} aria-label="当前上下文">
       {items.map((item) => (
-        <RowCard key={item.id} active={item.status === 'running' || item.status === 'failed'}>
+        <RowCard key={item.id} active={false}>
           <StatusMark status={item.status} />
           <div style={{ minWidth: 0, flex: 1 }}>
             <div style={activityButtonLabelStyle}>{item.label}</div>
@@ -227,9 +203,9 @@ const ActivityWorkspaceSection = ({ items }: { items: ActivityWorkspaceItem[] })
     <div style={{ display: 'grid', gap: 4 }}>
       {visibleItems.map((item) => (
         <div key={item.id} title={item.detail || item.label}>
-          <RowCard active={item.status === 'failed' || item.status === 'running'}>
+          <RowCard active={false}>
             <ActivityIcon>
-              {item.kind === 'branch' ? <GitBranch size={13} /> : <Folder size={13} />}
+              {item.kind === 'branch' ? <GitBranch size={14} /> : <Folder size={14} />}
             </ActivityIcon>
             <span style={activityWorkspaceValueStyle}>{item.label}</span>
           </RowCard>
@@ -254,7 +230,7 @@ const ActivityOutputSection = ({ items }: { items: ActivityOutputItem[] }) => {
       return
     }
     if (item.url) {
-      openWebInPreview(item.url)
+      openWebTarget(item.url)
     }
   }
 
@@ -264,12 +240,12 @@ const ActivityOutputSection = ({ items }: { items: ActivityOutputItem[] }) => {
         const Icon = outputIcon(item)
         return (
           <ActivityButtonRow key={item.id} onClick={() => openOutput(item)} title={item.detail || item.label}>
-            <ActivityIcon><Icon size={13} /></ActivityIcon>
+            <ActivityIcon><Icon size={14} /></ActivityIcon>
             <span style={{ flex: 1, minWidth: 0 }}>
               <span style={activityButtonLabelStyle}>{item.label}</span>
               {item.detail ? <span style={activityMetaTextStyle}>{item.detail}</span> : null}
             </span>
-            <ChevronRight size={12} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+            <ChevronRight size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
           </ActivityButtonRow>
         )
       })}
@@ -279,14 +255,14 @@ const ActivityOutputSection = ({ items }: { items: ActivityOutputItem[] }) => {
 
 const ActivityBrowserSection = ({ items }: { items: ActivityBrowserItem[] }) => {
   const openBrowser = (item: ActivityBrowserItem) => {
-    openWebInPreview(item.url)
+    openWebTarget(item.url)
   }
 
   return (
     <ActivitySection title="浏览器" previewCount={2}>
       {items.map((item) => (
         <ActivityButtonRow key={item.id} onClick={() => openBrowser(item)} title={item.url}>
-          <ActivityIcon><MonitorPlay size={13} /></ActivityIcon>
+          <ActivityIcon><MonitorPlay size={14} /></ActivityIcon>
           <span style={{ flex: 1, minWidth: 0 }}>
             <span style={activityButtonLabelStyle}>{item.label}</span>
             <span style={activityMetaTextStyle}>{item.host}{item.detail ? ` - ${item.detail}` : ''}</span>
@@ -302,7 +278,7 @@ const ActivityBrowserAnnotationsSection = ({ items }: { items: ActivityBrowserAn
   const openAnnotation = (item: ActivityBrowserAnnotationItem) => {
     const store = useAppStore.getState()
     if (item.url) {
-      openWebInPreview(item.url)
+      openWebTarget(item.url)
     }
     store.addInspectorEntry({
       targetKind: 'message',
@@ -328,10 +304,10 @@ const ActivityBrowserAnnotationsSection = ({ items }: { items: ActivityBrowserAn
   }
 
   return (
-    <ActivitySection title="页面记录" previewCount={4}>
+    <ActivitySection title="页面备注" previewCount={4}>
       {items.map((item) => (
         <ActivityButtonRow key={item.id} onClick={() => openAnnotation(item)} title={item.note}>
-          <ActivityIcon><MessageSquare size={13} /></ActivityIcon>
+          <ActivityIcon><MessageSquare size={14} /></ActivityIcon>
           <span style={{ flex: 1, minWidth: 0 }}>
             <span style={activityButtonLabelStyle}>{item.label}</span>
             <span style={activityMetaTextStyle}>{[
@@ -341,14 +317,20 @@ const ActivityBrowserAnnotationsSection = ({ items }: { items: ActivityBrowserAn
               item.screenshotDetail,
             ].filter(Boolean).join(' - ')}</span>
           </span>
-          <ChevronRight size={12} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+          <ChevronRight size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
         </ActivityButtonRow>
       ))}
     </ActivitySection>
   )
 }
 
-const ActivityAttachmentsSection = ({ items }: { items: ActivityAttachmentItem[] }) => {
+const ActivityAttachmentsSection = ({
+  items,
+  workingDirectory,
+}: {
+  items: ActivityAttachmentItem[]
+  workingDirectory: string
+}) => {
   const [preview, setPreview] = useState<{ src: string; name: string } | null>(null)
   const [pendingPreviewArtifactId, setPendingPreviewArtifactId] = useState<string | null>(null)
   const [failedPreviewArtifactId, setFailedPreviewArtifactId] = useState<string | null>(null)
@@ -386,7 +368,7 @@ const ActivityAttachmentsSection = ({ items }: { items: ActivityAttachmentItem[]
     const isImage = item.kind === 'image' || item.mediaType?.startsWith('image/')
     if (isImage) {
       if (item.path) {
-        setPreview({ src: previewUrlForPath(item.path), name: item.label })
+        setPreview({ src: previewUrlForPath(item.path, workingDirectory), name: item.label })
         return
       }
       if (item.artifactId) {
@@ -451,18 +433,18 @@ const ActivityAttachmentsSection = ({ items }: { items: ActivityAttachmentItem[]
             onClick={() => openAttachment(item)}
             title={failedPreviewArtifactId === item.artifactId ? '图片加载失败，点击重试' : item.detail || item.label}
           >
-            <ActivityIcon><Icon size={13} /></ActivityIcon>
+            <ActivityIcon><Icon size={14} /></ActivityIcon>
             <span style={{ flex: 1, minWidth: 0 }}>
               <span style={activityButtonLabelStyle}>{item.label}</span>
               <span style={activityMetaTextStyle}>
                 {pendingPreviewArtifactId === item.artifactId
-                  ? 'loading'
+                  ? '加载中'
                   : failedPreviewArtifactId === item.artifactId
-                    ? 'load failed'
+                    ? '加载失败'
                     : item.kind}{item.detail ? ` - ${item.detail}` : ''}
               </span>
             </span>
-            {(item.artifactId || item.path) && <ChevronRight size={12} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />}
+            {(item.artifactId || item.path) && <ChevronRight size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />}
           </ActivityButtonRow>
         )
       })}
@@ -479,12 +461,25 @@ const ActivityAttachmentsSection = ({ items }: { items: ActivityAttachmentItem[]
 }
 
 const ActivityRunsSection = ({ items }: { items: ActivityRunItem[] }) => {
-  const title = items.every((item) => item.kind === 'terminal') ? 'Terminal' : 'Processes'
+  const kinds = new Set(items.map((item) => item.kind))
+  const title = kinds.size !== 1
+    ? '运行项'
+    : kinds.has('terminal')
+      ? '终端'
+      : kinds.has('background-command')
+        ? '后台任务'
+        : kinds.has('agent')
+          ? '子智能体'
+          : kinds.has('automation')
+            ? '自动化'
+            : kinds.has('preview')
+              ? '预览服务'
+              : '运行项'
   const openRun = (item: ActivityRunItem) => {
     const store = useAppStore.getState()
     if (item.kind === 'terminal') {
       if (item.terminalId) store.setActiveTerminalSession(item.terminalId)
-      store.setRightStackTab('terminal')
+      store.openBottomTab('terminal')
       return
     }
     if (item.kind === 'automation') {
@@ -507,7 +502,7 @@ const ActivityRunsSection = ({ items }: { items: ActivityRunItem[] }) => {
     <ActivitySection title={title} previewCount={4}>
       {items.map((item) => (
         <ActivityButtonRow key={item.id} onClick={() => openRun(item)} title={item.detail || item.label}>
-          <ActivityIcon>{item.kind === 'automation' ? <CalendarClock size={13} /> : item.kind === 'preview' ? <MonitorPlay size={13} /> : item.kind === 'agent' ? <Layers size={13} /> : <SquareTerminal size={13} />}</ActivityIcon>
+          <ActivityIcon>{item.kind === 'automation' ? <CalendarClock size={14} /> : item.kind === 'preview' ? <MonitorPlay size={14} /> : item.kind === 'agent' ? <Layers size={14} /> : <SquareTerminal size={14} />}</ActivityIcon>
           <span style={{ flex: 1, minWidth: 0 }}>
               <span style={activityButtonLabelStyle}>{item.label}</span>
               {item.detail ? <span style={activityMetaTextStyle}>{item.detail}</span> : null}
@@ -522,22 +517,25 @@ const ActivityRunsSection = ({ items }: { items: ActivityRunItem[] }) => {
 const ActivitySourcesSection = ({ items }: { items: ActivitySourceItem[] }) => {
   const openWebSource = (item: ActivitySourceItem) => {
     if (!item.url) return
-    openWebInPreview(item.url)
+    openWebTarget(item.url)
   }
 
   return (
     <ActivitySection title="来源" previewCount={5}>
       {items.slice(0, 10).map((item) => {
-        const Icon = item.kind === 'file' ? FileText : Link
         const detail = sourceDetail(item)
         const body = (
           <>
-            <ActivityIcon><Icon size={13} /></ActivityIcon>
+            <ActivityIcon>
+              {item.kind === 'file'
+                ? <FileText size={14} />
+                : <BrandIcon value={`${item.label} ${item.title || ''} ${item.url || ''}`} websiteUrl={item.url} fallback="web" size={14} />}
+            </ActivityIcon>
             <span style={{ flex: 1, minWidth: 0 }}>
               <span style={activityButtonLabelStyle}>{item.label}</span>
               {detail ? <span style={activityMetaTextStyle}>{detail}</span> : null}
             </span>
-            {item.kind === 'web' && <ChevronRight size={12} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />}
+            {item.kind === 'web' && <ChevronRight size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />}
           </>
         )
 
@@ -562,7 +560,16 @@ const ActivitySourcesSection = ({ items }: { items: ActivitySourceItem[] }) => {
 function sourceDetail(item: ActivitySourceItem): string {
   if (item.kind === 'file') {
     const path = item.path || [item.title, item.label].filter(Boolean).join('/')
-    return path ? compactPath(path) : 'workspace file'
+    return path ? compactPath(path) : '工作区文件'
+  }
+  if (item.title && item.title !== item.label) return item.title
+  if (item.url) {
+    try {
+      const parsed = new URL(item.url)
+      return parsed.pathname && parsed.pathname !== '/' ? parsed.pathname : parsed.hostname
+    } catch {
+      return item.url
+    }
   }
   return ''
 }
@@ -583,19 +590,20 @@ function outputIcon(item: ActivityOutputItem) {
 }
 
 function browserStatusLabel(status: ActivityBrowserItem['status']): string {
-  if (status === 'verified') return 'ok'
-  if (status === 'failed') return 'fail'
-  if (status === 'running') return 'run'
-  return 'idle'
+  if (status === 'verified') return '正常'
+  if (status === 'failed') return '失败'
+  if (status === 'running') return '运行中'
+  return '空闲'
 }
 
 function statusLabel(status: string): string {
-  if (status === 'completed') return 'ok'
-  if (status === 'failed') return 'fail'
-  if (status === 'blocked') return 'block'
-  if (status === 'partial') return 'part'
-  if (status === 'running') return 'run'
-  return 'info'
+  if (status === 'completed') return '完成'
+  if (status === 'failed') return '失败'
+  if (status === 'blocked') return '受阻'
+  if (status === 'partial') return '部分完成'
+  if (status === 'running') return '运行中'
+  if (status === 'cancelled') return '已取消'
+  return '信息'
 }
 
 // ── Styles ───────────────────────────────────────────────────────
@@ -630,7 +638,7 @@ const activityMetaTextStyle: React.CSSProperties = {
   display: 'block',
   marginTop: 2,
   color: 'var(--text-muted)',
-  fontSize: 10,
+  fontSize: "var(--text-3xs)",
   lineHeight: 1.2,
   overflow: 'hidden',
   textOverflow: 'ellipsis',
@@ -647,7 +655,7 @@ const activityStatusPillStyle = (status: string): React.CSSProperties => ({
   justifyContent: 'center',
   border: '1px solid var(--border-subtle)',
   borderRadius: 'var(--radius-sm, 4px)',
-  fontSize: 10,
+  fontSize: "var(--text-3xs)",
   fontFamily: 'var(--font-mono)',
   color: status === 'verified'
     ? 'var(--state-success)'

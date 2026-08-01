@@ -6,10 +6,38 @@ BUILTIN_AGENT_TYPE_ORDER = [
     "general-purpose",
     "explore",
     "plan",
-    "implement",
-    "verification",
 ]
 BUILTIN_AGENT_TYPES: set[str] = set(BUILTIN_AGENT_TYPE_ORDER)
+
+_BUILTIN_AGENT_GUIDANCE = {
+    "general-purpose": "Any multi-step task that does not fit a more specific type.",
+    "explore": "Read-only investigation: locate code, answer 'where is X defined'.",
+    "plan": "Design an implementation approach and return a step-by-step plan.",
+}
+
+
+def agent_type_description(
+    agent_types: list[str],
+    *,
+    get_custom_agent: Callable[[str], Any | None] | None = None,
+) -> str:
+    """Describe each selectable subagent type for the model-facing schema.
+
+    A bare enum tells the model nothing about when to pick a custom agent, so a
+    user-authored ``agents/*.md`` would be undiscoverable in practice. Mirrors
+    cc's formatAgentLine (``- type: whenToUse``).
+    """
+    lines: list[str] = []
+    for name in agent_types:
+        guidance = _BUILTIN_AGENT_GUIDANCE.get(name, "")
+        if not guidance and get_custom_agent is not None:
+            try:
+                definition = get_custom_agent(name)
+            except Exception:
+                definition = None
+            guidance = str(getattr(definition, "description", "") or "").strip()
+        lines.append(f"- {name}: {guidance}" if guidance else f"- {name}")
+    return "Subagent type to delegate to. Available types:\n" + "\n".join(lines)
 
 
 def available_agent_types(

@@ -19,7 +19,13 @@ _SENSITIVE_ENV_SUFFIXES = (
     "_API_KEY",
     "_AUTH_TOKEN",
     "_ACCESS_TOKEN",
+    "_TOKEN",
+    "_PASSWORD",
+    "_PASSWD",
+    "_CREDENTIAL",
+    "_CREDENTIALS",
     "_SECRET",
+    "_SECRET_KEY",
 )
 
 
@@ -105,4 +111,3 @@ def ensure_utf8_console_logging(level: int = logging.INFO) -> None:
         root.addHandler(handler)
     if root.level == logging.NOTSET or root.level > level:
         root.setLevel(level)
-

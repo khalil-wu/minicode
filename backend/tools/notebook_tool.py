@@ -10,8 +10,9 @@ from pathlib import Path
 from typing import Any
 
 from backend.permissions.context import ToolExecutionContext
+from backend.security.sensitive_files import is_protected_write_path, is_sensitive_file
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
-from backend.tools.file_tools_common import _validate_expected_hash, content_hash
+from backend.tools.file_tools_common import _atomic_write_text, _validate_expected_hash, content_hash
 from backend.tools.path_resolution import _is_bypass_mode, _resolve_path
 
 
@@ -19,9 +20,13 @@ class NotebookEditTool(BaseTool):
     """Edit a cell in a Jupyter notebook (.ipynb)."""
 
     name = "notebook_edit"
+    result_kind = "edit"
+    activity_kind = "fileChange"
+    display_label = "Edit notebook"
     mutates_workspace = True
     read_only = False
     permission = PermissionLevel.CONFIRM
+    workspace_path_fields = ("notebook_path",)
     description = (
         "Edit a Jupyter notebook (.ipynb) cell. Supports replace / insert / delete of a single cell "
         "by its 0-based index, or append when cell_index equals the cell count. Use for notebook "
@@ -40,7 +45,6 @@ class NotebookEditTool(BaseTool):
                     "edit_mode": {"type": "string", "enum": ["replace", "insert", "delete"], "description": "replace (default), insert before cell_index, or delete cell_index."},
                     "cell_type": {"type": "string", "enum": ["code", "markdown", "raw"], "description": "Cell type for replace/insert."},
                     "source": {"type": "string", "description": "New cell source (replace/insert). Markdown allowed for markdown cells."},
-                    "expected_hash": {"type": "string", "description": "Latest content_hash returned when the notebook was read. Required for existing notebooks; guards against blind edits and stale views."},
                 },
                 "required": ["notebook_path", "cell_index"],
             },
@@ -59,11 +63,35 @@ class NotebookEditTool(BaseTool):
         if path.suffix.lower() != ".ipynb":
             return self._error_result(f"Not a notebook (.ipynb): {raw_path}")
 
-        # Read-before-edit + staleness guard (mirrors edit_file.py). Without an
-        # expected_hash matching the current file, refuse — blindly editing a
-        # notebook the model never read, or one changed on disk since, silently
-        # loses data.
-        ok, message = _validate_expected_hash(path, args.get("expected_hash"))
+        # Same write floor as write_file/edit_file: a notebook inside .git/ or
+        # .claude/ can execute on open, so it must not be a way around the
+        # protected-path and secret-file guards.
+        bypass_mode = _is_bypass_mode(context)
+        if is_sensitive_file(path) and not bypass_mode:
+            return self._error_result(
+                f"Refusing to write sensitive file: {raw_path}. "
+                "Edit credential files manually outside the agent."
+            )
+        if is_protected_write_path(path) and not bypass_mode:
+            return self._error_result(
+                f"Refusing to write protected path: {raw_path}. "
+                "Repository and agent configuration files must be edited manually."
+            )
+
+        # Read-before-edit + staleness guard (mirrors edit_file.py). Claude Code
+        # tracks notebook freshness with a harness readFileState map rather than a
+        # model-supplied hash; we use the content hash read_file recorded in
+        # context metadata for the same purpose. Honor an explicit expected_hash
+        # if the model passed one, otherwise fall back to the recorded read-time
+        # hash so a notebook read this session is editable without the model
+        # echoing the hash back (edit_file/write_file get the same hash injected
+        # via generate_diff; notebook_edit resolves it here instead).
+        expected_hash = args.get("expected_hash")
+        if not expected_hash and context is not None and isinstance(getattr(context, "metadata", None), dict):
+            read_time_hashes = context.metadata.get("_read_file_hashes")
+            if isinstance(read_time_hashes, dict):
+                expected_hash = read_time_hashes.get(str(path))
+        ok, message = _validate_expected_hash(path, expected_hash)
         if not ok:
             return self._error_result(message)
 
@@ -116,7 +144,7 @@ class NotebookEditTool(BaseTool):
         nb["cells"] = cells
         try:
             new_text = json.dumps(nb, ensure_ascii=False, indent=1)
-            path.write_text(new_text, encoding="utf-8")
+            _atomic_write_text(path, new_text)
         except Exception as exc:
             return self._error_result(f"Failed to write notebook: {exc}")
 

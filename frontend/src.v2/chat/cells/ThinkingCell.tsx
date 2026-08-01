@@ -1,49 +1,36 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import type React from "react";
 import { ChevronDown, ChevronRight, Sparkles } from "lucide-react";
 import { MarkdownRenderer } from "../messages/MarkdownRenderer";
 import type { ThinkingCellState } from "./cellTypes";
 import "./cells.css";
 
-function normalizeProviderReasoningSummary(content: string, cell: ThinkingCellState): string {
-  if (cell.source !== "provider" && cell.source !== "reasoning") return content;
-  if (cell.providerReasoningType !== "reasoning_summary_text") return content;
-  return content.replace(/\*\*([^*\n]+?)\*\*(\n{2,})/g, "$1$2");
-}
-
-export function ThinkingCell({ cell, isStreaming = false }: { cell: ThinkingCellState; isStreaming?: boolean }) {
-  const [expanded, setExpanded] = useState(false);
+export const ThinkingCell = memo(function ThinkingCell({ cell, isStreaming = false }: { cell: ThinkingCellState; isStreaming?: boolean }) {
+  const [expanded, setExpanded] = useState(isStreaming);
 
   useEffect(() => {
-    if (!isStreaming) setExpanded(false);
+    setExpanded(isStreaming);
   }, [isStreaming]);
 
   const hasContent = Boolean(cell.content?.trim());
-  const renderedContent = hasContent ? normalizeProviderReasoningSummary(cell.content, cell) : cell.content;
+  const renderedContent = cell.content;
   const renderAsProcessText = hasContent && (
+    cell.source === "commentary" ||
     cell.source === "model_preamble" ||
     cell.source === "post_tool" ||
-    cell.source === "provider" ||
-    cell.source === "runtime" ||
-    cell.source === "reasoning"
+    cell.source === "runtime"
   );
   if (renderAsProcessText) {
     return (
       <div className="thinking-cell thinking-cell-process" data-source={cell.source}>
         <div className="thinking-cell-process-content">
-          <MarkdownRenderer content={renderedContent} />
+          <MarkdownRenderer content={renderedContent} isStreaming={isStreaming} />
         </div>
       </div>
     );
   }
 
-  const preview = hasContent && !expanded
-    ? compactPreview(cell.content, isStreaming ? 110 : 96)
-    : "";
-
-  const phaseLabel = cell.phase ? formatPhase(cell.phase) : "";
   const label = labelForSource(cell.source, isStreaming);
-  const charCount = hasContent ? cell.content.trim().length : 0;
 
   return (
     <div className="thinking-cell" data-streaming={isStreaming ? "true" : "false"}>
@@ -53,60 +40,30 @@ export function ThinkingCell({ cell, isStreaming = false }: { cell: ThinkingCell
         className="thinking-cell-header"
         aria-expanded={expanded}
       >
-        <Sparkles size={12} className="thinking-cell-icon" />
-        <span className="thinking-cell-therefore">
-          {charCount ? `${label} · ${charCount} 字` : label}
-        </span>
-        {phaseLabel && (
-          <span className="thinking-cell-phase">({phaseLabel})</span>
-        )}
-        {!expanded && preview && (
-          <span className="thinking-cell-preview">
-            {" · "}{preview}
-          </span>
-        )}
+        <Sparkles size={14} className="thinking-cell-icon" />
+        <span className="thinking-cell-therefore">{label}</span>
         <span className="thinking-cell-toggle">
-          {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </span>
       </button>
-      {hasContent && (
+      {expanded && hasContent && (
         <div className="thinking-cell-content-wrap" data-open={expanded ? "true" : "false"}>
           <div className="thinking-cell-content">
-            <MarkdownRenderer content={renderedContent} />
+            <MarkdownRenderer content={renderedContent} isStreaming={isStreaming} />
           </div>
         </div>
       )}
     </div>
   );
-}
+});
 
 function labelForSource(source: ThinkingCellState["source"], isStreaming: boolean): string {
+  if (source === "commentary") return "";
   if (source === "model_preamble") return "";
   if (source === "post_tool") return "";
   if (source === "runtime") return "运行状态";
-  if (source === "provider") return "";
-  return "";
-}
-
-function compactPreview(value: string, max = 96): string {
-  const text = value.replace(/\s+/g, " ").trim();
-  if (text.length <= max) return text;
-  return `${text.slice(0, max - 1).trimEnd()}...`;
-}
-
-function formatPhase(phase: string): string {
-  const readable = phase
-    .replace(/_/g, " ")
-    .replace(/([a-z])([A-Z])/g, "$1 $2")
-    .toLowerCase();
-
-  const translations: Record<string, string> = {
-    "analyzing requirements": "分析需求",
-    "planning approach": "规划方案",
-    "deciding tools": "选择工具",
-    "reviewing context": "审查上下文",
-    "synthesizing": "综合分析",
-  };
-
-  return translations[readable] || readable;
+  if (source === "provider" || source === "reasoning") {
+    return isStreaming ? "Thinking..." : "Thinking";
+  }
+  return isStreaming ? "Thinking..." : "Thinking";
 }

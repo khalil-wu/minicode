@@ -1,4 +1,5 @@
 import { lazy, Suspense } from "react";
+import { LoaderCircle } from "lucide-react";
 import { WorkbenchShell } from "./shell/WorkbenchShell";
 import { QuickOpen } from "./overlays/QuickOpen";
 import { ToastContainer } from "./overlays/ToastContainer";
@@ -17,7 +18,12 @@ const KeyboardShortcutsHelp = lazy(() => import("./overlays/KeyboardShortcutsHel
 const SkillsMarketplace = lazy(() => import("./overlays/SkillsMarketplace").then((m) => ({ default: m.SkillsMarketplace })));
 const LiveArtifacts = lazy(() => import("./overlays/LiveArtifacts").then((m) => ({ default: m.LiveArtifacts })));
 const AgentEditor = lazy(() => import("./overlays/AgentEditor").then((m) => ({ default: m.AgentEditor })));
-const PluginCommandPanel = lazy(() => import("./overlays/PluginCommandPanel").then((m) => ({ default: m.PluginCommandPanel })));
+
+const RouteLoading = () => (
+  <div className="app-route-loading" role="status" aria-label="正在加载页面">
+    <LoaderCircle className="spin" aria-hidden="true" />
+  </div>
+);
 
 export const App = () => {
   useWebSocketConnection();
@@ -32,17 +38,16 @@ export const App = () => {
   const skillsMarketplaceOpen = useAppStore((s) => s.skillsMarketplaceOpen);
   const liveArtifactsOpen = useAppStore((s) => s.liveArtifactsOpen);
   const agentEditorOpen = useAppStore((s) => s.agentEditorOpen);
-  const pluginCommandPanelOpen = useAppStore((s) => s.pluginCommandPanelOpen);
   const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities);
   const agentEditorEnabled = capabilityFeatureEnabled(runtimeCapabilities, "agent_editor", true);
 
   return (
     <>
       <SafeBoundary fallback={<div style={{padding: 32, textAlign: 'center'}}>Something went wrong. <button onClick={() => window.location.reload()}>Reload</button></div>}>
-        <WorkbenchShell />
+        {!settingsOpen && <WorkbenchShell />}
       </SafeBoundary>
       <ChunkErrorBoundary>
-        <Suspense fallback={null}>
+        <Suspense fallback={<RouteLoading />}>
           {commandPaletteOpen && <CommandPalette />}
           {settingsOpen && <SettingsCenter />}
           {automationsOpen && <AutomationsCenter />}
@@ -50,7 +55,6 @@ export const App = () => {
           {skillsMarketplaceOpen && <SkillsMarketplace />}
           {liveArtifactsOpen && <LiveArtifacts />}
           {agentEditorOpen && agentEditorEnabled && <AgentEditor />}
-          {pluginCommandPanelOpen && <PluginCommandPanel />}
         </Suspense>
       </ChunkErrorBoundary>
       <QuickOpen />

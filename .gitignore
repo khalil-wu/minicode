@@ -40,6 +40,8 @@ desktop/*.log
 # Test
 .pytest_cache/
 .pytest-tmp/
+.test-tmp/
+.test-runs/
 .pytest_tmp_*/
 tests/.tmp/
 test-results/
@@ -88,6 +90,8 @@ desktop/python-runtime/
 data/sidechains/
 data/swarm/
 data/tool-results/
+data/parent_notifications/
+data/user-message-queue/
 desktop/release-*/
 desktop/_start_*.txt
 tmp-artifacts-test/
@@ -95,3 +99,20 @@ frontend/dist.backup/
 frontend/test-results/
 frontend/_build_*.txt
 .minicode/worktrees/
+
+# Local review, benchmark, and reference-source outputs
+/artifacts/
+/pi-src/
+/pi-src-full/
+/earendil-works-pi-*.tgz
+/figma/
+
+# UI review screenshots
+/right-panel-*.png
+/ui-second-pass-*.png
+/minicode-settings-*.png
+/frontend/.demo-shot-*.png
+/frontend/demo/.current-*.png
+/frontend/demo/.shots/
+/frontend/minicode-*.png
+/frontend/probe-*.png

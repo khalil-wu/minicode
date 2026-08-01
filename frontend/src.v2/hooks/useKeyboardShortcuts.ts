@@ -18,21 +18,9 @@ const announceViewMode = (mode: string) => {
   pushToast(`View mode: ${mode.charAt(0).toUpperCase()}${mode.slice(1)}`, "info", 1200);
 };
 
-const isInteractiveTarget = (target: EventTarget | null): boolean => {
-  if (!(target instanceof HTMLElement)) return false;
-  const tag = target.tagName.toLowerCase();
-  return (
-    tag === "input" ||
-    tag === "textarea" ||
-    tag === "select" ||
-    target.isContentEditable ||
-    Boolean(target.closest("[role='dialog'], .modal-content, .overlay-backdrop"))
-  );
-};
-
 const isModalTarget = (target: EventTarget | null): boolean =>
   target instanceof HTMLElement
-  && Boolean(target.closest("[role='dialog'], .modal-content, .overlay-backdrop"));
+  && Boolean(target.closest("[role='dialog'], .modal-content, .overlay-backdrop, .settings-workspace"));
 
 export const useKeyboardShortcuts = () => {
   const sidebarWidthRef = useRef(280);
@@ -57,13 +45,17 @@ export const useKeyboardShortcuts = () => {
       }
 
       if (e.key === "Escape") {
-        if (!isInteractiveTarget(e.target)) {
-          s.interrupt();
-          sendClientCommand({
-            type: "interrupt",
-            ...(s.conversationId ? { conversation_id: s.conversationId } : {}),
-          });
-        }
+        if (isModalTarget(e.target)) return;
+        // Only an actually-running turn can be interrupted. Without this gate a
+        // stray Escape while idle ran finishStreaming with no target message,
+        // which cancels the plan and blocks every in-progress todo.
+        if (!s.isStreaming) return;
+        e.preventDefault();
+        s.interrupt();
+        sendClientCommand({
+          type: "interrupt",
+          ...(s.conversationId ? { conversation_id: s.conversationId } : {}),
+        });
         return;
       }
 
@@ -199,7 +191,8 @@ export const useKeyboardShortcuts = () => {
         case "j":
           e.preventDefault();
           s.setAppMode("code");
-          s.setRightStackTab("terminal");
+          if (!s.dockCollapsed && s.activeBottomTab === "terminal") s.closeBottomDock();
+          else s.openBottomTab("terminal");
           break;
         case "\\":
           e.preventDefault();

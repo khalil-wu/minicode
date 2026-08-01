@@ -1,4 +1,5 @@
 import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDown } from "lucide-react";
 import { useAppStore } from "../stores";
 import { BrandMark } from "../components/icons";
@@ -7,13 +8,18 @@ import { ChatTurn } from "./components/ChatTurn";
 import { hasVisibleActiveConversation } from "./activeConversation";
 
 const RECENT_TURN_WINDOW = 40;
+const MAX_TURNS_WITHOUT_VIRTUALIZATION = 8;
+const ESTIMATED_TURN_HEIGHT = 220;
+const ESTIMATED_TURN_GAP = 8;
+const INITIAL_VIRTUAL_VIEWPORT_HEIGHT = 800;
+const estimateTurnHeight = () => ESTIMATED_TURN_HEIGHT;
 
 export const MessageList = () => {
   const messages = useAppStore((s) => s.messages);
   const isStreaming = useAppStore((s) => s.isStreaming);
   const conversationId = useAppStore((s) => s.conversationId);
   const conversations = useAppStore((s) => s.conversations);
-  const appMode = useAppStore((s) => s.appMode);
+  const liveGitChanges = useAppStore((s) => s.gitChanges.live);
 
   // Deferred messages: during streaming, use the live messages so the
   // streaming tail updates in real-time. When NOT streaming, defer the
@@ -27,6 +33,7 @@ export const MessageList = () => {
     [displayMessages],
   );
   const ref = useRef<HTMLDivElement>(null);
+  const getScrollElement = useCallback(() => ref.current, []);
   const contentRef = useRef<HTMLDivElement>(null);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
   const [isFollowing, setIsFollowing] = useState(true);
@@ -57,6 +64,63 @@ export const MessageList = () => {
   );
   const turns = projectedTurns.turns;
   const hiddenTurnCount = projectedTurns.hiddenTurnCount;
+  // Keep the newest turn outside historical virtualization. The current reply
+  // then streams without invalidating row measurements, and a newly restored
+  // conversation always paints its latest result before observers settle.
+  const tailTurn = turns.at(-1) ?? null;
+  const liveTurn = isStreaming && tailTurn?.status === "streaming" ? tailTurn : null;
+  const historicalTurns = tailTurn ? turns.slice(0, -1) : turns;
+  const shouldVirtualize = historicalTurns.length > MAX_TURNS_WITHOUT_VIRTUALIZATION;
+  const firstHistoricalTurnId = historicalTurns[0]?.id;
+  const lastHistoricalTurnId = historicalTurns.at(-1)?.id;
+  // TanStack includes getItemKey identity in its measurement cache key. Keep
+  // that callback stable while only the streaming tail changes; otherwise a
+  // long transcript rebuilds every historical row measurement on each delta.
+  const getHistoricalTurnKey = useMemo(() => {
+    const keys = historicalTurns.map((turn) => turn.id);
+    return (index: number) => keys[index] ?? index;
+  }, [conversationId, firstHistoricalTurnId, historicalTurns.length, lastHistoricalTurnId]);
+  const initialVirtualOffset = useCallback(() => Math.max(
+    0,
+    historicalTurns.length * (ESTIMATED_TURN_HEIGHT + ESTIMATED_TURN_GAP)
+      - INITIAL_VIRTUAL_VIEWPORT_HEIGHT,
+  ), [firstHistoricalTurnId, historicalTurns.length, lastHistoricalTurnId]);
+  const virtualListRef = useRef<HTMLDivElement>(null);
+  const virtualConversationRef = useRef(conversationId);
+  const [virtualScrollMargin, setVirtualScrollMargin] = useState(0);
+  useLayoutEffect(() => {
+    if (!shouldVirtualize) {
+      setVirtualScrollMargin((current) => current === 0 ? current : 0);
+      return;
+    }
+    const list = virtualListRef.current;
+    const scrollElement = ref.current;
+    if (!list || !scrollElement) return;
+    const listRect = list.getBoundingClientRect();
+    const scrollRect = scrollElement.getBoundingClientRect();
+    const next = Math.max(0, Math.round(listRect.top - scrollRect.top + scrollElement.scrollTop));
+    setVirtualScrollMargin((current) => current === next ? current : next);
+  }, [hiddenTurnCount, shouldVirtualize]);
+  const turnVirtualizer = useVirtualizer({
+    enabled: shouldVirtualize,
+    count: shouldVirtualize ? historicalTurns.length : 0,
+    getScrollElement,
+    estimateSize: estimateTurnHeight,
+    getItemKey: getHistoricalTurnKey,
+    overscan: 3,
+    gap: ESTIMATED_TURN_GAP,
+    scrollMargin: virtualScrollMargin,
+    initialRect: { width: 0, height: INITIAL_VIRTUAL_VIEWPORT_HEIGHT },
+    initialOffset: initialVirtualOffset,
+  });
+  useLayoutEffect(() => {
+    if (virtualConversationRef.current === conversationId) return;
+    virtualConversationRef.current = conversationId;
+    // The virtualizer instance survives conversation switches. Its internal
+    // size map is keyed by turn id, so discard measurements owned by the old
+    // transcript instead of retaining them across the inactive-chat LRU.
+    turnVirtualizer.measure();
+  }, [conversationId, turnVirtualizer]);
   const liveScrollSignature = useMemo(() => {
     if (!shouldShowMessages || timelineMessages.length === 0) return "empty";
     const last = timelineMessages[timelineMessages.length - 1];
@@ -272,7 +336,7 @@ export const MessageList = () => {
         data-testid="message-list-scroll"
         className={`message-list-scroll chat-scrollbar-auto-hide${isScrollbarActive ? " is-scrolling" : ""} flex-1 min-h-0 overflow-y-auto flex flex-col transition-opacity duration-[120ms] ease-out`}
         role="log"
-        aria-label="Conversation history"
+        aria-label="会话历史"
         tabIndex={0}
         style={{
           flex: 1,
@@ -289,6 +353,7 @@ export const MessageList = () => {
         <div
           ref={contentRef}
           className="message-list-content flex flex-col"
+          data-layout-mode="code"
           style={{
             gap: "var(--space-turn-gap)",
             minHeight: "100%",
@@ -315,7 +380,39 @@ export const MessageList = () => {
                 Show earlier messages ({hiddenTurnCount})
               </button>
             )}
-            {turns.map((turn, i) => {
+            {shouldVirtualize ? (
+              <div
+                ref={virtualListRef}
+                data-testid="virtual-turn-list"
+                style={{
+                  flex: "0 0 auto",
+                  height: turnVirtualizer.getTotalSize(),
+                  position: "relative",
+                  width: "100%",
+                }}
+              >
+                {turnVirtualizer.getVirtualItems().map((virtualRow) => {
+                  const turn = historicalTurns[virtualRow.index];
+                  if (!turn) return null;
+                  return (
+                    <div
+                      key={turn.id}
+                      ref={turnVirtualizer.measureElement}
+                      data-index={virtualRow.index}
+                      style={{
+                        left: 0,
+                        position: "absolute",
+                        top: 0,
+                        transform: `translateY(${virtualRow.start - virtualScrollMargin}px)`,
+                        width: "100%",
+                      }}
+                    >
+                      <ChatTurn turn={turn} />
+                    </div>
+                  );
+                })}
+              </div>
+            ) : historicalTurns.map((turn, i) => {
               // Aggressive content-visibility optimization:
               // - Last 5 turns: always visible (active conversation)
               // - Earlier turns: use content-visibility auto for lazy rendering
@@ -337,10 +434,22 @@ export const MessageList = () => {
                     containIntrinsicSize: isVeryOld ? "auto 200px" : "auto 120px",
                   }}
                 >
-                <ChatTurn turn={turn} wide={appMode === "code"} />
+                <ChatTurn turn={turn} />
                 </div>
               );
             })}
+            {tailTurn && (
+              <div
+                className={liveTurn ? "anim-message-appear" : undefined}
+                data-testid={liveTurn ? "streaming-turn-tail" : "latest-turn-tail"}
+                style={{ flex: "0 0 auto" }}
+              >
+                <ChatTurn
+                  turn={tailTurn}
+                  liveGitChanges={liveTurn ? liveGitChanges : undefined}
+                />
+              </div>
+            )}
             </>
           )}
         </div>
@@ -384,7 +493,7 @@ const EmptyState = () => {
           <div className="workbench-empty-mark" aria-hidden="true">
             <BrandMark size={22} />
           </div>
-          <h1 className="workbench-empty-title">What do you want to build?</h1>
+          <h1 className="workbench-empty-title">我们应该在 MiniCode 中构建什么？</h1>
         </div>
       </section>
     </div>

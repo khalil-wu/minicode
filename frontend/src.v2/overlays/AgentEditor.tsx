@@ -131,11 +131,11 @@ export const AgentEditor = () => {
     border: "1px solid var(--border-subtle)",
     background: "var(--surface-base)",
     color: "var(--text-primary)",
-    fontSize: 13,
+    fontSize: "var(--text-chrome)",
     boxSizing: "border-box",
   };
   const labelStyle: React.CSSProperties = {
-    fontSize: 12,
+    fontSize: "var(--text-xxs)",
     color: "var(--text-secondary)",
     marginBottom: 4,
     display: "block",
@@ -233,15 +233,15 @@ export const AgentEditor = () => {
                 background: "transparent",
                 color: "var(--text-primary)",
                 cursor: "pointer",
-                fontSize: 13,
+                fontSize: "var(--text-chrome)",
               }}
             >
               <Plus size={14} /> New agent
             </button>
             <div style={{ overflowY: "auto", flex: 1, padding: "0 10px 10px" }}>
-              {loading && <div style={{ color: "var(--text-muted)", fontSize: 12, padding: 8 }}>Loading…</div>}
+              {loading && <div style={{ color: "var(--text-muted)", fontSize: "var(--text-xxs)", padding: 8 }}>Loading…</div>}
               {!loading && agents.length === 0 && (
-                <div style={{ color: "var(--text-muted)", fontSize: 12, padding: 8 }}>No custom agents</div>
+                <div style={{ color: "var(--text-muted)", fontSize: "var(--text-xxs)", padding: 8 }}>No custom agents</div>
               )}
               {agents.map((a) => (
                 <div
@@ -261,7 +261,7 @@ export const AgentEditor = () => {
                   <div style={{ minWidth: 0 }}>
                     <div
                       style={{
-                        fontSize: 13,
+                        fontSize: "var(--text-chrome)",
                         color: "var(--text-primary)",
                         overflow: "hidden",
                         textOverflow: "ellipsis",
@@ -273,7 +273,7 @@ export const AgentEditor = () => {
                     {a.description && (
                       <div
                         style={{
-                          fontSize: 11,
+                          fontSize: "var(--text-2xs)",
                           color: "var(--text-muted)",
                           overflow: "hidden",
                           textOverflow: "ellipsis",
@@ -294,7 +294,7 @@ export const AgentEditor = () => {
                     className="mc-icon-button mc-icon-button-compact mc-icon-button-danger"
                     style={{ flexShrink: 0 }}
                   >
-                    <Trash2 size={13} />
+                    <Trash2 size={14} />
                   </button>
                 </div>
               ))}
@@ -330,7 +330,7 @@ export const AgentEditor = () => {
                   disabled
                   aria-describedby="agent-model-help"
                 />
-                <div id="agent-model-help" style={{ color: "var(--text-muted)", fontSize: 11, marginTop: 5 }}>
+                <div id="agent-model-help" style={{ color: "var(--text-muted)", fontSize: "var(--text-2xs)", marginTop: 5 }}>
                   Per-agent model overrides are not active yet. This agent uses the current session model.
                 </div>
               </div>
@@ -384,7 +384,7 @@ export const AgentEditor = () => {
                   background: "var(--text-primary)",
                   color: "var(--surface-base)",
                   cursor: saving ? "default" : "pointer",
-                  fontSize: 13,
+                  fontSize: "var(--text-chrome)",
                   fontWeight: 600,
                   opacity: saving ? 0.6 : 1,
                 }}

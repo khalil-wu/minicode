@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import shutil
 from typing import Any
 
 from backend.agent.message import AgentEvent
@@ -63,6 +64,64 @@ class IsolatedWorktreeCreationResult:
     worktree_path: str = ""
     error_event: AgentEvent | None = None
     notice_event: AgentEvent | None = None
+
+
+def copy_worktree_includes(source_root: Path, worktree_root: Path) -> tuple[list[str], list[str]]:
+    """Copy explicitly allowlisted ignored runtime files into a new worktree.
+
+    ``.worktreeinclude`` is intentionally opt-in.  Entries must remain under
+    the repository, symbolic links are never followed, and existing targets
+    are never overwritten.  This lets projects bring across local `.env`
+    templates or generated config without turning ignored files into an
+    implicit, unsafe bulk copy.
+    """
+
+    include_file = source_root / ".worktreeinclude"
+    if not include_file.is_file() or include_file.is_symlink():
+        return [], []
+    copied: list[str] = []
+    skipped: list[str] = []
+    try:
+        entries = include_file.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return [], [".worktreeinclude (unreadable)"]
+
+    for line in entries:
+        value = line.strip().replace("\\", "/")
+        if not value or value.startswith("#"):
+            continue
+        relative = Path(value)
+        if relative.is_absolute() or ".." in relative.parts:
+            skipped.append(value)
+            continue
+        source = (source_root / relative).resolve()
+        destination = (worktree_root / relative).resolve()
+        try:
+            source.relative_to(source_root.resolve())
+            destination.relative_to(worktree_root.resolve())
+        except ValueError:
+            skipped.append(value)
+            continue
+        if not source.exists() or source.is_symlink() or destination.exists():
+            skipped.append(value)
+            continue
+        try:
+            if source.is_dir():
+                shutil.copytree(source, destination, symlinks=True, ignore_dangling_symlinks=True)
+                if any(path.is_symlink() for path in destination.rglob("*")):
+                    shutil.rmtree(destination)
+                    skipped.append(value)
+                    continue
+            elif source.is_file():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination, follow_symlinks=False)
+            else:
+                skipped.append(value)
+                continue
+            copied.append(value)
+        except OSError:
+            skipped.append(value)
+    return copied, skipped
 
 
 def parse_conversation_rename_request(data: dict[str, Any]) -> ConversationRenameRequest:
@@ -272,6 +331,13 @@ def create_isolated_worktree_binding(
             error_event=AgentEvent.error("Failed to create isolated Git worktree", recoverable=True),
         )
 
+    copied, skipped = copy_worktree_includes(base_root, worktree_path)
+    include_note = ""
+    if copied:
+        include_note = f" Copied {len(copied)} managed local file(s) from .worktreeinclude."
+    if skipped:
+        include_note += f" Skipped {len(skipped)} unsafe or existing include entry(s)."
+
     return IsolatedWorktreeCreationResult(
         created=True,
         conversation_id=conversation_id,
@@ -284,6 +350,7 @@ def create_isolated_worktree_binding(
                 "content": (
                     "Created an isolated workspace for this session. "
                     "Edits in this session are separated from your main checkout until you review or merge them."
+                    + include_note
                 )
             },
         ),

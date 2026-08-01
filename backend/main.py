@@ -9,7 +9,6 @@ Startup initialisation:
   - MCP Server manager (loads from .mcp.json and starts)
   - Skills discovery and manager
   - File memory system
-  - Passive RAG pipeline for uploaded/document retrieval
 """
 
 from __future__ import annotations
@@ -17,8 +16,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
+import signal
 from contextlib import asynccontextmanager
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import FastAPI, Query, Request, WebSocket
@@ -36,9 +38,12 @@ from backend.workspace import create_workspace_router
 
 # ── Decomposed sub-modules ──
 from backend.api.auth import (
+    _is_plugin_asset_token_authorized,
+    _is_skill_asset_token_authorized,
     _is_workspace_raw_token_authorized,
     _is_runtime_authorized,
     _is_websocket_authorized,
+    _runtime_token_configured,
     _websocket_accept_subprotocol,
 )
 from backend.api.tool_registry import _build_tool_registry as _api_build_tool_registry
@@ -62,7 +67,6 @@ _bootstrap: AppBootstrap | None = None
 
 def _build_tool_registry(
     artifact_store: ArtifactStore,
-    vector_memory: Any = None,
     *,
     llm_provider: Any | None = None,
     mcp_manager: Any | None = None,
@@ -84,7 +88,6 @@ def _build_tool_registry(
         _state.bootstrap = _bootstrap
     return _api_build_tool_registry(
         artifact_store,
-        vector_memory,
         llm_provider=llm_provider,
         mcp_manager=mcp_manager,
     )
@@ -164,8 +167,16 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await _state.ws_manager.shutdown(reason="application_shutdown")
         if _state.bootstrap is not None:
             await _state.bootstrap.shutdown()
+        # The default AgentRuntime owns a process-scoped SQLite lease and a
+        # heartbeat thread. Relinquish both only after all sessions and
+        # background services have stopped, so a replacement process can
+        # recover immediately instead of waiting for lease expiry.
+        from backend.agent.runtime import default_runtime
+
+        default_runtime().close(release_lease=True)
         _bootstrap = None
         logger.info("MiniCode Backend shutdown complete")
 
@@ -176,6 +187,18 @@ app = FastAPI(
     version=__version__,
     lifespan=lifespan,
 )
+
+
+@app.post("/api/runtime/shutdown")
+async def shutdown_runtime(request: Request) -> dict[str, bool]:
+    """Ask the local sidecar to enter Uvicorn's normal lifespan shutdown."""
+    if not _is_runtime_authorized(request):
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    loop = asyncio.get_running_loop()
+    loop.call_later(0.2, lambda: signal.raise_signal(signal.SIGINT))
+    return {"accepted": True}
 
 
 # ── CORS configuration ──
@@ -189,7 +212,9 @@ def _build_cors_origins() -> list[str]:
     origins = _configured_cors_origins()
     runtime_frontend = os.environ.get("MINICODE_FRONTEND_URL") or os.environ.get("VITE_DEV_FRONTEND_ORIGIN")
     if runtime_frontend:
-        origins.append(runtime_frontend.strip())
+        parsed = urlsplit(runtime_frontend.strip())
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            origins.append(f"{parsed.scheme}://{parsed.netloc}")
     if os.environ.get("MINICODE_RUNTIME_TOKEN"):
         # Electron's packaged file:// renderer sends Origin: null for
         # cross-origin backend fetches. The runtime token remains the auth gate.
@@ -218,17 +243,55 @@ def _build_cors_origin_regex() -> str | None:
     return r"https?://(localhost|127\.0\.0\.1):(5[1-2][0-9]{2}|80[0-9]{2})"
 
 
+def _websocket_origin_allowed(websocket: WebSocket) -> bool:
+    """Validate the WebSocket handshake Origin against the CORS allowlist.
+
+    Browsers do NOT apply the Same-Origin Policy or CORS preflight to the
+    WebSocket handshake, and CORSMiddleware only governs HTTP. Without this,
+    in tokenless mode (loopback trusted) any web page the user visits could open
+    ws://127.0.0.1/ws and drive the full agent — Cross-Site WebSocket Hijacking.
+    We reuse the exact same allowlist HTTP fetches trust (no new config): the
+    built origin list + the dev regex. A missing Origin (non-browser client:
+    Electron file:// sends "null", native tools send none) is allowed — those
+    are not the CSWSH vector and remain gated by the token/host auth above.
+    """
+    origin = websocket.headers.get("origin")
+    if origin is None:
+        return True  # non-browser client; token/host auth is the gate
+    origin = origin.strip()
+    if not origin or origin == "null":
+        # Opaque browser origins are indistinguishable from a hostile local web
+        # page. Electron may use them only when the per-launch token is active.
+        return _runtime_token_configured() and _is_websocket_authorized(websocket)
+    if origin == "file://":
+        # Chromium uses this Origin for the unpackaged Electron renderer on
+        # Windows. Keep it behind the same runtime-token check as packaged
+        # Electron instead of rejecting an otherwise authenticated desktop.
+        return _is_websocket_authorized(websocket)
+    allowed = _build_cors_origins()
+    if origin in allowed:
+        return True
+    regex = _build_cors_origin_regex()
+    if regex is not None and re.fullmatch(regex, origin):
+        return True
+    return False
+
+
 # ── Middleware ──
 
 @app.middleware("http")
 async def _api_v1_path_alias(request: Request, call_next):
     """Rewrite /api/v1/* -> /api/* so v1 callers reach the same handlers."""
     path = request.scope.get("path", "")
-    is_workspace_raw_authorized = _is_workspace_raw_token_authorized(request)
+    is_embedded_asset_authorized = (
+        _is_workspace_raw_token_authorized(request)
+        or _is_skill_asset_token_authorized(request)
+        or _is_plugin_asset_token_authorized(request)
+    )
     if (
         request.method != "OPTIONS"
         and path.startswith("/api/")
-        and not is_workspace_raw_authorized
+        and not is_embedded_asset_authorized
         and not _is_runtime_authorized(request)
     ):
         return Response("Unauthorized", status_code=401)
@@ -394,7 +457,7 @@ async def update_ui_preferences(
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     """WebSocket chat endpoint."""
-    if not _is_websocket_authorized(websocket):
+    if not _is_websocket_authorized(websocket) or not _websocket_origin_allowed(websocket):
         await websocket.accept(subprotocol=_websocket_accept_subprotocol(websocket))
         await websocket.close(code=1008)
         return
@@ -426,9 +489,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         config=config,
         skill_manager=_state.bootstrap.skill_manager,
         skill_executor=_state.bootstrap.skill_executor,
-        rag_pipeline=_state.bootstrap.rag_pipeline,
-        memory_manager=_state.bootstrap.file_memory,
-        vector_memory=None,
+        memory_manager=_state.bootstrap.memory_manager,
     )
 
     try:

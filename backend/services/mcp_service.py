@@ -5,7 +5,7 @@ from typing import Any, Awaitable, Callable
 
 from backend.hooks.runtime import run_config_change_hook
 from backend.mcp import config_file as config_file_mod
-from backend.mcp.manager import MCP_CONFIG_FILE, MCPServerConfig
+from backend.mcp.manager import MCP_CONFIG_FILE, MCPServerConfig, validate_mcp_server_config
 from backend.mcp.marketplace import get_marketplace_connectors
 
 ConfigChangeHook = Callable[..., Awaitable[Any]]
@@ -34,6 +34,7 @@ async def add_mcp_server(
 ) -> list[dict[str, Any]]:
     manager = require_mcp_manager(manager)
     config = _manual_config_from_payload(data)
+    _validate_config_for_service(config)
     await _upsert_mcp_config(config.name, _server_entry_from_config(config), config_change_hook=config_change_hook)
     await manager.start_server(config)
     return list(manager.get_all_status())
@@ -63,8 +64,15 @@ async def restart_mcp_server(manager: Any | None, name: str) -> list[dict[str, A
     return list(manager.get_all_status())
 
 
+async def login_mcp_server(manager: Any | None, name: str) -> list[dict[str, Any]]:
+    manager = require_mcp_manager(manager)
+    server_name = _required_name(name, "Server name is required")
+    await manager.oauth_login(server_name)
+    return list(manager.get_all_status())
+
+
 def list_marketplace_connectors(manager: Any | None = None) -> list[dict[str, Any]]:
-    return get_marketplace_connectors(sorted(_installed_connector_names(manager)))
+    return get_marketplace_connectors(sorted(installed_connector_names(manager)))
 
 
 async def install_marketplace_connector(
@@ -80,6 +88,7 @@ async def install_marketplace_connector(
         raise MCPServiceError(f"Connector '{connector_name}' not found in marketplace")
 
     config = _marketplace_config_from_template(template)
+    _validate_config_for_service(config)
     await _upsert_mcp_config(config.name, _server_entry_from_template(config, template), config_change_hook=config_change_hook)
 
     if config.auto_start:
@@ -117,6 +126,13 @@ def _manual_config_from_payload(data: dict[str, Any]) -> MCPServerConfig:
         url=str(data.get("url", "")).strip() or None,
         source="user",
     )
+
+
+def _validate_config_for_service(config: MCPServerConfig) -> None:
+    try:
+        validate_mcp_server_config(config)
+    except ValueError as exc:
+        raise MCPServiceError(f"Unsafe MCP server configuration: {exc}") from exc
 
 
 def _marketplace_config_from_template(template: dict[str, Any]) -> MCPServerConfig:
@@ -214,7 +230,7 @@ async def _write_config_data(
     await config_change_hook(source="mcp", file_path=str(MCP_CONFIG_FILE))
 
 
-def _installed_connector_names(manager: Any | None) -> set[str]:
+def installed_connector_names(manager: Any | None) -> set[str]:
     installed_names: set[str] = set()
     try:
         config = config_file_mod.read_mcp_config()

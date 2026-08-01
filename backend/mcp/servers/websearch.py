@@ -9,19 +9,13 @@ websearch MCP Server（DESIGN.md §六.2）。
   并获取网页内容，用于回答需要实时信息的问题。
 
 Tools:
-  search(query, num_results=5) → 搜索摘要
-    返回 title + url + 1 行摘要，总量 ≤ 300 tokens
-    Token-efficient: 不返回全文，只给摘要和引用
+  search(query) → 搜索摘要
+    返回 title + url + 摘要和引用
 
   fetch_page(url) → 页面正文
-    使用 trafilatura 提取正文 Markdown
-    返回标题 + 前 500 tokens 正文
-    完整内容可通过后续工具读取
+    使用 trafilatura 提取正文 Markdown；结果统一遵循 Pi 工具输出契约
 
-Token-efficient 设计原则（DESIGN.md §14.2 ACI）：
-  - 默认返回摘要 + 引用链接
-  - 不灌全文到 context
-  - Agent 需要详情时用 fetch_page 按需获取
+输出大小由共享的 Pi 工具结果契约统一处理；此服务器不维护第二套字符阈值。
 
 运行方式：python -m backend.mcp.servers.websearch
 """
@@ -31,16 +25,24 @@ from __future__ import annotations
 import logging
 import sys
 
+from backend.tools.base import truncate_tool_result
+
 logger = logging.getLogger(__name__)
+
+
+class WebSearchProviderError(RuntimeError):
+    """A provider/dependency failure that MCP must report as a tool error."""
 
 # ── MCP Server 框架 ────────────────────────────────────────
 # 使用 FastMCP 构建 Server（pip install mcp[cli]）
 
 try:
     from mcp.server.fastmcp import FastMCP
+    from mcp.types import ToolAnnotations
     HAS_MCP = True
 except ImportError:
     HAS_MCP = False
+    ToolAnnotations = None  # type: ignore[assignment,misc]
 
 if HAS_MCP:
     mcp = FastMCP(
@@ -56,7 +58,7 @@ else:
 
 # ── 搜索引擎封装 ────────────────────────────────────────────
 
-def _search_duckduckgo(query: str, num_results: int = 5) -> list[dict[str, str]]:
+def _search_duckduckgo(query: str, num_results: int | None = None) -> list[dict[str, str]]:
     """
     使用 DuckDuckGo 搜索（无需 API Key）。
 
@@ -68,22 +70,25 @@ def _search_duckduckgo(query: str, num_results: int = 5) -> list[dict[str, str]]
     except ImportError:
         try:
             from duckduckgo_search import DDGS
-        except ImportError:
-            return [{"title": "错误", "url": "", "snippet": "需要安装: pip install ddgs"}]
+        except ImportError as exc:
+            raise WebSearchProviderError(
+                "Web search provider is unavailable; install the 'search' dependencies."
+            ) from exc
 
     try:
         results = []
         with DDGS() as ddgs:
-            for r in ddgs.text(query, max_results=num_results):
+            kwargs = {} if num_results is None else {"max_results": num_results}
+            for r in ddgs.text(query, **kwargs):
                 results.append({
                     "title": r.get("title", ""),
                     "url": r.get("href", ""),
-                    "snippet": r.get("body", "")[:120],  # 限制摘要长度
+                    "snippet": r.get("body", ""),
                 })
         return results
     except Exception as exc:
         logger.error("DuckDuckGo 搜索失败: %s", exc)
-        return [{"title": "搜索失败", "url": "", "snippet": str(exc)[:100]}]
+        raise WebSearchProviderError(f"Web search provider failed: {exc}") from exc
 
 
 def _fetch_and_extract(url: str) -> dict[str, str]:
@@ -98,6 +103,18 @@ def _fetch_and_extract(url: str) -> dict[str, str]:
     """
     import urllib.request
     import urllib.error
+
+    # SSRF guard: block loopback / private / link-local / cloud-metadata targets
+    # before fetching, mirroring the native web_fetch tool (assess_network_url).
+    from backend.permissions.network import assess_network_url
+
+    assessment = assess_network_url(url)
+    if not assessment.allowed:
+        return {
+            "title": url,
+            "content": f"获取失败: {assessment.reason or 'URL 目标被网络策略拒绝'}",
+            "word_count": "0",
+        }
 
     # 尝试 trafilatura
     try:
@@ -137,7 +154,7 @@ def _fetch_and_extract(url: str) -> dict[str, str]:
             url,
             headers={"User-Agent": "MiniCode/0.2.0"},
         )
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req) as resp:
             html = resp.read().decode("utf-8", errors="replace")
 
         # 简单标题提取
@@ -153,7 +170,7 @@ def _fetch_and_extract(url: str) -> dict[str, str]:
 
         return {
             "title": title,
-            "content": text[:5000],  # 限制长度
+            "content": text,
             "word_count": str(len(text)),
         }
 
@@ -169,8 +186,15 @@ def _fetch_and_extract(url: str) -> dict[str, str]:
 
 if HAS_MCP and mcp:
 
-    @mcp.tool()
-    def search(query: str, num_results: int = 5) -> str:
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        )
+    )
+    def search(query: str) -> str:
         """
         搜索互联网。
 
@@ -188,8 +212,7 @@ if HAS_MCP and mcp:
             search("Python MCP protocol")
             search("FastAPI WebSocket", num_results=3)
         """
-        num_results = max(1, min(10, num_results))
-        results = _search_duckduckgo(query, num_results)
+        results = _search_duckduckgo(query)
 
         if not results:
             return "未找到相关结果。"
@@ -197,25 +220,32 @@ if HAS_MCP and mcp:
         # 格式化输出（Token-efficient：只返回摘要）
         lines = [f"搜索 \"{query}\" 的结果：\n"]
         for i, r in enumerate(results, 1):
-            title = r["title"][:60]
+            title = r["title"]
             url = r["url"]
-            snippet = r["snippet"][:100]
+            snippet = r["snippet"]
             lines.append(f"{i}. **{title}**")
             lines.append(f"   {url}")
             lines.append(f"   {snippet}")
             lines.append("")
 
         lines.append(f"共 {len(results)} 条结果。使用 fetch_page(url) 获取详细内容。")
-        return "\n".join(lines)
+        return truncate_tool_result("\n".join(lines))
 
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        )
+    )
     def fetch_page(url: str) -> str:
         """
         获取网页正文内容。
 
         使用智能正文提取（trafilatura），返回 Markdown 格式。
-        默认只返回前 500 tokens，避免 context 爆炸。
+        返回结果由共享工具输出契约统一裁剪并在需要时提升为 artifact。
 
         Args:
             url: 目标网页 URL（以 http:// 或 https:// 开头）
@@ -232,23 +262,14 @@ if HAS_MCP and mcp:
         content = result["content"]
         word_count = result["word_count"]
 
-        # Token-efficient：限制返回长度（~500 tokens ≈ 2000 chars）
-        max_chars = 2000
-        truncated = len(content) > max_chars
-        content_preview = content[:max_chars]
-
         output = [
             f"## {title}",
             f"来源: {url}",
             f"字数: {word_count}",
             "",
-            content_preview,
+            content,
         ]
-
-        if truncated:
-            output.append(f"\n... (已截取前 {max_chars} 字符，共 {word_count} 字)")
-
-        return "\n".join(output)
+        return truncate_tool_result("\n".join(output))
 
 
     @mcp.resource("search://recent")

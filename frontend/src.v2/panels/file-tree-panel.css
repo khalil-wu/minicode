@@ -7,7 +7,7 @@
   width: 250px;
   height: 100%;
   background: var(--bg-sidebar);
-  border-left: 1px solid var(--border-light);
+  border-left: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -18,7 +18,7 @@
   font-weight: 600;
   font-size: var(--text-md);
   color: var(--text-primary);
-  border-bottom: 1px solid var(--border-light);
+  border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-card);
   display: flex;
   align-items: center;

@@ -1,35 +1,23 @@
-"""ListFilesTool (extracted from file_tools.py)."""
+"""Pi-compatible directory listing tool."""
 from __future__ import annotations
 
-import difflib
-import asyncio
-import os
-import tempfile
-import time
-import hashlib
-from collections import OrderedDict
-from dataclasses import dataclass
-from pathlib import Path
-from threading import Lock
 from typing import Any
 
-from backend.artifact.store import ArtifactStore
 from backend.permissions.context import ToolExecutionContext
-from backend.agent.cache_metrics import args_signature, emit_cache_metric
-from backend.security.sensitive_files import is_protected_write_path, is_sensitive_file
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
+from backend.tools.file_tools_common import (
+    LIST_FILES_MAX_ENTRIES,
+    _lookup_list_files_cache_result,
+    _put_list_files_cache,
+)
 from backend.tools.path_resolution import PathTraversalError, _is_bypass_mode, _resolve_path
-from backend.workspace.file_state_cache import get_global_file_cache
 from backend.workspace.path_filters import is_windows_reserved_path
-
-
-from backend.tools.file_tools_common import *  # shared helpers (validation/diff/cache/etc.)
 
 class ListFilesTool(BaseTool):
     """
     List directory contents.
 
-    Returns at most LIST_FILES_MAX_ENTRIES entries.
+    Returns at most ``limit`` entries (defaulting to Pi's 500-entry contract).
     """
 
     name = "list_files"
@@ -37,11 +25,12 @@ class ListFilesTool(BaseTool):
     result_kind = "file"
     activity_kind = "workspaceSearch"
     display_label = "List"
-    panel_hint = "inspector"
     description = (
         "List files and directories with sizes/types. Use to explore project structure; use glob_files for name patterns and grep_files for content."
     )
     permission = PermissionLevel.AUTO
+    workspace_path_fields = ("path", "directory")
+    allow_workspace_root_path = True
 
     def model_description(self) -> str:
         return "List files and directories to inspect project structure."
@@ -53,8 +42,12 @@ class ListFilesTool(BaseTool):
             parameters={
                 "type": "object",
                 "properties": {
-                    "directory": {"type": "string"},
-                    "recursive": {"type": "boolean"},
+                    "path": {"type": "string", "description": "Directory to list (default: workspace root)."},
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Maximum number of entries to return (default 500).",
+                    },
                 },
                 "required": [],
             },
@@ -66,11 +59,17 @@ class ListFilesTool(BaseTool):
         return ToolSpec(
             name=self.name,
             capability="workspace.list",
-            exposure="deferred",
-            default_args={"directory": "."},
-            accepted_resource_types=("workspace_file", "workspace_directory"),
-            empty_args_policy="repair_or_block",
+            exposure="core",
         )
+
+    def streamed_input_preview(self, args: dict[str, Any]) -> dict[str, Any]:
+        preview: dict[str, Any] = {}
+        if isinstance(args.get("path"), str):
+            preview["path"] = args["path"]
+        limit = args.get("limit")
+        if isinstance(limit, int) and not isinstance(limit, bool):
+            preview["limit"] = limit
+        return preview
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -79,13 +78,14 @@ class ListFilesTool(BaseTool):
             parameters={
                 "type": "object",
                 "properties": {
-                    "directory": {
+                    "path": {
                         "type": "string",
-                        "description": "Absolute or workspace-relative directory path.",
+                        "description": "Directory to list; defaults to the workspace root.",
                     },
-                    "recursive": {
-                        "type": "boolean",
-                        "description": "List recursively. Default false.",
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Maximum number of entries to return. Default 500.",
                     },
                 },
                 "required": [],
@@ -93,11 +93,26 @@ class ListFilesTool(BaseTool):
         )
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
-        directory = args.get("directory", ".")
+        directory = args.get("path") or args.get("directory", ".")
         recursive = args.get("recursive", False)
+        raw_limit = args.get("limit")
+        if raw_limit is None:
+            limit = LIST_FILES_MAX_ENTRIES
+        else:
+            try:
+                limit = int(raw_limit)
+            except (TypeError, ValueError):
+                return self._error_result("limit must be a positive integer")
+            if limit < 1:
+                return self._error_result("limit must be a positive integer")
 
         try:
-            path = _resolve_path(directory, context, allow_workspace_escape=_is_bypass_mode(context))
+            path = _resolve_path(
+                directory,
+                context,
+                allow_workspace_escape=_is_bypass_mode(context),
+                allow_declared_read_root=True,
+            )
         except PathTraversalError as exc:
             return self._error_result(str(exc))
 
@@ -106,63 +121,75 @@ class ListFilesTool(BaseTool):
         if not path.is_dir():
             return self._error_result(f"Not a directory: {directory}")
 
-        cached_result, stale_cache = _lookup_list_files_cache_result(path, recursive)
-        signature = args_signature({"directory": str(path), "recursive": bool(recursive)})
-        if cached_result is not None:
-            await emit_cache_metric(
-                context,
-                cache_layer="list_files.result",
-                tool_name=self.name,
-                args_signature_value=signature,
-                hit=True,
-                payload_size_bytes=len(cached_result.encode("utf-8")),
-            )
-            return self._success_result(cached_result)
+        cached_result, cache_hit = _lookup_list_files_cache_result(
+            path,
+            bool(recursive),
+            limit=limit,
+        )
+        if cache_hit:
+            return self._success_result(cached_result or "")
 
         entries: list[str] = []
+        dependencies: set[Any] = {path}
+        entry_limit_reached = False
         try:
             if recursive:
-                for item in sorted(path.rglob("*")):
-                    # Skip hidden files and __pycache__.
-                    parts = item.relative_to(path).parts
-                    if any(p.startswith(".") or p == "__pycache__" for p in parts) or is_windows_reserved_path(item.relative_to(path)):
+                candidates = sorted(
+                    path.rglob("*"),
+                    key=lambda item: item.relative_to(path).as_posix().lower(),
+                )
+                for item in candidates:
+                    try:
+                        if item.is_dir():
+                            dependencies.add(item)
+                    except OSError:
                         continue
+                for item in candidates:
                     rel = item.relative_to(path)
-                    if item.is_dir():
-                        entries.append(f"  {rel}/")
-                    else:
-                        size = item.stat().st_size
-                        entries.append(f"  {rel}  ({_format_size(size)})")
-                    if len(entries) >= LIST_FILES_MAX_ENTRIES:
-                        break
-            else:
-                for item in sorted(path.iterdir()):
-                    if item.name.startswith(".") or item.name == "__pycache__" or is_windows_reserved_path(item.name):
+                    if is_windows_reserved_path(rel):
                         continue
-                    if item.is_dir():
-                        entries.append(f"  {item.name}/")
-                    else:
-                        size = item.stat().st_size
-                        entries.append(f"  {item.name}  ({_format_size(size)})")
-                    if len(entries) >= LIST_FILES_MAX_ENTRIES:
+                    if len(entries) >= limit:
+                        entry_limit_reached = True
                         break
-        except PermissionError:
+                    try:
+                        suffix = "/" if item.is_dir() else ""
+                    except OSError:
+                        continue
+                    entries.append(f"{rel.as_posix()}{suffix}")
+            else:
+                for item in sorted(path.iterdir(), key=lambda candidate: candidate.name.lower()):
+                    if is_windows_reserved_path(item.name):
+                        continue
+                    if len(entries) >= limit:
+                        entry_limit_reached = True
+                        break
+                    try:
+                        suffix = "/" if item.is_dir() else ""
+                    except OSError:
+                        continue
+                    entries.append(f"{item.name}{suffix}")
+        except (OSError, PermissionError):
             return self._error_result(f"No permission to access directory: {directory}")
 
-        total = len(entries)
-        header = f"{directory}/ ({total} entries)"
-        if total >= LIST_FILES_MAX_ENTRIES:
-            header += f" [truncated at {LIST_FILES_MAX_ENTRIES} entries]"
+        if not entries:
+            result = "(empty directory)"
+            _put_list_files_cache(
+                path,
+                bool(recursive),
+                result,
+                limit=limit,
+                dependencies=tuple(dependencies),
+            )
+            return self._success_result(result)
 
-        result = header + "\n" + "\n".join(entries)
-        _put_list_files_cache(path, recursive, result)
-        await emit_cache_metric(
-            context,
-            cache_layer="list_files.result",
-            tool_name=self.name,
-            args_signature_value=signature,
-            hit=False,
-            stale=stale_cache,
-            payload_size_bytes=len(result.encode("utf-8")),
+        result = "\n".join(entries)
+        if entry_limit_reached:
+            result += "\n\n[The requested entry limit was reached.]"
+        _put_list_files_cache(
+            path,
+            bool(recursive),
+            result,
+            limit=limit,
+            dependencies=tuple(dependencies),
         )
         return self._success_result(result)

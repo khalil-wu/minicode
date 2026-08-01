@@ -173,6 +173,46 @@
   font-weight: 600;
 }
 
+.md-prose .md-web-link {
+  display: inline-flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 0.3em;
+  color: var(--accent-primary);
+  font-weight: 500;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.md-prose .md-web-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.md-prose .md-web-link:focus-visible {
+  border-radius: 3px;
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
+.md-prose .md-web-link-icon {
+  position: relative;
+  top: 0.12em;
+  box-sizing: content-box;
+  padding: 1px;
+  border-radius: 3px;
+  background: color-mix(in oklch, var(--surface-raised) 82%, var(--border-subtle));
+  box-shadow: 0 0 0 1px color-mix(in oklch, var(--border-subtle) 76%, transparent);
+}
+
+.md-prose .md-web-link-icon > img {
+  filter: drop-shadow(0 0 0.8px rgb(24 24 27 / 0.72));
+}
+
+html[data-theme="dark"] .md-prose .md-web-link-icon > img {
+  filter: drop-shadow(0 0 0.8px rgb(255 255 255 / 0.68));
+}
+
 .md-prose .md-inline-option-list {
   display: inline-flex;
   align-items: baseline;
@@ -390,21 +430,21 @@ html[data-theme="dark"] .md-prose .md-folder-chip {
    12. .tree-node-hover  — file tree row hover state
    Replaces: onMouseEnter/onMouseLeave DOM mutations
    ════════════════════════════════════════════════════════ */
-.tree-node-hover:not([data-selected]) { transition: background 80ms ease; }
+.tree-node-hover:not([data-selected]) { transition: background var(--transition-micro); }
 .tree-node-hover:not([data-selected]):hover { background: var(--surface-hover); }
 
 /* ════════════════════════════════════════════════════════
    13. .session-row-hover  — session list row hover state
    Replaces: onMouseEnter/onMouseLeave DOM mutations
    ════════════════════════════════════════════════════════ */
-.session-row-hover { transition: background 120ms ease; }
+.session-row-hover { transition: background var(--transition-fast); }
 .session-row-hover:hover { background: var(--surface-soft); }
 .session-row-hover[data-active] { background: var(--surface-page); }
 .session-row-actions {
   display: inline-flex;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 120ms ease;
+  transition: opacity var(--transition-fast);
 }
 .session-row-hover:hover .session-row-actions,
 .session-row-hover:focus-within .session-row-actions,
@@ -546,9 +586,9 @@ html[data-theme="dark"] .md-prose .md-folder-chip {
    ════════════════════════════════════════════════════════ */
 .btn-primary,
 .btn-send {
-  transition: filter 120ms ease-out,
-              box-shadow 120ms ease-out,
-              transform 120ms ease-out;
+  transition: filter var(--transition-fast),
+              box-shadow var(--transition-fast),
+              transform var(--transition-fast);
 }
 
 .btn-primary:hover,
@@ -567,7 +607,7 @@ html[data-theme="dark"] .md-prose .md-folder-chip {
    Panel switching transition (Phase 6 UI optimization)
    ════════════════════════════════════════════════════════ */
 .panel-content-wrapper {
-  animation: panel-fade-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  animation: panel-fade-in var(--duration-base) cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 @keyframes panel-fade-in {
@@ -593,7 +633,7 @@ html[data-theme="dark"] .md-prose .md-folder-chip {
     position: absolute;
     z-index: var(--z-sidebar, 10);
     transform: translateX(-100%);
-    transition: transform 0.2s ease;
+    transition: transform var(--transition-normal);
   }
   [data-panel="left"].sidebar-open {
     transform: translateX(0);

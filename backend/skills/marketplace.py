@@ -13,15 +13,21 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 
-USER_SKILLS_DIR = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")) / "skills"
+from backend.mcp.marketplace import get_marketplace_connectors
+
+USER_SKILLS_DIR = Path.home() / ".agents" / "skills"
 
 OPENAI_SKILLS_CONTENTS_URL = "https://api.github.com/repos/openai/skills/contents/skills/.curated?ref=main"
 OPENAI_SKILL_RAW_URL = "https://raw.githubusercontent.com/openai/skills/main/skills/.curated/{name}/SKILL.md"
-MCP_REGISTRY_SERVERS_URL = "https://registry.modelcontextprotocol.io/v0.1/servers?limit=50"
+MCP_REGISTRY_SERVERS_URL = "https://registry.modelcontextprotocol.io/v0.1/servers?limit=10"
 MARKETPLACE_CACHE_TTL_SECONDS = 15 * 60
-OPENAI_SKILLS_SOURCE_TIMEOUT_SECONDS = 1.0
+MARKETPLACE_ERROR_CACHE_TTL_SECONDS = 60
+MARKETPLACE_HTTP_TIMEOUT_SECONDS = 8.0
+MCP_REGISTRY_SOURCE_TIMEOUT_SECONDS = 4.0
+OPENAI_SKILLS_CATALOG_TIMEOUT_SECONDS = 7.0
+OPENAI_SKILLS_SOURCE_TIMEOUT_SECONDS = 5.0
 OPENAI_SKILLS_METADATA_LIMIT = 24
-OPENAI_SKILLS_METADATA_CONCURRENCY = 6
+OPENAI_SKILLS_METADATA_CONCURRENCY = 8
 
 FetchJson = Callable[[str], Awaitable[Any] | Any]
 FetchText = Callable[[str], Awaitable[str] | str]
@@ -98,17 +104,28 @@ async def _maybe_await(value: Awaitable[Any] | Any) -> Any:
 
 
 async def _default_fetch_json(url: str) -> Any:
-    async with httpx.AsyncClient(timeout=1.0, follow_redirects=True) as client:
-        response = await client.get(url, headers={"Accept": "application/vnd.github+json"})
+    headers = {
+        "Accept": "application/vnd.github+json" if "api.github.com" in url else "application/json",
+        "User-Agent": "MiniCode/0.2",
+    }
+    timeout = httpx.Timeout(MARKETPLACE_HTTP_TIMEOUT_SECONDS, connect=4.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        response = await client.get(url, headers=headers)
         response.raise_for_status()
         return response.json()
 
 
 async def _default_fetch_text(url: str) -> str:
-    async with httpx.AsyncClient(timeout=1.0, follow_redirects=True) as client:
-        response = await client.get(url)
+    timeout = httpx.Timeout(MARKETPLACE_HTTP_TIMEOUT_SECONDS, connect=4.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        response = await client.get(url, headers={"User-Agent": "MiniCode/0.2"})
         response.raise_for_status()
         return response.text
+
+
+def _error_message(exc: Exception) -> str:
+    message = str(exc).strip()
+    return message or type(exc).__name__
 
 
 def _utc_now_iso() -> str:
@@ -156,17 +173,10 @@ def _parse_skill_frontmatter(content: str, fallback_name: str) -> dict[str, str]
 
 
 def _render_skill_file(entry: dict[str, Any]) -> str:
-    triggers = ", ".join(str(item) for item in entry.get("triggers", []))
     return (
         "---\n"
         f"name: {entry['name']}\n"
         f"description: {entry['description']}\n"
-        "version: 1.0.0\n"
-        f"triggers: [{triggers}]\n"
-        "conflicts: []\n"
-        "tools_required: [read_file, grep_files, list_files]\n"
-        "mcp_required: []\n"
-        "linked_resources: []\n"
         "---\n\n"
         f"{entry['body'].strip()}\n"
     )
@@ -197,7 +207,12 @@ def _openai_directory_skill_entry(name: str) -> dict[str, Any]:
     }
 
 
-async def _fetch_openai_curated_skills(fetch_json: FetchJson, fetch_text: FetchText) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+async def _fetch_openai_curated_skills(
+    fetch_json: FetchJson,
+    fetch_text: FetchText,
+    *,
+    enrich_metadata: bool = True,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     directory_payload = await _maybe_await(fetch_json(OPENAI_SKILLS_CONTENTS_URL))
     if not isinstance(directory_payload, list):
         raise ValueError("OpenAI Skills directory response was not a list.")
@@ -209,7 +224,10 @@ async def _fetch_openai_curated_skills(fetch_json: FetchJson, fetch_text: FetchT
     ]
     skill_names = [_safe_skill_name(name) for name in skill_names[:80]]
     skills_by_name = {name: _openai_directory_skill_entry(name) for name in skill_names}
-    metadata_names = skill_names[:OPENAI_SKILLS_METADATA_LIMIT]
+    # The default desktop path stays directory-first so the market opens
+    # quickly. Injected loaders (tests or future cached metadata providers)
+    # can still enrich a bounded subset without changing the public contract.
+    metadata_names = skill_names[:OPENAI_SKILLS_METADATA_LIMIT] if enrich_metadata else []
     semaphore = asyncio.Semaphore(OPENAI_SKILLS_METADATA_CONCURRENCY)
 
     async def load_skill(name: str) -> dict[str, Any]:
@@ -270,6 +288,17 @@ def registry_server_to_marketplace_mcp(record: dict[str, Any], installed_names: 
         ),
         None,
     )
+    repository = server.get("repository") if isinstance(server.get("repository"), dict) else {}
+    website_url = str(server.get("websiteUrl") or repository.get("url") or (remote or {}).get("url") or "").strip()
+    icons = server.get("icons") if isinstance(server.get("icons"), list) else []
+    icon_url = next(
+        (
+            str(icon.get("src") or "").strip()
+            for icon in icons
+            if isinstance(icon, dict) and str(icon.get("src") or "").startswith(("https://", "http://"))
+        ),
+        "",
+    )
     config_snippet = (
         {
             "name": provider_name,
@@ -289,6 +318,7 @@ def registry_server_to_marketplace_mcp(record: dict[str, Any], installed_names: 
 
     return {
         "name": name,
+        "providerName": provider_name,
         "title": title,
         "description": description,
         "version": version,
@@ -297,6 +327,13 @@ def registry_server_to_marketplace_mcp(record: dict[str, Any], installed_names: 
         "actionable": config_snippet is not None,
         "setup_mode": "remote" if config_snippet else "manual",
         "config_snippet": config_snippet,
+        "transport": "http" if remote else "manual",
+        "url": str((remote or {}).get("url") or ""),
+        "autoStart": False,
+        "maxRetries": 3,
+        "websiteUrl": website_url,
+        "docsUrl": website_url,
+        "iconUrl": icon_url,
         "tags": ["MCP", "Registry", "Remote" if config_snippet else "Manual"],
         "official": official_status == "active",
     }
@@ -326,21 +363,51 @@ async def _fetch_mcp_registry(fetch_json: FetchJson) -> tuple[list[dict[str, Any
     return mcp_entries, {"source": "live", "ok": True, "count": len(mcp_entries)}
 
 
-def _apply_installed_flags(payload: dict[str, Any], installed_names: set[str]) -> dict[str, Any]:
+def _apply_installed_flags(
+    payload: dict[str, Any],
+    installed_skill_names: set[str],
+    installed_mcp_names: set[str],
+) -> dict[str, Any]:
     result = copy.deepcopy(payload)
     for skill in result.get("skills", []):
         if isinstance(skill, dict):
-            skill["installed"] = str(skill.get("name", "")) in installed_names
+            skill["installed"] = str(skill.get("name", "")) in installed_skill_names
     for entry in result.get("mcp", []):
         if isinstance(entry, dict):
-            provider_name = str(entry.get("config_snippet", {}).get("name", "")) if isinstance(entry.get("config_snippet"), dict) else ""
-            entry["installed"] = str(entry.get("name", "")) in installed_names or provider_name in installed_names
+            provider_name = str(entry.get("providerName") or "")
+            entry["installed"] = str(entry.get("name", "")) in installed_mcp_names or provider_name in installed_mcp_names
     return result
+
+
+def _merge_curated_connectors(
+    registry_entries: list[dict[str, Any]],
+    installed_mcp_names: set[str],
+) -> list[dict[str, Any]]:
+    curated = [
+        {
+            **entry,
+            "source": "curated",
+            "providerName": str(entry.get("name") or ""),
+            "websiteUrl": str(entry.get("docsUrl") or ""),
+            "iconUrl": str(entry.get("iconUrl") or ""),
+        }
+        for entry in get_marketplace_connectors(sorted(installed_mcp_names))
+    ]
+    merged = curated[:]
+    seen = {str(entry.get("providerName") or entry.get("name") or "").lower() for entry in curated}
+    for entry in registry_entries:
+        key = str(entry.get("providerName") or entry.get("name") or "").lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append(entry)
+    return merged
 
 
 async def list_extensions_marketplace(
     installed_names: set[str] | None = None,
     *,
+    installed_mcp_names: set[str] | None = None,
     fetch_json: FetchJson | None = None,
     fetch_text: FetchText | None = None,
     force_refresh: bool = False,
@@ -348,31 +415,47 @@ async def list_extensions_marketplace(
     global _MARKETPLACE_CACHE, _MARKETPLACE_CACHE_EXPIRES_AT
 
     installed_names = installed_names or set()
+    installed_mcp_names = installed_mcp_names or set()
     now = time.monotonic()
     if _MARKETPLACE_CACHE is not None and not force_refresh and now < _MARKETPLACE_CACHE_EXPIRES_AT:
-        return _apply_installed_flags(_MARKETPLACE_CACHE, installed_names)
+        return _apply_installed_flags(_MARKETPLACE_CACHE, installed_names, installed_mcp_names)
 
+    fetch_text_was_injected = fetch_text is not None
     fetch_json = fetch_json or _default_fetch_json
     fetch_text = fetch_text or _default_fetch_text
 
     async def get_skills():
         try:
-            return await _fetch_openai_curated_skills(fetch_json, fetch_text)
+            return await asyncio.wait_for(
+                _fetch_openai_curated_skills(
+                    fetch_json,
+                    fetch_text,
+                    enrich_metadata=fetch_text_was_injected,
+                ),
+                timeout=OPENAI_SKILLS_CATALOG_TIMEOUT_SECONDS,
+            )
         except Exception as exc:
             fb = _fallback_marketplace_skills()
-            return fb, {"source": "fallback", "ok": False, "count": len(fb), "error": str(exc)}
+            return fb, {"source": "fallback", "ok": False, "count": len(fb), "error": _error_message(exc)}
 
     async def get_mcp():
         try:
-            return await _fetch_mcp_registry(fetch_json)
+            return await asyncio.wait_for(
+                _fetch_mcp_registry(fetch_json),
+                timeout=MCP_REGISTRY_SOURCE_TIMEOUT_SECONDS,
+            )
         except Exception as exc:
-            return [], {"source": "fallback", "ok": False, "count": 0, "error": str(exc)}
+            return [], {"source": "fallback", "ok": False, "count": 0, "error": _error_message(exc)}
 
-    (skills, openai_status), (mcp, mcp_status) = await asyncio.gather(get_skills(), get_mcp())
+    # These two public sources frequently share a constrained desktop proxy.
+    # Fetching them in parallel can make both time out; prioritize the Skill
+    # directory, then spend a short bounded window enriching the MCP catalog.
+    skills, openai_status = await get_skills()
+    mcp, mcp_status = await get_mcp()
 
     base_payload = {
         "skills": skills,
-        "mcp": mcp,
+        "mcp": _merge_curated_connectors(mcp, set()),
         "source_status": {
             "openai_skills": openai_status,
             "mcp_registry": mcp_status,
@@ -380,8 +463,10 @@ async def list_extensions_marketplace(
         "generated_at": _utc_now_iso(),
     }
     _MARKETPLACE_CACHE = copy.deepcopy(base_payload)
-    _MARKETPLACE_CACHE_EXPIRES_AT = now + MARKETPLACE_CACHE_TTL_SECONDS
-    return _apply_installed_flags(base_payload, installed_names)
+    all_sources_ok = all(bool(status.get("ok")) for status in base_payload["source_status"].values())
+    cache_ttl = MARKETPLACE_CACHE_TTL_SECONDS if all_sources_ok else MARKETPLACE_ERROR_CACHE_TTL_SECONDS
+    _MARKETPLACE_CACHE_EXPIRES_AT = now + cache_ttl
+    return _apply_installed_flags(base_payload, installed_names, installed_mcp_names)
 
 
 def list_curated_skills(installed_names: set[str] | None = None) -> list[dict[str, Any]]:

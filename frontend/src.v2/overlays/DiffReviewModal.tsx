@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ExternalLink, Code2, ShieldCheck } from "lucide-react";
 import { useAppStore } from "../stores";
-import { getWebSocket } from "../hooks/useWebSocket";
 import { buildApprovalResponseCommand } from "../protocol/prompt-responses";
 import { pendingPromptTargetsConversation } from "../lib/pending-prompts";
 import { MonacoDiffView } from "../components/MonacoDiffView";
 import { guessLanguageFromPath } from "../lib/monaco-colorize";
-import { sendClientCommand } from "../protocol/ws-outbox";
+import { sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { pushToast } from "./ToastContainer";
 
 export const DiffReviewModal = () => {
   const pendingDiffReview = useAppStore((s) => s.pendingDiffReview);
@@ -17,15 +17,16 @@ export const DiffReviewModal = () => {
     : null;
   const containerRef = useFocusTrap(Boolean(visibleDiffReview));
   const [useMonaco, setUseMonaco] = useState(false);
+  const [persistingRule, setPersistingRule] = useState(false);
 
-  const respond = useCallback((accepted: boolean) => {
+  const submitDecision = useCallback((accepted: boolean) => {
     if (!visibleDiffReview) return;
-    const ws = getWebSocket();
-    ws?.send(buildApprovalResponseCommand(
+    const sent = sendClientCommand(buildApprovalResponseCommand(
       visibleDiffReview.requestId,
       accepted ? "approve" : "reject",
       visibleDiffReview.protocol,
     ));
+    if (!sent) return;
     const current = useAppStore.getState().diffReview;
     if (current?.requestId === visibleDiffReview.requestId) {
       useAppStore.getState().setDiffReviewState({
@@ -33,31 +34,58 @@ export const DiffReviewModal = () => {
         status: accepted ? "approved" : "rejected",
       });
     }
-    useAppStore.getState().clearDiffReview();
+    useAppStore.getState().clearDiffReview(visibleDiffReview.requestId);
   }, [visibleDiffReview]);
+
+  const respond = useCallback((accepted: boolean) => {
+    if (persistingRule) return;
+    submitDecision(accepted);
+  }, [persistingRule, submitDecision]);
 
   // "Always allow edits here": persist an Edit(<dir>/**) content rule so future
   // edits under the same directory skip the review, then approve this one.
-  const alwaysAllowHere = useCallback(() => {
+  const alwaysAllowHere = useCallback(async () => {
+    if (persistingRule) return;
     if (!visibleDiffReview?.filePath) {
-      respond(true);
+      submitDecision(true);
       return;
     }
     const normalized = visibleDiffReview.filePath.replace(/\\/g, "/");
     const slash = normalized.lastIndexOf("/");
     const glob = slash >= 0 ? `${normalized.slice(0, slash)}/**` : normalized;
-    sendClientCommand({
-      type: "permissions.content_rule.add",
-      rule: `Edit(${glob})`,
-      deny: false,
-      source: "diff_review.always_allow",
-    });
-    respond(true);
-  }, [visibleDiffReview, respond]);
+    const rule = `Edit(${glob})`;
+    setPersistingRule(true);
+    try {
+      const result = await sendClientCommandAwaitResult({
+        type: "permissions.content_rule.add",
+        rule,
+        deny: false,
+        source: "diff_review.always_allow",
+      }, "permissions.content_rule.add");
+      const failed = ["error", "failed", "warning"].includes(String(result.level || "").toLowerCase());
+      if (failed || result.data?.rule !== rule || result.data?.deny === true) {
+        throw new Error(result.message || "The permission rule was not saved.");
+      }
+      submitDecision(true);
+    } catch (error) {
+      pushToast(
+        error instanceof Error ? error.message : "Failed to save the permission rule.",
+        "error",
+        4200,
+      );
+    } finally {
+      setPersistingRule(false);
+    }
+  }, [persistingRule, visibleDiffReview, submitDecision]);
+
+  useEffect(() => {
+    setPersistingRule(false);
+  }, [visibleDiffReview?.requestId]);
 
   useEffect(() => {
     if (!visibleDiffReview) return;
     const handler = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLElement && e.target.closest("button")) return;
       if (e.key === "Enter" && (e.metaKey || e.ctrlKey || !isTextEditingTarget(e.target))) {
         e.preventDefault();
         respond(true);
@@ -146,7 +174,7 @@ export const DiffReviewModal = () => {
               opacity: useMonaco ? 1 : 0.7,
             }}
           >
-            <Code2 size={13} />
+            <Code2 size={14} />
             Monaco
           </button>
         </div>
@@ -203,23 +231,24 @@ export const DiffReviewModal = () => {
             Enter accepts, Esc rejects
           </span>
           <div className="flex gap-2">
-            <button onClick={openDiffPanel} className="border rounded cursor-pointer inline-flex items-center gap-1.5 py-2 px-3" style={openBtn}>
+            <button disabled={persistingRule} onClick={openDiffPanel} className="border rounded cursor-pointer inline-flex items-center gap-1.5 py-2 px-3" style={openBtn}>
               <ExternalLink size={14} /> Open in Diff
             </button>
-            <button onClick={() => respond(false)} className="border rounded py-2 px-5 cursor-pointer" style={rejectBtn}>
+            <button disabled={persistingRule} onClick={() => respond(false)} className="border rounded py-2 px-5 cursor-pointer" style={rejectBtn}>
               Reject
             </button>
             {visibleDiffReview.filePath && (
               <button
                 onClick={alwaysAllowHere}
+                disabled={persistingRule}
                 title="Approve and don't ask again for edits under this path"
                 className="border rounded py-2 px-3 cursor-pointer inline-flex items-center gap-1.5"
                 style={alwaysBtn}
               >
-                <ShieldCheck size={14} /> Always here
+                <ShieldCheck size={14} /> {persistingRule ? "Saving…" : "Always here"}
               </button>
             )}
-            <button onClick={() => respond(true)} className="border-0 rounded py-2 px-5 font-semibold cursor-pointer" style={acceptBtn}>
+            <button disabled={persistingRule} onClick={() => respond(true)} className="border-0 rounded py-2 px-5 font-semibold cursor-pointer" style={acceptBtn}>
               Accept
             </button>
           </div>

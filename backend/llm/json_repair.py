@@ -51,32 +51,26 @@ def repair_tool_json(raw: str) -> dict | None:
 
 def _try_close_json(raw: str) -> dict | None:
     """尝试通过闭合括号和引号来修复截断的 JSON。"""
-    for trim in range(min(20, len(raw))):
-        candidate = raw if trim == 0 else raw[:-trim]
-        if not candidate.strip():
-            continue
-
-        # 计算未闭合的结构
-        open_quotes = candidate.count('"') % 2
-        open_braces = candidate.count("{") - candidate.count("}")
-        open_brackets = candidate.count("[") - candidate.count("]")
-
-        if open_braces < 0 or open_brackets < 0:
-            continue
-
-        patched = candidate
-        if open_quotes:
-            patched += '"'
-        patched += "]" * open_brackets
-        patched += "}" * open_braces
-
-        # 移除 trailing comma before closing
-        patched = re.sub(r",\s*([}\]])", r"\1", patched)
-
-        try:
-            result = json.loads(patched)
-            return result if isinstance(result, dict) else None
-        except (json.JSONDecodeError, TypeError):
-            continue
+    # Never discard arbitrary trailing bytes to make a call parse.  That turns
+    # `{"path":"safe", ... malicious suffix` into an apparently approved
+    # operation.  Only a lossless structural close of the original bytes is
+    # permitted; execution still rejects every repaired call.
+    candidate = raw
+    open_quotes = candidate.count('"') % 2
+    open_braces = candidate.count("{") - candidate.count("}")
+    open_brackets = candidate.count("[") - candidate.count("]")
+    if open_braces < 0 or open_brackets < 0:
+        return None
+    patched = candidate
+    if open_quotes:
+        patched += '"'
+    patched += "]" * open_brackets
+    patched += "}" * open_braces
+    patched = re.sub(r",\s*([}\]])", r"\1", patched)
+    try:
+        result = json.loads(patched)
+        return result if isinstance(result, dict) else None
+    except (json.JSONDecodeError, TypeError):
+        pass
 
     return None

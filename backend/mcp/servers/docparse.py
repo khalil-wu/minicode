@@ -39,16 +39,19 @@ from typing import Any
 
 from backend.artifact.store import ArtifactStore
 from backend.attachments.store import AttachmentStore
+from backend.tools.base import truncate_tool_result
+from backend.tools.web_tools import WEB_FETCH_MAX_CHARS
 
 logger = logging.getLogger(__name__)
 
 # ── MCP Server 框架 ────────────────────────────────────────
 
 try:
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp import Context, FastMCP
     HAS_MCP = True
 except ImportError:
     HAS_MCP = False
+    Context = Any  # type: ignore[misc,assignment]
 
 if HAS_MCP:
     mcp = FastMCP(
@@ -64,8 +67,30 @@ else:
 
 # ── 文档存储 ────────────────────────────────────────────────
 
-# 已解析文档缓存：{doc_id: {"title": str, "sections": [...], "full_text": str}}
-_parsed_docs: dict[str, dict[str, Any]] = {}
+# Parsed documents are isolated by the trusted turn owner supplied through MCP
+# request metadata. A doc_id alone is not an authorization boundary.
+OwnerScope = tuple[str, str]
+_parsed_docs: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+
+def _owner_from_context(ctx: Any) -> OwnerScope:
+    try:
+        meta = ctx.request_context.meta
+    except (AttributeError, ValueError):
+        meta = None
+    extras = getattr(meta, "model_extra", None) or {}
+    owner = extras.get("minicode.dev/owner")
+    if not isinstance(owner, dict):
+        raise PermissionError("文档工具缺少可信会话上下文")
+    conversation_id = str(owner.get("conversation_id") or "").strip()
+    workspace_root = str(owner.get("workspace_root") or "").strip()
+    if not conversation_id:
+        raise PermissionError("文档工具缺少会话所有者")
+    return conversation_id, workspace_root
+
+
+def _doc_key(owner: OwnerScope, doc_id: str) -> tuple[str, str, str]:
+    return owner[0], owner[1], doc_id
 
 
 def _gen_doc_id(source: str) -> str:
@@ -77,8 +102,12 @@ def _is_parse_error(text: str) -> bool:
     return str(text or "").strip().lower().startswith(("error:", "错误:", "閿欒:"))
 
 
-def _doc_from_attachment_ref(ref: str) -> dict[str, Any] | None:
-    resolved = AttachmentStore().resolve_content(ref)
+def _doc_from_attachment_ref(ref: str, owner: OwnerScope) -> dict[str, Any] | None:
+    resolved = AttachmentStore().resolve_content(
+        ref,
+        conversation_id=owner[0],
+        workspace_root=owner[1],
+    )
     if resolved is None:
         return None
 
@@ -105,9 +134,9 @@ def _doc_from_attachment_ref(ref: str) -> dict[str, Any] | None:
     }
 
 
-def _doc_from_artifact_ref(ref: str) -> dict[str, Any] | None:
+def _doc_from_artifact_ref(ref: str, owner: OwnerScope) -> dict[str, Any] | None:
     store = ArtifactStore()
-    content = store.get(ref)
+    content = store.get(ref, conversation_id=owner[0], workspace_root=owner[1])
     if content is None:
         return None
 
@@ -123,13 +152,13 @@ def _doc_from_artifact_ref(ref: str) -> dict[str, Any] | None:
     }
 
 
-def _store_parsed_doc(source: str, parsed: dict[str, Any]) -> str:
+def _store_parsed_doc(owner: OwnerScope, source: str, parsed: dict[str, Any]) -> str:
     attachment = parsed.get("attachment")
     doc_id = ""
     if isinstance(attachment, dict):
         doc_id = str(attachment.get("doc_id") or "").strip()
     doc_id = doc_id or _gen_doc_id(source)
-    _parsed_docs[doc_id] = {
+    _parsed_docs[_doc_key(owner, doc_id)] = {
         "title": parsed["title"],
         "sections": _split_sections(str(parsed["full_text"])),
         "full_text": parsed["full_text"],
@@ -141,15 +170,29 @@ def _store_parsed_doc(source: str, parsed: dict[str, Any]) -> str:
     return doc_id
 
 
-def _get_or_load_doc(doc_id: str) -> dict[str, Any] | None:
-    doc = _parsed_docs.get(doc_id)
+def _get_or_load_doc(owner: OwnerScope, doc_id: str) -> dict[str, Any] | None:
+    doc = _parsed_docs.get(_doc_key(owner, doc_id))
     if doc is not None:
         return doc
-    parsed = _doc_from_attachment_ref(doc_id) or _doc_from_artifact_ref(doc_id)
+    parsed = _doc_from_attachment_ref(doc_id, owner) or _doc_from_artifact_ref(doc_id, owner)
     if parsed is None:
         return None
-    loaded_doc_id = _store_parsed_doc(doc_id, parsed)
-    return _parsed_docs.get(loaded_doc_id)
+    loaded_doc_id = _store_parsed_doc(owner, doc_id, parsed)
+    return _parsed_docs.get(_doc_key(owner, loaded_doc_id))
+
+
+def _resolve_owner_path(source: str, owner: OwnerScope) -> Path:
+    workspace_root = owner[1]
+    if not workspace_root:
+        raise PermissionError("当前会话没有可读取本地文件的工作区")
+    root = Path(workspace_root).expanduser().resolve()
+    candidate = Path(source).expanduser()
+    resolved = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise PermissionError(f"文件超出当前工作区: {source}") from exc
+    return resolved
 
 
 # ── 解析器 ──────────────────────────────────────────────────
@@ -242,40 +285,65 @@ def _parse_url(url: str) -> dict[str, Any]:
     """解析 URL 内容。"""
     import urllib.request
 
+    # SSRF guard: block loopback / private / link-local / cloud-metadata targets
+    # before any fetch. Mirrors the native web_fetch tool, which routes through
+    # the same assess_network_url. Without this, parse("http://169.254.169.254/…")
+    # reached internal endpoints while web_fetch refused the identical URL.
+    from backend.permissions.network import assess_network_url
+
+    def require_allowed(target: str) -> None:
+        assessment = assess_network_url(target)
+        if not assessment.allowed:
+            raise PermissionError(
+                f"{assessment.reason or 'URL 目标被网络策略拒绝'}: {target}"
+            )
+
+    class PolicyRedirectHandler(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+            require_allowed(newurl)
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    require_allowed(url)
     try:
-        import trafilatura
-        downloaded = trafilatura.fetch_url(url)
-        if downloaded:
+        req = urllib.request.Request(url, headers={"User-Agent": "MiniCode/0.2.0"})
+        opener = urllib.request.build_opener(PolicyRedirectHandler())
+        with opener.open(req, timeout=15) as resp:
+            require_allowed(resp.geturl())
+            html = resp.read(WEB_FETCH_MAX_CHARS + 1)
+        if len(html) > WEB_FETCH_MAX_CHARS:
+            raise ValueError("远程文档超过共享 web_fetch 资源边界")
+        decoded = html.decode("utf-8", errors="replace")
+        try:
+            import trafilatura
+
             text = trafilatura.extract(
-                downloaded,
+                decoded,
                 output_format="markdown",
                 include_links=True,
                 include_tables=True,
             )
-            metadata = trafilatura.bare_extraction(downloaded)
+            metadata = trafilatura.bare_extraction(decoded)
             title = metadata.get("title", url) if metadata else url
-            return {
-                "title": title,
-                "full_text": text or "无法提取正文",
-                "format": "html",
-                "pages": 1,
-            }
-    except ImportError:
-        pass
+            if text:
+                return {
+                    "title": title,
+                    "full_text": text,
+                    "format": "html",
+                    "pages": 1,
+                }
+        except ImportError:
+            pass
 
-    # Fallback
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "MiniCode/0.2.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            html = resp.read().decode("utf-8", errors="replace")
-        # 简单提取
-        title_m = re.search(r"<title>(.*?)</title>", html, re.I | re.S)
+        # Dependency-free fallback for minimal installs.
+        title_m = re.search(r"<title>(.*?)</title>", decoded, re.I | re.S)
         title = title_m.group(1).strip() if title_m else url
-        text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.S | re.I)
+        text = re.sub(r"<script[^>]*>.*?</script>", "", decoded, flags=re.S | re.I)
         text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.S | re.I)
         text = re.sub(r"<[^>]+>", " ", text)
         text = re.sub(r"\s+", " ", text).strip()
-        return {"title": title, "full_text": text[:10000], "format": "html", "pages": 1}
+        return {"title": title, "full_text": text, "format": "html", "pages": 1}
+    except PermissionError:
+        raise
     except Exception as exc:
         return {"title": url, "full_text": f"获取失败: {exc}", "format": "html", "pages": 0}
 
@@ -336,7 +404,7 @@ def _split_sections(text: str) -> list[dict[str, str]]:
 if HAS_MCP and mcp:
 
     @mcp.tool()
-    def parse(source: str) -> str:
+    def parse(source: str, ctx: Context) -> str:
         """
         解析文档，返回结构化概览。
 
@@ -353,28 +421,34 @@ if HAS_MCP and mcp:
             parse("/path/to/paper.pdf")
             parse("https://docs.python.org/3/tutorial/")
         """
+        owner = _owner_from_context(ctx)
         # 判断来源类型
         if source.startswith(("http://", "https://")):
             parsed = _parse_url(source)
-        elif (loaded := _doc_from_attachment_ref(source) or _doc_from_artifact_ref(source)) is not None:
+        elif (
+            loaded := _doc_from_attachment_ref(source, owner)
+            or _doc_from_artifact_ref(source, owner)
+        ) is not None:
             parsed = loaded
-        elif not Path(source).exists():
-            return f"错误: 文件不存在: {source}"
         else:
-            ext = Path(source).suffix.lower()
+            try:
+                resolved_source = _resolve_owner_path(source, owner)
+            except PermissionError as exc:
+                return f"错误: {exc}"
+            if not resolved_source.exists() or not resolved_source.is_file():
+                return f"错误: 文件不存在: {source}"
+            ext = resolved_source.suffix.lower()
             if ext == ".pdf":
-                parsed = _parse_pdf(source)
+                parsed = _parse_pdf(str(resolved_source))
             elif ext in (".docx", ".doc"):
-                parsed = _parse_docx(source)
+                parsed = _parse_docx(str(resolved_source))
             else:
-                parsed = _parse_text(source)
+                parsed = _parse_text(str(resolved_source))
 
         # 分割章节
-        doc_id = _store_parsed_doc(source, parsed)
-        sections = _parsed_docs[doc_id]["sections"]
+        doc_id = _store_parsed_doc(owner, source, parsed)
+        sections = _parsed_docs[_doc_key(owner, doc_id)]["sections"]
 
-        # 生成 doc_id 并缓存
-        doc_id = _gen_doc_id(source)
         # 构建概览输出（Token-efficient）
         word_count = len(parsed["full_text"])
         output = [
@@ -389,8 +463,7 @@ if HAS_MCP and mcp:
         ]
 
         for i, sec in enumerate(sections):
-            preview = sec["content"][:60].replace("\n", " ")
-            output.append(f"  {i}. **{sec['title']}** — {preview}...")
+            output.append(f"  {i}. **{sec['title']}**")
 
         output.append("")
         output.append("使用 `get_section(doc_id, section_index)` 读取具体章节。")
@@ -399,7 +472,7 @@ if HAS_MCP and mcp:
 
 
     @mcp.tool()
-    def get_section(doc_id: str, section_index: int) -> str:
+    def get_section(doc_id: str, section_index: int, ctx: Context) -> str:
         """
         按章节索引读取文档内容。
 
@@ -414,7 +487,8 @@ if HAS_MCP and mcp:
             get_section("doc_a1b2c3d4", 0)   # 读取第一个章节
             get_section("doc_a1b2c3d4", 2)   # 读取第三个章节
         """
-        doc = _get_or_load_doc(doc_id)
+        owner = _owner_from_context(ctx)
+        doc = _get_or_load_doc(owner, doc_id)
         if not doc:
             return f"错误: 文档 '{doc_id}' 不存在。请先使用 parse() 解析文档。"
 
@@ -427,30 +501,22 @@ if HAS_MCP and mcp:
 
         section = sections[section_index]
 
-        # 限制单章节返回长度
         content = section["content"]
-        max_chars = 4000
-        truncated = len(content) > max_chars
-
         output = [
             f"## {section['title']}",
             f"（章节 {section_index}/{len(sections) - 1}，来自 {doc['title']}）",
             "",
-            content[:max_chars],
+            content,
         ]
-
-        if truncated:
-            output.append(f"\n... (已截取前 {max_chars} 字符)")
-
-        return "\n".join(output)
+        return truncate_tool_result("\n".join(output))
 
 
     @mcp.tool()
-    def get_full_text(doc_id: str) -> str:
+    def get_full_text(doc_id: str, ctx: Context) -> str:
         """
         获取文档完整文本。
 
-        警告：大文档会被截断到 8000 字符。用于需要全文搜索的场景。
+        返回结果遵循共享 Pi 工具输出契约；完整内容仍保存在文档句柄中。
 
         Args:
             doc_id: 文档 ID
@@ -458,33 +524,12 @@ if HAS_MCP and mcp:
         Returns:
             文档全文（可能截断）
         """
-        doc = _get_or_load_doc(doc_id)
+        owner = _owner_from_context(ctx)
+        doc = _get_or_load_doc(owner, doc_id)
         if not doc:
             return f"错误: 文档 '{doc_id}' 不存在。"
 
-        text = doc["full_text"]
-        max_chars = 8000
-
-        if len(text) <= max_chars:
-            return text
-
-        return text[:max_chars] + f"\n\n... (已截取前 {max_chars}/{len(text)} 字符)"
-
-
-    @mcp.resource("doc://list")
-    def list_docs() -> str:
-        """列出已解析的文档。"""
-        if not _parsed_docs:
-            return "暂无已解析的文档。"
-
-        lines = ["已解析的文档：\n"]
-        for doc_id, doc in _parsed_docs.items():
-            lines.append(
-                f"- `{doc_id}`: {doc['title']} "
-                f"({doc['format']}, {len(doc['sections'])} 章节)"
-            )
-        return "\n".join(lines)
-
+        return truncate_tool_result(str(doc["full_text"]))
 
 # ── 入口 ────────────────────────────────────────────────────
 

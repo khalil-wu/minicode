@@ -4,7 +4,6 @@ import type { HistoryCellState } from "../../chat/cells/cellTypes";
 import type { AgentLoopTurnProjection } from "../projection/project-turn";
 import { AgentProcessSummary } from "./AgentProcessSummary";
 import { AgentTimeline } from "./AgentTimeline";
-import { ArtifactCards } from "./ArtifactCards";
 import { FinalAnswer } from "./FinalAnswer";
 
 export type RenderAgentCellArgs = {
@@ -31,7 +30,7 @@ export const AgentTurn = memo(function AgentTurn({
     setProcessExpanded(turn.initialProcessExpanded);
   }, [turn.id, turn.initialProcessExpanded]);
 
-  const hasTimelineItems = turn.timelineItems.length > 0;
+  const hasTimelineItems = turn.processCells.length > 0;
   const showProcessStack =
     turn.hasProcessContent &&
     hasTimelineItems &&
@@ -67,7 +66,6 @@ export const AgentTurn = memo(function AgentTurn({
 
           {showProcessStack && (
             <AgentTimeline
-              items={turn.timelineItems}
               cells={turn.processCells}
               renderCell={renderCell}
               streamingIndicator={null}
@@ -91,8 +89,6 @@ export const AgentTurn = memo(function AgentTurn({
           />
         </section>
       )}
-
-      <ArtifactCards cells={turn.artifactCells} />
     </div>
   );
 });

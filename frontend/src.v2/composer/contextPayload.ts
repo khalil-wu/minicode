@@ -1,11 +1,9 @@
-import { fsListTree, fsReadFileInfo, isDesktop } from "../desktop/runtime";
+import { fsListTree, isDesktop } from "../desktop/runtime";
 import { apiBase, authHeaders } from "../protocol/api";
 import { uploadAttachment } from "../protocol/api";
-import { listWorkspaceTree, readWorkspaceFile } from "../protocol/workspace";
-import type { FileContextRef, MessageAttachmentRef, MessageContextRef } from "../stores/types";
+import { listWorkspaceTree } from "../protocol/workspace";
+import type { MessageAttachmentRef, MessageContextRef } from "../stores/types";
 
-const MAX_FILE_CONTEXT_CHARS = 40_000;
-const MAX_FOLDER_ENTRIES = 80;
 const MAX_NATIVE_CONTEXT_ATTACHMENTS = 8;
 const MAX_NATIVE_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_NATIVE_PDF_BYTES = 50 * 1024 * 1024;
@@ -22,29 +20,14 @@ export const buildContextPayload = async (refs: MessageContextRef[]): Promise<st
   return blocks.filter(Boolean).join("\n\n");
 };
 
-export const buildContextFallback = (refs: MessageContextRef[]): string => {
-  const lines: string[] = [];
-  const fileRefs = refs.filter((ref): ref is FileContextRef => ref.kind === "file" || ref.kind === "folder" || ref.kind === "url");
-  const skillRefs = refs.filter((ref) => ref.kind === "skill");
-  if (fileRefs.length > 0) {
-    lines.push("Context references:");
-    lines.push(...fileRefs.map((item) => `- @${item.kind}:${item.path}`));
-  }
-  if (skillRefs.length > 0) {
-    if (lines.length > 0) lines.push("");
-    lines.push("Requested skills:");
-    lines.push(...skillRefs.map((skill) => `- ${skill.name}${skill.description ? `: ${skill.description}` : ""}`));
-  }
-  return lines.join("\n");
-};
-
 export const buildContextNativeAttachments = async (
   refs: MessageContextRef[],
   sessionId?: string,
+  workspaceRoot = "",
 ): Promise<NativeContextAttachments> => {
   if (!sessionId) return emptyNativeContextAttachments();
 
-  const candidates = await collectNativeContextCandidates(refs);
+  const candidates = await collectNativeContextCandidates(refs, workspaceRoot);
   if (candidates.length === 0) return emptyNativeContextAttachments();
 
   const attachments: Record<string, unknown>[] = [];
@@ -68,7 +51,7 @@ export const buildContextNativeAttachments = async (
     }
 
     try {
-      const blob = await fetchWorkspaceBlob(candidate.path);
+      const blob = await fetchWorkspaceBlob(candidate.path, workspaceRoot);
       if (blob.size > limit) {
         notes.push(`Native attachment skipped: ${candidate.path} is ${formatBytes(blob.size)}, above ${formatBytes(limit)}.`);
         continue;
@@ -86,7 +69,6 @@ export const buildContextNativeAttachments = async (
         sizeBytes: Number(result.attachment.size_bytes || blob.size || 0),
         artifactId: String(result.attachment.artifact_id || result.artifact_id || ""),
         docId: String(result.attachment.doc_id || result.doc_id || ""),
-        indexedChunks: Number(result.attachment.indexed_chunks ?? result.indexed_chunks ?? 0),
       });
     } catch {
       notes.push(`Native attachment unavailable: ${candidate.path}`);
@@ -102,63 +84,26 @@ export const buildContextNativeAttachments = async (
 
 const contextBlockForRef = async (ref: MessageContextRef): Promise<string> => {
   try {
-    if (ref.kind === "skill") {
-      return [
-        `Skill requested: ${ref.name}`,
-        ref.description ? `Description: ${ref.description}` : "",
-        ref.sourceLevel ? `Source: ${ref.sourceLevel}` : "",
-      ].filter(Boolean).join("\n");
-    }
+    if (ref.kind === "skill" || ref.kind === "plugin") return "";
     if (ref.kind === "url") {
       return `URL context: ${ref.path}`;
     }
-    if (ref.kind === "folder") {
-      return folderContext(ref.path);
+    if (ref.kind === "browser_annotation") {
+      return [
+        `Browser annotation: ${ref.url}`,
+        ref.selector ? `Target: ${ref.selector}` : "",
+        ref.xPercent != null && ref.yPercent != null
+          ? `Viewport target: ${(ref.xPercent * 100).toFixed(1)}%, ${(ref.yPercent * 100).toFixed(1)}%${ref.widthPercent != null && ref.heightPercent != null ? `; size ${(ref.widthPercent * 100).toFixed(1)}% x ${(ref.heightPercent * 100).toFixed(1)}%` : ""}${ref.viewportWidth && ref.viewportHeight ? ` in ${ref.viewportWidth}x${ref.viewportHeight}` : ""}`
+          : "",
+        `Comment: ${ref.note}`,
+      ].filter(Boolean).join("\n");
     }
-    return fileContext(ref.path);
+    if (ref.kind === "folder") return `Directory reference: ${ref.path}`;
+    return `File reference: ${ref.path}`;
   } catch {
-    if (ref.kind === "skill") return `Skill requested: ${ref.name}`;
+    if (ref.kind === "skill" || ref.kind === "plugin") return "";
     return `Context unavailable: @${ref.kind}:${ref.path}`;
   }
-};
-
-const fileContext = async (pathWithAnchor: string): Promise<string> => {
-  const { path, anchor } = splitAnchor(pathWithAnchor);
-  if (!anchor && isNativeContextPath(path)) {
-    return `Native file: ${path}\nAttached as native model input when supported.`;
-  }
-  const file = isDesktop()
-    ? await fsReadFileInfo(path)
-    : await readWorkspaceFile(path);
-  if (!file?.content) {
-    return `File context unavailable: ${pathWithAnchor}`;
-  }
-  const content = anchor ? sliceAnchoredContent(file.content, anchor) : file.content;
-  const clipped = clipText(content, MAX_FILE_CONTEXT_CHARS);
-  const label = anchor ? `${path}#${anchor}` : path;
-  return `File: ${label}\n\`\`\`\n${clipped}\n\`\`\``;
-};
-
-const folderContext = async (path: string): Promise<string> => {
-  const entries = isDesktop()
-    ? (await fsListTree(path)).map((entry) => ({
-        name: entry.name,
-        path: entry.path,
-        isDirectory: entry.isDirectory,
-      }))
-    : (await listWorkspaceTree(path))?.children?.map((entry) => ({
-        name: entry.name,
-        path: entry.path,
-        isDirectory: entry.is_dir,
-      })) ?? [];
-  if (entries.length === 0) return `Folder context: ${path}\n(no entries found)`;
-  const lines = entries
-    .slice(0, MAX_FOLDER_ENTRIES)
-    .map((entry) => `- ${entry.isDirectory ? "dir " : "file"} ${entry.path || entry.name}`);
-  if (entries.length > MAX_FOLDER_ENTRIES) {
-    lines.push(`- ... ${entries.length - MAX_FOLDER_ENTRIES} more`);
-  }
-  return `Folder: ${path}\n${lines.join("\n")}`;
 };
 
 interface NativeContextCandidate {
@@ -174,7 +119,10 @@ const emptyNativeContextAttachments = (): NativeContextAttachments => ({
   notes: "",
 });
 
-const collectNativeContextCandidates = async (refs: MessageContextRef[]): Promise<NativeContextCandidate[]> => {
+const collectNativeContextCandidates = async (
+  refs: MessageContextRef[],
+  workspaceRoot: string,
+): Promise<NativeContextCandidate[]> => {
   const candidates: NativeContextCandidate[] = [];
   for (const ref of refs) {
     if (ref.kind === "file") {
@@ -189,13 +137,13 @@ const collectNativeContextCandidates = async (refs: MessageContextRef[]): Promis
       continue;
     }
     if (ref.kind === "folder") {
-      candidates.push(...await nativeFolderCandidates(ref.path));
+      candidates.push(...await nativeFolderCandidates(ref.path, workspaceRoot));
     }
   }
   return candidates;
 };
 
-const nativeFolderCandidates = async (path: string): Promise<NativeContextCandidate[]> => {
+const nativeFolderCandidates = async (path: string, workspaceRoot: string): Promise<NativeContextCandidate[]> => {
   const entries = isDesktop()
     ? (await fsListTree(path)).map((entry) => ({
         name: entry.name,
@@ -203,7 +151,7 @@ const nativeFolderCandidates = async (path: string): Promise<NativeContextCandid
         isDirectory: entry.isDirectory,
         sizeBytes: entry.sizeBytes,
       }))
-    : (await listWorkspaceTree(path))?.children?.map((entry) => ({
+    : (await listWorkspaceTree(workspaceRoot, path))?.children?.map((entry) => ({
         name: entry.name,
         path: entry.path,
         isDirectory: entry.is_dir,
@@ -220,8 +168,10 @@ const nativeFolderCandidates = async (path: string): Promise<NativeContextCandid
     }));
 };
 
-const fetchWorkspaceBlob = async (path: string): Promise<Blob> => {
-  const url = `${apiBase()}/api/workspace/raw?path=${encodeURIComponent(path)}`;
+const fetchWorkspaceBlob = async (path: string, workspaceRoot: string): Promise<Blob> => {
+  const params = new URLSearchParams({ path });
+  if (workspaceRoot.trim()) params.set("workspace_root", workspaceRoot.trim());
+  const url = `${apiBase()}/api/workspace/raw?${params.toString()}`;
   const response = await fetch(url, { headers: authHeaders() });
   if (!response.ok) {
     throw new Error(`Workspace raw request failed (${response.status}).`);
@@ -261,17 +211,4 @@ const splitAnchor = (value: string): { path: string; anchor: string } => {
   const index = value.lastIndexOf("#");
   if (index < 0) return { path: value, anchor: "" };
   return { path: value.slice(0, index), anchor: value.slice(index + 1) };
-};
-
-const sliceAnchoredContent = (content: string, anchor: string): string => {
-  const match = anchor.match(/^L?(\d+)(?:-(\d+))?$/i);
-  if (!match) return content;
-  const start = Math.max(1, Number(match[1]));
-  const end = Math.max(start, Number(match[2] ?? match[1]));
-  return content.split(/\r?\n/).slice(start - 1, end).join("\n");
-};
-
-const clipText = (value: string, maxChars: number): string => {
-  if (value.length <= maxChars) return value;
-  return `${value.slice(0, maxChars)}\n\n[truncated ${value.length - maxChars} chars]`;
 };

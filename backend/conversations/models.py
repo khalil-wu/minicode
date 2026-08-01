@@ -104,6 +104,12 @@ class ConversationSummary:
     worktree_path: str = ""
     git_isolated: bool = False
     goal: dict[str, Any] = field(default_factory=dict)
+    parent_conversation_id: str = ""
+    parent_message_index: int | None = None
+    fork_id: str = ""
+    branch_kind: str = ""
+    merged_into_conversation_id: str = ""
+    merged_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -129,6 +135,16 @@ class ConversationSummary:
             worktree_path=str(payload.get("worktree_path") or ""),
             git_isolated=bool(payload.get("git_isolated") or False),
             goal=dict(payload.get("goal") or {}),
+            parent_conversation_id=str(payload.get("parent_conversation_id") or ""),
+            parent_message_index=(
+                int(payload["parent_message_index"])
+                if payload.get("parent_message_index") is not None
+                else None
+            ),
+            fork_id=str(payload.get("fork_id") or ""),
+            branch_kind=str(payload.get("branch_kind") or ""),
+            merged_into_conversation_id=str(payload.get("merged_into_conversation_id") or ""),
+            merged_at=str(payload.get("merged_at") or ""),
         )
 
 
@@ -158,6 +174,12 @@ class ConversationRecord:
     worktree_path: str = ""
     git_isolated: bool = False
     goal: dict[str, Any] = field(default_factory=dict)
+    parent_conversation_id: str = ""
+    parent_message_index: int | None = None
+    fork_id: str = ""
+    branch_kind: str = ""
+    merged_into_conversation_id: str = ""
+    merged_at: str = ""
 
     def to_summary(self) -> ConversationSummary:
         return ConversationSummary(
@@ -177,6 +199,12 @@ class ConversationRecord:
             worktree_path=self.worktree_path,
             git_isolated=self.git_isolated,
             goal=dict(self.goal or {}),
+            parent_conversation_id=self.parent_conversation_id,
+            parent_message_index=self.parent_message_index,
+            fork_id=self.fork_id,
+            branch_kind=self.branch_kind,
+            merged_into_conversation_id=self.merged_into_conversation_id,
+            merged_at=self.merged_at,
         )
 
     def to_meta_dict(self) -> dict[str, Any]:
@@ -221,4 +249,14 @@ class ConversationRecord:
             worktree_path=str(payload.get("worktree_path") or ""),
             git_isolated=bool(payload.get("git_isolated") or False),
             goal=dict(payload.get("goal") or {}),
+            parent_conversation_id=str(payload.get("parent_conversation_id") or ""),
+            parent_message_index=(
+                int(payload["parent_message_index"])
+                if payload.get("parent_message_index") is not None
+                else None
+            ),
+            fork_id=str(payload.get("fork_id") or ""),
+            branch_kind=str(payload.get("branch_kind") or ""),
+            merged_into_conversation_id=str(payload.get("merged_into_conversation_id") or ""),
+            merged_at=str(payload.get("merged_at") or ""),
         )

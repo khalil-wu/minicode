@@ -47,8 +47,15 @@ export function createStreamBuffer(onFlush: FlushFn): StreamBuffer {
 
   const flushNow = () => {
     if (!textBuf) return;
-    onFlush(textBuf, cidBuf, sourceBuf, metadataBuf, messageIdBuf);
+    const buffered = textBuf;
+    const conversationId = cidBuf;
+    const source = sourceBuf;
+    const metadata = metadataBuf;
+    const messageId = messageIdBuf;
+    // Detach the batch before invoking user code. A re-entrant push belongs to
+    // the next batch, and a throwing consumer must not make this batch replay.
     clearBuffer();
+    onFlush(buffered, conversationId, source, metadata, messageId);
   };
 
   const flush = () => {

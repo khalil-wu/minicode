@@ -96,6 +96,10 @@ function startBackendSidecar() {
     resolvedFrontendUrl = "",
     runtimeToken = "",
     stateRoot = "",
+    desktopDir = "",
+    documentsDir = "",
+    downloadsDir = "",
+    codexSandboxExe = "",
   } = config;
 
   const child = spawn(pythonCommand, ["-m", "backend"], {
@@ -112,6 +116,10 @@ function startBackendSidecar() {
       MINICODE_FRONTEND_URL: resolvedFrontendUrl,
       MINICODE_RUNTIME_TOKEN: runtimeToken,
       MINICODE_STATE_ROOT: stateRoot,
+      MINICODE_DESKTOP_DIR: desktopDir,
+      MINICODE_DOCUMENTS_DIR: documentsDir,
+      MINICODE_DOWNLOADS_DIR: downloadsDir,
+      MINICODE_CODEX_SANDBOX_EXE: codexSandboxExe,
       PYTHONPATH: [getAppRoot(), process.env.PYTHONPATH].filter(Boolean).join(require("node:path").delimiter),
     },
     windowsHide: true,
@@ -160,16 +168,51 @@ function startBackendSidecar() {
   });
 }
 
-function stopBackendSidecar() {
+async function stopBackendSidecar() {
   backendStopRequested = true;
   clearBackendRestartTimer();
 
   if (!backendProcess || !backendManagedByApp) return;
 
+  const child = backendProcess;
+  const { resolvedApiBaseUrl = "", runtimeToken = "" } = config;
+  const exited = new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolve();
+      return;
+    }
+    child.once("exit", resolve);
+  });
+
+  const terminateTree = async () => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    if (process.platform === "win32") {
+      await new Promise((resolve) => {
+        spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true })
+          .once("exit", resolve)
+          .once("error", resolve);
+      });
+      return;
+    }
+    child.kill("SIGTERM");
+  };
+
   try {
-    backendProcess.kill();
+    if (resolvedApiBaseUrl) {
+      await fetch(`${resolvedApiBaseUrl}/api/runtime/shutdown`, {
+        method: "POST",
+        headers: runtimeToken ? { "x-minicode-token": runtimeToken } : {},
+        signal: AbortSignal.timeout(2000),
+      });
+    }
+    await Promise.race([
+      exited,
+      sleep(5000),
+    ]);
+    await terminateTree();
   } catch (error) {
     writeStderr(`[backend] failed to stop: ${error.message}\n`);
+    await terminateTree();
   }
 }
 
@@ -185,8 +228,11 @@ async function waitForBackendReady(apiBaseUrl, timeoutMs = 30000) {
     try {
       const response = await fetch(healthUrl);
       if (response.ok) {
-        backendRestartAttempt = 0;
-        return;
+        const payload = await response.json().catch(() => null);
+        if (payload?.ready === true && ["ok", "degraded"].includes(payload.status)) {
+          backendRestartAttempt = 0;
+          return;
+        }
       }
     } catch {
       // Retry until timeout.

@@ -7,6 +7,8 @@ import { ToolCallCard } from "../chat/tool-calls/ToolCallCard";
 import { StreamingCursor } from "../chat/messages/StreamingCursor";
 import { getToolCallsFromMessage } from "../lib/content-blocks";
 import { toBackendPermissionMode } from "../protocol/permissions";
+import { sendConversationDeleteCommand } from "../protocol/ws-outbox";
+import { uniqueMessageId } from "../stores/shared-helpers";
 
 const newSideChatId = (): string =>
   `side-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
@@ -36,8 +38,7 @@ export const SideChatPanel = () => {
       permission_mode: toBackendPermissionMode(useAppStore.getState().permissionMode),
     });
     return () => {
-      const wsClose = getWebSocket();
-      wsClose?.send({
+      void sendConversationDeleteCommand({
         type: "conversation.delete",
         conversation_id: id,
       });
@@ -57,14 +58,18 @@ export const SideChatPanel = () => {
     const inheritedPrefix = thread.messages.length === 0 && thread.inheritedContext
       ? `${thread.inheritedContext}\n\nSide-chat question:\n`
       : "";
+    const assistantMessageId = uniqueMessageId("sa");
+    const userMessageId = uniqueMessageId("su");
     const sent = sendChatMessage({
       displayContent: content,
       backendContent: `${inheritedPrefix}${content}`,
       conversationId: id,
       allowWhileStreaming: false,
       skipLocalAppend: true,
+      assistantMessageId,
+      userMessageId,
     });
-    if (sent) startMessage(id, content);
+    if (sent) startMessage(id, content, { assistantMessageId, userMessageId });
   };
 
   const stop = () => {

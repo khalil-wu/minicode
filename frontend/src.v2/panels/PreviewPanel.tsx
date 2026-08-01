@@ -82,6 +82,7 @@ export const PreviewPanel = () => {
   const previewLaunchConfigs = useAppStore((s) => s.previewLaunchConfigs);
   const previewLaunchProcesses = useAppStore((s) => s.previewLaunchProcesses);
   const previewVerification = useAppStore((s) => s.previewVerification);
+  const conversationId = useAppStore((s) => s.conversationId);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const setLivePreviewUrl = useAppStore((s) => s.setLivePreviewUrl);
 
@@ -124,8 +125,14 @@ export const PreviewPanel = () => {
   }, [livePreviewUrl, previewArtifact]);
 
   useEffect(() => {
+    const state = useAppStore.getState();
+    state.setPreviewServers([]);
+    state.setPreviewLaunchConfigs([]);
+    state.setPreviewLaunchProcesses([]);
+    state.setPreviewVerification(null);
+    if (!conversationId) return;
     getWebSocket()?.send({ type: "preview.launch.config", workspace_root: workingDirectory || undefined });
-  }, [workingDirectory]);
+  }, [conversationId, workingDirectory]);
 
   useEffect(() => {
     if (!expanded) return;
@@ -270,8 +277,8 @@ const ModeBar = ({
       fontSize: "var(--text-xs)",
     }}
   >
-    <ModeTab active={mode === "live"} onClick={() => setMode("live")} icon={<Globe size={12} />} label="App" badge={hasUrl ? "active" : undefined} />
-    <ModeTab active={mode === "artifact"} onClick={() => setMode("artifact")} icon={<FileText size={12} />} label="文件" badge={hasArtifact ? "可查看" : undefined} />
+    <ModeTab active={mode === "live"} onClick={() => setMode("live")} icon={<Globe size={14} />} label="App" badge={hasUrl ? "active" : undefined} />
+    <ModeTab active={mode === "artifact"} onClick={() => setMode("artifact")} icon={<FileText size={14} />} label="文件" badge={hasArtifact ? "可查看" : undefined} />
   </div>
 );
 
@@ -347,7 +354,7 @@ const ZoomPicker = ({
         style={zoomTriggerStyle(open, compactHeight)}
       >
         <span>{zoomLabel(zoom)}</span>
-        <ChevronDown size={12} style={{ color: "var(--text-muted)" }} />
+        <ChevronDown size={14} style={{ color: "var(--text-muted)" }} />
       </button>
       {open && (
         <div role="listbox" aria-label="Preview zoom" style={zoomMenuStyle(align)}>
@@ -366,7 +373,7 @@ const ZoomPicker = ({
                 style={zoomOptionStyle(active)}
               >
                 <span style={{ width: 16, display: "inline-flex", justifyContent: "center", color: active ? "var(--accent-primary)" : "transparent" }}>
-                  <Check size={12} />
+                  <Check size={14} />
                 </span>
                 <span>{option.label}</span>
               </button>
@@ -461,7 +468,7 @@ const LiveView = ({
         disabled={!livePreviewUrl}
         style={iconBtnStyle(!livePreviewUrl)}
       >
-        <RefreshCw size={13} />
+        <RefreshCw size={14} />
       </button>
       <input
         type="text"
@@ -509,7 +516,7 @@ const LiveView = ({
         disabled={!livePreviewUrl}
         style={iconBtnStyle(!livePreviewUrl)}
       >
-        <ExternalLink size={13} />
+        <ExternalLink size={14} />
       </button>
       <button
         type="button"
@@ -519,7 +526,7 @@ const LiveView = ({
         disabled={!livePreviewUrl}
         style={iconBtnStyle(!livePreviewUrl)}
       >
-        <Maximize2 size={13} />
+        <Maximize2 size={14} />
       </button>
       <button
         type="button"
@@ -549,7 +556,7 @@ const LiveView = ({
         disabled={!livePreviewUrl}
         style={iconBtnStyle(!livePreviewUrl)}
       >
-        <X size={13} />
+        <X size={14} />
       </button>
     </div>
 
@@ -647,12 +654,12 @@ const LiveView = ({
                     onClick={() => onStopLaunch(running.id)}
                     style={iconBtnStyle(false)}
                   >
-                    <Square size={12} />
+                    <Square size={14} />
                   </button>
                 </>
               ) : (
                 <button type="button" onClick={() => onLaunch(config.name)} style={chipBtnStyle}>
-                  <Play size={12} style={{ marginRight: 4, verticalAlign: -2 }} />
+                  <Play size={14} style={{ marginRight: 4, verticalAlign: -2 }} />
                   Start
                 </button>
               )}
@@ -813,7 +820,7 @@ const LiveView = ({
               borderRadius: "4px",
               background: "rgba(0, 0, 0, 0.72)",
               color: "white",
-              fontSize: "10px",
+              fontSize: "var(--text-3xs)",
               fontFamily: "var(--font-mono)",
               pointerEvents: "none",
               display: "flex",
@@ -1036,7 +1043,7 @@ const ExpandedLivePreview = ({
               borderRadius: "4px",
               background: "rgba(0, 0, 0, 0.72)",
               color: "white",
-              fontSize: "10px",
+              fontSize: "var(--text-3xs)",
               fontFamily: "var(--font-mono)",
               pointerEvents: "none",
               display: "flex",

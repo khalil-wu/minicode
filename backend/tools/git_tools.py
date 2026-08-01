@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
+from backend.subprocesses import communicate, spawn_exec
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +34,71 @@ def _workspace_root(context: Any, fallback: Path) -> Path:
 
 def _resolve_work_dir(root: Path, path_value: Any) -> Path:
     raw = str(path_value or ".").strip() or "."
-    path = Path(raw)
-    if path.is_absolute():
-        return path.resolve()
-    return (root / path).resolve()
+    resolved = (root / raw).resolve() if not Path(raw).is_absolute() else Path(raw).resolve()
+    # Confine to the workspace: an absolute or ../-escaping path must not let a
+    # read-only AUTO tool inspect arbitrary repos on the host. Escapes fall back
+    # to the workspace root rather than running git in an unrelated directory.
+    root_resolved = root.resolve()
+    try:
+        resolved.relative_to(root_resolved)
+    except ValueError:
+        return root_resolved
+    return resolved
+
+
+def _secret_exclude_pathspecs(context: Any) -> list[str]:
+    """Git pathspecs that keep secret contents out of diff output.
+
+    ``git diff`` with no path argument prints the before/after text of every
+    changed file, so an AUTO read-only tool would otherwise echo .env and
+    secrets/ in full — contents the file tools refuse to read.
+    """
+    from backend.security.sensitive_files import (
+        SENSITIVE_FILE_NAMES,
+        SENSITIVE_FILE_PREFIXES,
+        SENSITIVE_FILE_SUFFIXES,
+        SENSITIVE_PATH_PARTS,
+    )
+
+    patterns: list[str] = []
+    patterns.extend(sorted(SENSITIVE_FILE_NAMES))
+    patterns.extend(f"{prefix}*" for prefix in sorted(SENSITIVE_FILE_PREFIXES))
+    patterns.extend(f"*{suffix}" for suffix in sorted(SENSITIVE_FILE_SUFFIXES))
+    patterns.extend(f"{part}/" for part in sorted(SENSITIVE_PATH_PARTS))
+
+    checker = getattr(context, "permission_checker", None) if context is not None else None
+    if checker is not None:
+        permission = getattr(context, "permission", None)
+        constraints = getattr(permission, "filesystem_constraints", None) or {}
+        if "denylist" in constraints:
+            configured = list(constraints["denylist"])
+        else:
+            settings = getattr(checker, "_settings", None)
+            configured = list(getattr(settings, "path_denylist", ()) or ())
+        patterns.extend(str(pattern) for pattern in configured)
+
+    specs: list[str] = []
+    for pattern in patterns:
+        cleaned = str(pattern or "").replace("\\", "/").strip()
+        if not cleaned:
+            continue
+        if cleaned.endswith("/"):
+            cleaned = f"{cleaned.rstrip('/')}/**"
+        spec = f":(exclude,glob)**/{cleaned}" if "/" not in cleaned else f":(exclude,glob){cleaned}"
+        if spec not in specs:
+            specs.append(spec)
+    return specs
+
+
+def _is_denied_path(context: Any, file_path: str) -> bool:
+    checker = getattr(context, "permission_checker", None) if context is not None else None
+    if checker is None:
+        return False
+    permission = getattr(context, "permission", None)
+    try:
+        return not checker.is_path_allowed(str(file_path), context=permission)
+    except Exception:
+        return False
 
 
 class GitStatusTool(BaseTool):
@@ -48,6 +110,9 @@ class GitStatusTool(BaseTool):
     """
 
     name = "git_status"
+    result_kind = "code"
+    activity_kind = "workspaceSearch"
+    display_label = "Git status"
     read_only = True
     description = (
         "Show the Git working tree status: modified, added, deleted, and untracked files. "
@@ -56,6 +121,10 @@ class GitStatusTool(BaseTool):
         "For actual diffs, use git_diff instead."
     )
     permission = PermissionLevel.AUTO
+    # The checker only fences path arguments a tool declares, so an undeclared
+    # field leaves an AUTO read-only tool with no workspace boundary.
+    workspace_path_fields = ("path",)
+    allow_workspace_root_path = True
 
     def __init__(self, workspace_root: Path | None = None):
         self._workspace_root = workspace_root or Path.cwd()
@@ -85,7 +154,7 @@ class GitStatusTool(BaseTool):
             return self._error_result(f"路径不存在: {path_str} (workspace: {root})")
 
         try:
-            proc = await asyncio.create_subprocess_exec(
+            proc = await spawn_exec(
                 "git",
                 "status",
                 "--short",
@@ -95,7 +164,7 @@ class GitStatusTool(BaseTool):
                 stderr=asyncio.subprocess.PIPE,
             )
 
-            stdout, stderr = await proc.communicate()
+            stdout, stderr = await communicate(proc)
 
             if proc.returncode != 0:
                 error_msg = _decode_process_output(stderr).strip()
@@ -125,6 +194,9 @@ class GitDiffTool(BaseTool):
     """
 
     name = "git_diff"
+    result_kind = "code"
+    activity_kind = "workspaceSearch"
+    display_label = "Git diff"
     read_only = True
     description = (
         "Show the actual code changes (diff) in the working tree or for a specific file. "
@@ -133,6 +205,7 @@ class GitDiffTool(BaseTool):
         "Use git_status first for a quick overview, then git_diff for details."
     )
     permission = PermissionLevel.AUTO
+    workspace_path_fields = ("file_path",)
 
     def __init__(self, workspace_root: Path | None = None):
         self._workspace_root = workspace_root or Path.cwd()
@@ -174,17 +247,29 @@ class GitDiffTool(BaseTool):
             cmd.append("--staged")
 
         if file_path:
-            cmd.append(file_path)
+            if _is_denied_path(context, str(file_path)):
+                return self._error_result(
+                    f"路径 '{file_path}' 属于受保护的敏感路径，git_diff 不会输出其内容。"
+                )
+            # "--" terminates option parsing so a path like "--output=..." is
+            # treated as a pathspec, not a git flag (which could write files).
+            # Mirrors git_log below, which already separates with "--".
+            cmd.extend(["--", file_path])
+        else:
+            # A bare diff would print secret contents verbatim; exclude them the
+            # same way read_file and grep_files do.
+            cmd.append("--")
+            cmd.extend(_secret_exclude_pathspecs(context))
 
         try:
-            proc = await asyncio.create_subprocess_exec(
+            proc = await spawn_exec(
                 *cmd,
                 cwd=str(root),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
 
-            stdout, stderr = await proc.communicate()
+            stdout, stderr = await communicate(proc)
 
             if proc.returncode != 0:
                 error_msg = _decode_process_output(stderr).strip()
@@ -214,6 +299,9 @@ class GitLogTool(BaseTool):
     """
 
     name = "git_log"
+    result_kind = "code"
+    activity_kind = "workspaceSearch"
+    display_label = "Git log"
     read_only = True
     description = (
         "Show Git commit history with messages, authors, and timestamps. "
@@ -222,6 +310,7 @@ class GitLogTool(BaseTool):
         "Use git_diff for the actual code changes; git_log shows the commit metadata only."
     )
     permission = PermissionLevel.AUTO
+    workspace_path_fields = ("file_path",)
 
     def __init__(self, workspace_root: Path | None = None):
         self._workspace_root = workspace_root or Path.cwd()
@@ -269,14 +358,14 @@ class GitLogTool(BaseTool):
             cmd.extend(["--", file_path])
 
         try:
-            proc = await asyncio.create_subprocess_exec(
+            proc = await spawn_exec(
                 *cmd,
                 cwd=str(root),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
 
-            stdout, stderr = await proc.communicate()
+            stdout, stderr = await communicate(proc)
 
             if proc.returncode != 0:
                 error_msg = _decode_process_output(stderr).strip()
@@ -305,6 +394,9 @@ class GitCommitTool(BaseTool):
     """
 
     name = "git_commit"
+    result_kind = "command"
+    activity_kind = "commandExecution"
+    display_label = "Git commit"
     mutates_external_state = True
     description = (
         "Create a Git commit with the staged changes. "
@@ -350,7 +442,7 @@ class GitCommitTool(BaseTool):
         try:
             # 如果需要，先添加所有文件
             if add_all:
-                add_proc = await asyncio.create_subprocess_exec(
+                add_proc = await spawn_exec(
                     "git",
                     "add",
                     "-A",
@@ -358,10 +450,10 @@ class GitCommitTool(BaseTool):
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                await add_proc.communicate()
+                await communicate(add_proc)
 
             # 创建提交
-            proc = await asyncio.create_subprocess_exec(
+            proc = await spawn_exec(
                 "git",
                 "commit",
                 "-m",
@@ -371,7 +463,7 @@ class GitCommitTool(BaseTool):
                 stderr=asyncio.subprocess.PIPE,
             )
 
-            stdout, stderr = await proc.communicate()
+            stdout, stderr = await communicate(proc)
 
             if proc.returncode != 0:
                 error_msg = _decode_process_output(stderr).strip()

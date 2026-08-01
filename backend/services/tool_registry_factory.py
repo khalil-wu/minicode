@@ -12,6 +12,7 @@ from backend.commands.catalog import get_builtin_command_catalog
 from backend.config import load_config
 from backend.permissions.checker import PermissionChecker
 from backend.tools.agent_tools import AskUserTool, BriefTool, ReadArtifactTool, TaskStatusTool, TaskStopTool, TaskTool
+from backend.tools.agent_artifact_tools import PresentFileTool
 from backend.tools.apply_patch import ApplyPatchTool
 from backend.tools.browser_control_tool import BrowserControlTool
 from backend.tools.command_tool import RunCommandTool
@@ -25,7 +26,6 @@ from backend.tools.file_tools import (
 from backend.tools.monitor_tool import MonitorTool
 from backend.tools.notebook_tool import NotebookEditTool
 from backend.tools.registry import ToolRegistry
-from backend.tools.repl_tool import ReplTool
 from backend.tools.search_tools import GrepFilesTool, GlobFilesTool
 from backend.tools.sleep_tool import SleepTool
 from backend.tools.swarm_tools import (
@@ -42,7 +42,6 @@ from backend.tools.swarm_tools import (
 )
 from backend.tools.team_memory_sync_tool import TeamMemorySyncTool
 from backend.tools.terminal_tools import ReadTerminalTool
-from backend.tools.workflow_tool import WorkflowTool
 
 logger = logging.getLogger(__name__)
 
@@ -62,11 +61,9 @@ def get_attachment_store() -> AttachmentStore:
 
 def build_tool_registry(
     artifact_store: ArtifactStore,
-    vector_memory: Any | None = None,
     *,
     llm_provider: Any | None = None,
     mcp_manager: Any | None = None,
-    enable_vector_memory_tools: bool = False,
 ) -> ToolRegistry:
     """
     Build the default tool registry (DESIGN.md section 8.2).
@@ -94,7 +91,6 @@ def build_tool_registry(
     registry.register(GlobFilesTool())
 
     registry.register(RunCommandTool(artifact_store))
-    registry.register(ReplTool())
     registry.register(SleepTool())
     registry.register(MonitorTool())
     registry.register(ReadTerminalTool())
@@ -108,6 +104,7 @@ def build_tool_registry(
             attachment_store=get_attachment_store(),
         )
     )
+    registry.register(PresentFileTool())
     registry.register(
         TaskTool(
             llm_provider=llm_provider,
@@ -131,33 +128,15 @@ def build_tool_registry(
     registry.register(TeamListTool())
     registry.register(TeamDeleteTool())
     registry.register(TeamMemorySyncTool())
-    registry.register(
-        WorkflowTool(
-            llm_provider=llm_provider,
-            tool_registry_provider=lambda: registry,
-            artifact_store=artifact_store,
-            permission_checker_provider=lambda: PermissionChecker(load_config().permissions),
-            agent_settings_provider=lambda: load_config().agent,
-            token_budget_provider=lambda: load_config().token_budget,
-        )
-    )
-
     bootstrap = _current_bootstrap()
     file_memory = bootstrap.file_memory if bootstrap else None
     if file_memory:
         from backend.tools.memory_tools import ReadMemoryTool, SaveMemoryTool
 
-        # File memory is the primary, CC-aligned memory path: MEMORY.md index
-        # + on-demand read_memory, no vector similarity. The vector tools stay
-        # opt-in (enable_vector_memory_tools) so recall/remember don't compete
-        # as a parallel memory route by default — see the memory design doc.
+        # File memory is the CC-aligned memory path: MEMORY.md index plus
+        # explicit file reads, without a parallel semantic-memory protocol.
         registry.register(ReadMemoryTool(file_memory))
         registry.register(SaveMemoryTool(file_memory))
-        if vector_memory is not None and enable_vector_memory_tools:
-            from backend.tools.memory_tools import RecallMemoryTool, RememberMemoryTool
-
-            registry.register(RecallMemoryTool(vector_memory))
-            registry.register(RememberMemoryTool(vector_memory))
 
     from backend.tools.web_tools import WebFetchTool, WebSearchTool
     registry.register(WebFetchTool(artifact_store))
@@ -213,12 +192,10 @@ def build_tool_registry(
     registry.register(TodoReadTool(todo_write_tool=todo_tool))
 
     from backend.tools.plan_tool import EnterPlanModeTool, ExitPlanModeTool, UpdatePlanTool
-    from backend.tools.prompt_pack_tool import PromptPackLoadTool
     from backend.tools.schedule_cron_tool import ScheduleCronTool
     registry.register(UpdatePlanTool(workspace_root=workspace_root))
     registry.register(ExitPlanModeTool(workspace_root=workspace_root))
     registry.register(EnterPlanModeTool(workspace_root=workspace_root))
-    registry.register(PromptPackLoadTool())
     registry.register(ScheduleCronTool())
 
     effective_mcp_manager = mcp_manager if mcp_manager is not None else (bootstrap.mcp_manager if bootstrap else None)
@@ -248,12 +225,6 @@ def build_tool_registry(
     registry.register(ToolCallTool())
 
     skill_manager = bootstrap.skill_manager if bootstrap else None
-    from backend.tools.skill_tools import SkillSearchTool, SkillTool, LoadSkillTool, UnloadSkillTool, ListSkillsTool
-    registry.register(SkillSearchTool(skill_manager))
-    registry.register(SkillTool(skill_manager))
-    registry.register(LoadSkillTool(skill_manager))
-    registry.register(UnloadSkillTool(skill_manager))
-    registry.register(ListSkillsTool(skill_manager))
     for command_definition in get_builtin_command_catalog():
         registry.register_command(command_definition["name"], command_definition)
     if skill_manager:

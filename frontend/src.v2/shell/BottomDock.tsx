@@ -1,108 +1,135 @@
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { Bug, Gauge, GitBranch, Plus, TerminalSquare, X } from "lucide-react";
+import { lazy, Suspense } from "react";
 import { useAppStore } from "../stores";
 import { GitPanel } from "../panels/GitPanel";
 import { promptCacheHitRate } from "../chat/cacheUsage";
+import { requestNewTerminalSession } from "../panels/terminalRequests";
+import { ChunkErrorBoundary, SafeBoundary } from "./ChunkErrorBoundary";
+import { PanelErrorFallback } from "../components/PanelErrorFallback";
+import { PanelSkeleton } from "./PanelSkeleton";
+import "./BottomDock.css";
 
 const TABS = [
-  { id: "git", label: "Git" },
-  { id: "budget", label: "Budget" },
-  { id: "debug", label: "Debug" },
+  { id: "terminal", label: "Terminal", icon: TerminalSquare },
+  { id: "git", label: "Git", icon: GitBranch },
+  { id: "budget", label: "Budget", icon: Gauge },
+  { id: "debug", label: "Debug", icon: Bug },
 ] as const;
+
+const LazyTerminalPanel = lazy(() =>
+  import("../panels/TerminalPanel").then((module) => ({ default: module.TerminalPanel })),
+);
 
 export const BottomDock = () => {
   const dockCollapsed = useAppStore((s) => s.dockCollapsed);
   const dockHeight = useAppStore((s) => s.dockHeight);
   const activeBottomTab = useAppStore((s) => s.activeBottomTab);
   const totalBudgetPercent = useAppStore((s) => s.totalBudgetPercent);
-  const setActiveBottomTab = useAppStore((s) => s.setActiveBottomTab);
-  const toggleDock = useAppStore((s) => s.toggleDock);
-  const visibleTab = activeBottomTab === "terminal" || activeBottomTab === "tasks" || activeBottomTab === "timeline" ? "git" : activeBottomTab;
+  const openBottomTab = useAppStore((s) => s.openBottomTab);
+  const closeBottomDock = useAppStore((s) => s.closeBottomDock);
+  const setDockHeight = useAppStore((s) => s.setDockHeight);
+  const visibleTab = activeBottomTab === "tasks" || activeBottomTab === "timeline" ? "terminal" : activeBottomTab;
+  const isOpen = !dockCollapsed;
+
+  const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const handle = event.currentTarget;
+    const pointerId = event.pointerId;
+    const startY = event.clientY;
+    const startHeight = dockHeight;
+    const onMove = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
+      setDockHeight(startHeight + startY - moveEvent.clientY);
+    };
+    const cleanup = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      handle.removeEventListener("lostpointercapture", cleanup);
+      if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    const onUp = (upEvent: PointerEvent) => {
+      if (upEvent.pointerId !== pointerId) return;
+      cleanup();
+    };
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    handle.setPointerCapture(pointerId);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    handle.addEventListener("lostpointercapture", cleanup);
+  };
+
+  const handleResizeKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const step = event.shiftKey ? 48 : 20;
+    let nextHeight: number | null = null;
+    if (event.key === "ArrowUp") nextHeight = dockHeight + step;
+    else if (event.key === "ArrowDown") nextHeight = dockHeight - step;
+    else if (event.key === "Home") nextHeight = 180;
+    else if (event.key === "End") nextHeight = 520;
+    else if (event.key === "Enter") nextHeight = 240;
+    if (nextHeight == null) return;
+    event.preventDefault();
+    setDockHeight(nextHeight);
+  };
+
   return (
     <section
-      className="flex flex-col shrink-0"
+      className="mc-bottom-drawer"
+      data-open={isOpen ? "true" : "false"}
+      aria-label="Bottom tools"
+      aria-hidden={!isOpen}
       style={{
-        display: "flex",
-        flexDirection: "column",
-        flexShrink: 0,
-        height: dockCollapsed ? 32 : dockHeight,
-        background: "var(--surface-base)",
-        borderTop: "1px solid var(--border-subtle)",
-        transition: "height var(--transition-md, 200ms cubic-bezier(0.4,0,0.2,1))",
-      }}
+        "--mc-bottom-drawer-height": `${dockHeight}px`,
+      } as React.CSSProperties}
     >
-      <div
-        className="h-8 flex items-center px-2 gap-1"
-        style={{
-          height: 32,
-          display: "flex",
-          alignItems: "center",
-          padding: "0 8px",
-          gap: 4,
-          borderBottom: dockCollapsed ? 0 : "1px solid var(--border-subtle)",
-          background: "var(--surface-page)",
-        }}
-      >
+      {isOpen && <div className="mc-bottom-drawer-resize" role="separator" aria-orientation="horizontal" aria-label="Resize bottom tools" aria-valuemin={180} aria-valuemax={520} aria-valuenow={Math.round(dockHeight)} tabIndex={0} onPointerDown={startResize} onKeyDown={handleResizeKeyDown} />}
+      {isOpen && <div className="mc-bottom-drawer-header">
         {TABS.map((t) => {
+          const Icon = t.icon;
           let badge: string | null = null;
           if (t.id === "budget" && totalBudgetPercent > 0.7) badge = `${Math.round(totalBudgetPercent * 100)}%`;
 
           return (
             <button
               key={t.id}
-              onClick={() => {
-                setActiveBottomTab(t.id);
-                if (dockCollapsed) toggleDock();
-              }}
-              className="border-0 px-2.5 py-1 cursor-pointer inline-flex items-center gap-1"
-              style={{
-                background: visibleTab === t.id && !dockCollapsed ? "var(--surface-raised)" : "transparent",
-                color: visibleTab === t.id ? "var(--text-primary)" : "var(--text-muted)",
-                borderRadius: "var(--radius-sm, 4px)",
-                fontSize: "var(--text-xs)",
-              }}
+              type="button"
+              onClick={() => openBottomTab(t.id)}
+              className="mc-bottom-drawer-tab"
+              data-active={visibleTab === t.id ? "true" : "false"}
             >
+              <Icon size={14} />
               {t.label}
               {badge && (
-                <span className="rounded-full px-1.5 text-center font-semibold" style={{
-                  fontSize: "var(--text-xs)",
-                  fontFamily: "var(--font-mono)",
-                  background: t.id === "budget" && totalBudgetPercent > 0.9 ? "var(--state-danger)" : "var(--surface-active)",
-                  color: t.id === "budget" && totalBudgetPercent > 0.9 ? "var(--text-on-accent)" : "var(--text-secondary)",
-                  lineHeight: "16px",
-                  minWidth: 16,
-                }}>
-                  {badge}
-                </span>
+                <span className="mc-bottom-drawer-badge" data-danger={totalBudgetPercent > 0.9 ? "true" : "false"}>{badge}</span>
               )}
             </button>
           );
         })}
-        <div className="flex-1" />
-        <button
-          onClick={toggleDock}
-          aria-label={dockCollapsed ? "Expand bottom dock" : "Collapse bottom dock"}
-          title={dockCollapsed ? "Expand bottom dock" : "Collapse bottom dock"}
-          className="bg-transparent border-0 cursor-pointer inline-flex items-center justify-center w-7 h-6"
-          style={{
-            color: "var(--text-muted)",
-          }}
-        >
-          {dockCollapsed ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+        <div className="mc-bottom-drawer-spacer" />
+        {visibleTab === "terminal" && (
+          <button type="button" className="mc-icon-button" aria-label="New terminal" title="New terminal" onClick={requestNewTerminalSession}>
+            <Plus size={15} />
+          </button>
+        )}
+        <button type="button" className="mc-icon-button" aria-label="Close bottom drawer" title="Close bottom drawer" onClick={closeBottomDock}>
+          <X size={15} />
         </button>
-      </div>
-      <div
-        aria-hidden={dockCollapsed}
-        className="flex-1 overflow-auto"
-        style={{
-          fontSize: "var(--text-sm)",
-          background: "var(--surface-base)",
-          opacity: dockCollapsed ? 0 : 1,
-          transform: dockCollapsed ? "translateY(6px)" : "translateY(0)",
-          pointerEvents: dockCollapsed ? "none" : "auto",
-          transition: "opacity 140ms ease, transform var(--transition-md, 200ms cubic-bezier(0.4,0,0.2,1))",
-        }}
-      >
-          {visibleTab === "budget" && (
+      </div>}
+      <div className="mc-bottom-drawer-content">
+          {isOpen && visibleTab === "terminal" && (
+            <ChunkErrorBoundary>
+              <Suspense fallback={<PanelSkeleton kind="terminal" />}>
+                <SafeBoundary fallback={<PanelErrorFallback panelName="Terminal" />}>
+                  <LazyTerminalPanel />
+                </SafeBoundary>
+              </Suspense>
+            </ChunkErrorBoundary>
+          )}
+          {isOpen && visibleTab === "budget" && (
             <div className="p-3">
               <div className="mb-2" style={{ color: "var(--text-secondary)" }}>
                 Total: {(totalBudgetPercent * 100).toFixed(1)}%
@@ -111,8 +138,8 @@ export const BottomDock = () => {
               <BudgetBars />
             </div>
           )}
-          {visibleTab === "git" && <GitPanel />}
-          {visibleTab === "debug" && <div className="p-3"><DebugLog /></div>}
+          {isOpen && visibleTab === "git" && <GitPanel />}
+          {isOpen && visibleTab === "debug" && <div className="p-3"><DebugLog /></div>}
       </div>
     </section>
   );

@@ -19,7 +19,7 @@ import { MessageQuote } from "../chat/components/MessageQuote";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { pushToast } from "../overlays/ToastContainer";
 import { getWebSocket } from "../hooks/useWebSocket";
-import { buildContextFallback, buildContextNativeAttachments, buildContextPayload } from "./contextPayload";
+import { buildContextNativeAttachments, buildContextPayload } from "./contextPayload";
 import {
   executeRuntimeSlashCommand,
   getActiveRuntimeSlashCommand,
@@ -51,7 +51,6 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const addSelectedSkill = useAppStore((s) => s.addSelectedSkill);
   const removeSelectedSkill = useAppStore((s) => s.removeSelectedSkill);
   const setMentionResults = useAppStore((s) => s.setMentionResults);
-  const appMode = useAppStore((s) => s.appMode);
   const selectedSkills = useAppStore((s) => s.selectedSkills);
   const activeGoal = useAppStore((s) => s.activeGoal);
   const currentModel = useAppStore((s) => s.currentModel);
@@ -64,6 +63,11 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const [skillPanelOpen, setSkillPanelOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyItems, setHistoryItems] = useState<string[]>([]);
+  // ArrowUp/ArrowDown recall cursor (cc useArrowKeyHistory): -1 = live draft,
+  // 0..n-1 = position in most-recent-first history. savedDraft preserves the
+  // in-progress text so ArrowDown past the newest entry restores it.
+  const historyCursorRef = useRef(-1);
+  const historySavedDraftRef = useRef("");
   const hasReadyAttachment = useAppStore((s) => s.attachments.some((a) => a.status === "ready"));
 
   const sendState = deriveSendState({
@@ -72,8 +76,10 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     isConnected,
     hasModel: currentModel.trim().length > 0,
   });
-  const codeMode = appMode === "code";
-  const wideMode = codeMode;
+  // Both work modes use the code-mode chat presentation. Mode-specific tools
+  // remain separate; transcript and composer geometry do not change.
+  const codeLayout = !minimal;
+  const wideMode = false;
   const activeSlashCommand = selectedSlashCommand ?? getActiveRuntimeSlashCommand(draft);
   const commandModeActive = Boolean(activeSlashCommand && !slashPanelOpen);
 
@@ -91,6 +97,33 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     return () => window.removeEventListener("composer:history-search", openPromptHistory);
   }, [openPromptHistory]);
 
+  const recallHistory = useCallback(
+    (direction: "up" | "down"): string | null => {
+      const items = readPromptHistory(workingDirectory);
+      if (items.length === 0) return null;
+      const cursor = historyCursorRef.current;
+      if (direction === "up") {
+        // Entering history from the live draft: save it so ArrowDown can return.
+        if (cursor === -1) historySavedDraftRef.current = useAppStore.getState().draft;
+        const next = Math.min(cursor + 1, items.length - 1);
+        historyCursorRef.current = next;
+        return items[next];
+      }
+      // direction === "down"
+      if (cursor <= -1) return null; // already at live draft; let arrow move caret
+      const next = cursor - 1;
+      historyCursorRef.current = next;
+      return next === -1 ? historySavedDraftRef.current : items[next];
+    },
+    [workingDirectory],
+  );
+
+  const escapeInterrupt = useCallback((): boolean => {
+    if (!useAppStore.getState().isStreaming) return false;
+    stopRun();
+    return true;
+  }, []);
+
   const sendUserMessage = async (
     content: string,
     readyAttachments: Record<string, unknown>[] = [],
@@ -105,7 +138,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       ...useAppStore.getState().selectedMentions,
       ...useAppStore.getState().selectedSkills,
     ];
-    const fallbackPayload = buildContextFallback(contextRefs);
+    const skillInvocations = buildSkillInvocationLine(useAppStore.getState().selectedSkills);
     let contextPayload = "";
     try {
       contextPayload = await buildContextPayload(contextRefs);
@@ -116,11 +149,11 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     }
     let nativeContext = { attachments: [] as Record<string, unknown>[], attachmentRefs: [] as MessageAttachmentRef[], notes: "" };
     try {
-      nativeContext = await buildContextNativeAttachments(contextRefs, getWebSocket()?.sessionId);
+      nativeContext = await buildContextNativeAttachments(contextRefs, getWebSocket()?.sessionId, workingDirectory);
     } catch (error) {
       console.warn("Failed to build native context attachments:", error);
     }
-    const prefix = [contextPayload || fallbackPayload, nativeContext.notes].filter(Boolean).join("\n\n");
+    const prefix = [skillInvocations, contextPayload, nativeContext.notes].filter(Boolean).join("\n\n");
     const mergedAttachments = [...readyAttachments, ...nativeContext.attachments];
     const mergedAttachmentRefs = [...(options?.attachmentRefs ?? []), ...nativeContext.attachmentRefs];
     const effectiveContent = [prefix, content].filter(Boolean).join("\n\n").trim();
@@ -144,7 +177,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       ...useAppStore.getState().selectedMentions,
       ...useAppStore.getState().selectedSkills,
     ];
-    const fallbackPayload = buildContextFallback(contextRefs);
+    const skillInvocations = buildSkillInvocationLine(useAppStore.getState().selectedSkills);
     let contextPayload = "";
     try {
       contextPayload = await buildContextPayload(contextRefs);
@@ -155,11 +188,11 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     }
     let nativeContext = { attachments: [] as Record<string, unknown>[], attachmentRefs: [] as MessageAttachmentRef[], notes: "" };
     try {
-      nativeContext = await buildContextNativeAttachments(contextRefs, getWebSocket()?.sessionId);
+      nativeContext = await buildContextNativeAttachments(contextRefs, getWebSocket()?.sessionId, workingDirectory);
     } catch (error) {
       console.warn("Failed to build native context attachments:", error);
     }
-    const prefix = [contextPayload || fallbackPayload, nativeContext.notes].filter(Boolean).join("\n\n");
+    const prefix = [skillInvocations, contextPayload, nativeContext.notes].filter(Boolean).join("\n\n");
     return sendChatMessage({
       ...options,
       backendContent: [prefix, options.backendContent].filter(Boolean).join("\n\n").trim(),
@@ -172,6 +205,8 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
 
   const resetComposer = () => {
     setDraft("");
+    historyCursorRef.current = -1;
+    historySavedDraftRef.current = "";
     clearAttachments();
     clearSelectedMentions();
     clearSelectedSkills();
@@ -232,7 +267,6 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         sizeBytes: Number(payload.size_bytes || a.size || 0),
         artifactId: String(payload.artifact_id || a.artifactId || ""),
         docId: String(payload.doc_id || a.docId || ""),
-        indexedChunks: Number(payload.indexed_chunks ?? a.indexedChunks ?? 0),
         dataUrl: a.type.startsWith("image/") ? a.dataUrl : undefined,
         inputSource: payload.input_source === "pasted_text" || a.inputSource === "pasted_text"
           ? "pasted_text" as const
@@ -290,6 +324,12 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
 
   const handleChange = (v: string) => {
     if (historyOpen) setHistoryOpen(false);
+    // Reset the history-recall cursor whenever the draft changes for a reason
+    // other than a recall fill, so the next ArrowUp starts from the live draft.
+    if (historyCursorRef.current !== -1 && v !== historySavedDraftRef.current) {
+      const items = readPromptHistory(workingDirectory);
+      if (v !== items[historyCursorRef.current]) historyCursorRef.current = -1;
+    }
     setDraft(v);
 
     const lines = v.split("\n");
@@ -309,7 +349,6 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       closeSlashPanel();
       setSkillPanelOpen(true);
       setMenuFilter(skillMatch[1]);
-      sendClientCommand({ type: "skills.list" });
       return;
     }
 
@@ -339,15 +378,20 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     }
 
     if (skillPanelOpen) {
-      const skillName = value.match(/^skill:(.+)$/)?.[1] ?? value.replace(/^\$/, "");
-      const skill = useAppStore.getState().availableSkills.find((item) => item.name === skillName);
+      const encodedPath = value.match(/^skill-path:(.+)$/)?.[1];
+      const encodedName = value.match(/^skill-name:(.+)$/)?.[1];
+      const skillPath = encodedPath ? decodeURIComponent(encodedPath) : "";
+      const skillName = encodedName ? decodeURIComponent(encodedName) : value.replace(/^\$/, "");
+      const skill = useAppStore.getState().availableSkills.find((item) => (
+        skillPath ? item.path === skillPath : item.name === skillName
+      ));
       if (skill) {
         addSelectedSkill({
           name: skill.name,
+          path: skill.path,
           description: skill.description,
           sourceLevel: skill.source_level,
         });
-        sendClientCommand({ type: "load_skill", skill_name: skill.name });
       }
       const dollarIdx = draft.lastIndexOf("$");
       if (dollarIdx >= 0) setDraft(draft.slice(0, dollarIdx));
@@ -360,7 +404,6 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       const selection = resolveRuntimeSlashMenuSelection(value, useAppStore.getState());
       if (selection.kind === "skill") {
         addSelectedSkill(selection.skill);
-        sendClientCommand({ type: "load_skill", skill_name: selection.skill.name });
         setSelectedSlashCommand(null);
         setDraft("");
         closeSlashPanel();
@@ -377,15 +420,15 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       closeSlashPanel();
       setMenuFilter("");
     } else if (mentionPanelOpen) {
-      const skillName = value.match(/^skill:(.+)$/)?.[1];
-      if (skillName) {
-        const skill = useAppStore.getState().availableSkills.find((item) => item.name === skillName);
-        addSelectedSkill({
-          name: skillName,
-          description: skill?.description,
-          sourceLevel: skill?.source_level,
+      const encodedPlugin = value.match(/^plugin:(.+)$/)?.[1];
+      if (encodedPlugin) {
+        const configName = decodeURIComponent(encodedPlugin);
+        addSelectedMention({
+          kind: "plugin",
+          name: configName,
+          configName,
+          path: `plugin://${configName}`,
         });
-        sendClientCommand({ type: "load_skill", skill_name: skillName });
         const atIdx = draft.lastIndexOf("@");
         if (atIdx >= 0) setDraft(draft.slice(0, atIdx));
         setMentionResults([]);
@@ -456,6 +499,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         className="composer-container relative mx-auto flex flex-col transition-[background_140ms_ease,border-color_300ms_ease,box-shadow_140ms_ease]"
         data-command-mode={commandModeActive ? "true" : "false"}
         data-drag-over={dragOver ? "true" : "false"}
+        data-layout-mode={codeLayout ? "code" : "cowork"}
         style={{
           position: "relative",
           left: undefined,
@@ -465,15 +509,15 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
           display: "flex",
           flexDirection: "column",
           width: minimal ? "100%" : wideMode ? "var(--chat-wide-axis-width)" : "var(--chat-composer-axis-width)",
-          marginBottom: codeMode ? "14px" : minimal ? 0 : "16px",
-          padding: codeMode ? "0" : "8px 10px 10px",
+          marginBottom: codeLayout ? "14px" : 0,
+          padding: codeLayout ? "0" : "8px 10px 10px",
           background: commandModeActive ? commandComposerBackground : "var(--surface-page)",
           border: dragOver
             ? "2px dashed var(--command-accent, var(--state-info))"
             : commandModeActive
               ? "1px solid var(--command-border, var(--state-info))"
               : "1px solid var(--border-subtle)",
-          borderRadius: codeMode ? "var(--radius-md, 8px)" : "var(--radius-lg, 8px)",
+          borderRadius: codeLayout ? "var(--radius-md, 8px)" : "var(--radius-lg, 8px)",
           boxShadow: commandModeActive
             ? "0 0 0 1px color-mix(in oklch, var(--command-accent, var(--state-info)) 10%, transparent)"
             : "none",
@@ -491,10 +535,12 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         menuOpen={slashPanelOpen || mentionPanelOpen || skillPanelOpen || historyOpen}
         onHistorySearch={openPromptHistory}
         onDropFiles={handleComposerFiles}
-        compact={codeMode}
+        compact={codeLayout}
         minimal={minimal}
         commandMode={commandModeActive}
         commandLabel={selectedSlashCommand ? selectedSlashCommand.slice(1) : null}
+        onRecallHistory={recallHistory}
+        onEscape={escapeInterrupt}
         onClearCommand={() => setSelectedSlashCommand(null)}
         skillTokens={selectedSkills.map((skill) => ({
           name: skill.name,
@@ -505,7 +551,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
           const last = useAppStore.getState().selectedSkills.at(-1);
           if (last) removeSelectedSkill(last.name);
         }}
-        placeholder={selectedSlashCommand ? "Add instructions..." : "Write a message..."}
+        placeholder={selectedSlashCommand ? "补充指令…" : "随心输入"}
       />
       <MenuOverlay
         open={slashPanelOpen || mentionPanelOpen || skillPanelOpen}
@@ -518,7 +564,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         sendState={sendState}
         onSend={sendState === "stop" ? stopRun : submit}
         onStop={stopRun}
-        compact={codeMode}
+        compact={codeLayout}
         minimal={minimal}
       />
       <PromptHistoryOverlay
@@ -573,7 +619,7 @@ const GoalBar = () => {
         style={{ border: "1px solid var(--border-subtle)", background: "var(--surface-soft)", color: "var(--text-secondary)" }}
         onClick={() => sendGoalAction(paused ? "resume" : "pause")}
       >
-        {paused ? <Play size={13} /> : <Pause size={13} />}
+        {paused ? <Play size={14} /> : <Pause size={14} />}
       </button>
       <button
         type="button"
@@ -583,7 +629,7 @@ const GoalBar = () => {
         style={{ border: "1px solid var(--border-subtle)", background: "var(--surface-soft)", color: "var(--text-secondary)" }}
         onClick={() => sendGoalAction("clear")}
       >
-        <X size={13} />
+        <X size={14} />
       </button>
     </div>
   );
@@ -613,6 +659,9 @@ const getSkillMatch = (line: string): RegExpMatchArray | null => {
   if (!match) return null;
   return match;
 };
+
+const buildSkillInvocationLine = (skills: Array<{ name: string }>): string =>
+  skills.map((skill) => `$${skill.name}`).join(" ");
 
 const appendDraftLineAnchor = (path: string, draft: string): string => {
   if (path.includes("#")) return path;

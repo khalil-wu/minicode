@@ -4,11 +4,11 @@ Git Worktree 工具（参考 Claude Code 的 worktree 支持）。
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
-from backend.workspace.worktree import get_global_worktree_manager
 
 if TYPE_CHECKING:
     from backend.permissions.context import ToolExecutionContext
@@ -35,6 +35,9 @@ class ListWorktreesTool(BaseTool):
     """列出所有 Git worktree"""
 
     name = "list_worktrees"
+    result_kind = "workspace"
+    activity_kind = "workspaceSearch"
+    display_label = "List worktrees"
     read_only = True
     description = (
         "列出当前 Git 仓库的所有 worktree。"
@@ -57,12 +60,12 @@ class ListWorktreesTool(BaseTool):
     async def execute(
         self, args: dict[str, Any], context: ToolExecutionContext | None = None
     ) -> ToolResult:
-        manager = get_global_worktree_manager()
+        manager = await _resolve_worktree_manager(context)
 
         if manager is None:
             return self._error_result("当前目录不是 Git 仓库")
 
-        worktrees = manager.list_worktrees()
+        worktrees = await asyncio.to_thread(manager.list_worktrees)
 
         if not worktrees:
             return self._success_result("没有找到 worktree")
@@ -91,6 +94,9 @@ class CreateWorktreeTool(BaseTool):
     """创建新的 Git worktree"""
 
     name = "create_worktree"
+    result_kind = "workspace"
+    activity_kind = "genericTool"
+    display_label = "Create worktree"
     mutates_workspace = True
     description = (
         "创建新的 Git worktree。"
@@ -98,6 +104,9 @@ class CreateWorktreeTool(BaseTool):
         "适用于并行开发、测试、代码审查等场景。"
     )
     permission = PermissionLevel.CONFIRM
+    # The checker only fences declared path arguments, so leaving this off
+    # let a worktree be created or restored anywhere on the host.
+    workspace_path_fields = ("path",)
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -140,14 +149,15 @@ class CreateWorktreeTool(BaseTool):
         if not path_str:
             return self._error_result("缺少 path 参数")
 
-        manager = get_global_worktree_manager()
+        manager = await _resolve_worktree_manager(context)
 
         if manager is None:
             return self._error_result("当前目录不是 Git 仓库")
 
         path = Path(path_str)
 
-        success = manager.create_worktree(
+        success = await asyncio.to_thread(
+            manager.create_worktree,
             path=path,
             branch=branch,
             new_branch=new_branch,
@@ -173,12 +183,18 @@ class RemoveWorktreeTool(BaseTool):
     """删除 Git worktree"""
 
     name = "remove_worktree"
+    result_kind = "workspace"
+    activity_kind = "genericTool"
+    display_label = "Remove worktree"
     mutates_workspace = True
     description = (
         "删除指定的 Git worktree。"
         "注意: 如果 worktree 中有未提交的更改，需要使用 force=true 强制删除。"
     )
     permission = PermissionLevel.CONFIRM
+    # The checker only fences declared path arguments, so leaving this off
+    # let a worktree be created or restored anywhere on the host.
+    workspace_path_fields = ("path",)
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -211,14 +227,14 @@ class RemoveWorktreeTool(BaseTool):
         if not path_str:
             return self._error_result("缺少 path 参数")
 
-        manager = get_global_worktree_manager()
+        manager = await _resolve_worktree_manager(context)
 
         if manager is None:
             return self._error_result("当前目录不是 Git 仓库")
 
         path = Path(path_str)
 
-        success = manager.remove_worktree(path=path, force=force)
+        success = await asyncio.to_thread(manager.remove_worktree, path=path, force=force)
 
         if success:
             await _run_worktree_hook(
@@ -234,23 +250,26 @@ class RemoveWorktreeTool(BaseTool):
             )
 
 
-def _resolve_worktree_manager(context: "ToolExecutionContext | None"):
+async def _resolve_worktree_manager(context: "ToolExecutionContext | None"):
     """优先用当前工作区根构造 manager,回退到全局单例。非 Git 仓库返回 None。"""
     from backend.workspace.worktree import WorktreeManager, get_global_worktree_manager
 
     root = getattr(context, "workspace_root", None) if context else None
     if root:
         try:
-            return WorktreeManager(Path(root))
+            return await asyncio.to_thread(WorktreeManager, Path(root))
         except ValueError:
             return None
-    return get_global_worktree_manager()
+    return await asyncio.to_thread(get_global_worktree_manager)
 
 
 class SnapshotWorktreeTool(BaseTool):
     """为 worktree 抓取可恢复快照"""
 
     name = "worktree_snapshot"
+    result_kind = "workspace"
+    activity_kind = "genericTool"
+    display_label = "Snapshot worktree"
     mutates_external_state = True
     description = (
         "为一个 worktree 抓取可恢复的快照(包含未提交的 tracked 与 untracked 改动)。"
@@ -258,6 +277,9 @@ class SnapshotWorktreeTool(BaseTool):
         "省略 path 时默认对当前工作区。"
     )
     permission = PermissionLevel.CONFIRM
+    # The checker only fences declared path arguments, so leaving this off
+    # let a worktree be created or restored anywhere on the host.
+    workspace_path_fields = ("path",)
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -282,7 +304,7 @@ class SnapshotWorktreeTool(BaseTool):
     async def execute(
         self, args: dict[str, Any], context: ToolExecutionContext | None = None
     ) -> ToolResult:
-        manager = _resolve_worktree_manager(context)
+        manager = await _resolve_worktree_manager(context)
         if manager is None:
             return self._error_result("当前目录不是 Git 仓库")
 
@@ -290,7 +312,11 @@ class SnapshotWorktreeTool(BaseTool):
         if not path_str:
             return self._error_result("缺少 path 参数,且无法从上下文推断工作区")
 
-        record = manager.snapshot_worktree(Path(path_str), label=str(args.get("label", "")))
+        record = await asyncio.to_thread(
+            manager.snapshot_worktree,
+            Path(path_str),
+            label=str(args.get("label", "")),
+        )
         if record is None:
             return self._error_result(f"快照失败: {path_str}")
 
@@ -308,12 +334,18 @@ class RestoreWorktreeTool(BaseTool):
     """从快照恢复 worktree"""
 
     name = "worktree_restore"
+    result_kind = "workspace"
+    activity_kind = "genericTool"
+    display_label = "Restore worktree"
     mutates_workspace = True
     description = (
         "把一个 worktree 快照恢复成新的 worktree(detached 在快照提交上),"
         "找回当时未提交的全部改动。用 list_worktree_snapshots 查看可用快照。"
     )
     permission = PermissionLevel.CONFIRM
+    # The checker only fences declared path arguments, so leaving this off
+    # let a worktree be created or restored anywhere on the host.
+    workspace_path_fields = ("dest",)
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -342,12 +374,16 @@ class RestoreWorktreeTool(BaseTool):
         if not snapshot_id:
             return self._error_result("缺少 snapshot_id 参数")
 
-        manager = _resolve_worktree_manager(context)
+        manager = await _resolve_worktree_manager(context)
         if manager is None:
             return self._error_result("当前目录不是 Git 仓库")
 
         dest = args.get("dest")
-        result = manager.restore_snapshot(snapshot_id, dest=Path(dest) if dest else None)
+        result = await asyncio.to_thread(
+            manager.restore_snapshot,
+            snapshot_id,
+            dest=Path(dest) if dest else None,
+        )
         if not result.restored:
             return self._error_result(f"恢复失败: {result.error or snapshot_id}")
 
@@ -362,6 +398,9 @@ class ListWorktreeSnapshotsTool(BaseTool):
     """列出 worktree 快照"""
 
     name = "list_worktree_snapshots"
+    result_kind = "workspace"
+    activity_kind = "workspaceSearch"
+    display_label = "List worktree snapshots"
     read_only = True
     description = (
         "列出已保存的 worktree 快照(删除前自动或手动抓取的可恢复点),最新在前。"
@@ -388,12 +427,12 @@ class ListWorktreeSnapshotsTool(BaseTool):
     async def execute(
         self, args: dict[str, Any], context: ToolExecutionContext | None = None
     ) -> ToolResult:
-        manager = _resolve_worktree_manager(context)
+        manager = await _resolve_worktree_manager(context)
         if manager is None:
             return self._error_result("当前目录不是 Git 仓库")
 
         conversation_id = str(args.get("conversation_id", "")).strip() or None
-        records = manager.list_snapshots(conversation_id)
+        records = await asyncio.to_thread(manager.list_snapshots, conversation_id)
         if not records:
             return self._success_result("没有找到 worktree 快照")
 

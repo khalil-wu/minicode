@@ -36,6 +36,11 @@ select {
   font-family: inherit;
 }
 
+/* ── Global icon styling (M3 风格，2026-07-25) ────────── */
+svg {
+  stroke-width: 1.8;
+}
+
 /* ── Keyframe Animations ─────────────────────────────── */
 
 @keyframes cursorBlink {
@@ -137,35 +142,35 @@ select {
 /* ── Overlay & Modal Animations ──────────────────────── */
 
 .overlay-backdrop {
-  animation: overlay-in 200ms cubic-bezier(0.4, 0, 0.2, 1) both;
+  animation: overlay-in var(--transition-normal) both;
 }
 
 .overlay-backdrop.closing {
-  animation: overlay-out 150ms ease-in both;
+  animation: overlay-out var(--transition-fast) both;
 }
 
 .modal-content {
-  animation: modal-in 250ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  animation: modal-in var(--duration-slow) cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
 
 /* ── Message Animations ──────────────────────────────── */
 
 .message-enter {
-  animation: message-in 200ms cubic-bezier(0.4, 0, 0.2, 1) both;
+  animation: message-in var(--transition-normal) both;
 }
 
 .tool-call-enter {
-  animation: slide-up 250ms cubic-bezier(0.4, 0, 0.2, 1) both;
+  animation: slide-up var(--duration-slow) cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 
 /* ── Toast Notifications ─────────────────────────────── */
 
 .toast-enter {
-  animation: toast-in 300ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  animation: toast-in var(--duration-slow) cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
 
 .toast-exit {
-  animation: toast-out 200ms ease-in both;
+  animation: toast-out var(--duration-base) var(--easing-exit) both;
 }
 
 /* ── Progress & Loading ──────────────────────────────── */
@@ -285,13 +290,15 @@ select {
 /* ── Hover & Interaction ─────────────────────────────── */
 
 .window-control:hover {
-  background: var(--surface-hover) !important;
-  color: var(--text-primary) !important;
+  background: var(--surface-hover);
+  color: var(--text-primary);
+
 }
 
 .window-control-close:hover {
   background: var(--state-danger) !important;
   color: var(--text-on-accent) !important;
+
 }
 
 .window-control:active,
@@ -301,15 +308,17 @@ select {
 
 .editor-tab:hover .editor-tab-close {
   opacity: 1 !important;
+
 }
 
 .editor-tab:hover {
-  background: var(--surface-hover) !important;
+  background: var(--surface-hover);
+
 }
 
 .code-block-wrapper:hover .code-action-btn,
 .code-block-wrapper:focus-within .code-action-btn {
-  opacity: 1 !important;
+  opacity: 1;
 }
 
 .assistant-msg:hover .msg-actions {
@@ -329,12 +338,12 @@ select {
 }
 
 button {
-  transition: background 100ms ease,
-              color 100ms ease,
-              border-color 100ms ease,
-              opacity 100ms ease,
-              transform 100ms ease,
-              box-shadow 100ms ease;
+  transition: background var(--transition-micro),
+              color var(--transition-micro),
+              border-color var(--transition-micro),
+              opacity var(--transition-micro),
+              transform var(--transition-micro),
+              box-shadow var(--transition-micro);
 }
 
 button:active {
@@ -348,7 +357,7 @@ button:hover {
 /* ── Sidebar & Panel Transitions ─────────────────────── */
 
 .sidebar-animate {
-  transition: width 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  transition: width var(--transition-normal);
 }
 
 
@@ -376,7 +385,7 @@ button:hover {
   border: 2px solid transparent;
   border-radius: 999px;
   background-clip: padding-box;
-  transition: background 150ms ease;
+  transition: background var(--transition-fast);
 }
 :hover::-webkit-scrollbar-thumb {
   background: color-mix(in oklch, var(--text-muted) 28%, transparent);
@@ -411,24 +420,25 @@ textarea:focus-visible {
 
 .xterm textarea,
 .xterm .xterm-helper-textarea {
-  position: absolute !important;
-  left: -9999em !important;
-  top: 0 !important;
-  width: 0 !important;
-  height: 0 !important;
-  min-width: 0 !important;
-  min-height: 0 !important;
-  padding: 0 !important;
-  border: 0 !important;
-  outline: 0 !important;
-  resize: none !important;
-  opacity: 0 !important;
-  pointer-events: none !important;
+  position: absolute;
+  left: -9999em;
+  top: 0;
+  width: 0;
+  height: 0;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  resize: none;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .xterm textarea:focus-visible,
 .xterm .xterm-helper-textarea:focus-visible {
-  outline: 0 !important;
+  outline: 0;
+
 }
 
 /* ── Selection color ─────────────────────────────────── */
@@ -455,6 +465,7 @@ body.layout-dragging .xterm-screen,
 body.layout-dragging textarea,
 body.layout-dragging select,
 body.layout-dragging div.xterm {
-  pointer-events: none !important;
-  user-select: none !important;
+  pointer-events: none;
+  user-select: none;
+
 }

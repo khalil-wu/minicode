@@ -1,0 +1,528 @@
+/*
+ * Style A — 终端派 (Terminal)
+ *
+ * 等宽为主，无卡片无阴影，仅靠留白与 1px 分隔线分层。
+ * 颜色克制：单一强调色 + 状态色，其余全是灰阶。
+ * 动效最少：只有必要的状态反馈，没有装饰性运动。
+ */
+
+.demo-frame {
+  --d-font-body: var(--font-mono);
+  --d-radius: 0px;
+  --d-shadow: none;
+  --d-border: 1px solid var(--border-subtle);
+
+  background: var(--surface-base);
+  font-family: var(--d-font-body);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  color: var(--text-primary);
+}
+
+.demo-frame code,
+.demo-frame pre {
+  font-family: var(--font-mono);
+}
+
+/* ── Chat ─────────────────────────────────────────────── */
+
+.d-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+  padding: 24px 28px;
+}
+
+.d-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* User input reads as a prompt line, not a bubble. */
+.d-user-bubble {
+  padding: 0 0 0 16px;
+  border-left: 2px solid var(--accent-primary);
+  color: var(--text-secondary);
+}
+
+.d-user-bubble::before {
+  content: "> ";
+  color: var(--accent-primary);
+}
+
+/* ── Activity ─────────────────────────────────────────── */
+
+.d-activity {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.d-activity-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 24px;
+  color: var(--text-muted);
+}
+
+.d-activity-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  width: 16px;
+  color: var(--text-muted);
+}
+
+.d-activity-row[data-state="done"] .d-activity-icon { color: var(--state-success); }
+.d-activity-row[data-state="running"] .d-activity-icon { color: var(--accent-primary); }
+
+.d-activity-label {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.d-activity-label code {
+  color: var(--text-secondary);
+}
+
+.d-activity-meta {
+  flex-shrink: 0;
+  color: var(--text-disabled);
+  font-size: var(--text-2xs);
+}
+
+/* ── Tool call — a bare block, no card ────────────────── */
+
+.d-tool {
+  border-left: 1px solid var(--border-soft);
+}
+
+.d-tool-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 5px 0 5px 12px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: color var(--transition-micro);
+}
+
+.d-tool-head:hover { color: var(--text-primary); }
+
+.d-tool-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.d-tool-name { flex: 1; min-width: 0; }
+
+.d-tool-chev {
+  display: inline-flex;
+  color: var(--text-muted);
+  transition: transform var(--transition-fast);
+}
+
+.d-tool.is-collapsed .d-tool-chev { transform: rotate(-90deg); }
+
+.d-tool-body {
+  margin: 0;
+  padding: 0 0 8px 12px;
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+  line-height: var(--leading-relaxed);
+  white-space: pre-wrap;
+}
+
+.d-tool.is-collapsed .d-tool-body { display: none; }
+
+.d-badge {
+  flex-shrink: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+}
+
+.d-badge[data-tone="success"] { color: var(--state-success); }
+
+/* ── Assistant prose — still mono, wider leading ──────── */
+
+.d-assistant {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  line-height: var(--leading-relaxed);
+}
+
+.d-assistant p { margin: 0; }
+
+.d-assistant code {
+  padding: 1px 4px;
+  background: var(--surface-soft);
+  color: var(--text-primary);
+}
+
+/* ── Diff ─────────────────────────────────────────────── */
+
+.d-diff {
+  border-top: var(--d-border);
+  border-bottom: var(--d-border);
+}
+
+.d-diff-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+}
+
+.d-diff-path { flex: 1; min-width: 0; }
+.d-add { color: var(--state-success); }
+.d-del { color: var(--state-danger); }
+
+.d-diff-body {
+  margin: 0;
+  padding: 0 0 8px;
+  font-size: var(--text-2xs);
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+.d-line { display: block; }
+.d-line-add { color: var(--state-success); }
+.d-line-del { color: var(--state-danger); }
+
+/* ── Composer — a prompt rule, not a box ──────────────── */
+
+.d-composer {
+  padding: 0 28px 24px;
+}
+
+.d-composer-box {
+  border-top: 1px solid var(--border-soft);
+  padding-top: 12px;
+}
+
+.d-composer-input {
+  padding: 4px 0;
+  color: var(--text-primary);
+}
+
+.d-composer-input::before {
+  content: "> ";
+  color: var(--accent-primary);
+}
+
+.d-composer-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.d-composer-actions { display: flex; gap: 14px; }
+
+.d-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--text-2xs);
+  cursor: pointer;
+  transition: color var(--transition-micro);
+}
+
+.d-chip:hover { color: var(--text-primary); }
+
+.d-composer-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.d-composer-hint {
+  color: var(--text-disabled);
+  font-size: var(--text-2xs);
+}
+
+.d-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--accent-primary);
+  cursor: pointer;
+  transition: color var(--transition-micro);
+}
+
+.d-send:hover { color: var(--accent-hover); }
+
+/* ── Settings ─────────────────────────────────────────── */
+
+.d-settings {
+  display: grid;
+  grid-template-columns: 176px minmax(0, 1fr);
+  min-height: 520px;
+}
+
+.d-settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 22px 0;
+  border-right: var(--d-border);
+}
+
+.d-settings-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.d-settings-nav-label {
+  padding: 0 20px 6px;
+  color: var(--text-disabled);
+  font-size: var(--text-3xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.d-settings-tab {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 28px;
+  padding: 0 20px;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 0;
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: color var(--transition-micro);
+}
+
+.d-settings-tab:hover { color: var(--text-secondary); }
+
+.d-settings-tab[aria-current="page"] {
+  border-left-color: var(--accent-primary);
+  color: var(--text-primary);
+}
+
+.d-settings-content {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  padding: 22px 26px;
+  overflow: auto;
+}
+
+.d-settings-heading {
+  padding-bottom: 14px;
+  border-bottom: var(--d-border);
+}
+
+.d-settings-heading h2 {
+  margin: 0 0 4px;
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+  letter-spacing: -0.01em;
+}
+
+.d-settings-heading p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+}
+
+/* Rows separated by rules, not enclosed in cards. */
+.d-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.d-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(200px, auto);
+  gap: 20px;
+  align-items: center;
+  padding: 13px 0;
+  border-bottom: var(--d-border);
+}
+
+.d-row:first-child { padding-top: 0; }
+
+.d-row-title {
+  color: var(--text-primary);
+  font-size: var(--text-xs);
+}
+
+.d-row-desc {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+  line-height: var(--leading-snug);
+}
+
+.d-row-control {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.d-row-value {
+  color: var(--text-muted);
+  font-size: var(--text-2xs);
+}
+
+/* ── Settings controls ────────────────────────────────── */
+
+.d-segmented {
+  display: inline-flex;
+  border: var(--d-border);
+}
+
+.d-seg {
+  padding: 0 11px;
+  height: 26px;
+  border: 0;
+  border-right: var(--d-border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--text-2xs);
+  cursor: pointer;
+  transition: color var(--transition-micro), background var(--transition-micro);
+}
+
+.d-seg:last-child { border-right: 0; }
+.d-seg:hover { color: var(--text-secondary); }
+
+.d-seg[aria-pressed="true"] {
+  background: var(--surface-soft);
+  color: var(--text-primary);
+}
+
+/* Both inputs share the SAME family here — mono is the base font,
+   so there is no mono/sans split to reconcile. */
+.d-input {
+  width: 220px;
+  height: 28px;
+  padding: 0 9px;
+  border: var(--d-border);
+  border-radius: 0;
+  background: var(--surface-sunken);
+  color: var(--text-primary);
+  font-family: var(--d-font-body);
+  font-size: var(--text-2xs);
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+
+.d-input:focus { border-color: var(--accent-primary); }
+.d-input-mono { font-family: var(--font-mono); }
+
+.d-range { width: 150px; accent-color: var(--accent-primary); }
+
+.d-switch {
+  position: relative;
+  width: 34px;
+  height: 18px;
+  padding: 0;
+  border: var(--d-border);
+  border-radius: 0;
+  background: var(--surface-sunken);
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.d-switch > span {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  background: var(--text-muted);
+  transition: transform var(--transition-fast), background var(--transition-fast);
+}
+
+.d-switch[aria-checked="true"] {
+  border-color: var(--accent-primary);
+  background: var(--accent-soft);
+}
+
+.d-switch[aria-checked="true"] > span {
+  background: var(--accent-primary);
+  transform: translateX(16px);
+}
+
+.d-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.d-btn {
+  height: 28px;
+  padding: 0 14px;
+  border: var(--d-border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-2xs);
+  cursor: pointer;
+  transition: background var(--transition-micro), color var(--transition-micro);
+}
+
+.d-btn:hover { background: var(--surface-soft); color: var(--text-primary); }
+
+.d-btn-primary {
+  border-color: var(--accent-primary);
+  background: var(--accent-primary);
+  color: var(--text-on-accent);
+}
+
+.d-btn-primary:hover { background: var(--accent-hover); color: var(--text-on-accent); }
+
+/* ── Motion: minimal ─────────────────────────────────── */
+
+.d-spinner {
+  display: inline-flex;
+  animation: d-spin 900ms linear infinite;
+}
+
+@keyframes d-spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .d-spinner { animation: none; }
+}

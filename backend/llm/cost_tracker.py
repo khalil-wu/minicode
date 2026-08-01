@@ -1,43 +1,9 @@
-import logging
+import math
 import time
 from collections import defaultdict
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import Any
-
-logger = logging.getLogger(__name__)
-
-# Basic Claude 3.5 Sonnet prices per 1M tokens (in USD)
-# Default values can be overridden
-DEFAULT_INPUT_PRICE_PER_M = 3.00
-DEFAULT_OUTPUT_PRICE_PER_M = 15.00
-DEFAULT_CACHE_WRITE_PRICE_PER_M = 3.75
-DEFAULT_CACHE_READ_PRICE_PER_M = 0.30
-
-MODEL_PRICES_PER_M: dict[str, tuple[float, float, float, float]] = {
-    "claude-opus-4": (15.00, 75.00, 18.75, 1.50),
-    "claude-sonnet-4": (3.00, 15.00, 3.75, 0.30),
-    "claude-3-7-sonnet": (3.00, 15.00, 3.75, 0.30),
-    "claude-3-5-sonnet": (3.00, 15.00, 3.75, 0.30),
-    "claude-haiku": (0.80, 4.00, 1.00, 0.08),
-    "gpt-5.4": (1.25, 10.00, 1.25, 0.125),
-    "gpt-5.4-mini": (0.25, 2.00, 0.25, 0.025),
-    "gpt-4o": (2.50, 10.00, 2.50, 0.25),
-    "gpt-4.1": (2.00, 8.00, 2.00, 0.50),
-}
-
-
-def _prices_for_model(model_id: str | None) -> tuple[float, float, float, float]:
-    normalized = (model_id or "").strip().lower()
-    for prefix, prices in MODEL_PRICES_PER_M.items():
-        if normalized.startswith(prefix):
-            return prices
-    return (
-        DEFAULT_INPUT_PRICE_PER_M,
-        DEFAULT_OUTPUT_PRICE_PER_M,
-        DEFAULT_CACHE_WRITE_PRICE_PER_M,
-        DEFAULT_CACHE_READ_PRICE_PER_M,
-    )
 
 @dataclass
 class CostTrackerState:
@@ -89,25 +55,26 @@ class CostTracker:
         model_id: str | None = None,
         provider: str = "",
         session_id: str = "",
+        input_includes_cache_read: bool = True,
+        cost_usd: float | None = None,
     ) -> float:
         """
-        Record token usage and elapsed time, update global totals, and return the cost for this turn.
-        """
-        is_anthropic = "anthropic" in str(provider or "").strip().lower()
-        base_input = max(0, input_tokens if is_anthropic else input_tokens - cache_read_input_tokens)
-        prompt_cache_total = (
-            input_tokens + cache_read_input_tokens + cache_creation_input_tokens
-            if is_anthropic
-            else max(input_tokens, cache_read_input_tokens) + cache_creation_input_tokens
-        )
-        input_price, output_price, cache_write_price, cache_read_price = _prices_for_model(model_id)
+        Record token usage and elapsed time.
 
-        cost = (
-            (base_input / 1_000_000) * input_price +
-            (output_tokens / 1_000_000) * output_price +
-            (cache_creation_input_tokens / 1_000_000) * cache_write_price +
-            (cache_read_input_tokens / 1_000_000) * cache_read_price
+        Token counters are always retained. Monetary cost is recorded only when
+        the provider/runtime supplies an explicit value; model names are not a
+        pricing catalog and never select a local estimate.
+        """
+        del model_id, provider
+        base_input = max(
+            0,
+            input_tokens - cache_read_input_tokens
+            if input_includes_cache_read
+            else input_tokens,
         )
+        prompt_cache_total = base_input + cache_read_input_tokens + cache_creation_input_tokens
+        explicit_cost = float(cost_usd) if cost_usd is not None else 0.0
+        cost = max(0.0, explicit_cost) if math.isfinite(explicit_cost) else 0.0
 
         self._add_usage(
             self.state,

@@ -62,8 +62,23 @@ class TaskManager:
         _seq = getattr(self, "_seq", 0) + 1
         self._seq = _seq
         task_id = f"task_{_seq:05d}_{uuid4().hex[:12]}"
-        coro = self._wrap_awaitable(awaitable, timeout=timeout)
-        task = asyncio.create_task(coro)
+        # Own the caller's coroutine immediately. Wrapping an unscheduled
+        # coroutine in another coroutine leaves a cancellation window where
+        # the wrapper can be cancelled before its first ``await``, producing
+        # "coroutine was never awaited" and dropping the actual agent run.
+        source_task = asyncio.ensure_future(awaitable)
+        if timeout is None:
+            task = source_task
+        else:
+            task = asyncio.create_task(
+                self._wrap_awaitable(source_task, timeout=timeout)
+            )
+
+            def _cancel_source_if_supervisor_stops(finished: asyncio.Task[Any]) -> None:
+                if finished.cancelled() and not source_task.done():
+                    source_task.cancel()
+
+            task.add_done_callback(_cancel_source_if_supervisor_stops)
         managed = ManagedTask(id=task_id, kind=kind, task=task)
         self._tasks[task_id] = managed
         task.add_done_callback(lambda finished, managed_task=managed: self._finalize(managed_task, finished))
@@ -115,6 +130,29 @@ class TaskManager:
         if managed is None or managed.task is None:
             raise KeyError(task_id)
         return await managed.task
+
+    async def cancel_all_and_wait(self) -> int:
+        """Cancel and drain every live managed task.
+
+        Cancellation without awaiting leaves the wrapped coroutine pending
+        until event-loop destruction, where Python can inject ``GeneratorExit``
+        into application code. Session/application shutdown uses this method as
+        the final ownership boundary for all managed work.
+        """
+        current = asyncio.current_task()
+        pending: list[asyncio.Task[Any]] = []
+        for managed in self._tasks.values():
+            task = managed.task
+            if task is None or task.done() or task is current:
+                continue
+            managed.status = "cancelled"
+            managed.updated_at = _utc_now_iso()
+            task.cancel()
+            pending.append(task)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+            self._notify_changed()
+        return len(pending)
 
     async def _wrap_awaitable(self, awaitable: Any, *, timeout: float | None) -> Any:
         if timeout is None:

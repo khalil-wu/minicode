@@ -90,12 +90,12 @@ const ArtifactSection = ({ title, items }: { title: string; items: ArtifactItem[
         const Icon = artifactIcon(item)
         return (
           <ActivityButtonRow key={item.id} onClick={() => openItem(item)} title={item.detail || item.label}>
-            <ActivityIcon><Icon size={13} /></ActivityIcon>
+            <ActivityIcon><Icon size={14} /></ActivityIcon>
             <span style={{ flex: 1, minWidth: 0 }}>
               <span style={labelStyle}>{item.label}</span>
               <span style={metaStyle}>{[item.mediaType || item.kind, item.detail].filter(Boolean).join(' - ')}</span>
             </span>
-            <ChevronRight size={12} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+            <ChevronRight size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
           </ActivityButtonRow>
         )
       })}
@@ -234,7 +234,7 @@ const metaStyle: React.CSSProperties = {
   display: 'block',
   marginTop: 2,
   color: 'var(--text-muted)',
-  fontSize: 10,
+  fontSize: "var(--text-3xs)",
   lineHeight: 1.2,
   overflow: 'hidden',
   textOverflow: 'ellipsis',

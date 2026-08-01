@@ -74,6 +74,9 @@ export default {
         loose:   "var(--leading-loose)",
       },
       fontSize: {
+        "3xs": "var(--text-3xs)",
+        "2xs": "var(--text-2xs)",
+        xxs: "var(--text-xxs)",
         xs: "var(--text-xs)",
         sm: "var(--text-sm)",
         base: "var(--text-base)",

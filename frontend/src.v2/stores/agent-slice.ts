@@ -6,7 +6,6 @@ import { capabilityFeatureEnabled } from "../protocol/capabilities";
 
 const SERIAL_MAIN_PROGRESS_STAGES = new Set<ProgressContentBlock["stage"]>([
   "planning",
-  "verification",
   "final",
   "status",
 ]);

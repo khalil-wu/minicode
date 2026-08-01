@@ -10,7 +10,7 @@ import { formatModelLabel } from "../lib/model-label";
 import { UsageRing } from "../shell/UsageRing";
 import { openSettings } from "../lib/settings-navigation";
 import { selectableModelsForProvider } from "../lib/provider-models";
-import { ModelProviderIcon } from "../components/ModelProviderIcon";
+import { ModelBrandIcon } from "../components/ModelBrandIcon";
 
 interface Props {
   sendState: SendButtonState;
@@ -26,9 +26,9 @@ interface Props {
 }
 
 const PERMISSION_MODES: { id: PermissionMode; label: string }[] = [
-  { id: "ask_permissions", label: "Ask" },
-  { id: "auto", label: "Auto" },
-  { id: "bypass", label: "Full access" },
+  { id: "ask_permissions", label: "询问" },
+  { id: "auto", label: "自动" },
+  { id: "bypass", label: "完全访问" },
 ];
 
 const EFFORT_OPTIONS: { id: EffortLevel; label: string; desc: string }[] = [
@@ -127,11 +127,11 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
       setPermissionOpen(false);
       const { showConfirm } = await import("../overlays/DialogService");
       const ok = await showConfirm({
-        title: "Turn on Full access?",
+        title: "开启完全访问？",
         message:
-          "Full access (bypass) lets the agent run commands, edit files, and use the network without asking. Only enable this in a workspace you trust.",
-        confirmLabel: "Turn on Full access",
-        cancelLabel: "Cancel",
+          "完全访问允许智能体无需询问即可运行命令、编辑文件和使用网络。请仅在可信工作区中启用。",
+        confirmLabel: "开启完全访问",
+        cancelLabel: "取消",
         danger: true,
       });
       if (!ok) return;
@@ -144,24 +144,25 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
     if (!prMonitor) return;
     const next = !prMonitor[key];
     if (next) {
-      const label = key === "autoFix" ? "Auto-fix" : "Auto-merge";
+      const label = key === "autoFix" ? "自动修复" : "自动合并";
       const { showConfirm } = await import("../overlays/DialogService");
       const ok = await showConfirm({
-        title: `Enable ${label}`,
-        message: `${label} can trigger repository changes automatically. Enable it?`,
-        confirmLabel: "Enable",
+        title: `开启${label}？`,
+        message: `${label}会在当前项目中持续生效；代码写入仍遵循当前权限策略。`,
+        confirmLabel: "开启",
       });
       if (!ok) return;
     }
+    const automationKey = key === "autoFix" ? "auto_fix" : "auto_merge";
+    sendClientCommand({ type: "git.pr_automation.set", [automationKey]: next });
     useAppStore.getState().setPRMonitor({ ...prMonitor, [key]: next });
   };
 
-  const modelLabel = formatModelLabel(currentModel, "Select model");
+  const modelLabel = formatModelLabel(currentModel, "选择模型");
   const selectableModels = selectableModelsForProvider(
     availableModels,
     currentModel,
     currentProvider,
-    currentProviderBaseUrl,
     modelsSource,
   );
   const disabledReason = !currentModel.trim() ? "Select a model before sending" : undefined;
@@ -187,18 +188,18 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
         <div style={prMonitorStyle(prMonitor.ciStatus)}>
           <span className={prMonitor.ciStatus === "running" ? "thinking-pulse-dot" : undefined} style={prDotStyle(prMonitor.ciStatus)} />
           <span className="font-semibold" style={{ color: "var(--text-primary)" }}>PR #{prMonitor.prNumber}</span>
-          <span style={{ color: "var(--text-muted)" }}>CI: {prMonitor.ciStatus}</span>
+          <span style={{ color: "var(--text-muted)" }}>检查：{prMonitor.ciStatus}</span>
           {prMonitor.failedChecks && prMonitor.failedChecks.length > 0 && (
             <span style={{ color: "var(--state-danger)" }}>{prMonitor.failedChecks.length} failed</span>
           )}
           <span className="flex-1" />
           <ToggleChip
-            label="Auto-fix"
+            label="自动修复"
             active={prMonitor.autoFix}
             onClick={() => togglePRAutomation("autoFix")}
           />
           <ToggleChip
-            label="Auto-merge"
+            label="自动合并"
             active={prMonitor.autoMerge}
             onClick={() => togglePRAutomation("autoMerge")}
           />
@@ -206,9 +207,10 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
       )}
 
       <div
-        className="composer-footer"
+        className="composer-footer composer-footer-integrated"
         data-compact={compact ? "true" : "false"}
         data-minimal={minimal ? "true" : "false"}
+        data-permission-mode={permissionMode}
         style={footerStyle(compact)}
       >
         <input
@@ -225,10 +227,10 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
         <div className="composer-footer-primary" style={footerLeftStyle}>
           <button
             type="button"
-            title="Attach file"
+            title="添加附件"
             className="composer-attach-btn"
             style={iconBtn(compact)}
-            aria-label="Attach file"
+            aria-label="添加附件"
             onClick={openFilePicker}
             onKeyDown={(event) => {
               if (event.key !== "Enter" && event.key !== " ") return;
@@ -249,8 +251,8 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
               setPermissionOpen(open);
             }}
             label={permLabel}
-            title={`Permission: ${permLabel}`}
-            icon={<ShieldCheck size={12} />}
+            title={`权限：${permLabel}`}
+            icon={<ShieldCheck size={14} />}
           >
             {PERMISSION_MODES.map((mode) => (
               <MenuChoice
@@ -308,19 +310,19 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
             aria-expanded={modelOpen}
             aria-haspopup="listbox"
             style={{ ...pill, background: modelOpen ? "var(--surface-page)" : "var(--surface-soft)", borderColor: modelOpen ? "var(--border-subtle)" : "transparent" }}
-            title={currentModel || "Select model"}
+            title={currentModel || "选择模型"}
           >
-            <ModelProviderIcon model={currentModel} size={15} />
+            <ModelBrandIcon model={currentModel} size={15} />
             <span className="max-w-[180px] overflow-hidden text-ellipsis whitespace-nowrap">{modelLabel}</span>
-            <ChevronDown size={11} className="opacity-55 ml-0.5 flex-shrink-0" />
+            <ChevronDown size={14} className="opacity-55 ml-0.5 flex-shrink-0" />
           </button>
           {modelOpen && selectableModels.length > 0 && (
             <div style={dropdownStyle("right")}>
               {selectableModels.map((m) => (
                 <button key={m} onClick={() => switchModel(m)} style={{ ...dropdownItem, background: m === currentModel ? dropdownActiveBg : "transparent" }}>
-                  <ModelProviderIcon model={m} size={16} />
+                  <ModelBrandIcon model={m} size={16} />
                   <span className="flex-1">{m}</span>
-                  {m === currentModel && <Check size={13} style={{ color: "var(--accent-primary)" }} />}
+                  {m === currentModel && <Check size={14} style={{ color: "var(--accent-primary)" }} />}
                 </button>
               ))}
               <div className="mt-1 pt-1" style={{ borderTop: "1px solid var(--border-subtle)" }}>
@@ -331,7 +333,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
                   }}
                   style={{ ...dropdownItem, color: "var(--accent-primary)" }}
                 >
-                  Configure...
+                  配置模型…
                 </button>
               </div>
             </div>
@@ -342,11 +344,11 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
           <button
             type="button"
             onClick={onStop}
-            title="Stop current response"
-            aria-label="Stop current response"
+             title="停止当前回复"
+             aria-label="停止当前回复"
             className="composer-stop-current-btn w-7 h-7 border-0 inline-flex items-center justify-center"
           >
-            <Square size={11} fill="currentColor" />
+            <Square size={14} fill="currentColor" />
           </button>
         ) : null}
         <SendIconBtn sendState={sendState} onSend={onSend} disabledReason={disabledReason} />
@@ -391,7 +393,7 @@ const Picker = ({
     >
       {icon}
       {label}
-      <ChevronDown size={11} className="opacity-55 ml-0.5" />
+      <ChevronDown size={14} className="opacity-55 ml-0.5" />
     </button>
     {open && <div style={dropdownStyle(align)}>{children}</div>}
   </div>
@@ -420,7 +422,7 @@ const MenuChoice = ({
     }}
   >
     <span style={{ display: "inline-flex", justifyContent: "center", color: active ? "var(--accent-primary)" : "transparent" }}>
-      <Check size={13} />
+      <Check size={14} />
     </span>
     <span style={{ minWidth: 0, color: "var(--text-primary)", fontWeight: active ? 600 : 500 }}>{label}</span>
   </button>
@@ -448,8 +450,8 @@ const ContextUsageRing = memo(() => {
     <button
       type="button"
       onClick={() => getWebSocket()?.send({ type: "session.usage.inspect", source: "usage_ring" })}
-      title="Context usage — click for details (/usage)"
-      aria-label="Show context and token usage"
+       title="上下文用量，点击查看详情（/usage）"
+       aria-label="显示上下文和令牌用量"
       className="composer-context-usage"
       style={{ background: "transparent", border: 0, padding: 0, cursor: "pointer" }}
     >
@@ -476,11 +478,11 @@ const ToggleChip = ({ label, active, onClick }: { label: string; active: boolean
 );
 
 const permissionLabel = (mode: PermissionMode): string => {
-  if (mode === "ask_permissions") return "Ask";
-  if (mode === "plan") return "Plan";
-  if (mode === "auto") return "Auto";
-  if (mode === "bypass") return "Full access";
-  return "Auto";
+  if (mode === "ask_permissions") return "询问";
+  if (mode === "plan") return "规划";
+  if (mode === "auto") return "自动";
+  if (mode === "bypass") return "完全访问";
+  return "自动";
 };
 
 const effortOption = (level: EffortLevel) =>
@@ -601,11 +603,11 @@ const SendIconBtn = memo(({ sendState, onSend, disabledReason }: { sendState: Se
     : sendState === "queue"
       ? "Queue message"
       : sendState === "offline-queue"
-        ? "Send when reconnected"
-        : "Send";
+         ? "连接恢复后发送"
+         : "发送";
   return (
     <button onClick={onSend} disabled={disabled} title={disabledReason || label} aria-label={label} className="btn-send composer-send-btn w-7 h-7 border-0 inline-flex items-center justify-center" style={sendIconButtonStyle(sendState, disabled)}>
-      {sendState === "stop" ? <Square size={12} fill="currentColor" /> : <ArrowUp size={16} strokeWidth={2.3} />}
+      {sendState === "stop" ? <Square size={14} fill="currentColor" /> : <ArrowUp size={16} strokeWidth={1.8} />}
     </button>
   );
 });
@@ -613,7 +615,7 @@ SendIconBtn.displayName = "SendIconBtn";
 
 const sendIconButtonStyle = (sendState: SendButtonState, disabled: boolean): React.CSSProperties => ({
   borderRadius: "var(--radius-full)",
-  background: sendState === "stop" ? "var(--text-primary)" : disabled ? "var(--surface-soft)" : "var(--text-primary)",
+  background: sendState === "stop" ? "var(--text-primary)" : disabled ? "var(--surface-active)" : "var(--accent-primary)",
   color: disabled ? "var(--text-muted)" : "var(--text-on-accent)",
   cursor: disabled ? "not-allowed" : "pointer",
 });

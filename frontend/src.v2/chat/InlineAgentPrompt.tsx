@@ -10,10 +10,10 @@ import {
 } from "lucide-react";
 import { useAppStore } from "../stores";
 import { buildApprovalResponseCommand, buildAskUserResponseCommand } from "../protocol/prompt-responses";
-import { sendClientCommand } from "../protocol/ws-outbox";
+import { sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import type { PendingApproval, PendingAskUser, PendingDiffReview } from "../stores/types";
 import { pendingPromptTargetsConversation } from "../lib/pending-prompts";
-import { ToolGlyph, toolDisplayName, summarizeArgs, humanizeKey } from "./toolUtils";
+import { ToolGlyph, summarizeArgs, humanizeKey } from "./toolUtils";
 import { deriveCommandPrefix } from "./commandPrefix";
 
 export const InlineAgentPrompt = () => {
@@ -54,9 +54,9 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
   const [responding, setResponding] = useState(false);
   const [amending, setAmending] = useState(false);
   const [feedback, setFeedback] = useState("");
-  const summary = useMemo(() => summarizeApprovalArgs(request.toolName, request.args), [request.toolName, request.args]);
+  const summary = useMemo(() => summarizeArgs(request.args), [request.args]);
   const total = 1 + queue.length;
-  const displayName = toolDisplayName(request.toolName);
+  const displayName = humanizeKey(request.toolName);
   // Codex escalate-on-failure: a command retried with escalated permissions
   // carries with_escalated_permissions + a justification in its args. Surface it
   // prominently so the user understands they are approving full (unsandboxed)
@@ -64,6 +64,10 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
   const escalated = isEscalatedApproval(request);
   const escalationJustification = String(request.args?.justification ?? "").trim();
   const sourceLabel = approvalSourceLabel(request);
+  const samplingPromptPreview = request.toolName.startsWith("mcp_sampling:")
+    ? String(request.args?.prompt_preview ?? "").trim()
+    : "";
+  const samplingPreviewTruncated = request.args?.prompt_preview_truncated === true;
 
   useEffect(() => {
     setResponding(false);
@@ -104,22 +108,41 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
   // commands with the same prefix skip prompting, then approve this one.
   const commandText = String(request.args?.command ?? request.args?.cmd ?? "");
   const alwaysPrefix = deriveCommandPrefix(commandText);
-  const alwaysAllowPrefix = () => {
-    if (alwaysPrefix) {
-      sendClientCommand({
+  const alwaysAllowPrefix = async () => {
+    if (responding) return;
+    if (!alwaysPrefix) {
+      respond(true);
+      return;
+    }
+    setResponding(true);
+    const rule = `Bash(${alwaysPrefix}:*)`;
+    try {
+      const result = await sendClientCommandAwaitResult({
         type: "permissions.content_rule.add",
-        rule: `Bash(${alwaysPrefix}:*)`,
+        rule,
         deny: false,
         source: "approval.always_allow_prefix",
-      });
+      }, "permissions.content_rule.add");
+      const failed = ["error", "failed", "warning"].includes(String(result.level || "").toLowerCase());
+      if (failed || result.data?.rule !== rule || result.data?.deny === true) {
+        throw new Error(result.message || "The permission rule was not saved.");
+      }
+      const sent = sendClientCommand(
+        buildApprovalResponseCommand(request.requestId, "approve", request.protocol),
+      );
+      if (!sent) throw new Error("Connection is offline");
+      useAppStore.getState().clearApproval(request.requestId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to save the permission rule";
+      useAppStore.getState().markApprovalError(request.requestId, message);
+      setResponding(false);
     }
-    respond(true);
   };
 
   return (
     <section style={approvalBarStyle}>
       <div style={approvalIconStyle}>
-        <ToolGlyph name={request.toolName} />
+        <ToolGlyph />
       </div>
 
       <div style={approvalMainStyle}>
@@ -136,7 +159,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
 
         {escalated && (
           <div style={escalationBannerStyle}>
-            <ShieldAlert size={13} style={{ flexShrink: 0, marginTop: 1 }} />
+            <ShieldAlert size={14} style={{ flexShrink: 0, marginTop: 1 }} />
             <span>
               <strong>Run outside sandbox.</strong>
               {escalationJustification ? ` ${escalationJustification}` : " The agent says a sandboxed run failed and needs full access."}
@@ -159,6 +182,18 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
           <pre style={fullCommandStyle} aria-label="Command to run">{commandText}</pre>
         )}
 
+        {samplingPromptPreview && (
+          <div style={samplingPreviewStyle}>
+            <strong>Untrusted MCP prompt</strong>
+            <pre style={samplingPreviewTextStyle} aria-label="MCP prompt sent to the model">
+              {samplingPromptPreview}
+            </pre>
+            {samplingPreviewTruncated && (
+              <span style={samplingPreviewHintStyle}>Preview truncated; deny this request to avoid sending omitted content.</span>
+            )}
+          </div>
+        )}
+
         {amending && (
           <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
             <textarea
@@ -173,7 +208,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
                 border: "1px solid var(--border-subtle)",
                 background: "var(--surface-base)",
                 color: "var(--text-primary)",
-                fontSize: 12,
+                fontSize: "var(--text-xxs)",
                 fontFamily: "inherit",
                 resize: "vertical",
               }}
@@ -191,7 +226,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
 
         {queue.length > 0 && (
           <div style={queueStyle}>
-            Next: {queue.map((item) => toolDisplayName(item.toolName)).join(", ")}
+            Next: {queue.map((item) => humanizeKey(item.toolName)).join(", ")}
           </div>
         )}
         {request.status === "error" && request.error && (
@@ -201,15 +236,15 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
 
       <div style={compactButtonRowStyle}>
         <button type="button" onClick={() => respond(false)} disabled={responding} style={secondaryButtonStyle} aria-label="Deny tool use">
-          <X size={13} />
+          <X size={14} />
           Deny
         </button>
         <button type="button" onClick={() => respond(true)} disabled={responding} style={primaryButtonStyle} aria-label="Allow tool use">
-          <Check size={13} />
+          <Check size={14} />
           Allow
         </button>
         <button type="button" onClick={() => setAmending((v) => !v)} disabled={responding} style={secondaryButtonStyle} aria-label="Amend with feedback" title="Add guidance to your decision (cc Tab-to-amend)">
-          <MessageSquare size={13} />
+          <MessageSquare size={14} />
           Amend
         </button>
         {alwaysPrefix && (
@@ -221,7 +256,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
             aria-label={`Always allow ${alwaysPrefix} commands without prompting`}
             title={`Always allow "${alwaysPrefix}" commands without prompting`}
           >
-            <ShieldCheck size={13} />
+            <ShieldCheck size={14} />
             Always {alwaysPrefix}
           </button>
         )}
@@ -307,15 +342,15 @@ const DiffApprovalCard = ({ request }: { request: PendingDiffReview }) => {
 
       <div style={buttonRowStyle}>
         <button type="button" onClick={openDiff} style={secondaryButtonStyle}>
-          <ExternalLink size={13} />
+          <ExternalLink size={14} />
           Open diff
         </button>
         <button type="button" onClick={() => respond(false)} style={secondaryButtonStyle} aria-label="Deny file changes">
-          <X size={13} />
+          <X size={14} />
           Deny
         </button>
         <button type="button" onClick={() => respond(true)} style={primaryButtonStyle} aria-label="Allow file changes">
-          <Check size={13} />
+          <Check size={14} />
           Allow
         </button>
       </div>
@@ -402,48 +437,6 @@ const diffStats = (diff: string) => {
     }
   }
   return { plus, minus, preview };
-};
-
-type ApprovalArgSummary = { label: string; value: string };
-type ApprovalArgDescriptor = { label: string; keys: string[] };
-
-const TOOL_ARG_DESCRIPTORS: Array<{ pattern: RegExp; fields: ApprovalArgDescriptor[] }> = [
-  { pattern: /(?:run_)?command|bash|shell|terminal/i, fields: [
-    { label: "command", keys: ["command", "cmd", "script"] },
-    { label: "cwd", keys: ["cwd", "workdir", "working_directory"] },
-  ] },
-  { pattern: /(?:web_)?fetch|browser|url/i, fields: [
-    { label: "url", keys: ["url", "uri", "href"] },
-    { label: "query", keys: ["query", "q"] },
-  ] },
-  { pattern: /(?:web_)?search|grep|glob|find/i, fields: [
-    { label: "query", keys: ["query", "q", "pattern", "regex"] },
-    { label: "path", keys: ["path", "file_path", "dir", "directory", "cwd"] },
-  ] },
-  { pattern: /read|write|edit|patch|file|diff/i, fields: [
-    { label: "path", keys: ["path", "file_path", "filePath", "filename", "target"] },
-    { label: "command", keys: ["command", "cmd"] },
-  ] },
-];
-
-const summarizeApprovalArgs = (toolName: string, args: Record<string, unknown>): ApprovalArgSummary[] => {
-  const match = TOOL_ARG_DESCRIPTORS.find((descriptor) => descriptor.pattern.test(toolName));
-  if (!match) return summarizeArgs(args);
-
-  const rows = match.fields.flatMap((field) => {
-    const value = firstConciseValue(args, field.keys);
-    return value ? [{ label: field.label, value }] : [];
-  });
-  return rows.length > 0 ? rows : summarizeArgs(args);
-};
-
-const firstConciseValue = (args: Record<string, unknown>, keys: string[]): string | null => {
-  for (const key of keys) {
-    const value = args[key];
-    if (typeof value === "string" && value.trim()) return value.trim();
-    if (typeof value === "number" || typeof value === "boolean") return String(value);
-  }
-  return null;
 };
 
 const shellStyle: React.CSSProperties = {
@@ -556,6 +549,24 @@ const fullCommandStyle: React.CSSProperties = {
   lineHeight: 1.5,
   whiteSpace: "pre-wrap",
   wordBreak: "break-word",
+};
+
+const samplingPreviewStyle: React.CSSProperties = {
+  marginTop: 4,
+  display: "grid",
+  gap: 4,
+  color: "var(--text-secondary)",
+  fontSize: "var(--text-xs)",
+};
+
+const samplingPreviewTextStyle: React.CSSProperties = {
+  ...fullCommandStyle,
+  margin: 0,
+  maxHeight: 180,
+};
+
+const samplingPreviewHintStyle: React.CSSProperties = {
+  color: "var(--state-warning)",
 };
 
 const cardStyle: React.CSSProperties = {

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from urllib.parse import urlsplit
 from typing import Any
+
+from backend.llm.capabilities import capabilities_for_adapter
 
 
 NATIVE_IMAGE_LIMIT_BYTES = 20 * 1024 * 1024
@@ -36,7 +37,7 @@ def build_attachment_input_plan(
 
     The policy mirrors Codex/Claude Code style attachment handling: send native
     images/PDFs when the active wire format is known to support them, but keep
-    extracted document text addressable through artifacts/RAG instead of
+    extracted document text addressable through scoped artifacts instead of
     replaying large files into every prompt turn.
     """
 
@@ -53,8 +54,6 @@ def build_attachment_input_plan(
         kind = str(attachment.get("kind") or "").strip()
         data = str(attachment.get("data") or "").strip()
         artifact_id = str(attachment.get("artifact_id") or "").strip()
-        doc_id = str(attachment.get("doc_id") or "").strip()
-        indexed_chunks = int(attachment.get("indexed_chunks") or 0)
         size_bytes = int(attachment.get("size_bytes") or 0)
         parse_error = str(attachment.get("parse_error") or "").strip()
         input_source = str(attachment.get("input_source") or "").strip()
@@ -80,7 +79,6 @@ def build_attachment_input_plan(
         elif media_type == PDF_MEDIA_TYPE and data:
             text_hint = _attachment_source_hint(
                 artifact_id,
-                doc_id,
                 fallback="the extracted attachment text if available",
             )
             if _supports_native_pdf(mode) and _fits_limit(size_bytes, NATIVE_PDF_LIMIT_BYTES):
@@ -150,22 +148,19 @@ def build_attachment_input_plan(
             if used_native and media_type == PDF_MEDIA_TYPE:
                 hints.append(
                     f"- {file_name}: native PDF is attached; extracted text is available via "
-                    f"read_artifact('{artifact_id}') and doc_id {doc_id or 'unknown'}."
+                    f"read_artifact('{artifact_id}')."
                 )
             else:
                 source_hint = f"read_artifact('{artifact_id}')"
-                if doc_id:
-                    source_hint += f" or doc_id {doc_id}"
-                chunk_hint = f"; {indexed_chunks} indexed chunks" if indexed_chunks else ""
                 if input_source == "pasted_text":
                     hints.append(
                         f"- {file_name}: this file is the user's pasted message body. Before responding, "
-                        f"you must read its full contents with {source_hint}{chunk_hint} and treat those "
+                        f"you must read its full contents with {source_hint} and treat those "
                         "contents as the user message. Do not answer from the filename, title, or summary."
                     )
                 else:
                     hints.append(
-                        f"- {file_name}: before answering about this file, use {source_hint}{chunk_hint} "
+                        f"- {file_name}: before answering about this file, use {source_hint} "
                         "and base claims on the returned contents. "
                         "Do not infer document contents from the filename, title, or summary."
                     )
@@ -222,15 +217,12 @@ def _primary_llm_adapter(llm: Any | None) -> Any | None:
 
 def _attachment_source_hint(
     artifact_id: str,
-    doc_id: str = "",
     *,
     fallback: str,
 ) -> str:
     sources: list[str] = []
     if artifact_id:
         sources.append(f"read_artifact('{artifact_id}')")
-    if doc_id:
-        sources.append(f"doc_id {doc_id}")
     return " or ".join(sources) if sources else fallback
 
 
@@ -238,16 +230,12 @@ def _detect_llm_wire_mode(llm: Any | None) -> str:
     if llm is None:
         return "auto"
 
-    adapters = getattr(llm, "_adapters", None)
-    if isinstance(adapters, list) and adapters:
-        return _detect_llm_wire_mode(adapters[0])
-
-    class_name = llm.__class__.__name__.lower()
-    if "anthropic" in class_name:
-        return "anthropic"
-
-    settings = getattr(llm, "_settings", None)
-    wire_api = str(getattr(settings, "wire_api", "") or "").strip().lower()
+    # The adapter is the source of truth for its wire contract. Do not infer
+    # protocol or model capabilities from Python class names, hostnames, or
+    # model slugs; fallback adapters are already unwrapped by the capability
+    # helper.
+    capabilities = capabilities_for_adapter(llm)
+    wire_api = str(capabilities.wire_api or "").strip().lower()
     if wire_api in {"responses", "chat"}:
         return f"openai_{wire_api}"
     if wire_api == "anthropic":
@@ -261,72 +249,11 @@ def _supports_native_pdf(mode: str) -> bool:
 
 
 def _supports_native_images(mode: str, llm: Any | None) -> bool:
-    if mode == "auto":
-        return True
-    if mode == "anthropic":
-        return True
-
-    settings = getattr(llm, "_settings", None)
-    model = str(getattr(settings, "model", "") or "").strip().lower()
-    base_url = str(getattr(settings, "base_url", "") or "").strip().lower()
-    host = urlsplit(base_url).netloc.lower()
-
-    if _is_known_text_only_image_provider(host, model):
-        return False
-
-    if _model_declares_vision_support(model):
-        return True
-
-    if "api.openai.com" in host:
-        return True
-    # For custom OpenAI-compatible endpoints, prefer native image input unless
-    # the provider/model is explicitly known to reject it. Silently dropping the
-    # pixels is worse than surfacing a provider error the user can act on.
-    return mode.startswith("openai_")
-
-
-def _is_known_text_only_image_provider(host: str, model: str) -> bool:
-    """Providers/models where OpenAI-compatible chat rejects image_url input."""
-    if "deepseek" in host or "deepseek" in model:
-        return True
-    if ("dashscope" in host or "aliyuncs.com" in host or "qwen" in model) and not _model_declares_vision_support(model):
-        return True
-    if "siliconflow" in host and not _model_declares_vision_support(model):
-        return True
-    return False
-
-
-def _model_declares_vision_support(model: str) -> bool:
-    normalized = model.replace("_", "-").lower()
-    vision_markers = (
-        "gpt-4o",
-        "gpt-4.1",
-        "gpt-5",
-        "o3",
-        "o4",
-        "claude",
-        "gemini",
-        "vision",
-        "visual",
-        "-vl",
-        "vl-",
-        "qwen-vl",
-        "qwen2-vl",
-        "qwen2.5-vl",
-        "qwen3-vl",
-        "omni",
-        "qvq",
-        "glm-4v",
-        "glm-4.5v",
-        "doubao-vision",
-        "doubao-seed-vision",
-        "pixtral",
-        "llava",
-        "internvl",
-        "minicpm-v",
-        "grok-vision",
-    )
-    return any(marker in normalized for marker in vision_markers)
+    # Match Pi's model-input contract: unknown metadata stays permissive, and
+    # only an explicit provider declaration can suppress image bytes. Never
+    # infer vision support from a hostname or a model-name substring.
+    del mode
+    return capabilities_for_adapter(llm).vision is not False
 
 
 def _fits_limit(size_bytes: int, limit: int) -> bool:

@@ -1,16 +1,19 @@
-import { ChevronDown, ChevronUp, Copy, Quote, RotateCw, Trash2 } from "lucide-react";
-import { useCallback, useState } from "react";
+import { ChevronDown, ChevronUp, Copy, GitBranch, Quote, RotateCw, Trash2 } from "lucide-react";
+import { useCallback, useMemo, useState } from "react";
 import type React from "react";
 import type { AssistantMarkdownCellState, AssistantReplyAttachment } from "./cellTypes";
 import type { Citation } from "../../stores/types";
 import { MarkdownRenderer } from "../messages/MarkdownRenderer";
 import { normalizeCitationText } from "../messages/citationText";
-import { sourceFaviconUrl } from "../messages/sourceFavicon";
+import { BrandIcon } from "../../components/BrandIcon";
 import { ImageLightbox } from "../../components/ImageLightbox";
 import { getWebSocket } from "../../hooks/useWebSocket";
 import { useAppStore } from "../../stores";
-import { openWebInPreview } from "../openWebInPreview";
+import { openWebTarget } from "../openWebTarget";
 import { previewUrlForPath } from "../../shell/fileTreeHelpers";
+import { sendClientCommand } from "../../protocol/ws-outbox";
+import { openPath, revealPath } from "../../desktop/runtime";
+import { useContextMenu } from "../../components/useContextMenu";
 import "./cells.css";
 
 function interruptBackendRunIfStreaming(): void {
@@ -42,6 +45,13 @@ export function AssistantMarkdownCell({
   // "reply" marks an explicit BriefTool reply; "stream" (default) is
   // final-answer text streamed after the tool work.
   const replySource = cell.source === "reply" ? "reply" : "stream";
+  const visibleAttachments = useMemo(() => {
+    const normalizedMarkdown = rawMarkdown.replace(/\\/g, "/").toLowerCase();
+    return (cell.attachments ?? []).filter((attachment) => {
+      const normalizedPath = attachment.path.replace(/\\/g, "/").toLowerCase();
+      return !normalizedPath || !normalizedMarkdown.includes(normalizedPath);
+    });
+  }, [cell.attachments, rawMarkdown]);
 
   const copy = useCallback(() => {
     navigator.clipboard.writeText(displayMarkdown).then(() => {
@@ -131,6 +141,19 @@ export function AssistantMarkdownCell({
     }
   }, [cell.messageId, deleteMessage, recallMessage]);
 
+  const forkConversation = useCallback(() => {
+    if (!cell.messageId) return;
+    const state = useAppStore.getState();
+    const messageIndex = state.messages.findIndex((message) => message.id === cell.messageId);
+    sendClientCommand({
+      type: "context.fork",
+      message_id: cell.messageId,
+      ...(messageIndex >= 0 ? { message_index: messageIndex } : {}),
+      create_branch: true,
+      activate: true,
+    });
+  }, [cell.messageId]);
+
   return (
     <div
       className="assistant-cell-wrap"
@@ -143,11 +166,11 @@ export function AssistantMarkdownCell({
           isStreaming={cell.isStreaming || false}
           citations={cell.citations}
         />
-        {cell.attachments && cell.attachments.length > 0 && (
+        {visibleAttachments.length > 0 && (
           <div className="assistant-cell-attachments">
             <div className="assistant-cell-sources-title">附件</div>
             <div className="assistant-cell-attachments-list">
-              {cell.attachments.map((attachment) => (
+              {visibleAttachments.map((attachment) => (
                 <AttachmentChip key={attachment.path} attachment={attachment} />
               ))}
             </div>
@@ -157,9 +180,7 @@ export function AssistantMarkdownCell({
       <div className="assistant-cell-actions" data-has-sources={sources.length > 0 ? "true" : "false"}>
         {sources.length > 0 && (
           <div className="assistant-cell-source-strip" aria-label="引用来源">
-            {visibleSources.map((source) => {
-              const faviconUrl = sourceFaviconUrl(source.url);
-              return (
+            {visibleSources.map((source) => (
                 <a
                   key={source.url}
                   href={source.url}
@@ -167,26 +188,20 @@ export function AssistantMarkdownCell({
                   title={source.title || source.url}
                   className="assistant-cell-source-chip"
                   onClick={(event) => {
-                    if (openWebInPreview(source.url)) event.preventDefault();
+                    if (openWebTarget(source.url)) event.preventDefault();
                   }}
                 >
                   <span className="assistant-cell-source-favicon" aria-hidden="true">
-                    {faviconUrl && (
-                      <img
-                        src={faviconUrl}
-                        alt=""
-                        loading="lazy"
-                        referrerPolicy="no-referrer"
-                        onError={(event) => {
-                          event.currentTarget.style.display = "none";
-                        }}
-                      />
-                    )}
+                    <BrandIcon
+                      value={`${source.label} ${source.title || ""} ${source.url}`}
+                      websiteUrl={source.url}
+                      fallback="web"
+                      size={14}
+                    />
                   </span>
                   <span className="assistant-cell-source-label">{source.label}</span>
                 </a>
-              );
-            })}
+            ))}
             {hiddenSourceCount > 0 && (
               <button
                 type="button"
@@ -194,7 +209,7 @@ export function AssistantMarkdownCell({
                 onClick={() => setSourcesExpanded(true)}
                 aria-label={`再显示 ${hiddenSourceCount} 个来源`}
               >
-                <ChevronDown size={12} aria-hidden="true" />
+                <ChevronDown size={14} aria-hidden="true" />
                 再显示 {hiddenSourceCount} 个
               </button>
             )}
@@ -205,7 +220,7 @@ export function AssistantMarkdownCell({
                 onClick={() => setSourcesExpanded(false)}
                 aria-label="收起来源"
               >
-                <ChevronUp size={12} aria-hidden="true" />
+                <ChevronUp size={14} aria-hidden="true" />
                 收起
               </button>
             )}
@@ -220,7 +235,7 @@ export function AssistantMarkdownCell({
               aria-label={copied ? "已复制" : "复制回复"}
               className="cell-action-btn"
             >
-              <Copy size={12} />
+              <Copy size={14} />
             </button>
           )}
           {cell.messageId && (
@@ -232,7 +247,7 @@ export function AssistantMarkdownCell({
               aria-label="引用回复"
               className="cell-action-btn"
             >
-              <Quote size={12} />
+              <Quote size={14} />
             </button>
             <button
               type="button"
@@ -241,7 +256,16 @@ export function AssistantMarkdownCell({
               aria-label="重新生成"
               className="cell-action-btn"
             >
-              <RotateCw size={12} />
+              <RotateCw size={14} />
+            </button>
+            <button
+              type="button"
+              onClick={forkConversation}
+              title="从此处分支"
+              aria-label="从此处分支"
+              className="cell-action-btn"
+            >
+              <GitBranch size={14} />
             </button>
             <button
               type="button"
@@ -250,7 +274,7 @@ export function AssistantMarkdownCell({
               aria-label="删除回复"
               className="cell-action-btn"
             >
-              <Trash2 size={12} />
+              <Trash2 size={14} />
             </button>
             </>
           )}
@@ -267,35 +291,42 @@ function citationHref(citation: Citation | undefined): string {
 
 function AttachmentChip({ attachment }: { attachment: AssistantReplyAttachment }) {
   const [previewOpen, setPreviewOpen] = useState(false);
+  const workingDirectory = useAppStore((state) => state.workingDirectory);
   const openAttachment = () => {
     if (attachment.isImage) {
       setPreviewOpen(true);
       return;
     }
-    const store = useAppStore.getState();
-    const label = attachment.path.split(/[/\\]/).filter(Boolean).pop() ?? attachment.path;
-    store.openEditorFile(attachment.path, label);
-    store.setRightStackTab("inspector");
+    void openPath(attachment.path);
   };
 
   const fileName = attachment.path.split(/[/\\]/).filter(Boolean).pop() || attachment.path;
   const sizeLabel = formatFileSize(attachment.size);
-  const previewUrl = attachment.isImage ? previewUrlForPath(attachment.path) : "";
+  const previewUrl = attachment.isImage ? previewUrlForPath(attachment.path, workingDirectory) : "";
+  const { onContextMenu, menu } = useContextMenu(() => [
+    { label: "使用默认应用打开", onClick: () => { void openPath(attachment.path); } },
+    { label: "在资源管理器中显示", onClick: () => { void revealPath(attachment.path); } },
+    { label: "", separator: true },
+    { label: "复制路径", onClick: () => { void navigator.clipboard.writeText(attachment.path); } },
+  ]);
 
   return (
     <>
-      <button
-        type="button"
-        className="assistant-cell-attachment"
-        title={attachment.path}
-        onClick={openAttachment}
-      >
-        <span className="assistant-cell-attachment-kind" aria-hidden="true">
-          {attachment.isImage ? "[image]" : "[file]"}
-        </span>
-        <span className="assistant-cell-attachment-name">{fileName}</span>
-        <span className="assistant-cell-attachment-size">({sizeLabel})</span>
-      </button>
+      <span onContextMenu={onContextMenu}>
+        <button
+          type="button"
+          className="assistant-cell-attachment"
+          title={attachment.path}
+          onClick={openAttachment}
+        >
+          <span className="assistant-cell-attachment-kind" aria-hidden="true">
+            {attachment.isImage ? "[image]" : "[file]"}
+          </span>
+          <span className="assistant-cell-attachment-name">{fileName}</span>
+          <span className="assistant-cell-attachment-size">({sizeLabel})</span>
+        </button>
+        {menu}
+      </span>
       {previewOpen && previewUrl ? (
         <ImageLightbox
           src={previewUrl}

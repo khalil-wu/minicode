@@ -139,25 +139,28 @@ class WorkspaceFileWatcher:
             def on_any_event(self, event: FileSystemEvent):
                 if self.watcher._closed:
                     return
-                # 忽略目录事件
-                if event.is_directory:
-                    return
-
-                path = Path(event.src_path)
-
-                # 检查是否应该忽略
-                if self.watcher._should_ignore(path):
-                    return
-
-                # 防抖处理
                 loop = self.watcher._loop
                 if getattr(loop, "is_closed", lambda: False)():
                     return
-                coro = self.watcher._debounced_change(path, event.event_type)
-                try:
-                    asyncio.run_coroutine_threadsafe(coro, loop)
-                except RuntimeError:
-                    coro.close()
+
+                changes: list[tuple[Path, str]] = []
+                source = Path(event.src_path)
+                if event.event_type == "moved":
+                    changes.append((source, "deleted"))
+                    dest_path = getattr(event, "dest_path", "")
+                    if dest_path:
+                        changes.append((Path(dest_path), "moved"))
+                else:
+                    changes.append((source, event.event_type))
+
+                for path, event_type in changes:
+                    if self.watcher._should_ignore(path):
+                        continue
+                    coro = self.watcher._debounced_change(path, event_type)
+                    try:
+                        asyncio.run_coroutine_threadsafe(coro, loop)
+                    except RuntimeError:
+                        coro.close()
 
         return Handler(self)
 
@@ -210,7 +213,8 @@ class WorkspaceFileWatcher:
 
             finally:
                 # 清理任务
-                self._debounce_tasks.pop(path_str, None)
+                if self._debounce_tasks.get(path_str) is task:
+                    self._debounce_tasks.pop(path_str, None)
 
         # 创建新任务
         task = asyncio.create_task(delayed_callback())

@@ -26,6 +26,8 @@ from typing import Any
 _TOOL_ALIASES: dict[str, str] = {
     "bash": "run_command",
     "shell": "run_command",
+    "terminal.exec": "run_command",
+    "terminal_exec": "run_command",
     "terminal": "terminal_*",
     "edit": "edit_file",
     "write": "write_file",
@@ -36,7 +38,16 @@ _TOOL_ALIASES: dict[str, str] = {
 _COMMAND_TOOL_GLOBS: tuple[str, ...] = ("run_command", "terminal_*")
 _FILE_TOOL_GLOBS: tuple[str, ...] = ("read_file", "write_file", "edit_file", "save_*")
 
-_RULE_RE = re.compile(r"^([A-Za-z_][\w*?\-]*)\s*(?:\((.*)\))?$", re.DOTALL)
+_RULE_RE = re.compile(r"^([A-Za-z_][\w*?.\-]*)\s*(?:\((.*)\))?$", re.DOTALL)
+
+_UNSAFE_COMMAND_WRAPPERS = frozenset(
+    {
+        "bash", "sh", "zsh", "dash", "ksh", "fish", "csh", "tcsh",
+        "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe",
+        "env", "sudo", "doas", "pkexec", "xargs", "timeout", "nice", "nohup",
+        "time", "stdbuf", "setsid", "command", "builtin",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -93,6 +104,17 @@ def _is_file_tool(tool_name: str) -> bool:
     return any(fnmatch(tool_name, pattern) for pattern in _FILE_TOOL_GLOBS)
 
 
+def _tool_rule_matches(tool_name: str, pattern: str) -> bool:
+    normalized_pattern = str(pattern or "").strip()
+    if fnmatch(tool_name, normalized_pattern):
+        return True
+    return bool(
+        normalized_pattern.startswith("mcp__")
+        and "*" not in normalized_pattern
+        and tool_name.startswith(f"{normalized_pattern}__")
+    )
+
+
 def _extract_content(tool_name: str, args: dict[str, Any] | None) -> str:
     if not args:
         return ""
@@ -105,6 +127,15 @@ def _extract_content(tool_name: str, args: dict[str, Any] | None) -> str:
     return ""
 
 
+def command_prefix_uses_unsafe_wrapper(prefix: str) -> bool:
+    """Reject wrapper prefixes even when the binary is path-qualified."""
+    first = str(prefix or "").strip().split(maxsplit=1)[0].strip("'\"")
+    if not first:
+        return False
+    binary = re.split(r"[/\\]", first)[-1].lower()
+    return binary in _UNSAFE_COMMAND_WRAPPERS
+
+
 def _content_pattern_matches(pattern: str, value: str, *, is_command: bool) -> bool:
     """Match a content pattern against the extracted value.
 
@@ -114,17 +145,49 @@ def _content_pattern_matches(pattern: str, value: str, *, is_command: bool) -> b
     """
     if not value:
         return False
+    if is_command and _contains_unquoted_shell_control(value.strip()):
+        return False
     if is_command and pattern.endswith(":*"):
         prefix = pattern[:-2].strip()
-        return bool(prefix) and value.strip().startswith(prefix)
+        command = value.strip()
+        # A persistent command allow must describe one simple command.  Raw
+        # startswith let `git status:*` approve `git status && rm -rf ...` and
+        # even `git statusevil`; neither is part of the approved command.
+        return (
+            bool(prefix)
+            and (command == prefix or (command.startswith(prefix) and command[len(prefix):len(prefix) + 1].isspace()))
+        )
     # Collapse ``**`` so ``src/**`` behaves like ``src/*`` under fnmatch.
     glob = pattern.replace("/**", "/*").replace("**", "*")
     return fnmatch(value, glob)
 
 
+def _contains_unquoted_shell_control(command: str) -> bool:
+    """Whether a shell chain/redirection escapes a remembered simple command."""
+    quote = ""
+    escaped = False
+    for index, char in enumerate(command):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            continue
+        if char in {"'", '"'}:
+            quote = "" if quote == char else (char if not quote else quote)
+            continue
+        if quote:
+            continue
+        if char in {";", "|", "&", "`", "\n", "<", ">"}:
+            return True
+        if char == "$" and index + 1 < len(command) and command[index + 1] == "(":
+            return True
+    return False
+
+
 def rule_matches_call(rule: ContentRule, tool_name: str, args: dict[str, Any] | None) -> bool:
     """True if ``rule`` matches a tool call (tool name + content)."""
-    if not fnmatch(tool_name, rule.tool_glob):
+    if not _tool_rule_matches(tool_name, rule.tool_glob):
         return False
     if rule.content is None:
         return True  # whole-tool rule

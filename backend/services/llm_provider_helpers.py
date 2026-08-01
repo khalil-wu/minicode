@@ -18,92 +18,20 @@ from backend.config import (
 logger = logging.getLogger(__name__)
 
 
-# ── Known model lists per provider (fallback when live fetch fails) ──
-
-_LATEST_PROVIDER_MODELS: dict[str, list[str]] = {
-    "openai_official": ["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-4.1", "gpt-4o"],
-    "lucen": ["gpt-5.4"],
-    "deepseek": ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"],
-    "qwen": [
-        "qwen3-coder-next",
-        "qwen3-next-80b-a3b-thinking",
-        "qwen3-next-80b-a3b-instruct",
-        "qwen3.5-flash",
-        "qwen3-235b-a22b-thinking-2507",
-        "qwen3-235b-a22b-instruct-2507",
-        "qwen3-32b",
-        "qwen3-14b",
-    ],
-    "zhipu": ["glm-5.1", "glm-5", "glm-4.7"],
-    "anthropic_off": ["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"],
-    "openrouter": ["openai/gpt-5.2", "openai/gpt-4o", "deepseek/deepseek-chat", "google/gemini-2.5-pro"],
-    "siliconflow": [
-        "Pro/deepseek-ai/DeepSeek-R1",
-        "Pro/deepseek-ai/DeepSeek-V3.2",
-        "deepseek-ai/DeepSeek-V3.2",
-        "Qwen/Qwen2.5-72B-Instruct",
-    ],
-    "custom_openai": [],
-}
-
-_CUSTOM_GATEWAY_FALLBACK_MODELS = [
-    "claude-sonnet-4.6",
-    "claude-sonnet-4-6",
-    "claude-opus-4.6",
-    "claude-opus-4-6",
-    "gpt-5.4",
-    "gpt-5.4-mini",
-]
-
-
 # ── Normalization / resolution helpers ──
 
 
 def _normalize_provider_value(value: str) -> str:
     normalized = value.strip().lower()
+    if normalized == "openai":
+        return "openai"
     if normalized == "anthropic":
         return "anthropic"
-    if normalized in {"custom", "deepseek", "openrouter", "qwen", "moonshot", "together", "groq"}:
+    if normalized == "custom":
         return "custom"
-    return "openai"
-
-
-def _resolve_openai_provider_id(base_url: str) -> str:
-    host = urlsplit(base_url).netloc.lower()
-    if "lucen.cc" in host:
-        return "lucen"
-    if "api.openai.com" in host:
-        return "openai_official"
-    if "api.deepseek.com" in host:
-        return "deepseek"
-    if "dashscope" in host or "aliyuncs.com" in host:
-        return "qwen"
-    if "bigmodel.cn" in host:
-        return "zhipu"
-    if "openrouter.ai" in host:
-        return "openrouter"
-    if "siliconflow.cn" in host:
-        return "siliconflow"
-    return "custom_openai"
-
-
-def _is_chat_model_id(model_id: str) -> bool:
-    value = model_id.strip().lower()
-    if not value:
-        return False
-    blocked = (
-        "embedding",
-        "moderation",
-        "transcrib",
-        "tts",
-        "speech",
-        "image",
-        "dall",
-        "realtime",
-        "computer-use",
-        "search-preview",
-    )
-    return not any(token in value for token in blocked)
+    # Provider identity is a closed contract. Unknown values must not silently
+    # become first-party OpenAI and must use the explicit custom transport.
+    return "custom"
 
 
 def _model_id_from_item(item: Any) -> str:
@@ -151,7 +79,7 @@ def _extract_model_ids(payload: Any) -> list[str]:
     for index, item in enumerate(raw_items):
         model_id = _model_id_from_item(item)
         created_at = _model_created_from_item(item)
-        if model_id and _is_chat_model_id(model_id):
+        if model_id:
             model_items.append((model_id, created_at, index))
 
     if any(created_at is not None for _, created_at, _ in model_items):
@@ -250,18 +178,12 @@ def _merge_models(models: list[str], current_model: str) -> list[str]:
     return merged
 
 
-def _is_anthropic_model_id(model: str) -> bool:
-    value = model.strip().lower()
-    return value.startswith("claude-")
-
-
 def _select_refreshed_model(provider_id: str, models: list[str], current_model: str) -> str:
+    del provider_id
     current = current_model.strip()
-    if provider_id in {"anthropic_off", "custom_anthropic"}:
-        if _is_anthropic_model_id(current):
-            return current
-        return next((model for model in models if _is_anthropic_model_id(model)), models[0] if models else "")
-    return current or (models[0] if models else "")
+    if models:
+        return current if current in models else models[0]
+    return current
 
 
 def _manual_models_from_payload(payload: Any) -> list[str]:
@@ -277,19 +199,6 @@ def _merge_model_sources(*sources: list[str]) -> list[str]:
             if value and value not in merged:
                 merged.append(value)
     return merged
-
-
-def _deepseek_model_candidates_only(models: list[str]) -> list[str]:
-    filtered: list[str] = []
-    for model in models:
-        value = model.strip() if isinstance(model, str) else ""
-        lowered = value.lower()
-        if not value:
-            continue
-        if lowered.startswith("deepseek-") or lowered in {"deepseek-chat", "deepseek-reasoner"}:
-            if value not in filtered:
-                filtered.append(value)
-    return filtered
 
 
 def _persist_refreshed_models(
@@ -369,7 +278,7 @@ async def _check_openai_compatible_generation(
             "input": "ping",
             "stream": False,
             "store": False,
-            "max_output_tokens": 1,
+            "max_output_tokens": 16,
         }
     else:
         body = {
@@ -392,6 +301,35 @@ async def _check_openai_compatible_generation(
                 "Content-Type": "application/json",
             },
             json=body,
+        )
+        response.raise_for_status()
+
+
+async def _check_anthropic_generation(base_url: str, api_key: str, model: str) -> None:
+    if not api_key.strip() or not model.strip():
+        return
+    endpoint = base_url.rstrip("/") if base_url.strip() else "https://api.anthropic.com/v1"
+    if not endpoint.endswith("/v1"):
+        endpoint = f"{endpoint}/v1"
+    proxy_url = os.getenv("LLM_PROXY_URL", "").strip() or os.getenv("MINICODE_LLM_PROXY_URL", "").strip()
+    async with httpx.AsyncClient(
+        timeout=15.0,
+        follow_redirects=True,
+        proxy=proxy_url or None,
+        trust_env=not bool(proxy_url),
+    ) as client:
+        response = await client.post(
+            f"{endpoint}/messages",
+            headers={
+                "x-api-key": api_key.strip(),
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model.strip(),
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "ping"}],
+            },
         )
         response.raise_for_status()
 
@@ -421,12 +359,6 @@ def _status_hint_for_provider(provider_id: str, status_code: int | None, has_api
     if not has_api_key:
         return "No API key is available for the current provider. Save a key for this provider or switch to one with a configured key."
     if status_code in {401, 403}:
-        if provider_id == "deepseek":
-            return "DeepSeek authentication failed. Check that the saved key belongs to DeepSeek."
-        if provider_id == "openrouter":
-            return "OpenRouter authentication failed. Check that the key starts with sk-or and belongs to OpenRouter."
-        if provider_id == "lucen":
-            return "Gateway authentication failed. Check that the key, base URL, and model belong to the same provider."
         return "Authentication failed. Check that API key, base URL, and provider match."
     if status_code == 404:
         return "The selected model or API endpoint was not found. Check Base URL, API format, and model."

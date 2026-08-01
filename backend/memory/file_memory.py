@@ -17,10 +17,13 @@ MEMORY.md 格式（启动注入的是这个索引，不是正文）：
 from __future__ import annotations
 
 import logging
+import hashlib
+import os
 import time
 from pathlib import Path
 
 from backend.config import DATA_ROOT
+from backend.atomic_io import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +35,8 @@ MEMORY_INDEX_FILE = MEMORY_DIR / "MEMORY.md"
 # historical snapshot, not present truth — code/paths/timelines must be
 # re-checked against the live workspace before use).
 STALE_THRESHOLD_DAYS = 14
+MEMORY_INDEX_MAX_LINES = 200
+MEMORY_INDEX_MAX_BYTES = 20_000
 
 # 默认记忆文件模板
 DEFAULT_MEMORY_INDEX = """\
@@ -63,19 +68,53 @@ class FileMemory:
         self._index_file = self._dir / "MEMORY.md"
         self._ensure_initialized()
 
+    @classmethod
+    def for_workspace(cls, workspace_root: Path | str | None) -> "FileMemory":
+        """Return the project-scoped memory store for a workspace.
+
+        Claude Code keys auto-memory by the canonical project rather than by
+        the desktop process.  Resolve the nearest Git root and use a stable,
+        opaque directory key so two projects never share project memory.
+        """
+        if not workspace_root:
+            return cls()
+        root = Path(workspace_root).expanduser().resolve()
+        canonical = root
+        for candidate in (root, *root.parents):
+            if (candidate / ".git").exists():
+                canonical = candidate
+                break
+        identity = str(canonical)
+        if os.name == "nt":
+            identity = identity.casefold()
+        project_key = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
+        return cls(MEMORY_DIR / "projects" / project_key)
+
+    @staticmethod
+    def _bounded_index(content: str) -> str:
+        selected: list[str] = []
+        size = 0
+        for line in content.splitlines()[:MEMORY_INDEX_MAX_LINES]:
+            encoded = (line + "\n").encode("utf-8")
+            if size + len(encoded) > MEMORY_INDEX_MAX_BYTES:
+                break
+            selected.append(line)
+            size += len(encoded)
+        return "\n".join(selected).strip()
+
     def _ensure_initialized(self) -> None:
         """确保记忆目录和索引文件存在。"""
         self._dir.mkdir(parents=True, exist_ok=True)
 
         if not self._index_file.exists():
-            self._index_file.write_text(DEFAULT_MEMORY_INDEX, encoding="utf-8")
+            atomic_write_text(self._index_file, DEFAULT_MEMORY_INDEX)
             logger.info("已创建默认 MEMORY.md 索引")
 
         # 创建默认记忆文件（如果不存在）
         for filename, content in DEFAULT_MEMORY_FILES.items():
             filepath = self._dir / filename
             if not filepath.exists():
-                filepath.write_text(content, encoding="utf-8")
+                atomic_write_text(filepath, content)
 
     def get_index(self) -> str:
         """
@@ -85,7 +124,7 @@ class FileMemory:
         每条 ≤ 80 chars，总量约 500 tokens。
         """
         try:
-            return self._index_file.read_text(encoding="utf-8").strip()
+            return self._bounded_index(self._index_file.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError) as exc:
             logger.warning("读取 MEMORY.md 索引失败: %s", exc)
             return "（记忆索引不可用）"
@@ -148,7 +187,7 @@ class FileMemory:
         filepath = self._dir / safe_name
 
         try:
-            filepath.write_text(content, encoding="utf-8")
+            atomic_write_text(filepath, content)
             logger.info("已更新记忆文件: %s", safe_name)
             return True
         except OSError as exc:
@@ -186,4 +225,5 @@ class FileMemory:
         if not found:
             lines.append(f"- [{Path(filename).stem}]({filename}) — {description}")
 
-        self._index_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        bounded = self._bounded_index("\n".join(lines))
+        atomic_write_text(self._index_file, f"{bounded}\n" if bounded else "")

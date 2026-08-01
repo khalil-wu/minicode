@@ -1,4 +1,4 @@
-const CONV_SEGMENT = /^conv_[a-z0-9]+$/i;
+const CONV_SEGMENT = /^conv_[a-z0-9_]+$/i;
 
 export const isInternalConversationName = (value: string): boolean =>
   CONV_SEGMENT.test(value.trim());
@@ -30,7 +30,7 @@ export const canonicalWorkspacePath = (path: string | null | undefined): string 
   const value = (path || "").trim();
   if (!value) return "";
   const normalized = value.replace(/\\/g, "/");
-  const match = normalized.match(/^(.*)\/\.claude\/worktrees\/conv_[a-z0-9]+$/i);
+  const match = normalized.match(/^(.*)\/\.claude\/worktrees\/conv_[a-z0-9_]+$/i);
   if (!match) return value;
   const base = match[1] || "";
   if (!base) return value;

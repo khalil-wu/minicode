@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-import asyncio
-import os
-import subprocess
 from dataclasses import dataclass
+import os
+import re
 from typing import Any
 
 from backend.agent.message import AgentEvent
-from backend.runtime_env import sanitized_subprocess_env
 from backend.terminal.shell_commands import normalize_windows_shell_command
+from backend.tools.output_limits import (
+    CLAUDE_BASH_OUTPUT_DEFAULT_CHARS,
+    CLAUDE_BASH_OUTPUT_MAX_CHARS,
+)
 
 
 @dataclass(frozen=True)
@@ -31,17 +33,29 @@ def terminal_created_payload(terminal_session: Any) -> dict[str, Any]:
         "pid": terminal_session.pid,
         "shell": terminal_session.shell,
         "cwd": terminal_session._initial_cwd,
+        "terminal_mode": terminal_session.terminal_mode,
+        "conversation_id": str(getattr(terminal_session, "conversation_id", "") or ""),
     }
 
 
-def terminal_resized_payload(*, session_id: str, cols: int, rows: int, applied: bool) -> dict[str, Any]:
-    return {
+def terminal_resized_payload(
+    *,
+    session_id: str,
+    cols: int,
+    rows: int,
+    applied: bool,
+    conversation_id: str = "",
+) -> dict[str, Any]:
+    payload = {
         "type": "terminal.resized",
         "session_id": session_id,
         "cols": cols,
         "rows": rows,
         "applied": bool(applied),
     }
+    if clean_conversation_id := str(conversation_id or "").strip():
+        payload["conversation_id"] = clean_conversation_id
+    return payload
 
 
 def apply_terminal_resize(terminal_session: Any, *, cols: int, rows: int) -> bool:
@@ -72,12 +86,15 @@ def apply_terminal_resize(terminal_session: Any, *, cols: int, rows: int) -> boo
     return False
 
 
-def terminal_killed_payload(session_id: str) -> dict[str, Any]:
-    return {"type": "terminal.killed", "session_id": session_id}
+def terminal_killed_payload(session_id: str, *, conversation_id: str = "") -> dict[str, Any]:
+    payload = {"type": "terminal.killed", "session_id": session_id}
+    if clean_conversation_id := str(conversation_id or "").strip():
+        payload["conversation_id"] = clean_conversation_id
+    return payload
 
 
-def terminal_list_payload(sessions: list[Any]) -> dict[str, Any]:
-    return {
+def terminal_list_payload(sessions: list[Any], *, conversation_id: str = "") -> dict[str, Any]:
+    payload = {
         "type": "terminal.list",
         "sessions": [
             {
@@ -87,22 +104,37 @@ def terminal_list_payload(sessions: list[Any]) -> dict[str, Any]:
                 "shell": item.shell,
                 "is_alive": item.is_alive,
                 "started_at": item.started_at,
+                "terminal_mode": item.terminal_mode,
+                "conversation_id": str(getattr(item, "conversation_id", "") or ""),
             }
             for item in sessions
         ],
     }
+    if clean_conversation_id := str(conversation_id or "").strip():
+        payload["conversation_id"] = clean_conversation_id
+    return payload
 
 
 def normalize_snapshot_max_chars(data: dict[str, Any]) -> int:
     try:
-        return int(data.get("max_chars") or data.get("maxChars") or 20_000)
+        value = int(
+            data.get("max_chars")
+            or data.get("maxChars")
+            or CLAUDE_BASH_OUTPUT_DEFAULT_CHARS
+        )
+        return max(1, min(value, CLAUDE_BASH_OUTPUT_MAX_CHARS))
     except (TypeError, ValueError):
-        return 20_000
+        return CLAUDE_BASH_OUTPUT_DEFAULT_CHARS
 
 
-def terminal_snapshot_payload(snapshot: dict[str, Any] | None, *, session_id: str = "") -> dict[str, Any]:
+def terminal_snapshot_payload(
+    snapshot: dict[str, Any] | None,
+    *,
+    session_id: str = "",
+    conversation_id: str = "",
+) -> dict[str, Any]:
     if snapshot is None:
-        return {
+        payload = {
             "type": "terminal.snapshot",
             "session_id": session_id,
             "output": "",
@@ -113,6 +145,9 @@ def terminal_snapshot_payload(snapshot: dict[str, Any] | None, *, session_id: st
                 else "No terminal session is available"
             ),
         }
+        if clean_conversation_id := str(conversation_id or "").strip():
+            payload["conversation_id"] = clean_conversation_id
+        return payload
     return {"type": "terminal.snapshot", **snapshot}
 
 
@@ -129,20 +164,32 @@ def optional_int(value: Any) -> int | None:
         return None
 
 
-def mirror_output_chunk(data: dict[str, Any], *, max_chars: int = 20_000) -> str:
+def mirror_output_chunk(
+    data: dict[str, Any], *, max_chars: int = CLAUDE_BASH_OUTPUT_MAX_CHARS
+) -> str:
     chunk = str(data.get("data") or data.get("output") or "")
-    if len(chunk) > max_chars:
-        chunk = chunk[-max_chars:]
+    limit = max(1, min(int(max_chars), CLAUDE_BASH_OUTPUT_MAX_CHARS))
+    if len(chunk) > limit:
+        chunk = chunk[-limit:]
     return chunk
 
 
-def terminal_output_payload(command: str, output: str, exit_code: int | None) -> dict[str, Any]:
-    return {
+def terminal_output_payload(
+    command: str,
+    output: str,
+    exit_code: int | None,
+    *,
+    conversation_id: str = "",
+) -> dict[str, Any]:
+    payload = {
         "type": "terminal.output",
         "command": command,
         "output": output,
         "exit_code": exit_code,
     }
+    if clean_conversation_id := str(conversation_id or "").strip():
+        payload["conversation_id"] = clean_conversation_id
+    return payload
 
 
 def parse_terminal_exec_command(data: dict[str, Any]) -> TerminalCommandRequest:
@@ -168,7 +215,7 @@ def terminal_exec_approval_event(
 ) -> AgentEvent:
     event = AgentEvent.approval_request(
         tool_call_id=request_id,
-        tool_name="terminal.exec",
+        tool_name="run_command",
         args=command_args,
     )
     clean_conversation_id = str(conversation_id or "").strip()
@@ -177,39 +224,60 @@ def terminal_exec_approval_event(
     return event
 
 
-def terminal_exec_rejected_payload(command: str, approval: Any) -> dict[str, Any]:
+def terminal_exec_rejected_payload(
+    command: str,
+    approval: Any,
+    *,
+    conversation_id: str = "",
+) -> dict[str, Any]:
     guidance = str((approval or {}).get("guidance") or "terminal command rejected").strip()
-    return terminal_output_payload(command, f"Command rejected: {guidance}", -1)
-
-
-def terminal_exec_completed_payload(command: str, stdout: bytes, stderr: bytes, exit_code: int | None) -> dict[str, Any]:
-    output = stdout.decode("utf-8", errors="replace")
-    if stderr:
-        output += "\n" + stderr.decode("utf-8", errors="replace")
-    return terminal_output_payload(command, output[:10000], exit_code)
+    return terminal_output_payload(
+        command,
+        f"Command rejected: {guidance}",
+        -1,
+        conversation_id=conversation_id,
+    )
 
 
 async def run_terminal_exec_command(
     command: str,
     cwd: str,
     *,
-    timeout: float = 30,
-    create_subprocess_shell: Any | None = None,
+    tool: Any | None = None,
+    context: Any | None = None,
+    conversation_id: str = "",
 ) -> dict[str, Any]:
-    shell_factory = create_subprocess_shell or asyncio.create_subprocess_shell
-    try:
-        proc = await shell_factory(
+    """Execute terminal.exec through the registered run_command tool.
+
+    The desktop command bridge must share the same catastrophic-command check,
+    workspace sandbox, timeout, and process-tree owner as model tool calls. A
+    direct spawn_shell fallback would recreate a weaker second shell boundary.
+    """
+    if tool is None or context is None:
+        return terminal_output_payload(
             command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-            env=sanitized_subprocess_env({"MINICODE_TERMINAL_EXEC": "1"}),
-            **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
+            "Error: terminal.exec requires the shared run_command runtime.",
+            -1,
+            conversation_id=conversation_id,
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        return terminal_exec_completed_payload(command, stdout, stderr, getattr(proc, "returncode", None))
-    except asyncio.TimeoutError:
-        timeout_label = str(int(timeout)) if float(timeout).is_integer() else str(timeout)
-        return terminal_output_payload(command, f"Command timed out ({timeout_label}s limit)", -1)
+    try:
+        result = await tool.execute({"command": command, "cwd": cwd}, context)
+        output = str(getattr(result, "content", "") or "")
+        preview = str(getattr(result, "artifact_preview", "") or "")
+        if preview:
+            output = f"{output}\n\n{preview}" if output else preview
+        match = re.match(r"Exit code:\s*(-?\d+)", output, re.IGNORECASE)
+        exit_code = int(match.group(1)) if match else (-1 if getattr(result, "is_error", False) else 0)
+        return terminal_output_payload(
+            command,
+            output[:10000],
+            exit_code,
+            conversation_id=conversation_id,
+        )
     except Exception as exc:
-        return terminal_output_payload(command, f"Error: {exc}", -1)
+        return terminal_output_payload(
+            command,
+            f"Error: {exc}",
+            -1,
+            conversation_id=conversation_id,
+        )

@@ -10,6 +10,22 @@ const FOCUSABLE_SELECTOR = [
   '[tabindex]:not([tabindex="-1"]):not([disabled])',
 ].join(', ');
 
+function restoreFocus(target: HTMLElement | null | undefined): boolean {
+  if (!target || !document.body.contains(target)) return false;
+
+  const existingTabIndex = target.getAttribute('tabindex');
+  if (target.tabIndex < 0) {
+    target.setAttribute('tabindex', '-1');
+  }
+  target.focus({ preventScroll: true });
+  if (existingTabIndex === null) {
+    target.removeAttribute('tabindex');
+  } else {
+    target.setAttribute('tabindex', existingTabIndex);
+  }
+  return document.activeElement === target;
+}
+
 /**
  * useFocusTrap - Trap keyboard focus within a container (for modals, dialogs)
  *
@@ -90,14 +106,22 @@ export function useFocusTrap(isActive: boolean, fallbackFocusRef?: RefObject<HTM
       document.removeEventListener('keydown', handleKeyDown);
 
       // Restore focus to the original trigger when it still exists. A nested
-      // drawer may have unmounted that trigger, so fall back to stable shell UI.
+      // drawer may have unmounted that trigger, so fall back to explicit shell
+      // UI and finally the stable application root instead of leaving focus on
+      // document.body.
       const previous = previouslyFocusedRef.current;
-      const target = previous && previous !== document.body && document.body.contains(previous)
-        ? previous
-        : fallbackFocusRef?.current;
-      if (target && document.body.contains(target)) {
-        target.focus();
+      if (
+        previous
+        && previous !== document.body
+        && restoreFocus(previous)
+      ) {
+        return;
       }
+      if (restoreFocus(fallbackFocusRef?.current)) return;
+      restoreFocus(
+        document.querySelector<HTMLElement>('[data-focus-restore-root]')
+          ?? document.getElementById('root'),
+      );
     };
   }, [fallbackFocusRef, isActive]);
 

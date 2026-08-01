@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { lazy, Suspense } from "react";
-import { Circle, Edit3, Eye, FileWarning, GitCompare, Image, X } from "lucide-react";
+import { Circle, Edit3, Eye, FileCode2, FileWarning, GitCompare, Image, LockKeyhole, X } from "lucide-react";
 import { fileGlyphColor, fileIcon } from "../shell/fileTreeHelpers";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -10,8 +10,9 @@ import { workspaceRawResourceUrlWithToken } from "../protocol/api";
 import {
   compareWriteWorkspaceFile,
   readWorkspaceFile,
+  searchWorkspaceFiles,
 } from "../protocol/workspace";
-import { fsCompareWriteFile, fsReadFileInfo, isDesktop, revealPath } from "../desktop/runtime";
+import { fsCompareWriteFile, fsReadFileInfo, fsSearchFiles, isDesktop, revealPath } from "../desktop/runtime";
 import { pushToast } from "../overlays/ToastContainer";
 import { ContextMenu, type ContextMenuItem } from "../components/ContextMenu";
 
@@ -61,6 +62,7 @@ type PlainTextEditorProps = {
   value: string;
   onChange: (value: string) => void;
   onCursorChange: (cursor: { line: number; column: number }) => void;
+  readOnly?: boolean;
 };
 
 const guessLanguage = (path: string): string => {
@@ -79,6 +81,28 @@ const guessLanguage = (path: string): string => {
 
 const basename = (path: string) => path.split(/[/\\]/).filter(Boolean).pop() ?? path;
 const dirname = (path: string) => path.replace(/\\/g, "/").split("/").filter(Boolean).slice(0, -1).join("/");
+
+const workspaceRelativePath = (path: string, workingDirectory: string): string => {
+  const normalized = String(path || "").trim().replace(/\\/g, "/");
+  const root = String(workingDirectory || "").trim().replace(/\\/g, "/").replace(/\/+$/, "");
+  if (root && normalized.toLowerCase().startsWith(`${root.toLowerCase()}/`)) {
+    return normalized.slice(root.length + 1);
+  }
+  return normalized.replace(/^\.\/+/, "");
+};
+
+const resolveUnqualifiedEditorPath = async (path: string, workingDirectory: string): Promise<string> => {
+  const relative = workspaceRelativePath(path, workingDirectory);
+  if (!relative || relative.includes("/") || !workingDirectory.trim()) return relative || path;
+
+  const query = basename(relative);
+  const results = isDesktop()
+    ? await fsSearchFiles(workingDirectory, query, 50, "file")
+    : await searchWorkspaceFiles(workingDirectory, query, 50, "file");
+  const exact = results.filter((result) => result.name.toLowerCase() === query.toLowerCase());
+  if (exact.length !== 1) return relative;
+  return workspaceRelativePath(exact[0].path, workingDirectory);
+};
 
 const cursorFromOffset = (value: string, offset: number): { line: number; column: number } => {
   const safeOffset = Math.max(0, Math.min(offset, value.length));
@@ -161,7 +185,7 @@ const toWorkspaceDisplayPath = (path: string, workingDirectory = ""): string => 
 const rawFileUrl = (path: string, workingDirectory = ""): string => {
   const normalized = toWorkspaceDisplayPath(path, workingDirectory);
   if (/^(https?:|data:|blob:|file:|mailto:|tel:|#)/i.test(normalized)) return normalized;
-  return workspaceRawResourceUrlWithToken(normalized);
+  return workspaceRawResourceUrlWithToken(normalized, workingDirectory);
 };
 
 const isAbsoluteLocalPath = (path: string): boolean =>
@@ -214,6 +238,7 @@ interface FileSnapshot {
   content: string;
   contentHash?: string;
   sizeBytes?: number;
+  readOnly?: boolean;
 }
 
 const MAX_EDITOR_BYTES = 2 * 1024 * 1024;
@@ -348,10 +373,11 @@ const readFileSnapshot = async (path: string, workingDirectory: string): Promise
         content: desktopFile.content,
         contentHash: desktopFile.contentHash ?? desktopFile.content_hash,
         sizeBytes: desktopFile.sizeBytes ?? desktopFile.size_bytes,
+        readOnly: desktopFile.readOnly ?? desktopFile.read_only ?? false,
       };
     }
   }
-  const response = await readWorkspaceFile(path);
+  const response = await readWorkspaceFile(path, workingDirectory);
   if (!response) return null;
   return {
     content: response.content,
@@ -403,7 +429,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   const editorSlot = panelSlots.find((slot) => slot.kind === "editor");
   const editorSlotId = editorSlot?.id ?? "editor";
   const chatSlot = panelSlots.find((slot) => slot.kind === "chat");
-  const dirty = activeTab ? activeTab.content !== activeTab.original : false;
+  const dirty = activeTab ? !activeTab.readOnly && activeTab.content !== activeTab.original : false;
   const language = useMemo(() => guessLanguage(activeTabPath ?? ""), [activeTabPath]);
   const monacoTheme = themeMode === "light" ? "light" : "vs-dark";
   const canRenderMarkdown = Boolean(activeTab && isMarkdownPath(activeTab.path) && !activeTab.loading && !activeTab.error && !activeTab.largeFile);
@@ -459,16 +485,21 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   // Consume open requests from other panels
   useEffect(() => {
     for (const request of editorOpenRequests) {
-      openEditorTab(request.path);
-      loadFileIfNeeded(request.path);
-      handleSetActive(request.path, {
-        path: request.path,
-        line: request.line,
-        column: request.column,
-      });
       consumeEditorOpenRequest(request.id);
+      void resolveUnqualifiedEditorPath(request.path, workingDirectory).catch(() => (
+        workspaceRelativePath(request.path, workingDirectory) || request.path
+      )).then((resolvedPath) => {
+        if (workingDirectory !== useAppStore.getState().workingDirectory) return;
+        openEditorTab(resolvedPath);
+        loadFileIfNeeded(resolvedPath);
+        handleSetActive(resolvedPath, {
+          path: resolvedPath,
+          line: request.line,
+          column: request.column,
+        });
+      });
     }
-  }, [editorOpenRequests, consumeEditorOpenRequest, openEditorTab]);
+  }, [editorOpenRequests, consumeEditorOpenRequest, openEditorTab, workingDirectory]);
 
   // Sync activeEditorPath from workspace slice
   useEffect(() => {
@@ -529,12 +560,14 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
             largeFile: true,
             loadWarning: warning,
             sizeBytes: snapshot.sizeBytes,
+            readOnly: snapshot.readOnly,
           }));
         } else {
           commit(() => markTabLoaded(path, snapshot.content, null, snapshot.contentHash, {
             largeFile: false,
             loadWarning: null,
             sizeBytes: snapshot.sizeBytes,
+            readOnly: snapshot.readOnly,
           }));
         }
       } else {
@@ -623,6 +656,10 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       pushToast("No file is open.", "info", 1600);
       return;
     }
+    if (activeTab.readOnly) {
+      pushToast("该文件由 MiniCode 生成，仅供只读查看。", "info", 2400);
+      return;
+    }
     if (activeTab.largeFile) {
       pushToast(`${basename(activeTab.path)} was not loaded into the editor.`, "warning", 2400);
       return;
@@ -637,27 +674,36 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
     setSaving(true);
     setSaveStatus("idle");
 
+    const savePath = activeTab.path;
+    const saveContent = activeTab.content;
     const expectedHash = activeTab.contentHash ?? "";
-    const result = isDesktop()
-      ? await fsCompareWriteFile(resolveDesktopFsPath(activeTab.path, workingDirectory), expectedHash, activeTab.content)
-      : await compareWriteWorkspaceFile(activeTab.path, expectedHash, activeTab.content);
-    if (result.ok) {
-      const savedFile = result.file as { contentHash?: string; content_hash?: string };
-      const nextHash = savedFile.contentHash ?? savedFile.content_hash;
-      markTabSaved(activeTab.path, nextHash);
-      setSaveStatus("saved");
-      pushToast(`Saved ${basename(activeTab.path)}`, "success", 1600);
-      window.setTimeout(() => setSaveStatus("idle"), 1400);
-    } else {
-      setSaveStatus("error");
-      if (result.conflict) {
-        markTabExternalChanged(activeTab.path);
-        pushToast(`${basename(activeTab.path)} changed on disk. Save skipped to avoid overwriting it.`, "warning", 4200);
+    const saveWorkspace = workingDirectory;
+    try {
+      const result = isDesktop()
+        ? await fsCompareWriteFile(resolveDesktopFsPath(savePath, saveWorkspace), expectedHash, saveContent)
+        : await compareWriteWorkspaceFile(savePath, expectedHash, saveContent, saveWorkspace);
+      if (result.ok) {
+        const savedFile = result.file as { contentHash?: string; content_hash?: string };
+        const nextHash = savedFile.contentHash ?? savedFile.content_hash;
+        // Mark exactly the payload acknowledged by disk as the baseline. If
+        // the user typed again while this request was in flight, current
+        // content remains newer than original and the tab correctly stays dirty.
+        markTabSaved(savePath, saveContent, nextHash);
+        setSaveStatus("saved");
+        pushToast(`Saved ${basename(savePath)}`, "success", 1600);
+        window.setTimeout(() => setSaveStatus("idle"), 1400);
       } else {
-        pushToast(result.message || `Save failed: ${basename(activeTab.path)}`, "error", 3500);
+        setSaveStatus("error");
+        if (result.conflict) {
+          markTabExternalChanged(savePath);
+          pushToast(`${basename(savePath)} changed on disk. Save skipped to avoid overwriting it.`, "warning", 4200);
+        } else {
+          pushToast(result.message || `Save failed: ${basename(savePath)}`, "error", 3500);
+        }
       }
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
   };
 
   const revert = () => {
@@ -704,7 +750,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   useEffect(() => {
     const handleInsert = (event: Event) => {
       const detail = (event as EditorInsertEvent).detail;
-      if (!detail?.text || !activeTab || activeTab.loading || activeTab.error || activeTab.largeFile || mdPreview) return;
+      if (!detail?.text || !activeTab || activeTab.loading || activeTab.error || activeTab.largeFile || activeTab.readOnly || mdPreview) return;
       const editor = editorRef.current;
       if (!editor) return;
       const selection = editor.getSelection();
@@ -770,7 +816,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                   title={tab.path}
                 >
                 {tabDirty ? (
-                  <Circle size={7} fill="currentColor" className="shrink-0" style={{ color: "var(--state-warning)" }} />
+                  <Circle size={14} fill="currentColor" className="shrink-0" style={{ color: "var(--state-warning)" }} />
                 ) : (
                   <span className="editor-tab-file-icon shrink-0" style={{ color: fileGlyphColor(tab.path) }} aria-hidden="true">
                     {fileIcon(tab.path, { size: 14, className: "editor-tab-file-icon-svg" })}
@@ -795,7 +841,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                     opacity: active || tabDirty ? 1 : 0,
                   }}
                 >
-                  {tabDirty ? <Circle size={7} fill="currentColor" /> : <X size={14} />}
+                  {tabDirty ? <Circle size={14} fill="currentColor" /> : <X size={14} />}
                 </button>
               </div>
             );
@@ -821,7 +867,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                 boxShadow: !mdPreview ? "0 1px 2px rgba(0,0,0,0.12)" : "none",
               }}
             >
-              <Edit3 size={12} />
+              <Edit3 size={14} />
               Edit
             </button>
             <button
@@ -839,7 +885,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                 boxShadow: mdPreview ? "0 1px 2px rgba(0,0,0,0.12)" : "none",
               }}
             >
-              <Eye size={12} />
+              <Eye size={14} />
               Rendered
             </button>
           </div>
@@ -883,6 +929,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
               value={activeTab.content}
               onChange={(value) => updateTabContent(activeTab.path, value)}
               onCursorChange={setCursor}
+              readOnly={activeTab.readOnly}
             />
           ) : (
             <Suspense fallback={<EditorLoading />}>
@@ -904,9 +951,10 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                 }}
                 options={{
                   automaticLayout: true,
+                  readOnly: Boolean(activeTab.readOnly),
                   fontFamily: "var(--font-mono)",
-                  fontSize: 14,
-                  lineHeight: 22,
+                  fontSize: 15,
+                  lineHeight: 23,
                   minimap: { enabled: false },
                   scrollBeyondLastLine: false,
                   wordWrap: "on",
@@ -940,10 +988,10 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
           )
         ) : (
           <div className="h-full flex flex-col items-center justify-center gap-2.5 text-sm" style={{ color: "var(--text-muted)", background: "var(--surface-base)" }}>
-            <span className="editor-empty-file-icon" aria-hidden="true">{fileIcon("file.ts", { size: 28, className: "editor-empty-file-icon-svg" })}</span>
-            <div className="font-semibold" style={{ color: "var(--text-secondary)" }}>No file open</div>
+            <span className="editor-empty-file-icon" aria-hidden="true"><FileCode2 size={28} strokeWidth={1.8} className="editor-empty-file-icon-svg" /></span>
+            <div className="font-semibold" style={{ color: "var(--text-secondary)" }}>未打开文件</div>
             <div className="max-w-[420px] text-center">
-              Use Files or the search box above to open a workspace file.
+              从左侧项目文件或搜索中打开工作区文件。
             </div>
           </div>
         )}
@@ -951,9 +999,14 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
 
       <div title={activeTabPath ?? ""} className="flex gap-3 min-h-6 items-center px-3 border-t overflow-hidden whitespace-nowrap text-xs" style={{ color: dirty ? "var(--state-warning)" : "var(--text-muted)", borderColor: "var(--border-subtle)", fontFamily: "var(--font-mono)", background: "var(--surface-sidebar)" }}>
         <span className="flex-1 min-w-0 overflow-hidden text-ellipsis">
-          {activeTabPath || "No file open"}{dirty ? " - modified" : ""}
+          {activeTabPath || "未打开文件"}{dirty ? " - modified" : ""}
         </span>
         {activeTab?.sizeBytes != null && <span>{formatBytes(activeTab.sizeBytes)}</span>}
+        {activeTab?.readOnly && (
+          <span className="inline-flex items-center gap-1" title="MiniCode 生成的只读工具结果">
+            <LockKeyhole size={14} /> 只读
+          </span>
+        )}
         <span>{language}</span>
         {activeGitChange?.patch && (
           <button
@@ -970,7 +1023,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
               fontWeight: 650,
             }}
           >
-            <GitCompare size={12} />
+            <GitCompare size={14} />
             Diff
             <span style={{ color: "var(--state-success)" }}>+{activeGitChange.additions}</span>
             <span style={{ color: "var(--state-danger)" }}>-{activeGitChange.deletions}</span>
@@ -1002,7 +1055,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
               onClick: () => { void navigator.clipboard.writeText(ctxMenu.path); },
             },
             {
-              label: "Reveal in file tree",
+              label: "在文件管理器中显示",
               onClick: () => { void revealPath(ctxMenu.path); },
             },
           ]}
@@ -1018,7 +1071,7 @@ const EditorLoading = () => (
   </div>
 );
 
-const PlainTextEditor = ({ value, onChange, onCursorChange }: PlainTextEditorProps) => {
+const PlainTextEditor = ({ value, onChange, onCursorChange, readOnly = false }: PlainTextEditorProps) => {
   const updateCursor = (target: HTMLTextAreaElement) => {
     onCursorChange(cursorFromOffset(target.value, target.selectionStart ?? 0));
   };
@@ -1026,6 +1079,7 @@ const PlainTextEditor = ({ value, onChange, onCursorChange }: PlainTextEditorPro
     <textarea
       aria-label="Plain text editor"
       value={value}
+      readOnly={readOnly}
       spellCheck={false}
       onChange={(event) => {
         onChange(event.currentTarget.value);
@@ -1052,8 +1106,8 @@ const plainTextEditorStyle: React.CSSProperties = {
   background: "var(--surface-base)",
   color: "var(--text-primary)",
   fontFamily: "var(--font-mono)",
-  fontSize: 14,
-  lineHeight: "22px",
+  fontSize: 15,
+  lineHeight: "23px",
   whiteSpace: "pre",
   overflow: "auto",
   tabSize: 2,
@@ -1096,7 +1150,7 @@ const MarkdownPreviewLimitNotice = ({ imageCount, onEdit }: { imageCount: number
       This Markdown file references {imageCount.toLocaleString()} images. Open it in edit mode to avoid loading them all at once.
     </div>
     <button type="button" onClick={onEdit} className="inline-flex items-center gap-1.5 h-[30px] px-2.5 border rounded-[4px] cursor-pointer font-semibold" style={{ borderColor: "var(--border-subtle)", background: "var(--surface-raised)", color: "var(--text-primary)", fontFamily: "var(--font-ui)", fontSize: "var(--text-xs)" }}>
-      <Edit3 size={13} />
+      <Edit3 size={14} />
       Edit Markdown
     </button>
   </div>

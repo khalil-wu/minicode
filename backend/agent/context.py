@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import re
-import time
 from copy import copy, deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -23,32 +22,19 @@ from backend.config import AgentSettings, TokenBudget
 from backend.agent.attachment_policy import AttachmentInputPlan, build_attachment_input_plan
 from backend.attachments.store import AttachmentStore
 from backend.llm.base import LLMMessage, ToolCallEvent, UsageInfo
-from backend.llm.response_cache import simple_chat_cache
 from backend.agent.prompting import (
+    COMPACTION_SYSTEM_PROMPT,
     PromptParts,
     PromptBuilderV2,
     build_compaction_prompt,
-    build_dynamic_context,
     build_static_environment_info,
     build_stable_prompt,
     clear_system_prompt_sections,
     detect_project_type,
-    select_prompt_packs,
     summarize_prompt_sections,
 )
 from backend.agent.prompt_cache import prompt_cache_usage_stats
-from backend.agent.tool_result_compaction import (
-    ToolResultCacheEditConfig,
-    compact_old_tool_results_by_id,
-)
-from backend.agent.tool_result_persistence import (
-    force_persist_for_compaction,
-    try_persist_tool_result,
-)
-from backend.agent.context_edit import (
-    ContextEditConfig,
-    apply_context_edit,
-)
+from backend.agent.tool_result_persistence import persist_tool_result, try_persist_tool_result
 from backend.tools.base import ToolResult
 
 logger = logging.getLogger(__name__)
@@ -61,23 +47,13 @@ def clone_context_builder(builder: "ContextBuilder") -> "ContextBuilder":
         "_history",
         "_history_token_estimates",
         "_persistent_notes",
-        "_tool_result_replacements",
-        "_tool_result_seen_ids",
+        "_read_file_hashes",
         "_last_prompt_section_summary",
     ):
         if hasattr(builder, name):
             setattr(cloned, name, deepcopy(getattr(builder, name)))
     return cloned
 
-CONTINUATION_REQUESTS = {
-    "继续",
-    "继续吧",
-    "接着",
-    "接着做",
-    "继续做",
-    "continue",
-    "go on",
-}
 INTERNAL_LAST_RESORT_PROMPT_PREFIX = (
     "Use the tool results above to answer the user's original question."
 )
@@ -143,44 +119,20 @@ SUMMARY_PREFIX = (
 )
 COMPACTION_BOUNDARY_TAG = "context_boundary"
 COMPACTION_BOUNDARY_PREFIX = f"<{COMPACTION_BOUNDARY_TAG}"
-POST_COMPACTION_MAX_FILES_TO_RESTORE = 5
-POST_COMPACTION_MAX_CHARS_PER_FILE = 12_000
-POST_COMPACTION_TOTAL_CHARS = 50_000
 POST_COMPACTION_RESTORE_TOOLS = frozenset({"read_file", "edit_file", "write_file"})
-POST_COMPACTION_STATE_CHARS = 8_000
-POST_COMPACTION_MAX_SKILLS_TO_RESTORE = 5
-POST_COMPACTION_MAX_CHARS_PER_SKILL = 4_000
 
-TOOL_RESULT_BUDGET_TOKENS = 80_000  # Maximum total tokens for all tool results
-TOOL_RESULT_STABLE_REPLACEMENT_CHARS = 50_000
-TOOL_RESULT_STABLE_PREVIEW_CHARS = 6_000
-# Keep the uncached tail small for providers with automatic prefix caching
-# (DeepSeek/OpenAI-compatible Chat). Recent results remain verbatim; older
-# results get deterministic previews so subsequent turns can reuse the prefix.
-TOOL_RESULT_CACHE_KEEP_RECENT = 2
-TOOL_RESULT_CACHE_EDIT_MIN_CHARS = 360
-TOOL_RESULT_CACHE_EDIT_PREVIEW_CHARS = 220
 # Per-message tool result budget: when a single user message's tool_result
 # blocks together exceed this many characters, the largest fresh results are
 # persisted to disk and replaced with previews (mirrors cc's
 # getPerMessageBudgetLimit / enforcePerMessageBudget).  Each message is
 # evaluated independently — a 50K result in one message and a 50K result in
 # another are both under budget and untouched.
-PER_MESSAGE_TOOL_RESULT_BUDGET_CHARS = 120_000
+PER_MESSAGE_TOOL_RESULT_BUDGET_CHARS = 200_000
 
-# Cheap history ladder (cc query order: snip -> microcompact -> collapse -> autocompact).
-# These are lossy but local operations that avoid an immediate full LLM compact.
-SNIP_KEEP_RECENT_MESSAGES = 24
-SNIP_MIN_MESSAGES = 30
-SNIP_TRIGGER_USAGE_RATIO = 0.70
-COLLAPSE_KEEP_RECENT_MESSAGES = 18
-COLLAPSE_MIN_MESSAGES = 24
-COLLAPSE_TRIGGER_USAGE_RATIO = 0.82
-COLLAPSE_PREVIEW_CHARS = 240
 RUNTIME_CONTEXT_STRIP_KEEP_RECENT_USER_TURNS = 1
-RUNTIME_CONTEXT_OMITTED_PLACEHOLDER = "[runtime context omitted]"
 _RUNTIME_BLOCK_RE = re.compile(
     r"\A(?:\s*(?:"
+    r"<system-reminder>[\s\S]*?</system-reminder>|"
     r"<permissions instructions>[\s\S]*?</permissions instructions>|"
     r"<environment_context>[\s\S]*?</environment_context>|"
     r"<collaboration_mode>[\s\S]*?</collaboration_mode>|"
@@ -191,6 +143,19 @@ _RUNTIME_BLOCK_RE = re.compile(
     r"Conversation language:[^\n]*(?:\n|$)"
     r")\s*)+",
     re.IGNORECASE,
+)
+_TRAILING_RUNTIME_BLOCK_RE = re.compile(
+    r"(?:\s*\n?\s*)?<system-reminder>[\s\S]*?</system-reminder>\s*\Z",
+    re.IGNORECASE,
+)
+_RUNTIME_REMINDER_MARKERS = (
+    "<environment_context>",
+    "<collaboration_mode>",
+    "<agent_mode>",
+    "<turn_aborted>",
+    "<tool_runtime_context>",
+    "<task_status>",
+    "<retrieved_context>",
 )
 
 
@@ -236,39 +201,15 @@ def _build_static_environment_info(workspace_root: Path | None = None) -> str:
     return build_static_environment_info(workspace_root)
 
 
-def _build_dynamic_context() -> str:
-    return build_dynamic_context()
-
-
 def _detect_project_type(cwd: Path) -> str:
     return detect_project_type(cwd)
 
 
 def _estimate_content_tokens(content: str) -> int:
-    """Estimate token count with better accuracy for mixed CJK/ASCII content.
-
-    - ASCII characters: ~4 chars per token (English words average)
-    - CJK characters: ~1.5 chars per token (each CJK char is roughly 1-2 tokens)
-    - Conservative fallback: max(len // 4, cjk_count + ascii_count // 4)
-    """
+    """Estimate tokens with Pi's provider-neutral ``chars / 4`` heuristic."""
     if not content:
         return 0
-    ascii_chars = 0
-    cjk_chars = 0
-    for ch in content:
-        code = ord(ch)
-        # CJK Unified Ideographs, Hiragana, Katakana, Hangul, etc.
-        if (0x4E00 <= code <= 0x9FFF or   # CJK Unified Ideographs
-            0x3400 <= code <= 0x4DBF or   # CJK Extension A
-            0x3040 <= code <= 0x309F or   # Hiragana
-            0x30A0 <= code <= 0x30FF or   # Katakana
-            0xAC00 <= code <= 0xD7AF or   # Hangul Syllables
-            0xF900 <= code <= 0xFAFF):    # CJK Compatibility Ideographs
-            cjk_chars += 1
-        else:
-            ascii_chars += 1
-    # CJK chars: ~1.5 tokens per char; ASCII: ~4 chars per token
-    return max(1, int(cjk_chars * 1.5 + ascii_chars / 4))
+    return (len(content) + 3) // 4
 
 
 def _xml_text(value: Any) -> str:
@@ -281,6 +222,29 @@ def _strip_leading_runtime_context(content: str) -> str:
         return text
     stripped = _RUNTIME_BLOCK_RE.sub("", text, count=1).lstrip()
     return stripped
+
+
+def _strip_runtime_context(content: str) -> str:
+    """Remove MiniCode's old and current reminder forms.
+
+    Current turns use CC's leading ``<system-reminder>`` prefix. Older
+    snapshots from the previous implementation placed that same block after
+    the user's text, so the trailing compatibility pass is intentionally
+    limited to reminders containing a runtime marker. User-authored XML is
+    therefore not treated as runtime state merely because it uses the same
+    tag name.
+    """
+    text = str(content or "")
+    stripped = _strip_leading_runtime_context(text)
+    if stripped != text:
+        return stripped
+    match = _TRAILING_RUNTIME_BLOCK_RE.search(text)
+    if not match:
+        return text
+    block = match.group(0).lower()
+    if not any(marker in block for marker in _RUNTIME_REMINDER_MARKERS):
+        return text
+    return text[: match.start()].rstrip()
 
 
 def _has_leading_runtime_context(content: str) -> bool:
@@ -296,92 +260,77 @@ class ContextBuilder:
         token_budget: TokenBudget | None = None,
         agent_settings: AgentSettings | None = None,
         skill_executor: Any | None = None,
-        rag_pipeline: Any | None = None,
         memory_manager: Any | None = None,
         llm: Any | None = None,
         skill_manager: Any | None = None,
-        vector_memory: Any | None = None,
     ) -> None:
         self._budget = token_budget or TokenBudget()
         self._agent_settings = agent_settings or AgentSettings()
         self._history: list[LLMMessage] = []
         self._history_token_estimates: list[int] = []
         self._history_tokens_total = 0
-        self._token_calibration_factor = 1.0  # EMA of actual / estimated
         self._persistent_notes: list[dict[str, str]] = []
         self._compaction_count = 0
         self._skill_executor = skill_executor
         self._skill_manager = skill_manager
-        self._rag_pipeline = rag_pipeline
         self._memory_manager = memory_manager
         self._llm = llm
-        self._vector_memory = vector_memory
         self._attachment_store = AttachmentStore()
-        self._cached_guidelines: str = ""
-        self._cached_guidelines_signature: str = ""
-        self._cached_guidelines_ts: float = 0.0
         self._last_actual_prompt_tokens = 0
-        self._tool_result_replacements: dict[str, str] = {}
-        self._tool_result_seen_ids: set[str] = set()
-        self._last_tool_result_cache_edit_saved_tokens = 0
-        self._tool_result_cache_edit_saved_tokens_total = 0
-        self._tool_result_cache_edit_compacted_total = 0
-        # Monotonic timestamp of the last assistant message appended to history.
-        # Used by _maybe_time_based_microcompact to detect cold-cache gaps.
-        self._last_assistant_ts: float = 0.0
+        # Claude Code keeps readFileState across user turns so an interrupted
+        # task can resume edits without rereading unchanged files. The content
+        # hash remains an optimistic guard: writes still fail if the file has
+        # changed since the last successful read.
+        self._read_file_hashes: dict[str, str] = {}
         self._prefer_stateful_history = False
-        self._last_sent_runtime_context = ""
         self._prepared_prompt_parts: PromptParts | None = None
         self._prepared_prompt_state: AgentState | None = None
         self._last_prompt_section_summary: dict[str, Any] = {}
 
-    _GUIDELINES_CACHE_TTL = 10.0  # seconds
-
     def _get_project_guidelines(self, workspace_root: Path | None = None) -> str:
-        """Return cached project guidelines, reloading only when TTL expires.
+        """Load guidelines through the signature-validated shared cache.
 
-        Avoids repeated Path.stat() syscalls from load_project_guidelines()
-        by short-circuiting within the TTL window.
+        ``claude_md.load_project_guidelines`` already reuses unchanged bundles
+        and invalidates them from the file watcher.  A second time-based cache
+        here delayed authoritative instruction changes and added an unsourced
+        freshness threshold.
         """
-        now = time.monotonic()
-        signature = str(workspace_root or "")
-        if (
-            self._cached_guidelines_ts > 0
-            and self._cached_guidelines_signature == signature
-            and (now - self._cached_guidelines_ts) < self._GUIDELINES_CACHE_TTL
-        ):
-            return self._cached_guidelines
         from backend.agent.claude_md import load_project_guidelines
-        self._cached_guidelines = load_project_guidelines(workspace_root)
-        self._cached_guidelines_signature = signature
-        self._cached_guidelines_ts = now
-        return self._cached_guidelines
 
-    def _build_skill_context(self, state: AgentState) -> str:
-        parts: list[str] = []
-        if self._skill_manager:
+        return load_project_guidelines(workspace_root)
+
+    def _consume_skill_injections(self, state: AgentState) -> list[str]:
+        """Render explicit skills as Codex-style contextual user fragments."""
+        prompt_context = state.prompt_context if isinstance(state.prompt_context, dict) else {}
+        payloads = prompt_context.pop("skill_injections", [])
+        if not isinstance(payloads, list):
+            return []
+        fragments: list[str] = []
+        for payload in payloads:
+            if not isinstance(payload, dict):
+                continue
+            name = str(payload.get("name") or "").strip()
+            path = str(payload.get("path") or "").strip()
+            content = str(payload.get("content") or "").strip()
+            if not name or not path or not content:
+                continue
+            fragments.append(
+                "<skill>\n"
+                f"<name>{_xml_text(name)}</name>\n"
+                f"<path>{_xml_text(path)}</path>\n"
+                f"{content}\n"
+                "</skill>"
+            )
+        return fragments
+
+    def _build_skill_catalog(self) -> str:
+        executor = self._skill_executor
+        if executor is None and self._skill_manager is not None:
             from backend.skills.executor import SkillExecutor
 
             executor = SkillExecutor(self._skill_manager)
-            if self._skill_manager.get_active_names():
-                skill_content = executor.build_skill_context(
-                    budget=self._budget.active_skills,
-                    consume=True,
-                )
-                if skill_content:
-                    parts.append(skill_content)
-        elif self._skill_executor:
-            skill_content = self._skill_executor.build_skill_context(
-                budget=self._budget.active_skills
-            )
-            if skill_content:
-                parts.append(skill_content)
-        elif state.active_skills:
-            parts.append(
-                "\n\n## Active Skills\n"
-                + "\n".join(f"- {skill}" for skill in state.active_skills)
-            )
-        return "\n\n".join(part for part in parts if part.strip())
+        build_catalog = getattr(executor, "build_layer1_summary", None)
+        return str(build_catalog() or "") if callable(build_catalog) else ""
 
     def _build_memory_context(self) -> str:
         if not self._memory_manager:
@@ -438,9 +387,9 @@ class ContextBuilder:
         user_message = str(user_message or "")
         if not user_message.strip() and not state.attachments:
             return
+        skill_injections = self._consume_skill_injections(state)
         workspace_root = self._workspace_root_for_state(state)
         prompt_parts = self._build_prompt_parts(state, workspace_root)
-        runtime_context_prefix = self._build_runtime_context_prefix(state)
         attachment_plan = build_attachment_input_plan(
             state.attachments,
             llm=self._llm,
@@ -449,13 +398,16 @@ class ContextBuilder:
         user_turn_content = self._build_user_turn_content(
             self._with_attachment_text_fallback(user_message, attachment_plan),
             state,
-            prompt_parts,
-            runtime_prefix=runtime_context_prefix,
         )
         if not user_turn_content.strip() and not attachment_plan.images and not attachment_plan.documents:
             return
 
         self._compact_old_user_runtime_context_for_cache()
+        for skill_injection in skill_injections:
+            self._append_history_message(
+                LLMMessage(role="user", content=skill_injection),
+                raw_content=skill_injection,
+            )
         self._append_history_message(
             LLMMessage(
                 role="user",
@@ -465,7 +417,6 @@ class ContextBuilder:
             ),
             raw_content=user_turn_content,
         )
-        self._last_sent_runtime_context = runtime_context_prefix.strip()
         self._compact_old_user_runtime_context_for_cache(
             keep_recent_user_turns=RUNTIME_CONTEXT_STRIP_KEEP_RECENT_USER_TURNS,
         )
@@ -474,7 +425,13 @@ class ContextBuilder:
 
     def append_user_context(self, content: str) -> None:
         """Append hook or runtime context after the active user turn."""
-        self.append_user(content)
+        text = str(content or "").strip()
+        if not text:
+            return
+        if text.startswith("<system-reminder>"):
+            self.append_user(text)
+            return
+        self.append_user(f"<system-reminder>\n{text}\n</system-reminder>")
 
     async def build(
         self,
@@ -491,9 +448,7 @@ class ContextBuilder:
 
         messages: list[LLMMessage] = []
         if not self._prefer_stateful_history:
-            self._compact_old_tool_results_for_cache()
             self._enforce_per_message_tool_budget()
-            self._maybe_time_based_microcompact()
 
         workspace_root = self._workspace_root_for_state(active_state)
         if self._prepared_prompt_state is active_state and self._prepared_prompt_parts is not None:
@@ -503,39 +458,23 @@ class ContextBuilder:
         self._prepared_prompt_parts = None
         self._prepared_prompt_state = None
         system_content = prompt_parts.render_system()
-        runtime_context_prefix = self._build_runtime_context_prefix(active_state)
-        self._append_runtime_context_update_if_changed(runtime_context_prefix)
+        plugin_instructions = self._build_plugin_instructions(active_state)
+        self._refresh_active_user_runtime_context(active_state)
         self._compact_old_user_runtime_context_for_cache()
 
         # ── End of system prompt ────────────────────────────────────────────────
-        # Keep retrieval agentic: Codex/Claude Code-style loops let the model
-        # request memory or document context with tools instead of silently
-        # injecting passive RAG into every turn. Explicitly populated chunks are
-        # still honored below for command/tool driven workflows.
+        # Retrieval remains agentic: memory and document context enter through
+        # explicit tool results instead of an implicit per-turn injection.
 
         messages.append(LLMMessage(role="system", content=system_content))
+        if plugin_instructions.strip():
+            # Codex models an explicit plugin selection as a turn-scoped
+            # developer fragment, ahead of the user's input and history.
+            messages.append(
+                LLMMessage(role="developer", content=plugin_instructions.strip())
+            )
         history = self._get_history_within_budget()
         messages.extend(history)
-
-        # API-level context edit: strip old thinking blocks and compact old
-        # recoverable tool results without mutating internal history. Provider
-        # replay items are preserved by default because stateless Responses API
-        # calls may need them.
-        if len(history) >= 6:
-            edited_messages, edit_stats = apply_context_edit(
-                messages,
-                # In the default (non-stateful) path the history-level compactor
-                # (_compact_old_tool_results_for_cache) already rewrote old tool
-                # results, so only let apply_context_edit compact them when that
-                # path was skipped (stateful history). This avoids a duplicate
-                # full scan and double-wrapping. Thinking-strip always runs.
-                config=ContextEditConfig(
-                    compact_tool_results=self._prefer_stateful_history,
-                ),
-                token_estimator=self._estimate_content_tokens,
-            )
-            if edit_stats.total_edits > 0:
-                messages = edited_messages
 
         return messages
 
@@ -555,7 +494,7 @@ class ContextBuilder:
             state=state,
             workspace_root=workspace_root,
             project_guidelines=self._get_project_guidelines(workspace_root),
-            skill_context=self._build_skill_context(state),
+            skill_context=self._build_skill_catalog(),
             memory_context=self._build_memory_context(),
             persistent_context=self._build_persistent_context(),
         )
@@ -599,47 +538,46 @@ class ContextBuilder:
     def _build_user_turn_content(
         user_message: str,
         state: AgentState,
-        prompt_parts: PromptParts,
-        *,
-        runtime_prefix: str | None = None,
     ) -> str:
-        runtime_prefix = (
-            ContextBuilder._build_runtime_context_prefix(state)
-            if runtime_prefix is None
-            else runtime_prefix
-        )
-        volatile_prefix = prompt_parts.render_volatile_prefix()
-        effective_user_message = ContextBuilder._build_effective_user_message(user_message, state)
-        return "\n\n".join(
-            part
-            for part in (
-                runtime_prefix,
-                volatile_prefix,
-                effective_user_message,
-            )
-            if str(part or "").strip()
-        )
+        runtime_context = ContextBuilder._build_runtime_context_prefix(state).strip()
+        if not runtime_context:
+            return user_message
+        reminder = f"<system-reminder>\n{runtime_context}\n</system-reminder>"
+        # CC treats the wrapper prefix as the reliable discriminator for
+        # system-injected attachment/reminder text (ensureSystemReminderWrap /
+        # smooshSystemReminderSiblings). Keep the real user text after that
+        # prefix so old-turn cleanup can remove only injected context without
+        # guessing at arbitrary tags inside the user's request.
+        return f"{reminder}\n\n{user_message}" if user_message.strip() else reminder
 
-    def _append_runtime_context_update_if_changed(self, runtime_context: str) -> bool:
-        content = str(runtime_context or "").strip()
-        if not content or content == self._last_sent_runtime_context:
-            return False
-        previous = self._history[-1] if self._history else None
-        if (
-            previous is not None
-            and previous.role == "user"
-            and not previous.tool_call_id
-            and not previous.tool_calls
-            and str(previous.content or "").strip() == content
-        ):
-            self._last_sent_runtime_context = content
-            return False
-        self._append_history_message(
-            LLMMessage(role="user", content=content),
-            raw_content=content,
-        )
-        self._last_sent_runtime_context = content
-        return True
+    def _refresh_active_user_runtime_context(self, state: AgentState) -> bool:
+        """Refresh the current turn's CC-style reminder before each model call."""
+        for index in range(len(self._history) - 1, -1, -1):
+            message = self._history[index]
+            if message.role != "user" or message.tool_call_id or message.tool_calls:
+                continue
+            content = str(message.content or "")
+            user_text = _strip_runtime_context(content)
+            # Standalone hook/system reminders strip to empty. The active user
+            # turn is the latest wrapped message that still has real user text.
+            if user_text == content or not user_text:
+                continue
+            refreshed = self._build_user_turn_content(user_text, state)
+            if refreshed == content:
+                return False
+            self._history[index] = LLMMessage(
+                role=message.role,
+                content=refreshed,
+                name=message.name,
+                tool_call_id=message.tool_call_id,
+                tool_calls=message.tool_calls,
+                images=list(message.images),
+                documents=list(message.documents),
+            )
+            self._rebuild_history_token_cache()
+            self._last_actual_prompt_tokens = 0
+            return True
+        return False
 
     @staticmethod
     def _build_runtime_context_prefix(state: AgentState) -> str:
@@ -649,8 +587,68 @@ class ContextBuilder:
             ContextBuilder._build_agent_mode_block(state),
             ContextBuilder._build_turn_aborted_block(state),
             ContextBuilder._build_tool_runtime_context_block(state),
+            ContextBuilder._build_task_status_block(state),
+            ContextBuilder._build_retrieved_context_block(state),
         ]
         return "\n\n".join(block for block in blocks if block.strip())
+
+    @staticmethod
+    def _build_plugin_instructions(state: AgentState) -> str:
+        prompt_context = ContextBuilder._prompt_context(state)
+        plugins = prompt_context.get("plugin_injections")
+        if not isinstance(plugins, list):
+            return ""
+        rendered: list[str] = []
+        for plugin in plugins:
+            if not isinstance(plugin, dict):
+                continue
+            display_name = str(plugin.get("display_name") or plugin.get("config_name") or "").strip()
+            if not display_name:
+                continue
+            lines = [f"Capabilities from the `{display_name}` plugin:"]
+            if bool(plugin.get("has_skills")):
+                lines.append(f"- Skills from this plugin are prefixed with `{display_name}:`.")
+            servers = sorted({
+                str(name).strip()
+                for name in (plugin.get("mcp_server_names") or [])
+                if str(name).strip()
+            }, key=str.casefold)
+            if servers:
+                lines.append(
+                    "- MCP servers from this plugin available in this session: "
+                    + ", ".join(f"`{name}`" for name in servers)
+                    + "."
+                )
+            apps = sorted({
+                str(name).strip()
+                for name in (plugin.get("available_apps") or [])
+                if str(name).strip()
+            }, key=str.casefold)
+            if apps:
+                lines.append(
+                    "- Apps from this plugin available in this session: "
+                    + ", ".join(f"`{name}`" for name in apps)
+                    + "."
+                )
+            if len(lines) == 1:
+                continue
+            lines.append("Use these plugin-associated capabilities to help solve the task.")
+            rendered.append("\n".join(lines))
+        return "\n\n".join(rendered)
+
+    @staticmethod
+    def _build_task_status_block(state: AgentState) -> str:
+        summary = str(getattr(state, "task_summary", "") or "").strip()
+        return f"Task status:\n{summary}" if summary else ""
+
+    @staticmethod
+    def _build_retrieved_context_block(state: AgentState) -> str:
+        chunks = [
+            str(chunk).strip()
+            for chunk in (getattr(state, "retrieved_chunks", []) or [])
+            if str(chunk).strip()
+        ]
+        return "Background knowledge:\n" + "\n---\n".join(chunks) if chunks else ""
 
     @staticmethod
     def _prompt_context(state: AgentState) -> dict[str, Any]:
@@ -682,13 +680,24 @@ class ContextBuilder:
             )
         normalized_roots = [str(root) for root in workspace_roots if str(root or "").strip()]
 
-        shell = str(
-            environment.get("shell")
-            or prompt_context.get("shell")
-            or os.environ.get("SHELL")
-            or os.environ.get("COMSPEC")
-            or ("powershell" if os.name == "nt" else "unknown")
-        ).strip()
+        user_directories = environment.get("user_directories")
+        if not isinstance(user_directories, dict):
+            user_directories = prompt_context.get("user_directories")
+        if not isinstance(user_directories, dict):
+            user_directories = {}
+        known_directory_env = {
+            "desktop": "MINICODE_DESKTOP_DIR",
+            "documents": "MINICODE_DOCUMENTS_DIR",
+            "downloads": "MINICODE_DOWNLOADS_DIR",
+        }
+        normalized_user_directories = {
+            name: str(user_directories.get(name) or os.environ.get(env_name) or "").strip()
+            for name, env_name in known_directory_env.items()
+        }
+        normalized_user_directories = {
+            name: value for name, value in normalized_user_directories.items() if value
+        }
+
         now = datetime.now().astimezone()
         current_date = str(
             environment.get("current_date")
@@ -712,6 +721,19 @@ class ContextBuilder:
             str(permission.get("mode") or prompt_context.get("permission_mode") or "default").strip()
             or "default"
         )
+        if os.name == "nt":
+            shell = (
+                "powershell (Windows host, full access)"
+                if mode in {"bypass", "full_access", "full-access", "danger-full-access"}
+                else "pwsh (Linux workspace sandbox; use relative workspace paths)"
+            )
+        else:
+            shell = str(
+                environment.get("shell")
+                or prompt_context.get("shell")
+                or os.environ.get("SHELL")
+                or "unknown"
+            ).strip()
         source = (
             str(permission.get("source") or prompt_context.get("permission_source") or "runtime").strip()
             or "runtime"
@@ -742,6 +764,14 @@ class ContextBuilder:
             workspace_roots_block = f"    <workspace_roots>\n{root_lines}\n    </workspace_roots>"
         else:
             workspace_roots_block = "    <workspace_roots />"
+        if normalized_user_directories:
+            directory_lines = "\n".join(
+                f"    <{name}>{_xml_text(value)}</{name}>"
+                for name, value in normalized_user_directories.items()
+            )
+            user_directories_block = f"  <user_directories>\n{directory_lines}\n  </user_directories>"
+        else:
+            user_directories_block = "  <user_directories />"
 
         return (
             "<environment_context>\n"
@@ -749,6 +779,7 @@ class ContextBuilder:
             f"  <shell>{_xml_text(shell)}</shell>\n"
             f"  <current_date>{_xml_text(current_date)}</current_date>\n"
             f"  <timezone>{_xml_text(timezone)}</timezone>\n"
+            f"{user_directories_block}\n"
             "  <filesystem>\n"
             f"{workspace_roots_block}\n"
             f"    <permission_profile type=\"{_xml_text(mode)}\" source=\"{_xml_text(source)}\">\n"
@@ -778,12 +809,12 @@ class ContextBuilder:
         if active_mode == "plan":
             lines = [
                 "# Collaboration Mode: Plan",
-                "Inspect, reason, and design without making workspace changes. Use read-only discovery; when ready, call exit_plan_mode with concise steps and wait for approval.",
+                "Workspace changes are disabled. Use read-only tools and return a plan.",
             ]
         else:
             lines = [
                 "# Collaboration Mode: Default",
-                "Implement directly when the user asks for work, then verify and report the result. Use visible planning only when requested or materially useful; stay in review/brainstorming/no-change mode when asked.",
+                "Follow the user's requested task and interaction mode.",
             ]
         return "<collaboration_mode>\n" + "\n".join(lines) + "\n</collaboration_mode>"
 
@@ -795,11 +826,11 @@ class ContextBuilder:
         guidance = {
             "build": [
                 "# Agent Mode: Build",
-                "Implement the requested change directly, verify it, and report the result. Use a brief plan only when it reduces risk or clarifies sequencing.",
+                "Workspace changes are allowed when the user requests them.",
             ],
             "plan": [
                 "# Agent Mode: Plan",
-                "Produce a concrete implementation plan before edits. Prefer discovery and design; do not claim implementation is complete before approval.",
+                "Inspect and produce an implementation plan without editing the workspace.",
             ],
             "review": [
                 "# Agent Mode: Review",
@@ -834,17 +865,12 @@ class ContextBuilder:
         prompt_context = ContextBuilder._prompt_context(state)
         tool_runtime_guidance = str(
             getattr(state, "tool_runtime_guidance", "")
-            or getattr(state, "harness_guidance", "")
             or ""
         ).strip()
         deferred_tools_prompt_block = str(
             prompt_context.get("deferred_tools_prompt_block") or ""
         ).strip()
-        loop_guidance = list(getattr(state, "loop_guidance", []) or [])
-        loop_guidance_text = "\n".join(
-            f"- {str(item).strip()}" for item in loop_guidance[-4:] if str(item).strip()
-        ).strip()
-        if not tool_runtime_guidance and not deferred_tools_prompt_block and not loop_guidance_text:
+        if not tool_runtime_guidance and not deferred_tools_prompt_block:
             return ""
         parts = [
             "<tool_runtime_context>",
@@ -852,37 +878,10 @@ class ContextBuilder:
         ]
         if tool_runtime_guidance:
             parts.extend(["", tool_runtime_guidance])
-        if loop_guidance_text:
-            parts.extend(["", "Runtime guidance:", loop_guidance_text])
         if deferred_tools_prompt_block:
             parts.extend(["", deferred_tools_prompt_block])
         parts.append("</tool_runtime_context>")
         return "\n".join(parts)
-
-    @staticmethod
-    def _build_effective_user_message(user_message: str, state: AgentState) -> str:
-        stripped = user_message.strip()
-        if stripped.lower() not in CONTINUATION_REQUESTS:
-            return user_message
-        task_summary = (state.task_summary or "").strip()
-        recent = []
-        for tc in state.tool_calls[-5:]:
-            output = (tc.tool_output or "").strip().replace("\n", " ")
-            if len(output) > 180:
-                output = f"{output[:180]}..."
-            recent.append(f"- {tc.tool_name} {tc.tool_input} [{tc.status}]: {output}")
-        details = []
-        if task_summary:
-            details.append(f"Previous task summary:\n{task_summary}")
-        if recent:
-            details.append("Recent tool results:\n" + "\n".join(recent))
-        suffix = "\n\n".join(details) if details else "Use the current conversation context."
-        return (
-            "Continue the previous unfinished task. Do not ask whether to continue. "
-            "Choose and execute the next concrete step, or provide a concise final result "
-            "only if the task is already complete.\n\n"
-            f"{suffix}"
-        )
 
     def append_user(self, content: str) -> None:
         content_text = str(content)
@@ -1024,48 +1023,6 @@ class ContextBuilder:
             }
         )
 
-    # MicroCompact: 可压缩的只读工具（参考 Claude Code microCompact.ts COMPACTABLE_TOOLS）
-    # 只列「可重新获取」的幂等只读工具。task（子 Agent 输出）和 read_artifact
-    # （一次性 artifact 引用）不可复现，头尾截断会永久丢内容且占位符会谎称可重取，
-    # 因此排除在外（Claude Code 上下文管理 §4.3：不可复现信息不能轻易删）。
-    _COMPACTABLE_TOOLS = frozenset({
-        "read_file", "list_files", "grep_files", "glob_files", "fuzzy_search",
-        "git_status", "git_diff", "git_log", "web_fetch", "web_search",
-        "run_command", "go_to_definition",
-        "find_references", "write_file", "edit_file",
-    })
-    _MICRO_COMPACT_THRESHOLD = 1500  # 默认阈值
-    # 中段丢弃量达到此值才落盘兜底（小幅省略靠诚实提示即可，避免大量小文件）
-    _MICRO_COMPACT_MIN_PERSIST_OMITTED = 2000
-    # 模型主动请求的内容（read_file, git_diff）用更高阈值，避免丢失关键上下文
-    _HIGH_THRESHOLD_TOOLS = frozenset({
-        "read_file", "git_diff", "go_to_definition",
-    })
-    _LOW_THRESHOLD_TOOLS = frozenset({
-        "web_search", "web_fetch", "list_files", "glob_files", "grep_files",
-    })
-    _HIGH_COMPACT_THRESHOLD = 3500
-    _LOW_COMPACT_THRESHOLD = 900
-    _READ_FILE_COMPACT_THRESHOLD = 12_000
-
-    # Time-based microcompact: when the gap since the last assistant message
-    # exceeds this threshold (in minutes), the server prompt cache has expired
-    # and the full prefix will be rewritten regardless — so content-clear old
-    # tool results now to shrink what gets rewritten (mirrors cc's
-    # evaluateTimeBasedTrigger / maybeTimeBasedMicrocompact).
-    _TIME_BASED_MC_GAP_MINUTES = 15.0
-    _TIME_BASED_MC_KEEP_RECENT = 3
-
-    def _tool_result_compaction_hint(self, tool_name: str, *, artifact_hint: bool = False) -> str:
-        """Return a truthful recovery hint for compacted tool output."""
-        if tool_name in self._COMPACTABLE_TOOLS:
-            if artifact_hint:
-                return "如需完整内容，请读取相关文件、查看 artifact，或用安全的只读方式重新获取。"
-            return "如需完整内容，请读取相关文件或用安全的只读方式重新获取。"
-        if artifact_hint:
-            return "这是状态性或不可复现输出，仅保留预览；如有 artifact 引用可尝试读取，但不要假设可重取。"
-        return "这是状态性或不可复现输出，仅保留预览；不要假设可重新获取。"
-
     def append_tool_result(
         self,
         tool_call_id: str,
@@ -1073,20 +1030,17 @@ class ContextBuilder:
         result: ToolResult,
     ) -> None:
         content = result.to_context_string()
-        content = self._stable_tool_result_replacement(tool_call_id, tool_name, content)
-
-        # Disk persistence: if the result is very large, write the full
-        # content to disk and replace the inline text with a compact preview
-        # that includes a file path the model can read_file to recover.
-        # This runs before _micro_compact so the latter sees the smaller preview.
-        content = try_persist_tool_result(content, tool_call_id, tool_name)
-
-        # MicroCompact: 对大型只读工具结果进行即时截断压缩
-        content = self._micro_compact(tool_name, content)
+        # Artifact-backed results already preserve the full output and carry a
+        # bounded, readable preview. Persisting that pointer-plus-preview a
+        # second time would hide Pi's 50-KiB result contract behind another
+        # unrelated preview file and leave two recovery mechanisms for one
+        # result.
+        if not result.artifact_id:
+            content = try_persist_tool_result(content, tool_call_id, tool_name)
 
         # Codex-style: add structured status prefix matching function_call_result format
         status = "error" if result.is_error else "completed"
-        if not content.startswith("<persisted-"):
+        if not content.startswith("<persisted-output>"):
             content = (
                 f'<function_call_result status="{status}" call_id="{tool_call_id}">\n'
                 f"{content}\n"
@@ -1099,11 +1053,12 @@ class ContextBuilder:
                 content=content,
                 name=tool_name,
                 tool_call_id=tool_call_id,
+                is_error=bool(result.is_error),
+                images=list(result.images),
             ),
             raw_content=content,
         )
         if not self._prefer_stateful_history:
-            self._compact_old_tool_results_for_cache()
             self._enforce_per_message_tool_budget()
             self._compact_old_user_runtime_context_for_cache()
 
@@ -1112,76 +1067,63 @@ class ContextBuilder:
         *,
         keep_recent_user_turns: int = RUNTIME_CONTEXT_STRIP_KEEP_RECENT_USER_TURNS,
     ) -> int:
-        """Remove repeated per-turn runtime wrappers from old user turns.
+        """Keep runtime reminders only on the active user turn.
 
-        Current-turn runtime context is required for correctness. Older turns do
-        not need their old cwd/date/permission wrappers repeated forever; their
-        user text remains enough conversation history, and stateful providers
-        already preserve the exact older request through previous_response_id.
+        Runtime context is sent as a CC-style system-reminder prefix on every
+        request. Historical snapshots may contain it inside user turns or as a
+        standalone synthetic user message. Strip the former and remove the
+        latter so restored conversations cannot manufacture a user steer between
+        a tool result and the next assistant response.
         """
-        keep_recent_user_turns = max(0, int(keep_recent_user_turns))
-        user_indices = [
-            index
-            for index, message in enumerate(self._history)
-            if message.role == "user" and not message.tool_call_id and not message.tool_calls
-        ]
-        if len(user_indices) <= keep_recent_user_turns:
-            return 0
-        protected = set(user_indices[-keep_recent_user_turns:]) if keep_recent_user_turns else set()
-        if keep_recent_user_turns:
-            for index in reversed(user_indices):
-                if _has_leading_runtime_context(str(self._history[index].content or "")):
-                    protected.add(index)
-                    break
-        changed = 0
-        for index in user_indices:
-            if index in protected:
+        keep_recent = max(0, int(keep_recent_user_turns))
+        wrapped_turn_indexes: list[int] = []
+        for index, message in enumerate(self._history):
+            if message.role != "user" or message.tool_call_id or message.tool_calls:
                 continue
-            message = self._history[index]
             content = str(message.content or "")
-            stripped = _strip_leading_runtime_context(content)
-            if stripped == content:
+            stripped = _strip_runtime_context(content)
+            if stripped != content and stripped:
+                wrapped_turn_indexes.append(index)
+        keep_indexes = set(wrapped_turn_indexes[-keep_recent:]) if keep_recent else set()
+        active_turn_index = wrapped_turn_indexes[-1] if wrapped_turn_indexes else -1
+        next_history: list[LLMMessage] = []
+        changed = 0
+        for index, message in enumerate(self._history):
+            if message.role != "user" or message.tool_call_id or message.tool_calls:
+                next_history.append(message)
                 continue
-            replacement = stripped or RUNTIME_CONTEXT_OMITTED_PLACEHOLDER
-            self._history[index] = LLMMessage(
-                role=message.role,
-                content=replacement,
-                name=message.name,
-                tool_call_id=message.tool_call_id,
-                tool_calls=message.tool_calls,
-                images=list(message.images),
-                documents=list(message.documents),
-            )
+            if index in keep_indexes:
+                next_history.append(message)
+                continue
+            content = str(message.content or "")
+            stripped = _strip_runtime_context(content)
+            if stripped == content:
+                next_history.append(message)
+                continue
+            if not stripped and index > active_turn_index:
+                # Hook feedback and other standalone system reminders appended
+                # after the active user turn belong to the current iteration.
+                next_history.append(message)
+                continue
             changed += 1
+            if not stripped:
+                continue
+            next_history.append(
+                LLMMessage(
+                    role=message.role,
+                    content=stripped,
+                    name=message.name,
+                    tool_call_id=message.tool_call_id,
+                    tool_calls=message.tool_calls,
+                    images=list(message.images),
+                    documents=list(message.documents),
+                )
+            )
         if changed:
+            self._history = next_history
             self._rebuild_history_token_cache()
+            self._last_actual_prompt_tokens = 0
         return changed
-
-    def _compact_old_tool_results_for_cache(self) -> int:
-        compacted_history, stats = compact_old_tool_results_by_id(
-            self._history,
-            replacements=self._tool_result_replacements,
-            token_estimator=self._estimate_content_tokens,
-            config=ToolResultCacheEditConfig(
-                keep_recent=TOOL_RESULT_CACHE_KEEP_RECENT,
-                min_chars=TOOL_RESULT_CACHE_EDIT_MIN_CHARS,
-                preview_chars=TOOL_RESULT_CACHE_EDIT_PREVIEW_CHARS,
-            ),
-        )
-        if stats.compacted <= 0:
-            return 0
-        self._history = compacted_history
-        self._last_tool_result_cache_edit_saved_tokens = stats.saved_tokens
-        self._tool_result_cache_edit_saved_tokens_total += stats.saved_tokens
-        self._tool_result_cache_edit_compacted_total += stats.compacted
-        self._last_actual_prompt_tokens = 0
-        self._rebuild_history_token_cache()
-        logger.info(
-            "[ToolResultCacheEdit] Compacted %d old tool results by tool_call_id, saved ~%d tokens",
-            stats.compacted,
-            stats.saved_tokens,
-        )
-        return stats.compacted
 
     def _enforce_per_message_tool_budget(self) -> int:
         """Enforce a per-message aggregate budget on tool result content.
@@ -1259,19 +1201,16 @@ class ContextBuilder:
                 tool_name = str(tool_msg.name or "unknown")
                 content = str(tool_msg.content or "")
 
-                # Skip already-persisted or already-compacted results
+                # Skip results already replaced by disk-backed previews.
                 if (
                     not call_id
-                    or content.startswith("<persisted-tool-result>")
-                    or content.startswith("<persisted-tool-result-preview>")
-                    or content.lstrip().startswith("<tool_result_cache_entry")
-                    or call_id in self._tool_result_seen_ids
+                    or content.startswith("<persisted-output>")
                 ):
                     continue
 
-                self._tool_result_seen_ids.add(call_id)
-                new_content = try_persist_tool_result(content, call_id, tool_name)
-                if new_content != content:
+                persisted = persist_tool_result(content, call_id, tool_name, force=True)
+                if persisted is not None:
+                    new_content = persisted.preview
                     self._history[idx] = LLMMessage(
                         role=tool_msg.role,
                         content=new_content,
@@ -1296,178 +1235,6 @@ class ContextBuilder:
             )
 
         return newly_persisted
-
-    def _stable_tool_result_replacement(self, tool_call_id: str, tool_name: str, content: str) -> str:
-        """Freeze very large tool result replacements by tool_call_id.
-
-        This mirrors Claude Code's prompt-cache-friendly rule: once a tool
-        result has been compacted, future passes for the same id reuse the exact
-        same replacement string rather than deriving a fresh truncation.
-        """
-        if not tool_call_id:
-            return content
-        replacement = self._tool_result_replacements.get(tool_call_id)
-        if replacement is not None:
-            return replacement
-        if tool_call_id in self._tool_result_seen_ids:
-            return content
-        self._tool_result_seen_ids.add(tool_call_id)
-        if len(content) <= TOOL_RESULT_STABLE_REPLACEMENT_CHARS:
-            return content
-
-        head_size = int(TOOL_RESULT_STABLE_PREVIEW_CHARS * 0.7)
-        tail_size = TOOL_RESULT_STABLE_PREVIEW_CHARS - head_size
-        omitted = max(0, len(content) - head_size - tail_size)
-        compacted = (
-            "<persisted-tool-result-preview>\n"
-            f"Tool result from {tool_name} was too large for stable inline context "
-            f"({len(content)} chars). Showing a deterministic preview; use a narrower tool call, "
-            "pagination parameters, or the referenced artifact when available for more detail.\n\n"
-            f"{content[:head_size]}\n"
-            f"... [{omitted} chars omitted from stable tool result preview] ...\n"
-            f"{content[-tail_size:]}\n"
-            "</persisted-tool-result-preview>"
-        )
-        self._tool_result_replacements[tool_call_id] = compacted
-        return compacted
-
-    def _micro_compact(self, tool_name: str, content: str) -> str:
-        """
-        对可压缩工具的大型结果进行即时截断（参考 Claude Code microCompact.ts）。
-
-        策略：
-        - 仅对 _COMPACTABLE_TOOLS 中的工具生效
-        - 模型主动请求的内容（read_file 等）用更高阈值，保留更多上下文
-        - 超过阈值时保留首部和尾部内容，中间用摘要替代
-        - 如果有 artifact_id 引用，保留引用信息
-        """
-        # Matches both this method's own preview tag and the disk-persistence
-        # tag (<persisted-tool-result>) so already-compacted content is not
-        # truncated a second time.
-        if content.startswith("<persisted-tool-result"):
-            return content
-        if tool_name not in self._COMPACTABLE_TOOLS:
-            return content
-        threshold = (
-            self._READ_FILE_COMPACT_THRESHOLD
-            if tool_name == "read_file"
-            else self._HIGH_COMPACT_THRESHOLD
-            if tool_name in self._HIGH_THRESHOLD_TOOLS
-            else self._LOW_COMPACT_THRESHOLD
-            if tool_name in self._LOW_THRESHOLD_TOOLS
-            else self._MICRO_COMPACT_THRESHOLD
-        )
-        if len(content) <= threshold:
-            return content
-
-        # 保留首尾各 40% 的阈值空间
-        head_size = int(threshold * 0.4)
-        tail_size = int(threshold * 0.4)
-        omitted = len(content) - head_size - tail_size
-
-        head = content[:head_size]
-        tail = content[-tail_size:]
-
-        # Disk fallback before dropping the middle. cc never truncates a large
-        # result irrecoverably — the full text is stored and the preview is a
-        # reference. try_persist_tool_result above only covers PERSISTABLE_TOOLS
-        # (>20k); this catches the remainder (e.g. write_file/edit_file, or
-        # persistable results below the 20k persist threshold) so the middle is
-        # still recoverable via read_file rather than lost forever.
-        recovery_ref = ""
-        if omitted >= self._MICRO_COMPACT_MIN_PERSIST_OMITTED:
-            filepath = force_persist_for_compaction(content, tool_name)
-            if filepath:
-                recovery_ref = f"完整原文已落盘：{filepath}（可用 read_file 读取）；"
-        # If落盘失败或省略量较小，退回诚实提示（不假装完整、不假装可重取）。
-        return (
-            f"{head}\n"
-            f"... [已压缩 {omitted} 字符；{recovery_ref}"
-            f"{self._tool_result_compaction_hint(tool_name)}] ...\n"
-            f"{tail}"
-        )
-
-    def _maybe_time_based_microcompact(self) -> int:
-        """Time-based microcompact: clear old tool results when the cache is cold.
-
-        Mirrors cc's ``maybeTimeBasedMicrocompact``: when the gap since the
-        last assistant message exceeds a threshold, the server-side prompt
-        cache has expired and the full prefix will be rewritten regardless.
-        Content-clearing old tool results now shrinks what gets rewritten,
-        saving tokens without any cache-breaking cost.
-
-        Returns the number of tool results cleared.
-        """
-        if not self._history:
-            return 0
-        # Use the tracked timestamp of the last assistant message (set in
-        # _append_history_message).  LLMMessage doesn't carry a timestamp
-        # field, so we maintain it as a separate instance variable.
-        last_asst_ts = self._last_assistant_ts
-
-        if last_asst_ts <= 0:
-            return 0
-
-        gap_minutes = (time.monotonic() - last_asst_ts) / 60.0
-        if gap_minutes < self._TIME_BASED_MC_GAP_MINUTES:
-            return 0
-
-        # Cache is cold: content-clear old compactable tool results.
-        # Keep the most recent N results untouched.
-        compactable_indices: list[int] = []
-        for i, msg in enumerate(self._history):
-            if msg.role == "tool" and (msg.name or "") in self._COMPACTABLE_TOOLS:
-                content = str(msg.content or "")
-                # Skip already-cleared results
-                if (
-                    content.startswith("<persisted-tool-result")
-                    or content.lstrip().startswith("<tool_result_cache_entry")
-                    or "[Old tool result content cleared]" in content[:60]
-                ):
-                    continue
-                compactable_indices.append(i)
-
-        if not compactable_indices:
-            return 0
-
-        keep_recent = max(1, self._TIME_BASED_MC_KEEP_RECENT)
-        keep_set = set(compactable_indices[-keep_recent:])
-        clear_set = set(compactable_indices) - keep_set
-
-        if not clear_set:
-            return 0
-
-        cleared = 0
-        for idx in clear_set:
-            msg = self._history[idx]
-            call_id = str(msg.tool_call_id or "").strip()
-            # Use the stable replacement mechanism so it's byte-identical
-            # on subsequent calls (cache stability)
-            cleared_content = "[Old tool result content cleared]"
-            self._tool_result_replacements[call_id] = cleared_content
-            self._history[idx] = LLMMessage(
-                role=msg.role,
-                content=cleared_content,
-                name=msg.name,
-                tool_call_id=msg.tool_call_id,
-                tool_calls=msg.tool_calls,
-                images=list(msg.images),
-                documents=list(msg.documents),
-            )
-            cleared += 1
-
-        if cleared > 0:
-            self._rebuild_history_token_cache()
-            self._last_actual_prompt_tokens = 0
-            logger.info(
-                "[TimeBasedMC] gap %.1fmin > %.1fmin, cleared %d old tool results, kept last %d",
-                gap_minutes,
-                self._TIME_BASED_MC_GAP_MINUTES,
-                cleared,
-                len(keep_set),
-            )
-
-        return cleared
 
     @property
     def token_usage(self) -> int:
@@ -1502,7 +1269,7 @@ class ContextBuilder:
                 category = "system_runtime"
             elif name in {"workspace_summary", "project_guidelines"}:
                 category = "guidelines"
-            elif name == "skill_context" or name.startswith("prompt_pack:"):
+            elif name == "skill_context":
                 category = "skills"
             elif name in {"memory_context", "persistent_context", "retrieved_chunks"}:
                 category = "memory"
@@ -1523,7 +1290,6 @@ class ContextBuilder:
                 message.images,
                 message.documents,
             )
-            attachment_tokens = int(attachment_tokens * self._token_calibration_factor)
             if message.role == "tool":
                 category = "tool_results"
                 source = str(message.name or "tool")
@@ -1584,24 +1350,6 @@ class ContextBuilder:
         cache_creation = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
         if observed > 0:
             self._last_actual_prompt_tokens = observed
-            # Update the token estimation calibration factor via exponential
-            # moving average (EMA). The heuristic (_estimate_content_tokens)
-            # uses character counts with CJK/ASCII ratios; the calibration
-            # factor lets it learn from the provider's real tokenizer over
-            # time. Keep calibrating for the whole session (cc anchors every
-            # threshold check on the latest real usage — freezing after a few
-            # turns lets long sessions drift ±30%). ``_history_tokens_total`` is
-            # already calibrated, so ``observed / estimated`` is the *residual*
-            # correction; fold it multiplicatively so the factor converges to
-            # the true multiplier instead of stalling at its square root.
-            estimated = self._history_tokens_total
-            if estimated > 0:
-                residual = observed / estimated
-                target = max(0.5, min(2.0, self._token_calibration_factor * residual))
-                self._token_calibration_factor = max(
-                    0.5,
-                    min(2.0, self._token_calibration_factor * 0.9 + target * 0.1),
-                )
         # Cache-hit diagnostic: log cache efficiency when provider reports cache reads
         if cache_read > 0 and observed > 0:
             logger.info(
@@ -1613,157 +1361,6 @@ class ContextBuilder:
                 cache_hit_pct,
             )
 
-
-    def snip_history_if_needed(
-        self,
-        *,
-        usage_ratio: float | None = None,
-        force: bool = False,
-    ) -> dict[str, int]:
-        """Drop very old history turns before microcompact / full compact.
-
-        Mirrors the intent of Claude Code HISTORY_SNIP: free tokens cheaply by
-        removing protected-tail-outside messages, while keeping recent tool-call
-        groups intact via ``_aligned_recent_start``.
-        """
-        total_budget = max(1, int(getattr(self._budget, "total", 0) or 0))
-        ratio = (
-            float(usage_ratio)
-            if usage_ratio is not None
-            else (self.token_usage / total_budget)
-        )
-        if not force and ratio < SNIP_TRIGGER_USAGE_RATIO:
-            return {"removed": 0, "kept": len(self._history), "saved_tokens": 0}
-        if len(self._history) < SNIP_MIN_MESSAGES:
-            return {"removed": 0, "kept": len(self._history), "saved_tokens": 0}
-
-        keep_recent = max(
-            int(getattr(self._agent_settings, "history_keep_recent", 15) or 15),
-            SNIP_KEEP_RECENT_MESSAGES,
-        )
-        recent_start = self._aligned_recent_start(keep_recent)
-        if recent_start <= 0:
-            return {"removed": 0, "kept": len(self._history), "saved_tokens": 0}
-
-        before_tokens = int(self._history_tokens_total or 0)
-        removed = recent_start
-        boundary = LLMMessage(
-            role="user",
-            content=(
-                f"{SUMMARY_PREFIX}\n\n"
-                f"{_compaction_boundary('snip', self._compaction_count + 1, removed)}\n"
-                f"[History snip] Removed {removed} older message(s) to free context. "
-                "Recent turns and tool evidence are preserved; re-read files if earlier details are required."
-            ),
-        )
-        self._history = [boundary] + self._history[recent_start:]
-        self._rebuild_history_token_cache()
-        saved = max(0, before_tokens - int(self._history_tokens_total or 0))
-        logger.info(
-            "[HistorySnip] removed=%d kept=%d saved~%d tokens ratio=%.3f",
-            removed,
-            len(self._history),
-            saved,
-            ratio,
-        )
-        return {
-            "removed": removed,
-            "kept": len(self._history),
-            "saved_tokens": saved,
-        }
-
-    def collapse_old_tool_results(
-        self,
-        *,
-        usage_ratio: float | None = None,
-        force: bool = False,
-    ) -> dict[str, int]:
-        """Cheap staged collapse of old tool results before full autocompact.
-
-        Unlike the last-resort hard truncate path, this keeps a
-        short preview and tool identity so the parent can still decide what to
-        re-fetch. Recent results and unconsumed tool batches stay intact.
-        """
-        total_budget = max(1, int(getattr(self._budget, "total", 0) or 0))
-        ratio = (
-            float(usage_ratio)
-            if usage_ratio is not None
-            else (self.token_usage / total_budget)
-        )
-        if not force and ratio < COLLAPSE_TRIGGER_USAGE_RATIO:
-            return {"collapsed": 0, "saved_tokens": 0}
-        if len(self._history) < COLLAPSE_MIN_MESSAGES:
-            return {"collapsed": 0, "saved_tokens": 0}
-
-        keep_recent = max(
-            int(getattr(self._agent_settings, "history_keep_recent", 15) or 15),
-            COLLAPSE_KEEP_RECENT_MESSAGES,
-        )
-        protect_start = self._aligned_recent_start(keep_recent)
-        before_tokens = int(self._history_tokens_total or 0)
-
-        # Preserve the latest unconsumed tool batch (assistant tool_calls + results).
-        unconsumed: set[int] = set()
-        for idx in range(len(self._history) - 1, -1, -1):
-            msg = self._history[idx]
-            if msg.role == "tool":
-                unconsumed.add(idx)
-                continue
-            if msg.role == "assistant" and msg.tool_calls:
-                unconsumed.add(idx)
-                # include preceding consecutive tools already collected; stop after assistant
-                break
-            if msg.role in {"user", "assistant"}:
-                break
-
-        collapsed = 0
-        for idx, msg in enumerate(self._history):
-            if idx >= protect_start or idx in unconsumed:
-                continue
-            if msg.role != "tool":
-                continue
-            content = str(msg.content or "")
-            if len(content) <= COLLAPSE_PREVIEW_CHARS:
-                continue
-            if content.startswith("[Tool result truncated") or content.startswith("[Old tool result"):
-                continue
-            if content.lstrip().startswith("<tool_result_cache_entry") or content.lstrip().startswith("<persisted-tool-result"):
-                continue
-            if content.lstrip().startswith("<context_edit_compact"):
-                continue
-            tool_name = str(msg.name or "tool")
-            preview = content[:COLLAPSE_PREVIEW_CHARS].rstrip()
-            replacement = (
-                f"[Collapsed tool result: {tool_name} — was {len(content)} chars]\n"
-                f"{preview}\n"
-                f"... [re-run tool or read source if full output is required]"
-            )
-            self._history[idx] = LLMMessage(
-                role=msg.role,
-                content=replacement,
-                name=msg.name,
-                tool_call_id=msg.tool_call_id,
-                tool_calls=msg.tool_calls,
-                images=list(getattr(msg, "images", []) or []),
-                documents=list(getattr(msg, "documents", []) or []),
-            )
-            call_id = str(msg.tool_call_id or "").strip()
-            if call_id:
-                self._tool_result_replacements[call_id] = replacement
-                self._tool_result_seen_ids.add(call_id)
-            collapsed += 1
-
-        if collapsed:
-            self._rebuild_history_token_cache()
-        saved = max(0, before_tokens - int(self._history_tokens_total or 0))
-        if collapsed:
-            logger.info(
-                "[ContextCollapse] collapsed=%d saved~%d tokens ratio=%.3f",
-                collapsed,
-                saved,
-                ratio,
-            )
-        return {"collapsed": collapsed, "saved_tokens": saved}
 
     def strip_historical_media(self, *, keep_recent_user_turns: int = 1) -> dict[str, int]:
         """Drop image/document attachments from older history turns.
@@ -1839,164 +1436,64 @@ class ContextBuilder:
             "documents": stripped_documents,
         }
 
-    def apply_cheap_context_ladder(
-        self,
-        *,
-        usage_ratio: float | None = None,
-        force: bool = False,
-    ) -> dict[str, Any]:
-        """Run snip then collapse before expensive full compaction.
+    def quarantine_latest_external_web_results(self) -> int:
+        """Isolate the latest web-tool batch after a provider content refusal.
 
-        Order intentionally mirrors Claude Code query.ts:
-        tool-budget (caller) -> snip -> collapse drain -> autocompact.
+        Claude Code keeps hosted web search in a side query, and Codex marks web
+        search as external-context pollution. Custom providers do not always
+        offer hosted search, so preserve that boundary locally: remove only the
+        latest paired web results while keeping the user request and assistant
+        tool-call item intact for a different-source retry.
         """
-        snip_stats = self.snip_history_if_needed(usage_ratio=usage_ratio, force=force)
-        # Recompute ratio after snip so collapse threshold reflects freed space.
-        total_budget = max(1, int(getattr(self._budget, "total", 0) or 0))
-        post_snip_ratio = (
-            float(usage_ratio)
-            if usage_ratio is not None and not snip_stats.get("removed")
-            else (self.token_usage / total_budget)
-        )
-        collapse_stats = self.collapse_old_tool_results(
-            usage_ratio=post_snip_ratio,
-            force=force or bool(snip_stats.get("removed")),
-        )
-        return {
-            "snip": snip_stats,
-            "collapse": collapse_stats,
-            "saved_tokens": int(snip_stats.get("saved_tokens", 0) or 0)
-            + int(collapse_stats.get("saved_tokens", 0) or 0),
-        }
+        marker = "[External web result withheld after provider content-safety rejection.]"
+        tool_indices: list[int] = []
+        found_tool_call = False
+        for idx in range(len(self._history) - 1, -1, -1):
+            message = self._history[idx]
+            if message.role == "tool":
+                tool_indices.append(idx)
+                continue
+            if message.role == "assistant" and message.tool_calls:
+                found_tool_call = True
+            break
 
-    def apply_tool_result_budget(self, max_tokens: int | None = None) -> int:
-        """Enforce a global budget on tool-result tokens.
-
-        Replaces the oldest large tool results first until the total is within
-        budget. Recent results (last 5) stay intact.
-
-        Prefer recoverable contentReplacement (disk-backed preview or stable
-        preview) over hard one-line truncation so the model can re-read the
-        original payload. Hard truncation is only a last-resort fallback when
-        no recoverable replacement shrinks the content.
-
-        Returns the number of results replaced/truncated.
-        """
-        budget = (
-            max_tokens
-            or getattr(self, "TOKEN_BUDGET_TOOL_RESULTS", None)
-            or int(self._budget.total * 0.4)
-        )
-
-        tool_results: list[tuple[int, int, str]] = []
-        for i, msg in enumerate(self._history):
-            if msg.role == "tool":
-                content_str = str(msg.content) if msg.content else ""
-                tokens = _estimate_content_tokens(content_str)
-                tool_results.append((i, tokens, content_str))
-
-        if not tool_results:
+        if not found_tool_call:
             return 0
 
-        total_tokens = sum(t[1] for t in tool_results)
-        original_total = total_tokens
-        if total_tokens <= budget:
-            return 0
-
-        keep_recent = 5
-        truncatable = tool_results[:-keep_recent] if len(tool_results) > keep_recent else []
-
-        replaced = 0
-        for idx, tokens, content in truncatable:
-            if total_tokens <= budget:
-                break
-
-            msg = self._history[idx]
-            call_id = str(msg.tool_call_id or "").strip()
-            tool_name = str(msg.name or "unknown")
-            content = str(msg.content or "")
-            if not content:
+        changed = 0
+        for idx in tool_indices:
+            message = self._history[idx]
+            tool_name = str(message.name or "").strip()
+            if tool_name not in {"web_search", "web_fetch"}:
                 continue
-
-            # Already compact / previously replaced — keep frozen content.
-            if (
-                content.startswith("[Tool result truncated")
-                or content.startswith("[Old tool result")
-                or content.startswith("[Collapsed tool result:")
-                or content.lstrip().startswith("<tool_result_cache_entry")
-                or content.startswith("<persisted-tool-result>")
-                or content.startswith("<persisted-tool-result-preview>")
-            ):
+            if marker in str(message.content or ""):
                 continue
-
-            # Frozen replacement for previously seen tool_call_id.
-            replacement = None
-            if call_id and call_id in self._tool_result_replacements:
-                cached = self._tool_result_replacements[call_id]
-                if cached and cached != content and len(cached) < len(content):
-                    replacement = cached
-
-            # Prefer disk-backed recoverable preview (cc contentReplacement).
-            if replacement is None and call_id:
-                persisted = try_persist_tool_result(content, call_id, tool_name)
-                if (
-                    persisted
-                    and persisted != content
-                    and len(persisted) < len(content)
-                    and (
-                        persisted.startswith("<persisted-tool-result>")
-                        or persisted.startswith("<persisted-tool-result-preview>")
-                    )
-                ):
-                    replacement = persisted
-
-            # Stable deterministic preview when disk persistence is unavailable.
-            if replacement is None and call_id:
-                stable = self._stable_tool_result_replacement(call_id, tool_name, content)
-                if stable and stable != content and len(stable) < len(content):
-                    replacement = stable
-
-            # Last resort: hard one-line truncate when no recoverable path works.
-            if replacement is None:
-                if tokens <= 8:
-                    continue
-                replacement = (
-                    f"[Tool result truncated — was {len(content)} chars; "
-                    "re-run the tool with a narrower query if full output is needed]"
-                )
-
-            if not replacement or replacement == content or len(replacement) >= len(content):
-                continue
-
+            call_id = str(message.tool_call_id or "").strip()
+            replacement = (
+                f'<function_call_result status="completed" call_id="{call_id}">\n'
+                f"{marker}\n"
+                "Do not reuse the same query or URL. Search a different reputable "
+                "source with a narrower query, then continue the user's original request.\n"
+                "</function_call_result>"
+            )
             self._history[idx] = LLMMessage(
-                role="tool",
+                role=message.role,
                 content=replacement,
-                name=msg.name,
-                tool_call_id=msg.tool_call_id,
-                tool_calls=msg.tool_calls,
-                images=list(msg.images),
-                documents=list(msg.documents),
+                name=message.name,
+                tool_call_id=message.tool_call_id,
+                tool_calls=message.tool_calls,
+                phase=message.phase,
+                provider_items=list(message.provider_items),
+                images=list(message.images),
+                documents=list(message.documents),
             )
-            total_tokens -= tokens
-            total_tokens += _estimate_content_tokens(replacement)
-            replaced += 1
-            if call_id:
-                self._tool_result_replacements[call_id] = replacement
-                self._tool_result_seen_ids.add(call_id)
+            changed += 1
 
-        if replaced > 0:
+        if changed:
             self._rebuild_history_token_cache()
-            saved = original_total - total_tokens
-            logger.info(
-                "[ToolBudget] Replaced %d/%d tool results with recoverable previews "
-                "(saved ~%d tokens)",
-                replaced,
-                len(tool_results),
-                saved,
-            )
-
-        return replaced
-
+            self._last_actual_prompt_tokens = 0
+            logger.info("[ContentFilterRecovery] quarantined_web_results=%d", changed)
+        return changed
 
     def get_budget_snapshot(
         self,
@@ -2010,43 +1507,25 @@ class ContextBuilder:
             system_tokens += _estimate_content_tokens(project_guidelines)
         tool_runtime_guidance = str(
             getattr(state, "tool_runtime_guidance", "")
-            or getattr(state, "harness_guidance", "")
             or ""
         )
         if tool_runtime_guidance:
             system_tokens += _estimate_content_tokens(tool_runtime_guidance)
-        for pack in select_prompt_packs(prompt_context=getattr(state, "prompt_context", None)):
-            system_tokens += _estimate_content_tokens(pack.content)
-
         notes_tokens = sum(
             _estimate_content_tokens(str(note.get("content", ""))) for note in self._persistent_notes
         )
         skills_tokens = 0
-        rag_tokens = 0
+        retrieved_tokens = 0
         history_tokens = 0
         tools_tokens = 0
 
-        executor = None
-        if self._skill_manager:
-            try:
-                from backend.skills.executor import SkillExecutor
-
-                executor = SkillExecutor(self._skill_manager)
-            except Exception:
-                executor = None
-        elif self._skill_executor:
-            executor = self._skill_executor
-
-        if executor:
-            try:
-                skills_tokens = _estimate_content_tokens(
-                    executor.build_skill_context(budget=self._budget.active_skills)
-                )
-            except Exception:
-                skills_tokens = 0
+        try:
+            skills_tokens = _estimate_content_tokens(self._build_skill_catalog())
+        except Exception:
+            skills_tokens = 0
 
         if state.retrieved_chunks:
-            rag_tokens = _estimate_content_tokens("\n---\n".join(state.retrieved_chunks))
+            retrieved_tokens = _estimate_content_tokens("\n---\n".join(state.retrieved_chunks))
 
         for index in self._get_history_within_budget_indices():
             history_tokens += self._history_token_estimates[index]
@@ -2058,7 +1537,7 @@ class ContextBuilder:
             system_tokens
             + notes_tokens
             + skills_tokens
-            + rag_tokens
+            + retrieved_tokens
             + history_tokens
             + tools_tokens
         )
@@ -2071,13 +1550,10 @@ class ContextBuilder:
             "breakdown": {
                 "system": system_tokens + notes_tokens,
                 "skills": skills_tokens,
-                "rag": rag_tokens,
+                "retrieved": retrieved_tokens,
                 "history": history_tokens,
                 "tools": tools_tokens,
                 "observed_actual": observed_actual,
-                "tool_result_cache_saved": self._tool_result_cache_edit_saved_tokens_total,
-                "tool_result_cache_compacted": self._tool_result_cache_edit_compacted_total,
-                "tool_result_cache_last_saved": self._last_tool_result_cache_edit_saved_tokens,
             },
         }
 
@@ -2087,53 +1563,61 @@ class ContextBuilder:
         *,
         tool_schemas: list[dict[str, Any]] | None = None,
     ) -> bool:
-        threshold = self._effective_compaction_threshold(state)
-        # Reserve room for the model's reply before comparing overall usage to
-        # the threshold — mirrors cc autoCompact subtracting the output budget,
-        # and matches history_budget (which already subtracts response_reserve).
-        # Without this the overall-context ratio fires too late and can leave no
-        # room for the response. The active prompt can be dominated by system,
-        # skill, RAG, or memory sections, so this ratio is still the primary
-        # signal; the history-budget check guards against silent oldest-message
-        # drops during history selection.
-        effective_total = max(self._budget.total - self._budget.response_reserve, 1)
-        history_budget = max(self._budget.history_budget, 1)
+        # Pi's session host owns compaction and uses one explicit reserve:
+        # contextTokens > contextWindow - reserveTokens.
         snapshot = self.get_budget_snapshot(state or AgentState(user_message=""), tool_schemas=tool_schemas)
-
-        return (
-            int(snapshot.get("used", 0)) > effective_total * threshold
-            or self._history_tokens_total > history_budget * threshold
-        )
+        trigger = max(1, self._budget.total - self._budget.response_reserve)
+        return int(snapshot.get("used", 0)) > trigger
 
     def _restore_recent_files_after_compaction(self, state: AgentState | None = None) -> None:
         self._persistent_notes[:] = [
             note for note in self._persistent_notes
-            if note.get("kind") != "post_compaction_restore"
+            if note.get("kind") not in {"post_compaction_restore", "post_compaction_structured_state"}
         ]
         if state is None:
-            self._restore_structured_state_after_compaction(state)
             return
         workspace_root = self._workspace_root_for_state(state)
         if workspace_root is None:
-            self._restore_structured_state_after_compaction(state)
             return
 
         try:
             root = Path(workspace_root).resolve()
         except OSError:
-            self._restore_structured_state_after_compaction(state)
             return
 
+        # Restore only what fits in the same context budget used by the turn
+        # kernel. A separate fixed post-compaction quota would create a second
+        # hidden context ladder.
+        available_tokens = max(
+            0,
+            int(self._budget.total)
+            - int(self._budget.response_reserve)
+            - int(self.token_usage),
+        )
+        structured_blocks = self._post_compaction_structured_state_blocks(state, root)
+        if structured_blocks:
+            structured_content = "\n\n".join(structured_blocks)
+            structured_tokens = self._estimate_content_tokens(structured_content)
+            if structured_tokens <= available_tokens:
+                self._persistent_notes.append(
+                    {
+                        "kind": "post_compaction_structured_state",
+                        "title": "Post-compaction structured task state",
+                        "content": structured_content,
+                    }
+                )
+                available_tokens -= structured_tokens
+
         restored_blocks: list[str] = []
-        used_chars = 0
         for path in self._recent_workspace_file_paths(state, root):
             block = self._build_restored_file_block(path, root)
             if not block:
                 continue
-            if used_chars + len(block) > POST_COMPACTION_TOTAL_CHARS:
-                break
+            block_tokens = self._estimate_content_tokens(block)
+            if block_tokens > available_tokens:
+                continue
             restored_blocks.append(block)
-            used_chars += len(block)
+            available_tokens -= block_tokens
 
         if restored_blocks:
             self._persistent_notes.append(
@@ -2143,33 +1627,6 @@ class ContextBuilder:
                     "content": "\n\n".join(restored_blocks),
                 }
             )
-        self._restore_structured_state_after_compaction(state, root)
-
-    def _restore_structured_state_after_compaction(
-        self,
-        state: AgentState | None = None,
-        root: Path | None = None,
-    ) -> None:
-        self._persistent_notes[:] = [
-            note for note in self._persistent_notes
-            if note.get("kind") != "post_compaction_structured_state"
-        ]
-        if state is None:
-            return
-
-        blocks = self._post_compaction_structured_state_blocks(state, root)
-        if not blocks:
-            return
-        content = "\n\n".join(blocks)
-        if len(content) > POST_COMPACTION_STATE_CHARS:
-            content = content[:POST_COMPACTION_STATE_CHARS] + "\n... [structured state truncated]"
-        self._persistent_notes.append(
-            {
-                "kind": "post_compaction_structured_state",
-                "title": "Post-compaction structured task state",
-                "content": content,
-            }
-        )
 
     def _post_compaction_structured_state_blocks(
         self,
@@ -2200,83 +1657,7 @@ class ContextBuilder:
                 "Use it as the current plan/todo checkpoint, not just prose summary.\n"
                 f"```json\n{rendered}\n```"
             )
-        invoked_skills = self._build_invoked_skills_state_block(state)
-        if invoked_skills:
-            blocks.append(invoked_skills)
         return blocks
-
-    def _build_invoked_skills_state_block(self, state: AgentState) -> str:
-        skills = self._collect_invoked_skill_payloads(state)
-        if not skills:
-            return ""
-        rendered: list[str] = [
-            "### Invoked skills snapshot",
-            "The following SKILL.md workflows were invoked in this session. "
-            "Continue to follow these guidelines unless newer user instructions supersede them.",
-        ]
-        for skill in skills[:POST_COMPACTION_MAX_SKILLS_TO_RESTORE]:
-            name = str(skill.get("name") or "").strip()
-            if not name:
-                continue
-            path = str(skill.get("path") or "").strip()
-            content = str(skill.get("content") or "").strip()
-            if len(content) > POST_COMPACTION_MAX_CHARS_PER_SKILL:
-                omitted = len(content) - POST_COMPACTION_MAX_CHARS_PER_SKILL
-                content = (
-                    content[:POST_COMPACTION_MAX_CHARS_PER_SKILL].rstrip()
-                    + f"\n... [{omitted} skill chars omitted after post-compaction restore limit]"
-                )
-            rendered.append(
-                f'<skill name="{_xml_text(name)}" path="{_xml_text(path)}">\n'
-                f"{content}\n"
-                "</skill>"
-            )
-        return "\n\n".join(part for part in rendered if part.strip())
-
-    def _collect_invoked_skill_payloads(self, state: AgentState) -> list[dict[str, Any]]:
-        manager = self._skill_manager
-        if manager is None:
-            return []
-
-        payloads: list[dict[str, Any]] = []
-        seen: set[str] = set()
-
-        def add(raw: Any) -> None:
-            if not isinstance(raw, dict):
-                return
-            name = str(raw.get("name") or raw.get("skill_name") or "").strip()
-            if not name or name in seen:
-                return
-            content = str(raw.get("content") or "").strip()
-            if not content:
-                return
-            seen.add(name)
-            payloads.append(
-                {
-                    "name": name,
-                    "path": str(raw.get("path") or raw.get("source_path") or ""),
-                    "content": content,
-                }
-            )
-
-        get_invoked = getattr(manager, "get_invoked_skills", None)
-        if callable(get_invoked):
-            try:
-                for raw in get_invoked():
-                    add(raw)
-            except Exception as exc:
-                logger.debug("Failed to collect invoked skills: %s", exc)
-
-        get_payload = getattr(manager, "get_skill_payload", None)
-        if callable(get_payload):
-            for name in getattr(state, "active_skills", []) or []:
-                if str(name or "").strip() in seen:
-                    continue
-                try:
-                    add(get_payload(str(name)))
-                except Exception as exc:
-                    logger.debug("Failed to hydrate invoked skill %s: %s", name, exc)
-        return payloads
 
     @classmethod
     def _load_first_plan_snapshot(
@@ -2380,8 +1761,6 @@ class ContextBuilder:
                 continue
             seen.add(key)
             paths.append(resolved)
-            if len(paths) >= POST_COMPACTION_MAX_FILES_TO_RESTORE:
-                break
         return paths
 
     @staticmethod
@@ -2399,17 +1778,7 @@ class ContextBuilder:
         except (UnicodeDecodeError, OSError):
             return ""
         rel = path.relative_to(root).as_posix()
-        lines = text.splitlines()
-        numbered: list[str] = []
-        used = 0
-        for index, line in enumerate(lines, 1):
-            next_line = f"{index}: {line}"
-            if used + len(next_line) + 1 > POST_COMPACTION_MAX_CHARS_PER_FILE:
-                break
-            numbered.append(next_line)
-            used += len(next_line) + 1
-        if len(numbered) < len(lines):
-            numbered.append(f"... [{len(lines) - len(numbered)} lines omitted after post-compaction restore limit]")
+        numbered = [f"{index}: {line}" for index, line in enumerate(text.splitlines(), 1)]
         content = "\n".join(numbered)
         return f"### {rel}\n```text\n{content}\n```"
 
@@ -2455,40 +1824,35 @@ class ContextBuilder:
         if self._llm is None:
             return "No LLM available for side query."
         try:
-            response = await self._llm.chat(messages)
-            content = getattr(response, "content", None)
-            if isinstance(content, list):
-                # Extract text from multimodal response
-                return "\n".join(
-                    block.get("text", "") for block in content
-                    if isinstance(block, dict) and block.get("type") == "text"
-                )
-            return str(content or "")
+            return str(await self._llm.simple_chat(messages)).strip()
         except Exception as exc:
             logger.warning("Side query failed: %s", exc)
             return f"Side query failed: {exc}"
 
-    def _aligned_recent_start(self, keep_recent: int) -> int:
-        """Start index of the recent-history slice, aligned to tool-call groups.
+    def _aligned_recent_start(self, keep_recent_tokens: int) -> int:
+        """Find Pi's token-based cut point, aligned to tool-call groups.
 
-        A naive ``-keep_recent`` cut can land inside an assistant(tool_calls) →
-        tool → tool group; the stranded tool results would then be dropped as
-        orphans by reconcile_dangling_tool_calls. Move the cut earlier so the
-        group's assistant message stays with its tool results.
+        Walk backwards until the configured recent-token budget is reached.
+        Never leave tool results without their assistant tool-call message.
         """
-        start = len(self._history) - keep_recent
+        start = len(self._history)
+        accumulated = 0
+        target = max(0, int(keep_recent_tokens))
+        for index in range(len(self._history) - 1, -1, -1):
+            start = index
+            accumulated += self._history_token_estimates[index]
+            if accumulated >= target:
+                break
         while start > 0 and self._history[start].role == "tool":
+            start -= 1
+        if start > 0 and self._history[start].role == "assistant" and self._history[start].tool_calls:
             start -= 1
         return start
 
     async def compact(self, focus: str = "", restore_state: AgentState | None = None) -> str:
-        """Time-decay compaction: compress old history, preserve recent context.
-
-        Creates new compacted messages instead of mutating originals in-place
-        (Hermes pattern: never irreversibly destroy information).
-        """
+        """Summarize older entries while preserving a token-bounded recent tail."""
         clear_system_prompt_sections()
-        keep_recent = self._agent_settings.history_keep_recent
+        keep_recent = self._agent_settings.compaction_keep_recent_tokens
         recent_start = self._aligned_recent_start(keep_recent)
 
         if recent_start <= 0:
@@ -2496,58 +1860,7 @@ class ContextBuilder:
 
         self._compaction_count += 1
 
-        total = len(self._history)
-
-        # Build compacted versions of old messages — create new objects,
-        # do NOT mutate the originals in-place.
-        early_messages: list[LLMMessage] = []
-        for idx, message in enumerate(self._history[:recent_start]):
-            age_ratio = 1.0 - (idx / max(total, 1))  # 0=最新, 1=最旧
-
-            if message.role == "tool" and message.content:
-                tool_name = message.name or "unknown"
-                content_len = len(message.content)
-
-                if age_ratio > 0.7 and content_len > 100:
-                    # Far history: keep tool name + brief summary
-                    compacted = f"[{tool_name} 结果已压缩]"
-                    # Preserve artifact reference if present
-                    artifact_hint = "artifact" in message.content[:200].lower()
-                    compacted += f"（{self._tool_result_compaction_hint(tool_name, artifact_hint=artifact_hint)}）"
-                    early_messages.append(LLMMessage(
-                        role=message.role,
-                        content=compacted,
-                        name=message.name,
-                        tool_call_id=message.tool_call_id,
-                    ))
-                elif age_ratio > 0.4 and content_len > 200:
-                    # Mid history: truncate to 400 chars (enough for key info)
-                    compacted = (
-                        message.content[:400]
-                        + f"\n... [已压缩；{self._tool_result_compaction_hint(tool_name, artifact_hint='artifact' in message.content[:200].lower())}]"
-                    )
-                    early_messages.append(LLMMessage(
-                        role=message.role,
-                        content=compacted,
-                        name=message.name,
-                        tool_call_id=message.tool_call_id,
-                    ))
-                elif content_len > 800:
-                    # Near history: truncate to 800 chars (preserve most context)
-                    compacted = (
-                        message.content[:800]
-                        + "\n... [已压缩]"
-                    )
-                    early_messages.append(LLMMessage(
-                        role=message.role,
-                        content=compacted,
-                        name=message.name,
-                        tool_call_id=message.tool_call_id,
-                    ))
-                else:
-                    early_messages.append(message)
-            else:
-                early_messages.append(message)
+        early_messages = self._history[:recent_start]
 
         compressed_summary = await self._summarize_early(early_messages, focus=focus)
         boundary = _compaction_boundary("auto", self._compaction_count, len(early_messages))
@@ -2568,166 +1881,8 @@ class ContextBuilder:
         return compressed_summary
 
     async def full_compact(self, restore_state: AgentState | None = None) -> str:
-        """Emergency compaction for near-exhausted context windows.
-
-        When the context window is ≥95% full, this method fires as a last resort.
-        It first tries LLM-based summarization (same as compact()); if the LLM call
-        fails or times out, it falls back to rule-based fact extraction.
-        """
-        import asyncio as _asyncio
-
-        clear_system_prompt_sections()
-        self._compaction_count += 1
-        keep_recent = max(2, min(self._agent_settings.history_keep_recent, 6))
-        original_len = len(self._history)
-        original_tokens = self._history_tokens_total
-        recent_start = self._aligned_recent_start(keep_recent)
-
-        if recent_start <= 0:
-            # Short history: rule-based truncation (no LLM needed)
-            new_history: list[LLMMessage] = []
-            for message in self._history:
-                if message.role == "tool" and message.content and len(message.content) > 240:
-                    tool_name = message.name or "tool"
-                    compacted = (
-                        f"[{tool_name} 结果已压缩；"
-                        f"{self._tool_result_compaction_hint(tool_name, artifact_hint='artifact' in message.content[:200].lower())}] "
-                        f"{message.content[:160]}"
-                    )
-                    new_history.append(LLMMessage(
-                        role=message.role,
-                        content=compacted,
-                        name=message.name,
-                        tool_call_id=message.tool_call_id,
-                    ))
-                else:
-                    new_history.append(message)
-            self._history = new_history
-            self._rebuild_history_token_cache()
-            self._restore_recent_files_after_compaction(restore_state)
-            saved = max(0, original_tokens - self._history_tokens_total)
-            return f"紧急压缩：截断了旧工具结果，节省约 {saved} tokens"
-
-        early = self._history[:recent_start]
-        recent = self._history[recent_start:]
-
-        # Try LLM-based summarization first (30s timeout).
-        # If the LLM call itself hits a prompt-too-long error, retry by
-        # dropping the oldest API-round message groups (mirrors cc's
-        # truncateHeadForPTLRetry). This prevents the compaction request
-        # itself from deadlocking when the conversation is very large.
-        MAX_PTL_RETRIES = 2
-        llm_summary = ""
-        summarizable = early
-        if self._llm is not None:
-            for ptl_attempt in range(MAX_PTL_RETRIES + 1):
-                try:
-                    llm_summary = await _asyncio.wait_for(
-                        self._summarize_early(summarizable, focus="紧急压缩，保留关键事实"),
-                        timeout=30.0,
-                    )
-                    break  # success
-                except Exception as exc:
-                    exc_str = str(exc).lower()
-                    is_ptl = any(
-                        marker in exc_str
-                        for marker in ("prompt too long", "context_length", "too long", "413")
-                    )
-                    if is_ptl and ptl_attempt < MAX_PTL_RETRIES and len(summarizable) > 4:
-                        # Drop oldest ~25% of messages and retry
-                        drop_count = max(1, len(summarizable) // 4)
-                        while (
-                            drop_count < len(summarizable)
-                            and summarizable[drop_count].role == "tool"
-                        ):
-                            drop_count += 1
-                        summarizable = summarizable[drop_count:]
-                        logger.info(
-                            "[Compaction] PTL retry %d: dropped %d oldest messages, %d remaining",
-                            ptl_attempt + 1, drop_count, len(summarizable),
-                        )
-                        continue
-                    logger.debug("Emergency LLM summarization failed, using fallback: %s", exc)
-                    break
-
-        # Fall back to rule-based extraction if LLM failed
-        if not llm_summary:
-            facts: list[str] = []
-            for message in summarizable[-12:]:
-                text = (message.content or "").strip().replace("\n", " ")
-                if not text:
-                    continue
-                if message.role == "user":
-                    facts.append(f"用户问了：{text[:100]}")
-                elif message.role == "assistant":
-                    facts.append(f"助手回答了：{text[:100]}")
-                elif message.role == "tool":
-                    facts.append(f"工具 {message.name or 'unknown'} 返回了：{text[:90]}")
-            llm_summary = (
-                "\n".join(f"- {fact}" for fact in facts[-6:])
-                or "- 早期对话已被移除以保护上下文窗口。"
-            )
-
-        summary_content = (
-            f"{SUMMARY_PREFIX}\n\n"
-            f"{_compaction_boundary('emergency', self._compaction_count, len(early))}\n"
-            f"[紧急上下文压缩 第 {self._compaction_count} 次]\n"
-            "因上下文窗口接近满载，较早的消息已被压缩为摘要。\n"
-            f"{llm_summary}"
-        )
-        summary_message = LLMMessage(role="user", content=summary_content)
-
-        # Build compacted history from [summary + recent] without mutating originals
-        compacted_history: list[LLMMessage] = []
-        prefix_block = f"{SUMMARY_PREFIX}\n\n"
-
-        # Truncate summary if too long
-        if len(summary_message.content) > 900:
-            body = summary_message.content[len(prefix_block):]
-            compacted_history.append(LLMMessage(
-                role=summary_message.role,
-                content=f"{prefix_block}{body[:700]}... [已截断]",
-                name=summary_message.name,
-                tool_call_id=summary_message.tool_call_id,
-            ))
-        else:
-            compacted_history.append(summary_message)
-
-        # Truncate recent messages if needed
-        for message in recent:
-            if message.role in {"user", "assistant"} and message.content and len(message.content) > 220:
-                compacted_history.append(LLMMessage(
-                    role=message.role,
-                    content=f"{message.content[:180]}... [已压缩]",
-                    phase=message.phase,
-                    name=message.name,
-                    tool_calls=message.tool_calls,
-                    tool_call_id=message.tool_call_id,
-                    provider_items=list(message.provider_items),
-                    images=list(message.images),
-                    documents=list(message.documents),
-                ))
-            elif message.role == "tool" and message.content and len(message.content) > 360:
-                tool_name = message.name or "tool"
-                compacted_history.append(LLMMessage(
-                    role=message.role,
-                    content=(
-                        f"[{tool_name} 结果已压缩；"
-                        f"{self._tool_result_compaction_hint(tool_name, artifact_hint='artifact' in message.content[:200].lower())}] "
-                        f"{message.content[:260]}"
-                    ),
-                    name=message.name,
-                    tool_call_id=message.tool_call_id,
-                ))
-            else:
-                compacted_history.append(message)
-
-        self._history = compacted_history
-        self._rebuild_history_token_cache()
-        self._last_actual_prompt_tokens = 0
-        self._restore_recent_files_after_compaction(restore_state)
-        saved = max(0, original_tokens - self._history_tokens_total)
-        return f"紧急压缩保留了 {len(self._history)}/{original_len} 条消息，节省约 {saved} tokens"
+        """Overflow recovery uses the same session compaction contract."""
+        return await self.compact(restore_state=restore_state)
 
     async def _summarize_early(self, early: list[LLMMessage], focus: str = "") -> str:
         raw_text = format_compaction_history(early)
@@ -2736,64 +1891,31 @@ class ContextBuilder:
                 prompt = build_compaction_prompt(
                     raw_text,
                     focus=focus,
-                    include_memory_directives=bool(self._memory_manager),
                 )
 
-                # Cache-sharing optimisation (mirrors cc's runForkedAgent for
-                # compact): instead of sending a bare user message that shares
-                # zero prefix with the main conversation, prepend the system
-                # prompt and the most recent 2 history messages as a cache
-                # prefix.  When the provider has automatic prefix caching
-                # (Anthropic, DeepSeek, OpenAI-compatible), the compaction
-                # request hits the same cache as the main loop and avoids a
-                # full re-process of the system prompt + tools schema.
-                cache_messages: list[LLMMessage] = []
-                # Reuse the stable system prompt as a cache prefix
-                stable_prompt = build_stable_prompt()
-                if stable_prompt:
-                    cache_messages.append(
-                        LLMMessage(role="system", content=stable_prompt)
-                    )
-                # Include the most recent messages from early as a cacheable
-                # prefix — these are the same messages the main loop sends.
-                recent_for_cache = early[-2:] if len(early) > 2 else early
-                cache_messages.extend(recent_for_cache)
-                # The actual compaction request
-                cache_messages.append(LLMMessage(role="user", content=prompt))
+                cache_messages = [
+                    LLMMessage(role="system", content=COMPACTION_SYSTEM_PROMPT),
+                    LLMMessage(role="user", content=prompt),
+                ]
 
-                output = await simple_chat_cache.simple_chat(
-                    self._llm,
-                    cache_messages,
-                )
+                # Compaction is a forked model task in Claude Code and is not
+                # served from a process-global result cache. Provider prefix
+                # caching still applies to the repeated message prefix.
+                output = (await self._llm.simple_chat(cache_messages)).strip()
                 if output:
                     return self._consume_compaction_output(output)
+                raise RuntimeError("Compaction model returned an empty summary")
             except Exception as exc:
-                logger.debug("LLM summarization failed, using fallback: %s", exc)
+                # A failed compaction must be visible to the caller. Returning
+                # the complete pre-compact transcript as a "summary" makes the
+                # context larger while hiding a retry failure from the circuit
+                # breaker.
+                logger.debug("LLM summarization failed: %s", exc)
+                raise
         return raw_text
 
     def _consume_compaction_output(self, output: str) -> str:
-        parsed = parse_compaction_output(
-            output,
-            parse_memory_directives=bool(self._memory_manager),
-        )
-        if parsed.memdir_facts:
-            self._remember_memdir_facts(parsed.memdir_facts)
-        return parsed.summary
-
-    def _remember_memdir_facts(self, facts: list[str]) -> None:
-        clean = [fact for fact in facts if fact]
-        if not clean:
-            return
-        # CC-aligned: autocompact facts are semantic conclusions, so they go to
-        # the durable file track (auto_facts.md) rather than a vector store.
-        append_facts = getattr(self._memory_manager, "append_facts", None)
-        if callable(append_facts):
-            try:
-                append_facts(clean)
-            except Exception as exc:
-                logger.debug("Failed to append MemDir facts to file memory: %s", exc)
-        for fact in clean:
-            logger.info("AutoCompact extracted MemDir fact: %s", fact)
+        return parse_compaction_output(output).summary
 
     def _get_history_within_budget(self) -> list[LLMMessage]:
         selected = [
@@ -2813,21 +1935,39 @@ class ContextBuilder:
         self._history_token_estimates.clear()
         self._history_tokens_total = 0
         self._persistent_notes.clear()
+        self._read_file_hashes.clear()
         self._compaction_count = 0
-        self._tool_result_replacements.clear()
-        self._tool_result_seen_ids.clear()
-        self._last_tool_result_cache_edit_saved_tokens = 0
-        self._tool_result_cache_edit_saved_tokens_total = 0
-        self._tool_result_cache_edit_compacted_total = 0
-        self._last_assistant_ts = 0.0
-        self._last_sent_runtime_context = ""
         self._prepared_prompt_parts = None
         self._prepared_prompt_state = None
         self._last_prompt_section_summary = {}
+        # Provider-observed measurements describe the conversation being
+        # discarded. A ContextBuilder is reused across conversation switches
+        # (load_snapshot_partial calls clear), and token_usage takes the max of
+        # the estimate and the last observed value, so leaving these set makes a
+        # fresh conversation inherit the previous one's prompt size and compact
+        # on its first turn.
+        self._last_actual_prompt_tokens = 0
 
-    def export_snapshot(self) -> dict[str, Any]:
-        history: list[dict[str, Any]] = []
-        for message in self._history:
+    def export_snapshot(
+        self,
+        *,
+        max_messages: int | None = None,
+        max_chars: int | None = None,
+    ) -> dict[str, Any]:
+        """Export a resume snapshot with optional cheap pre-serialization bounds.
+
+        Checkpoint persistence runs on the event-loop thread so it can remain
+        cancellation-safe. Bounding history here prevents that synchronous
+        durability boundary from first constructing and hashing an arbitrarily
+        large conversation only to truncate it later in ``save_checkpoint``.
+        """
+        source_history = self._history
+        if max_messages is not None:
+            message_limit = max(0, int(max_messages))
+            source_history = source_history[-message_limit:] if message_limit else []
+        history_reversed: list[dict[str, Any]] = []
+        remaining_chars = None if max_chars is None else max(0, int(max_chars))
+        for message in reversed(source_history):
             content = message.content
             if message.role == "tool" and content and len(content) > 1200:
                 content = (
@@ -2837,7 +1977,12 @@ class ContextBuilder:
                 )
             elif len(content) > 4000:
                 content = f"{content[:2800]}\n... [快照截断了 {len(content) - 2800} 字符] ..."
-            history.append(
+            if remaining_chars is not None:
+                if remaining_chars <= 0:
+                    break
+                content = content[:remaining_chars]
+                remaining_chars -= len(content)
+            history_reversed.append(
                 {
                     "role": message.role,
                     "content": content,
@@ -2855,9 +2000,14 @@ class ContextBuilder:
                     ],
                 }
             )
+        history = list(reversed(history_reversed))
         return {
             "history": self.sanitize_snapshot_history(history),
             "persistent_notes": [dict(note) for note in self._persistent_notes],
+            # CC bounds readFileState to 100 entries. Preserve the most recent
+            # insertion order here so conversation snapshots cannot grow
+            # without limit.
+            "read_file_hashes": dict(list(self._read_file_hashes.items())[-100:]),
             "compaction_count": self._compaction_count,
             "context_ledger": self.context_ledger(),
         }
@@ -2978,6 +2128,17 @@ class ContextBuilder:
             if str(note.get("content", "")).strip()
         ]
         self._compaction_count = int(snapshot.get("compaction_count", 0))
+        raw_hashes = snapshot.get("read_file_hashes")
+        if isinstance(raw_hashes, dict):
+            self._read_file_hashes = {
+                str(path): str(file_hash)
+                for path, file_hash in list(raw_hashes.items())[-100:]
+                if str(path).strip() and str(file_hash).strip()
+            }
+
+    def read_file_hashes(self) -> dict[str, str]:
+        """Return the session-owned optimistic read state used by file tools."""
+        return self._read_file_hashes
 
     def _append_history_message(
         self,
@@ -2986,19 +2147,12 @@ class ContextBuilder:
         raw_content: Any | None = None,
     ) -> None:
         self._history.append(message)
-        # Track monotonic process time so system clock corrections cannot
-        # _maybe_time_based_microcompact can detect cold-cache gaps.
-        if message.role == "assistant":
-            self._last_assistant_ts = time.monotonic()
         estimate = int(
-            (
-                self._estimate_message_tokens(
-                    raw_content if raw_content is not None else message.content,
-                    message.tool_calls,
-                )
-                + estimate_native_attachments(message.images, message.documents)[0]
+            self._estimate_message_tokens(
+                raw_content if raw_content is not None else message.content,
+                message.tool_calls,
             )
-            * self._token_calibration_factor
+            + estimate_native_attachments(message.images, message.documents)[0]
         )
         self._history_token_estimates.append(estimate)
         self._history_tokens_total += estimate
@@ -3006,43 +2160,17 @@ class ContextBuilder:
     def _rebuild_history_token_cache(self) -> None:
         self._history_token_estimates = [
             int(
-                (
-                    self._estimate_message_tokens(message.content, message.tool_calls)
-                    + estimate_native_attachments(message.images, message.documents)[0]
-                )
-                * self._token_calibration_factor
+                self._estimate_message_tokens(message.content, message.tool_calls)
+                + estimate_native_attachments(message.images, message.documents)[0]
             )
             for message in self._history
         ]
         self._history_tokens_total = sum(self._history_token_estimates)
 
-    def _first_user_anchor_index(self) -> int | None:
-        """Index of the earliest user message — the original task anchor."""
-        for index, message in enumerate(self._history):
-            if message.role == "user":
-                return index
-        return None
-
     def _get_history_within_budget_indices(self) -> list[int]:
-        budget = self._budget.history_budget
-        selected: list[int] = []
-        used = 0
-
-        for index in range(len(self._history) - 1, -1, -1):
-            message_tokens = self._history_token_estimates[index] + 10
-            if selected and used + message_tokens > budget:
-                break
-            selected.append(index)
-            used += message_tokens
-
-        selected.reverse()
-        # Never silently drop the original task: if the recency window pushed the
-        # earliest user request out of budget, keep it as an anchor so the model
-        # never loses what it was asked to do (cc never drops the task silently).
-        anchor = self._first_user_anchor_index()
-        if anchor is not None and anchor not in selected:
-            selected.insert(0, anchor)
-        return selected
+        # Pi compacts the session before the provider call; it does not silently
+        # drop older messages through a second history-only budget.
+        return list(range(len(self._history)))
 
     @staticmethod
     def _repair_provider_tool_sequence(messages: list[LLMMessage]) -> list[LLMMessage]:
@@ -3092,16 +2220,6 @@ class ContextBuilder:
         flush_pending()
         return repaired
 
-    def _effective_compaction_threshold(self, state: AgentState | None = None) -> float:
-        threshold = self._agent_settings.compaction_threshold
-        if state is not None and state.iterations < 3:
-            threshold = max(threshold, 0.75)  # was 0.85 — compact earlier
-        if self._compaction_count > 0:
-            threshold = min(threshold, 0.70)
-        if state is not None and len(state.tool_calls) > 10:
-            threshold = min(threshold, 0.65)
-        return threshold
-
     @staticmethod
     def _estimate_message_tokens(
         content: Any,
@@ -3114,7 +2232,7 @@ class ContextBuilder:
         if isinstance(content, str):
             return _estimate_content_tokens(content)
         # For all non-string types (dict, list, tuple, set, int, etc.),
-        # convert to string representation and use the CJK-aware estimator.
+        # convert to string representation before applying the same estimator.
         # Previously this used len(content) // 4 for sized objects, which
         # returned the number of items (e.g., dict keys) instead of character
         # count, causing massive token underestimation for dict/set objects.

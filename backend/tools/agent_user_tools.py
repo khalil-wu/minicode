@@ -13,12 +13,13 @@ class AskUserTool(BaseTool):
     """Ask the user one concise clarification question."""
 
     name = "ask_user"
-    should_defer = True
+    # Required clarifications are part of the base interaction protocol, not a
+    # capability the model should have to discover after it becomes blocked.
+    should_defer = False
     search_hint = "clarify ambiguity ask user question preference decision requirement missing detail"
     result_kind = "generic"
     activity_kind = "genericTool"
     display_label = "Ask user"
-    panel_hint = "inspector"
     description = (
         "Ask the user a focused clarification question when a required detail cannot be inferred from context or tools. "
         "Ask at most ONE question per turn. Include enough context for the user to answer without reading the entire conversation. "
@@ -36,7 +37,17 @@ class AskUserTool(BaseTool):
             parameters={
                 "type": "object",
                 "properties": {
-                    "question": {"type": "string"},
+                    "question": {
+                        "type": "string",
+                        "description": "The concise, self-contained question to ask the user.",
+                    },
+                    "options": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional 2-4 short answer choices. The UI also allows a custom answer.",
+                        "minItems": 2,
+                        "maxItems": 4,
+                    },
                 },
                 "required": ["question"],
             },
@@ -49,8 +60,6 @@ class AskUserTool(BaseTool):
             toolset="core",
             exposure="core",
             required_args=("question",),
-            arg_roles={"question": "generated_content"},
-            empty_args_policy="repair_or_block",
         )
 
     def get_schema(self) -> ToolSchema:
@@ -96,9 +105,7 @@ class BriefTool(BaseTool):
     name = "reply"
     result_kind = "reply"
     activity_kind = ""
-    display_scope = "silent"
     display_label = "Reply"
-    panel_hint = ""
     description = (
         "Send a user-facing message as the main assistant reply. "
         "Be concise by default, but provide a complete answer when the user asks for a full solution, detailed derivation, proof, tutorial, or exhaustive explanation. "
@@ -107,8 +114,11 @@ class BriefTool(BaseTool):
         "Do not use it for filler acknowledgements like 'I'll keep looking' or 'now I will answer'."
     )
     permission = PermissionLevel.AUTO
-    read_only = True
+    read_only = False
     mutates_workspace = False
+    mutates_external_state = True
+    side_effect_kind = "external"
+    idempotent = False
     deferred_catalog_scopes = ()
 
     _IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
@@ -121,8 +131,6 @@ class BriefTool(BaseTool):
             capability="user.reply",
             exposure="deferred",
             required_args=("message",),
-            arg_roles={"message": "generated_content"},
-            empty_args_policy="repair_or_block",
         )
 
     def get_schema(self) -> ToolSchema:
@@ -166,10 +174,28 @@ class BriefTool(BaseTool):
 
         emit_event = context.emit_event if context else None
         if emit_event is not None:
-            payload: dict[str, Any] = {"content": message, "source": self.name}
+            tool_call_id = str(context.metadata.get("_current_tool_call_id") or "").strip()
+            item_id = f"agent-message:{tool_call_id}" if tool_call_id else "agent-message"
+            await emit_event("item.started", {
+                "item": {
+                    "id": item_id,
+                    "type": "agent_message",
+                    "text": "",
+                    "status": "in_progress",
+                },
+            })
+            payload: dict[str, Any] = {
+                "item": {
+                    "id": item_id,
+                    "type": "agent_message",
+                    "text": message,
+                    "source": "reply",
+                    "status": "completed",
+                },
+            }
             if attachments_meta is not None:
                 payload["attachments"] = attachments_meta
-            await emit_event("text_chunk", payload)
+            await emit_event("item.completed", payload)
 
         summary = "Sent user-facing message."
         if str(args.get("status") or "normal") == "proactive":
@@ -179,7 +205,6 @@ class BriefTool(BaseTool):
         return ToolResult(
             content=summary,
             result_kind="reply",
-            display_scope="silent",
         )
 
     def _resolve_attachments(

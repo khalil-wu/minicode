@@ -9,6 +9,8 @@ from typing import Any
 from backend.runtime_env import sanitized_git_env
 from backend.workspace.state import get_active_workspace_root
 
+GIT_COMMAND_TIMEOUT_SECONDS = 15
+
 
 class GitApiServiceError(Exception):
     def __init__(self, status_code: int, detail: str) -> None:
@@ -76,7 +78,10 @@ def list_git_branches(workspace_path: str | None = None) -> list[GitBranchRecord
             text=True,
             encoding="utf-8",
             check=True,
+            timeout=GIT_COMMAND_TIMEOUT_SECONDS,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise GitApiServiceError(504, "Git branch listing timed out.") from exc
     except subprocess.CalledProcessError as exc:
         raise GitApiServiceError(500, f"Git command failed: {exc.stderr}") from exc
     except FileNotFoundError as exc:
@@ -126,7 +131,10 @@ def checkout_git_branch(*, branch: str, create: bool = False, workspace_path: st
             text=True,
             encoding="utf-8",
             check=True,
+            timeout=GIT_COMMAND_TIMEOUT_SECONDS,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise GitApiServiceError(504, "Git checkout timed out.") from exc
     except subprocess.CalledProcessError as exc:
         raise GitApiServiceError(500, f"Git checkout failed: {exc.stderr}") from exc
 
@@ -151,7 +159,10 @@ def get_git_status_payload(workspace_path: str | None = None) -> dict[str, Any]:
             text=True,
             encoding="utf-8",
             check=True,
+            timeout=GIT_COMMAND_TIMEOUT_SECONDS,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise GitApiServiceError(504, "Git status timed out.") from exc
     except subprocess.CalledProcessError as exc:
         raise GitApiServiceError(500, f"Git status failed: {exc.stderr}") from exc
 
@@ -182,8 +193,9 @@ def get_current_git_branch_payload(workspace_path: str | None = None) -> dict[st
             text=True,
             encoding="utf-8",
             check=True,
+            timeout=GIT_COMMAND_TIMEOUT_SECONDS,
         )
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return {"branch": None}
 
     return {"branch": result.stdout.strip()}

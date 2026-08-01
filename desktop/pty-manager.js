@@ -2,6 +2,7 @@
 
 const path = require("node:path");
 const { StringDecoder } = require("node:string_decoder");
+const { spawn } = require("node:child_process");
 
 // ---------------------------------------------------------------------------
 // State
@@ -57,6 +58,23 @@ function getSendTarget() {
   return null;
 }
 
+function normalizeConversationId(conversationId) {
+  return typeof conversationId === "string" ? conversationId.trim() : "";
+}
+
+function requireConversationId(conversationId) {
+  const normalized = normalizeConversationId(conversationId);
+  if (!normalized) {
+    throw new Error("Terminal conversation owner is required.");
+  }
+  return normalized;
+}
+
+function isOwnedBy(session, conversationId) {
+  const owner = normalizeConversationId(conversationId);
+  return Boolean(owner && session && session.conversationId === owner);
+}
+
 function appendSessionOutput(sessionId, session, data, emit = true) {
   const text = typeof data === "string" ? data : String(data);
   if (!text) return;
@@ -69,7 +87,13 @@ function appendSessionOutput(sessionId, session, data, emit = true) {
   if (!emit) return;
   const wc = getSendTarget();
   if (wc) {
-    wc.send("minicode:pty:data", { sessionId, data: text, startCursor, endCursor: session.outputCursor });
+    wc.send("minicode:pty:data", {
+      sessionId,
+      conversationId: session.conversationId,
+      data: text,
+      startCursor,
+      endCursor: session.outputCursor,
+    });
   }
 }
 
@@ -122,8 +146,9 @@ function windowsPowerShellArgs() {
   return ["-NoLogo", "-NoProfile", "-NoExit", "-Command", initCommand];
 }
 
-function spawnSession(cwd) {
+function spawnSession(cwd, conversationId) {
   pruneExitedSessions();
+  const ownerConversationId = requireConversationId(conversationId);
   const liveSessionCount = Array.from(ptySessions.values()).filter((session) => session.isAlive !== false).length;
   if (liveSessionCount >= PTY_LIVE_SESSION_MAX) {
     throw new Error(`Terminal session limit reached (${PTY_LIVE_SESSION_MAX}). Close a terminal before opening another.`);
@@ -199,6 +224,7 @@ function spawnSession(cwd) {
   const sessionId = `term_${ptyIdCounter++}`;
   const session = {
     process: ptyProcess,
+    conversationId: ownerConversationId,
     cwd: resolvedCwd,
     shell: shellStr,
     scrollback: "",
@@ -222,15 +248,26 @@ function spawnSession(cwd) {
     session.exitedAt = Date.now();
     const wc = getSendTarget();
     if (wc) {
-      wc.send("minicode:pty:exit", { sessionId, exitCode: normalizedExitCode, exitedAt: session.exitedAt });
+      wc.send("minicode:pty:exit", {
+        sessionId,
+        conversationId: session.conversationId,
+        exitCode: normalizedExitCode,
+        exitedAt: session.exitedAt,
+      });
     }
     pruneExitedSessions();
   });
 
-  return { session_id: sessionId, pid: ptyProcess.pid, shell: shellStr, cwd: resolvedCwd };
+  return {
+    session_id: sessionId,
+    conversation_id: ownerConversationId,
+    pid: ptyProcess.pid,
+    shell: shellStr,
+    cwd: resolvedCwd,
+  };
 }
 
-function writeToSession(sessionId, data) {
+function writeToSession(sessionId, data, conversationId) {
   if (typeof sessionId !== "string" || typeof data !== "string") {
     return false;
   }
@@ -239,7 +276,7 @@ function writeToSession(sessionId, data) {
     return false;
   }
   const session = ptySessions.get(sessionId);
-  if (session?.isAlive) {
+  if (session?.isAlive && isOwnedBy(session, conversationId)) {
     for (let offset = 0; offset < data.length; offset += PTY_WRITE_CHUNK_CHARS) {
       session.process.write(data.slice(offset, offset + PTY_WRITE_CHUNK_CHARS));
     }
@@ -248,9 +285,9 @@ function writeToSession(sessionId, data) {
   return false;
 }
 
-function resizeSession(sessionId, cols, rows) {
+function resizeSession(sessionId, cols, rows, conversationId) {
   const session = ptySessions.get(sessionId);
-  if (session?.isAlive) {
+  if (session?.isAlive && isOwnedBy(session, conversationId)) {
     try {
       const size = normalizeTerminalSize(cols, rows);
       session.process.resize(size.cols, size.rows);
@@ -260,17 +297,61 @@ function resizeSession(sessionId, cols, rows) {
   }
 }
 
-function killSession(sessionId) {
-  const session = ptySessions.get(sessionId);
-  if (session) {
-    ptySessions.delete(sessionId);
-    if (session.isAlive) session.process.kill();
-  }
+function killProcessTree(pid, fallback) {
+  void killProcessTreeAndWait(pid, fallback);
 }
 
-function acknowledgeExitedSession(sessionId) {
+function killProcessTreeAndWait(pid, fallback) {
+  if (!Number.isFinite(pid) || pid <= 0) {
+    try { fallback(); } catch {}
+    return Promise.resolve();
+  }
+  if (process.platform !== "win32") {
+    try { process.kill(-pid, "SIGTERM"); } catch { try { fallback(); } catch {} }
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const killer = spawn("taskkill", ["/pid", String(pid), "/t", "/f"], { windowsHide: true });
+    let settled = false;
+    const finish = (useFallback) => {
+      if (settled) return;
+      settled = true;
+      if (useFallback) {
+        try { fallback(); } catch {}
+      }
+      resolve();
+    };
+    killer.once("error", () => finish(true));
+    killer.once("close", (code) => finish(code !== 0));
+  });
+}
+
+async function killSession(sessionId, conversationId) {
   const session = ptySessions.get(sessionId);
-  if (!session || session.isAlive !== false) return false;
+  if (isOwnedBy(session, conversationId)) {
+    if (session.isAlive) {
+      await killProcessTreeAndWait(session.process.pid, () => session.process.kill());
+    }
+    if (ptySessions.get(sessionId) === session) ptySessions.delete(sessionId);
+    return true;
+  }
+  return false;
+}
+
+async function killConversation(conversationId) {
+  const owner = requireConversationId(conversationId);
+  const ownedSessionIds = Array.from(ptySessions.entries())
+    .filter(([, session]) => session.conversationId === owner)
+    .map(([sessionId]) => sessionId);
+  const results = await Promise.all(
+    ownedSessionIds.map((sessionId) => killSession(sessionId, owner)),
+  );
+  return results.filter(Boolean).length;
+}
+
+function acknowledgeExitedSession(sessionId, conversationId) {
+  const session = ptySessions.get(sessionId);
+  if (!isOwnedBy(session, conversationId) || session.isAlive !== false) return false;
   ptySessions.delete(sessionId);
   return true;
 }
@@ -283,6 +364,7 @@ function _snapshotEntry(sessionId, session, maxChars) {
   const outputEndCursor = Number.isFinite(session.outputCursor) ? session.outputCursor : full.length;
   return {
     session_id: sessionId,
+    conversation_id: session.conversationId,
     pid: session.process.pid,
     shell: session.shell || session.process.process || "shell",
     cwd: session.cwd,
@@ -298,19 +380,22 @@ function _snapshotEntry(sessionId, session, maxChars) {
   };
 }
 
-function snapshotSession(sessionId, maxChars) {
+function snapshotSession(sessionId, maxChars, conversationId) {
   pruneExitedSessions();
   const session = ptySessions.get(sessionId);
-  if (!session) {
+  if (!isOwnedBy(session, conversationId)) {
     return null;
   }
   return _snapshotEntry(sessionId, session, maxChars);
 }
 
-function listSessions(maxChars) {
+function listSessions(conversationId, maxChars) {
   pruneExitedSessions();
+  const owner = normalizeConversationId(conversationId);
+  if (!owner) return [];
   const list = [];
   for (const [sessionId, session] of ptySessions.entries()) {
+    if (session.conversationId !== owner) continue;
     list.push(_snapshotEntry(sessionId, session, maxChars || PTY_LIST_PREVIEW_CHARS));
   }
   return list;
@@ -321,7 +406,7 @@ function killAllSessions() {
   ptyCleanupDone = true;
   for (const [sessionId, session] of ptySessions.entries()) {
     try {
-      session.process.kill();
+      killProcessTree(session.process.pid, () => session.process.kill());
     } catch (error) {
       appendDesktopLog(`[desktop] failed to kill pty ${sessionId}: ${error.message}`);
     }
@@ -339,6 +424,7 @@ module.exports = {
   writeToSession,
   resizeSession,
   killSession,
+  killConversation,
   listSessions,
   snapshotSession,
   acknowledgeExitedSession,

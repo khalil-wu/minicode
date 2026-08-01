@@ -24,8 +24,12 @@ async def skills_marketplace_payload(
     *,
     skill_manager: Any | None,
     list_marketplace: MarketplaceLoader,
+    force_refresh: bool = False,
 ) -> dict[str, Any]:
-    payload = await list_marketplace(installed_names=installed_skill_names(skill_manager))
+    payload = await list_marketplace(
+        installed_names=installed_skill_names(skill_manager),
+        force_refresh=force_refresh,
+    )
     return {
         "skills": payload["skills"],
         "source_status": {"openai_skills": payload["source_status"]["openai_skills"]},
@@ -36,9 +40,17 @@ async def skills_marketplace_payload(
 async def extensions_marketplace_payload(
     *,
     skill_manager: Any | None,
+    mcp_manager: Any | None = None,
     list_marketplace: MarketplaceLoader,
+    force_refresh: bool = False,
 ) -> dict[str, Any]:
-    return await list_marketplace(installed_names=installed_skill_names(skill_manager))
+    from backend.services.mcp_service import installed_connector_names
+
+    return await list_marketplace(
+        installed_names=installed_skill_names(skill_manager),
+        installed_mcp_names=installed_connector_names(mcp_manager),
+        force_refresh=force_refresh,
+    )
 
 
 async def install_skill_from_marketplace(skill_name: str, *, skill_manager: Any | None) -> dict[str, Any]:
@@ -48,8 +60,6 @@ async def install_skill_from_marketplace(skill_name: str, *, skill_manager: Any 
 
 def remove_skill(skill_name: str, *, skill_manager: Any | None) -> dict[str, Any]:
     result = remove_user_skill(skill_name)
-    if skill_manager is not None:
-        skill_manager.deactivate(result["skill"]["name"])
     return {**result, "skills": refresh_skill_list(skill_manager)}
 
 

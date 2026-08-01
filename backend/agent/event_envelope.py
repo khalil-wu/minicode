@@ -34,8 +34,9 @@ _ADAPTER_INTERNAL: frozenset[str] = frozenset({
 # ``_TURN_MESSAGE_SCOPED_EVENT_TYPES`` but is kept independent so the
 # envelope doesn't import from the WS package.
 _TURN_SCOPED: frozenset[str] = frozenset({
-    "text_chunk",
-    "text_replace",
+    "item.started",
+    "agent_message.delta",
+    "item.completed",
     "image_chunk",
     "thinking_delta",
     "thinking",
@@ -43,12 +44,8 @@ _TURN_SCOPED: frozenset[str] = frozenset({
     "tool_output_delta",
     "command_output_chunk",
     "tool_result",
-    "agent.loop.started",
-    "agent.loop.completed",
     "agent.run.started",
-    "agent.run.updated",
     "agent.run.completed",
-    "agent.phase.updated",
     "agent.item",
     "agent.progress",
     "runtime.span",
@@ -57,8 +54,6 @@ _TURN_SCOPED: frozenset[str] = frozenset({
     "approval_request",
     "approval.file_diff",
     "ask_user",
-    "verification.started",
-    "verification.result",
     "citation.add",
     "artifact.preview",
     "done",
@@ -132,6 +127,7 @@ class EventEnvelope:
             data.setdefault("turn_id", self._turn_id)
         if self._conversation_id:
             data.setdefault("conversation_id", self._conversation_id)
-        data.setdefault("seq", self._next_seq())
+        if "seq" not in data:
+            data["seq"] = self._next_seq()
 
         return event

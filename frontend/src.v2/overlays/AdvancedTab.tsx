@@ -20,42 +20,42 @@ export const AdvancedTab = () => {
 
   return (
     <>
-      <Section title="Environment Variables">
+      <Section title="环境变量">
         {envVars.length > 0 && (
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             {envVars.map((v) => (
               <div key={v.name} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 8px", background: "var(--bg-secondary)", borderRadius: 4 }}>
                 <span style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)" }}>{v.name}</span>
-                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{v.scope}</span>
+                <span style={{ fontSize: "var(--text-2xs)", color: "var(--text-muted)" }}>{v.scope}</span>
                 <button
                   onClick={() => {
                     sendClientCommand({ type: "env.delete", name: v.name });
                   }}
-                  style={{ ...secondaryActionStyle, padding: "2px 6px", fontSize: 11, color: "var(--text-error, #e55)" }}
+                  style={{ ...secondaryActionStyle, padding: "2px 6px", fontSize: "var(--text-2xs)", color: "var(--state-danger)" }}
                 >
-                  Remove
+                  删除
                 </button>
               </div>
             ))}
           </div>
         )}
-        {envVars.length === 0 && <div style={{ fontSize: 12, color: "var(--text-muted)" }}>No environment variables configured.</div>}
+        {envVars.length === 0 && <div style={{ fontSize: "var(--text-xxs)", color: "var(--text-muted)" }}>尚未配置环境变量。</div>}
         <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
           <input
-            placeholder="NAME"
+            placeholder="变量名"
             value={newEnvName}
             onChange={(e) => setNewEnvName(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, ""))}
-            style={{ ...inputStyle, width: 120, fontFamily: "var(--font-mono)", fontSize: 12 }}
+            style={{ ...inputStyle, width: 120, fontFamily: "var(--font-mono)", fontSize: "var(--text-xxs)" }}
           />
           <input
-            placeholder="Value"
+            placeholder="变量值"
             type="password"
             value={newEnvValue}
             onChange={(e) => setNewEnvValue(e.target.value)}
             style={{ ...inputStyle, flex: 1, minWidth: 120 }}
           />
           <input
-            placeholder="Description (optional)"
+            placeholder="说明（可选）"
             value={newEnvDescription}
             onChange={(e) => setNewEnvDescription(e.target.value)}
             style={{ ...inputStyle, flex: 1, minWidth: 120 }}
@@ -71,32 +71,32 @@ export const AdvancedTab = () => {
             disabled={!newEnvName || !newEnvValue}
             style={secondaryActionStyle}
           >
-            Add
+            添加
           </button>
         </div>
       </Section>
 
       {isDesktop() && (
         <>
-          <Section title="Export">
+          <Section title="导出">
             <button
               onClick={async () => {
                 setDiagLoading(true);
                 try {
                   const result = await exportDiagnostics();
                   setDiagResult((result ?? null) as Record<string, unknown> | null);
-                  pushToast("Diagnostics exported", "success");
+                  pushToast("诊断信息已导出", "success");
                 } catch {
-                  pushToast("Export failed", "error");
+                  pushToast("导出失败", "error");
                 }
                 setDiagLoading(false);
               }}
               disabled={diagLoading}
               style={secondaryActionStyle}
             >
-              {diagLoading ? "Exporting..." : "Export Diagnostics"}
+              {diagLoading ? "正在导出…" : "导出诊断信息"}
             </button>
-            {diagResult && "logPath" in diagResult && <button onClick={() => revealPath(diagResult.logPath as string)} style={secondaryActionStyle}>Reveal Log File</button>}
+            {diagResult && "logPath" in diagResult && <button onClick={() => revealPath(diagResult.logPath as string)} style={secondaryActionStyle}>显示日志文件</button>}
           </Section>
           {diagResult && <pre style={preStyle}>{JSON.stringify(diagResult, null, 2)}</pre>}
         </>

@@ -49,7 +49,8 @@ export const QuickOpen = () => {
           useAppStore.setState({ quickOpenResults: [], quickOpenLoading: false });
         });
       } else {
-        searchWorkspaceFiles(q, 20).then((results) => {
+        const workingDirectory = useAppStore.getState().workingDirectory || "";
+        searchWorkspaceFiles(workingDirectory, q, 20).then((results) => {
           useAppStore.setState({ quickOpenResults: results, quickOpenLoading: false });
         }).catch(() => {
           useAppStore.setState({ quickOpenResults: [], quickOpenLoading: false });
@@ -64,8 +65,11 @@ export const QuickOpen = () => {
   };
 
   const mentionFile = (file: { path: string; name: string }) => {
-    const draft = useAppStore.getState().draft;
-    useAppStore.getState().setDraft(draft + `@${file.path} `);
+    useAppStore.getState().addSelectedMention({
+      kind: "file",
+      path: file.path,
+      name: file.name,
+    });
     close();
   };
 

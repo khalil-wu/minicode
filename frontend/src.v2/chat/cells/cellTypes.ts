@@ -5,17 +5,7 @@
 
 import type { ToolCallRecord } from "../../lib/tool-call-reducer";
 import type { TurnActivityKind } from "../../lib/turn-projection";
-import type { ActivityItem } from "../../agent-loop/activity-item";
 import type { Citation } from "../../stores/types";
-
-// ── Plan Step ───────────────────────────────────────────────────────
-
-export interface PlanStep {
-  id: string;
-  title: string;
-  description?: string;
-  status: "pending" | "in_progress" | "completed" | "blocked" | "cancelled";
-}
 
 // ── Diff File Change ────────────────────────────────────────────────
 
@@ -48,6 +38,7 @@ export interface UserMessageCellState {
   queueState?: "queued" | "cancelled";
   queuePosition?: number;
   queueMessageId?: string;
+  steeredIntoMessageId?: string;
 }
 
 export interface StatusNoticeCellState {
@@ -59,26 +50,13 @@ export interface StatusNoticeCellState {
   createdAt: number;
 }
 
-export interface TurnSummaryCellState {
-  kind: "turn_summary";
-  id: string;
-  status: "running" | "completed" | "failed" | "interrupted";
-  items: {
-    kind: "command" | "diff" | "activity" | "error" | "source";
-    label: string;
-    detail?: string;
-    tone?: "neutral" | "success" | "warning" | "danger";
-  }[];
-  createdAt: number;
-}
-
 export interface ActivityCellState {
   kind: "activity";
   id: string;
   activityKind: TurnActivityKind;
   title: string;
   subtitle?: string;
-  status: "running" | "done" | "failed" | "interrupted";
+  status: "running" | "done" | "partial" | "failed" | "interrupted";
   collapsed: boolean;
   toolCallRecords?: ToolCallRecord[];
   progress?: {
@@ -89,7 +67,6 @@ export interface ActivityCellState {
   skill?: SkillProcessMetadata;
   startedAt: number;
   completedAt?: number;
-  canonical?: ActivityItem;
 }
 
 export interface SkillProcessMetadata {
@@ -101,35 +78,13 @@ export interface SkillProcessMetadata {
   content?: string;
 }
 
-export interface ActivityGroupCellState {
-  kind: "activity_group";
-  id: string;
-  cells: ActivityCellState[];
-  status: "running" | "done" | "failed" | "interrupted";
-  collapsed: boolean;
-  startedAt: number;
-  completedAt?: number;
-}
-
-export interface PlanCellState {
-  kind: "plan";
-  id: string;
-  planId?: string;
-  title: string;
-  status: "proposed" | "approved" | "executing" | "completed" | "cancelled";
-  requiresApproval: boolean;
-  steps: PlanStep[];
-  markdownSource?: string;
-  createdAt: number;
-  updatedAt: number;
-}
-
 export interface ExecCellState {
   kind: "exec";
   id: string;
   command: string;
   cwd?: string;
-  status: "pending_approval" | "running" | "success" | "failed" | "cancelled";
+  background?: boolean;
+  status: "pending_approval" | "running" | "success" | "partial" | "failed" | "cancelled";
   exitCode?: number;
   stdoutPreview: string[];
   stderrPreview: string[];
@@ -139,16 +94,6 @@ export interface ExecCellState {
   collapsed: boolean;
   needsApproval?: boolean;
   createdAt: number;
-  completedAt?: number;
-}
-
-export interface ExecGroupCellState {
-  kind: "exec_group";
-  id: string;
-  cells: ExecCellState[];
-  status: "running" | "done" | "failed";
-  collapsed: boolean;
-  startedAt: number;
   completedAt?: number;
 }
 
@@ -189,7 +134,7 @@ export interface AssistantMarkdownCellState {
   isStreaming?: boolean; // ✅ 添加流式状态标志
   /** Origin of the reply text. Used for data-source attribution, not for
    * visual divergence in this phase. */
-  source?: "reply" | "stream" | "fallback" | "partial";
+  source?: "reply" | "stream" | "partial";
   /** Attachments carried by a BriefTool (send_message) reply. Rendered as a
    * compact chip list below the answer; image attachments are previewable. */
   attachments?: AssistantReplyAttachment[];
@@ -225,7 +170,7 @@ export interface ThinkingCellState {
   kind: "thinking";
   id: string;
   content: string;
-  source: "model_preamble" | "post_tool" | "provider" | "reasoning" | "runtime";
+  source: "commentary" | "model_preamble" | "post_tool" | "provider" | "reasoning" | "runtime";
   isRawProviderReasoning?: boolean;
   providerReasoningType?: string;
   phase?: string; // Optional phase indicator (e.g., "analyzing", "planning")
@@ -238,12 +183,8 @@ export interface ThinkingCellState {
 export type HistoryCellState =
   | UserMessageCellState
   | StatusNoticeCellState
-  | TurnSummaryCellState
   | ActivityCellState
-  | ActivityGroupCellState
-  | PlanCellState
   | ExecCellState
-  | ExecGroupCellState
   | DiffCellState
   | ErrorCellState
   | AssistantMarkdownCellState
@@ -262,9 +203,10 @@ export interface ChatTurnState {
   >[];
   activeCell: HistoryCellState | null;
   finalAnswerCell: AssistantMarkdownCellState | null;
-  status: "streaming" | "completed" | "failed" | "interrupted";
+  status: "streaming" | "completed" | "partial" | "failed" | "interrupted";
   startedAt: number;
   completedAt?: number;
+  durationMs?: number;
 }
 
 // ── Surface State ───────────────────────────────────────────────────

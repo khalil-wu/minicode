@@ -1,11 +1,32 @@
 import { useAppStore } from "../stores";
 import type { CommandResultEvent, ServerEvent } from "../protocol/events";
-import { sendClientCommand } from "../protocol/ws-outbox";
+import * as wsOutbox from "../protocol/ws-outbox";
 import { pushToast } from "../overlays/ToastContainer";
 import { capabilityFeatureEnabled } from "../protocol/capabilities";
 import { openAutomations } from "../lib/automations-navigation";
 import { openSettings } from "../lib/settings-navigation";
 import type { PanelKind, RightStackTab, WorkspaceSlice } from "../stores/types";
+
+export const downloadConversationExport = (
+  filename: string,
+  content: string,
+  mimeType = "application/json;charset=utf-8",
+): boolean => {
+  if (typeof document === "undefined" || typeof URL === "undefined" || typeof URL.createObjectURL !== "function") return false;
+  const safeFilename = (filename || "minicode-conversation.json")
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_")
+    .slice(0, 180);
+  const url = URL.createObjectURL(new Blob([content], { type: mimeType }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = safeFilename || "minicode-conversation.json";
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  return true;
+};
 
 const commandResultStatus = (level?: string): "completed" | "failed" => {
   const normalized = String(level || "").toLowerCase();
@@ -29,11 +50,6 @@ const surfaceCommandResult = (ev: CommandResultEvent) => {
   if (command === "subagent.status") return;
   const message = String(ev.message || "").trim();
   if (!message) return;
-  if (command === "subagent.resume") {
-    const failed = commandResultStatus(ev.level) === "failed";
-    pushToast(failed ? "任务未能继续，请查看详情" : "任务已继续", failed ? "error" : "success", 4000);
-    return;
-  }
   const title = ev.title ? String(ev.title).trim() : `/${command.replace(/^\//, "")}`;
   const level = String(ev.level || "").toLowerCase();
   const duration = level === "error" || level === "failed" || level === "warning" ? 7000 : 5000;
@@ -59,7 +75,6 @@ const commandResultTargetsActiveConversation = (conversationId?: string): boolea
 
 const RIGHT_STACK_TABS = new Set<RightStackTab>([
   "preview",
-  "terminal",
   "tasks",
   "plan",
   "subagents",
@@ -88,8 +103,6 @@ const PANEL_KINDS = new Set<PanelKind>([
   "inspector",
 ]);
 
-const PLUGIN_COMPONENTS = new Set(["prompt-form"]);
-
 const SETTINGS_TABS = new Set([
   "general",
   "provider",
@@ -115,8 +128,7 @@ const openRightStack = (tab: RightStackTab) => {
 };
 
 const openDock = (tab: WorkspaceSlice["activeBottomTab"]) => {
-  useAppStore.getState().setActiveBottomTab(tab);
-  useAppStore.setState({ dockCollapsed: false });
+  useAppStore.getState().openBottomTab(tab);
 };
 
 const openPanel = (kind: PanelKind) => {
@@ -139,21 +151,10 @@ const handleUiAction = (
   const [action, suffix] = splitUiAction(rawAction);
   const capabilities = state.runtimeCapabilities;
 
-  if (action === "open_plugin_component") {
-    if (!capabilityFeatureEnabled(capabilities, "plugin_local_jsx_commands", true)) return true;
-    const component = String(data?.component || "").trim();
-    if (PLUGIN_COMPONENTS.has(component)) {
-      state.openPluginCommandPanel({ ...(data ?? {}), component });
-    } else if (component) {
-      pushToast(`Unsupported plugin component: ${component}`, "warning");
-    }
-    return true;
-  }
-
   if (action === "open_skills_marketplace") {
     if (!state.skillsMarketplaceOpen) state.toggleSkillsMarketplace();
-    sendClientCommand({ type: "skills.list" });
-    sendClientCommand({ type: "skills.marketplace.list" });
+    wsOutbox.sendClientCommand({ type: "skills.list" });
+    wsOutbox.sendClientCommand({ type: "skills.marketplace.list" });
     return true;
   }
 
@@ -190,6 +191,11 @@ const handleUiAction = (
     return true;
   }
 
+  if (action === "open_right_stack" && suffix === "terminal") {
+    openDock("terminal");
+    return true;
+  }
+
   if (action === "open_dock" && DOCK_TABS.has(suffix as WorkspaceSlice["activeBottomTab"])) {
     openDock(suffix as WorkspaceSlice["activeBottomTab"]);
     return true;
@@ -214,6 +220,9 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
       removed?: boolean;
       error?: string;
       ui_action?: string;
+      filename?: string;
+      mime_type?: string;
+      content?: string;
       budget?: {
         used?: number;
         total?: number;
@@ -247,6 +256,16 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
 
   handleUiAction(ev.data);
 
+  if (
+    ev.command === "conversation.export" &&
+    typeof ev.data?.content === "string" &&
+    typeof ev.data?.filename === "string"
+  ) {
+    if (!downloadConversationExport(ev.data.filename, ev.data.content, ev.data.mime_type)) {
+      pushToast("Export is ready, but this environment cannot start a download.", "error", 5000);
+    }
+  }
+
   surfaceCommandResult(ev);
 
   if (ev.command === "conversation.worktree.cleanup") {
@@ -261,7 +280,7 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
           danger: true,
         }).then((ok) => {
           if (ok) {
-            sendClientCommand({
+            wsOutbox.sendClientCommand({
               type: "conversation.worktree.cleanup",
               conversation_id: convId,
               force: true,
@@ -296,6 +315,22 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
     const target = ev.data?.target === "local" ? "local" : "worktree";
     const fingerprint = typeof ev.data?.fingerprint === "string" ? ev.data.fingerprint : "";
     const checks = Array.isArray(ev.data?.checks) ? ev.data.checks as Array<{ severity?: string; message?: string }> : [];
+    const dirty = checks.some((check) => check.severity === "blocking" && /local changes|source\.dirty/i.test(String(check.message || "")));
+    if (!ev.data?.allowed && dirty && conversationId) {
+      import("../overlays/DialogService").then(({ showConfirm }) => showConfirm({
+        title: "检测到未提交改动",
+        message: "可将已跟踪和未跟踪文件暂存，并在目标工作区恢复。发生冲突时暂存内容会保留，可手动恢复。",
+        confirmLabel: "暂存后继续",
+        danger: true,
+      }).then((ok) => {
+        if (ok) wsOutbox.sendClientCommand({
+          type: "conversation.worktree.handoff.preflight",
+          conversation_id: conversationId,
+          target,
+          dirty_action: "stash",
+        });
+      }));
+    }
     if (ev.data?.allowed && conversationId && fingerprint) {
       const warnings = checks.filter((check) => check.severity === "warning").map((check) => check.message).filter(Boolean);
       import("../overlays/DialogService").then(({ showConfirm }) => showConfirm({
@@ -308,11 +343,12 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
         ].join("\n\n"),
         confirmLabel: "Move task",
       }).then((ok) => {
-        if (ok) sendClientCommand({
+        if (ok) wsOutbox.sendClientCommand({
           type: "conversation.worktree.handoff.execute",
           conversation_id: conversationId,
           target,
           fingerprint,
+          dirty_action: ev.data?.dirty_action === "stash" ? "stash" : "block",
         });
       }));
     }
@@ -334,5 +370,11 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
     }));
   }
 
+  // Older embedded/test outboxes may expose only sendClientCommand. The
+  // durable result resolver is optional at this boundary; never make a
+  // transient UI projection fail merely because that adapter is absent.
+  if ("resolveClientCommandResult" in wsOutbox) {
+    wsOutbox.resolveClientCommandResult(ev);
+  }
   return true;
 };

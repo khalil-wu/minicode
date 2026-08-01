@@ -5,6 +5,7 @@ import { ChatSearch } from "./ChatSearch";
 import { SafeBoundary } from "../shell/ChunkErrorBoundary";
 import { ComposerErrorFallback } from "../components/ComposerErrorFallback";
 import { ChatErrorFallback } from "../components/ChatErrorFallback";
+import { ChatContextCard } from "./ChatContextCard";
 
 export const ChatPane = () => {
   const [showSearch, setShowSearch] = useState(false);
@@ -44,27 +45,33 @@ export const ChatPane = () => {
   return (
     <div
       ref={containerRef}
-      className="chat-pane flex flex-1 min-h-0 flex-col overflow-hidden w-full"
+      className="chat-pane flex-1 min-h-0 overflow-hidden w-full"
       style={{
         position: "relative",
-        display: "flex",
+        display: "grid",
+        gridTemplateColumns: "minmax(0, 1fr)",
+        gridTemplateRows: "minmax(0, 1fr)",
         flex: 1,
         minHeight: 0,
-        flexDirection: "column",
         overflow: "hidden",
         width: "100%",
         background: "var(--surface-base)",
       }}
     >
-      {showSearch && (
-        <ChatSearch onClose={handleCloseSearch} containerRef={containerRef} />
-      )}
-      <SafeBoundary fallback={<ChatErrorFallback />}>
-        <MessageList />
-      </SafeBoundary>
-      <SafeBoundary fallback={<ComposerErrorFallback />}>
-        <Composer />
-      </SafeBoundary>
+      <div className="chat-pane-layout">
+        <div className="chat-pane-main">
+          {showSearch && (
+            <ChatSearch onClose={handleCloseSearch} containerRef={containerRef} />
+          )}
+          <SafeBoundary fallback={<ChatErrorFallback />}>
+            <MessageList />
+          </SafeBoundary>
+          <SafeBoundary fallback={<ComposerErrorFallback />}>
+            <Composer />
+          </SafeBoundary>
+        </div>
+        <ChatContextCard />
+      </div>
     </div>
   );
 };

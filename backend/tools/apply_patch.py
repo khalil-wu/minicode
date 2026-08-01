@@ -11,7 +11,6 @@ stay consistent across all file-mutating tools.
 """
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -36,11 +35,9 @@ class ApplyPatchTool(BaseTool):
 
     name = "apply_patch"
     mutates_workspace = True
-    timeout_seconds = 30.0
     result_kind = "edit"
     activity_kind = "fileChange"
     display_label = "Apply patch"
-    panel_hint = "diff"
     search_hint = "patch diff apply_patch edit multi-file rename"
     description = (
         "Apply a Codex patch envelope to add, update, delete, or rename files in one call. "
@@ -51,6 +48,23 @@ class ApplyPatchTool(BaseTool):
         "Read files first so context/removal lines match exactly; do not wrap in JSON or Markdown fences."
     )
     permission = PermissionLevel.DIFF_REVIEW
+
+    def get_workspace_paths(self, args: dict[str, Any] | None = None) -> list[str]:
+        """Expose every add/update/delete/move path to the central checker."""
+        patch = str((args or {}).get("patch") or "")
+        if not patch.strip():
+            return []
+        try:
+            changes = parse_patch(patch)
+        except Exception:
+            return []
+        paths: list[str] = []
+        for change in changes:
+            if getattr(change, "path", None):
+                paths.append(str(change.path))
+            if getattr(change, "move_to", None):
+                paths.append(str(change.move_to))
+        return paths
 
     def model_description(self) -> str:
         return "Apply a Codex patch envelope for multi-file edits or renames."
@@ -78,17 +92,6 @@ class ApplyPatchTool(BaseTool):
             name=self.name,
             capability="workspace.edit",
             required_args=("patch",),
-            arg_roles={"patch": "generated_content"},
-            arg_sources={"patch": ("model_generation",)},
-            repair_policy={"patch": "needs_model_generation"},
-            accepted_resource_types=("workspace_file",),
-            rejected_resource_types=("uploaded_document", "web_url"),
-            empty_args_policy="repair_or_block",
-            blocked_guidance=(
-                "apply_patch requires a complete patch envelope in the 'patch' argument "
-                "(*** Begin Patch ... *** End Patch). Read the target files, generate the "
-                "full patch, then retry."
-            ),
         )
 
     def get_schema(self) -> ToolSchema:
@@ -135,17 +138,45 @@ class ApplyPatchTool(BaseTool):
         if isinstance(plans_or_error, str):
             return self._error_result(plans_or_error)
         plans = plans_or_error
+        metadata = (
+            context.metadata
+            if context is not None and isinstance(context.metadata, dict)
+            else {}
+        )
+        read_hashes = metadata.get("_read_file_hashes")
+        if not isinstance(read_hashes, dict):
+            read_hashes = {}
+        unread_existing = [
+            plan.raw_path
+            for plan in plans
+            if any(
+                path is not None
+                and path.exists()
+                and str(path.resolve()) not in read_hashes
+                for path in (plan.path, plan.move_to_path)
+            )
+        ]
+        if unread_existing:
+            return self._error_result(
+                "Read these existing file(s) before applying a patch: "
+                + ", ".join(unread_existing)
+            )
         expected_hashes = args.get("_expected_hashes")
         if not isinstance(expected_hashes, dict):
-            # Fail closed for direct/bypass execute paths: still prefer
-            # read-time hashes when available, otherwise snapshot current disk.
-            expected_hashes = self._snapshot_expected_hashes(plans, context)
+            # Match CC's read-before-edit contract. Do not bless an existing
+            # target by hashing it immediately before the write; only hashes
+            # recorded by read_file (or an equivalent explicit read) may pass.
+            expected_hashes = self._snapshot_expected_hashes(
+                plans,
+                context,
+                read_time_hashes=read_hashes,
+            )
             args["_expected_hashes"] = expected_hashes
         stale_error = self._review_snapshot_error(plans, expected_hashes)
         if stale_error:
             return self._error_result(stale_error)
 
-        # Phase 2: emit a combined diff preview, then write.
+        # Commit each validated file, then publish the exact on-disk diff.
         cache = get_global_file_cache()
         summary_lines: list[str] = []
         total_add = 0
@@ -153,13 +184,12 @@ class ApplyPatchTool(BaseTool):
         committed_paths: list[str] = []
         try:
             for plan in plans:
-                await self._emit_plan_preview(plan, context)
-            for plan in plans:
                 adds, dels = self._commit_plan(plan, cache)
                 total_add += adds
                 total_del += dels
                 summary_lines.append(plan.summary(adds, dels))
                 committed_paths.append(plan.raw_path)
+                await self._emit_plan_diff(plan, context)
         except (PermissionError, OSError) as exc:
             reason = (
                 f"No permission to write: {exc}"
@@ -303,7 +333,7 @@ class ApplyPatchTool(BaseTool):
         *,
         read_time_hashes: dict[str, str] | None = None,
     ) -> dict[str, str]:
-        """Prefer read-time content hashes; fall back to current on-disk snapshot."""
+        """Build review hashes from explicit read-time observations only."""
         meta = context.metadata if (context is not None and isinstance(context.metadata, dict)) else {}
         hashes = read_time_hashes if isinstance(read_time_hashes, dict) else meta.get("_read_file_hashes")
         if not isinstance(hashes, dict):
@@ -312,7 +342,7 @@ class ApplyPatchTool(BaseTool):
         for plan in plans:
             for path in filter(None, (plan.path, plan.move_to_path)):
                 key = str(path.resolve())
-                expected[key] = str(hashes.get(key) or _path_snapshot_hash(path))
+                expected[key] = str(hashes.get(key) or "")
         return expected
 
     def _guard_path(self, raw_path: str, path: Path, bypass_mode: bool) -> str:
@@ -330,12 +360,10 @@ class ApplyPatchTool(BaseTool):
             )
         return ""
 
-    # --- preview + commit ---------------------------------------------------
+    # --- commit + projection ------------------------------------------------
 
-    async def _emit_plan_preview(self, plan: "_ChangePlan", context: ToolExecutionContext | None) -> None:
-        if plan.kind == ChangeKind.DELETE:
-            return  # deletes have no new content to preview incrementally
-        await _emit_write_preview_progress(
+    async def _emit_plan_diff(self, plan: "_ChangePlan", context: ToolExecutionContext | None) -> None:
+        await _emit_write_diff(
             context,
             file_path=plan.raw_path,
             old_content=plan.old_content,
@@ -488,6 +516,9 @@ def _path_snapshot_hash(path: Path) -> str:
     if not path.exists():
         return "missing"
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError:
+        # Compare the same normalized text representation returned by
+        # read_file. Hashing raw bytes here makes every CRLF file look stale on
+        # Windows even when it has not changed since the explicit read.
+        return content_hash(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
         return "unreadable"

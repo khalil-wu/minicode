@@ -46,8 +46,8 @@ export const QueuedMessageList = ({ wide = false, minimal = false }: { wide?: bo
   return (
     <div
       className="queued-message-list"
-      aria-label="Queued messages"
-      style={{ width: minimal ? "100%" : wide ? "var(--chat-wide-axis-width)" : "var(--chat-composer-axis-width)" }}
+      aria-label="排队中的消息"
+      style={{ width: minimal ? "100%" : wide ? "var(--chat-code-composer-width)" : "var(--chat-composer-axis-width)" }}
     >
       {queued.map((message, index) => {
         const attachmentNames = (message.attachmentRefs ?? []).map((attachment) => attachment.name).filter(Boolean);
@@ -55,13 +55,13 @@ export const QueuedMessageList = ({ wide = false, minimal = false }: { wide?: bo
         const displayNumber = (message.queuePosition ?? index + 1) + 1;
         return (
           <div className="queued-message-row" key={message.id}>
-            <span className="queued-message-number" aria-label={`Queue item ${displayNumber}`}>{displayNumber}</span>
+            <span className="queued-message-number" aria-label={`队列第 ${displayNumber} 项`}>{displayNumber}</span>
             <span className="queued-message-text" title={label}>{label}</span>
             <button
               type="button"
               className="queued-message-steer"
               onClick={() => sendQueueAction("user_message.queue.steer", message)}
-              title="Guide the running task with this message next"
+              title="下一步用这条消息引导当前任务"
             >
               <CornerDownLeft size={14} aria-hidden="true" />
               <span>引导</span>
@@ -70,8 +70,8 @@ export const QueuedMessageList = ({ wide = false, minimal = false }: { wide?: bo
               type="button"
               className="queued-message-icon"
               onClick={() => sendQueueAction("user_message.queue.cancel", message)}
-              title="Delete queued message"
-              aria-label={`Delete queued message ${displayNumber}`}
+              title="删除排队消息"
+              aria-label={`删除排队消息 ${displayNumber}`}
             >
               <Trash2 size={14} />
             </button>
@@ -80,8 +80,8 @@ export const QueuedMessageList = ({ wide = false, minimal = false }: { wide?: bo
                 type="button"
                 className="queued-message-icon"
                 onClick={() => setMenuFor((current) => current === message.id ? null : message.id)}
-                title="More queued message actions"
-                aria-label={`More actions for queued message ${displayNumber}`}
+                title="更多排队消息操作"
+                aria-label={`排队消息 ${displayNumber} 的更多操作`}
                 aria-expanded={menuFor === message.id}
               >
                 <MoreHorizontal size={15} />
@@ -96,7 +96,7 @@ export const QueuedMessageList = ({ wide = false, minimal = false }: { wide?: bo
                       setMenuFor(null);
                     }}
                   >
-                    <Copy size={13} aria-hidden="true" />
+                    <Copy size={14} aria-hidden="true" />
                     复制内容
                   </button>
                 </div>

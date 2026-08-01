@@ -33,10 +33,9 @@ _SDK_ONLY_EVENT_TYPES: frozenset[str] = frozenset({
 def should_emit_event(event: AgentEvent) -> bool:
     """Return True if *event* should be forwarded to the UI layer.
 
-    Filters out adapter-internal streaming events (``tool_call_start``,
-    ``tool_call_delta``). Tool and approval lifecycle progress now flows
-    through as ``agent.progress`` so the UI can explain execution state.
-    ``stream_event`` is SDK-only and forwarded but flagged for UI suppression.
+    Filters out only adapter-internal streaming fragments
+    (``tool_call_start`` and ``tool_call_delta``). Stable tool lifecycle and
+    progress events remain observable to UI and SDK consumers.
     """
     if event.type in _ADAPTER_ONLY_EVENT_TYPES:
         return False

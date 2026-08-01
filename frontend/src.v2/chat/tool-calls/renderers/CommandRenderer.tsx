@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { ShieldAlert } from "lucide-react";
-import type { ToolRendererProps } from "../toolRendererRegistry";
+import type { ToolCallRecord } from "../../../lib/tool-call-reducer";
 
 // The backend appends a "[sandbox] ..." paragraph to a failed sandboxed command
 // so the model knows it can retry with escalated permissions. That text is
@@ -83,7 +83,7 @@ export const CommandResultView = ({
               className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-[color-mix(in_oklch,var(--state-warning,#c98a00)_40%,var(--border-subtle))] bg-[color-mix(in_oklch,var(--state-warning,#c98a00)_12%,var(--surface-base))] text-[var(--text-secondary)] font-sans"
               title="This command failed in the sandbox (no network / writes limited to the workspace). The agent may retry it with escalated permissions, which requires your approval."
             >
-              <ShieldAlert size={11} />
+              <ShieldAlert size={14} />
               sandbox blocked
             </span>
           )}
@@ -93,7 +93,10 @@ export const CommandResultView = ({
   );
 };
 
-export const CommandToolRenderer = ({ record, resultSummary = "" }: ToolRendererProps) => (
+export const CommandToolRenderer = ({ record, resultSummary = "" }: {
+  record: ToolCallRecord;
+  resultSummary?: string;
+}) => (
   <CommandResultView
     command={typeof (record.args.command ?? record.args.cmd) === "string" ? String(record.args.command ?? record.args.cmd) : null}
     summary={record.summary ?? ""}

@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import logging
 import os
 from pathlib import Path
+import re
+import sys
 from threading import Lock
 
 logger = logging.getLogger(__name__)
@@ -83,13 +85,18 @@ def _normalize_additional_directories(
     return tuple(normalized)
 
 
-def _get_user_config_dir() -> Path:
-    """Return ~/.minicode/ (user-level config directory)."""
+def _get_claude_user_dir() -> Path:
+    """Return Claude Code's user-memory directory (``~/.claude``)."""
+    return Path.home() / ".claude"
+
+
+def _get_managed_claude_dir() -> Path:
+    """Return Claude Code's platform-managed policy directory."""
     if os.name == "nt":
-        base = Path(os.environ.get("USERPROFILE", "~"))
-    else:
-        base = Path(os.environ.get("HOME", "~"))
-    return base.expanduser() / ".minicode"
+        return Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "ClaudeCode"
+    if sys.platform == "darwin":
+        return Path("/Library/Application Support/ClaudeCode")
+    return Path("/etc/claude-code")
 
 
 # Codex AGENTS.md behavior: discover AGENTS.md from the project (git) root down
@@ -97,6 +104,10 @@ def _get_user_config_dir() -> Path:
 # (closest to cwd) wins by appearing last. Capped at AGENTS_MD_MAX_BYTES total to
 # bound prompt size (Codex default is 32 KiB).
 AGENTS_MD_MAX_BYTES = 32 * 1024
+# CC warns for oversized memory files but does not silently truncate them.
+MAX_MEMORY_CHARACTER_COUNT = 40_000
+MAX_INCLUDE_DEPTH = 5
+_INCLUDE_RE = re.compile(r"(?:^|\s)@((?:[^\s\\]|\\ )+)")
 
 
 def _find_project_root(start: Path) -> Path | None:
@@ -143,6 +154,38 @@ def _agents_md_chain(scope_dir: Path) -> list[Path]:
     return chain
 
 
+def _claude_memory_chain(scope_dir: Path) -> list[Path]:
+    """Directories from the filesystem root toward ``scope_dir``.
+
+    Claude Code deliberately does not stop at a Git root.  It walks upward to
+    (but does not inspect) the filesystem root, then loads memory root-first so
+    files closer to the working directory have higher priority.
+    """
+    try:
+        current = scope_dir.resolve()
+    except OSError:
+        return [scope_dir]
+    chain: list[Path] = []
+    while current != current.parent:
+        chain.append(current)
+        current = current.parent
+    chain.reverse()
+    return chain
+
+
+def _rule_files(rules_dir: Path) -> list[Path]:
+    """Return recursive Markdown rules in stable path order (CC behavior)."""
+    if not rules_dir.exists() or not rules_dir.is_dir():
+        return []
+    try:
+        return sorted(
+            (path for path in rules_dir.rglob("*.md") if path.is_file()),
+            key=lambda path: str(path).casefold(),
+        )
+    except OSError:
+        return []
+
+
 def _agents_md_candidates(scope_dir: Path) -> list[tuple[Path, str, str, int]]:
     """Resolve the AGENTS.md hierarchy for a scope into guideline specs.
 
@@ -170,42 +213,91 @@ def _iter_guideline_specs(
     specs: list[tuple[Path, str, str, int, str]] = []
     seen_paths: set[str] = set()
 
+    def add_candidate(
+        path: Path,
+        source_kind: str,
+        label: str,
+        priority: int,
+        scope: str,
+    ) -> None:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            return
+        key = os.path.normcase(str(resolved))
+        if key in seen_paths or not resolved.exists() or not resolved.is_file():
+            return
+        seen_paths.add(key)
+        specs.append((resolved, source_kind, label, priority, scope))
+
+    # Claude Code order: managed policy, user memory, project memory, local
+    # memory. Codex's user AGENTS.md is also global and precedes project docs.
+    managed_dir = _get_managed_claude_dir()
+    add_candidate(
+        managed_dir / "CLAUDE.md",
+        "managed_memory",
+        "Managed Memory",
+        0,
+        str(managed_dir),
+    )
+    for index, rule_file in enumerate(_rule_files(managed_dir / ".claude" / "rules")):
+        add_candidate(
+            rule_file,
+            "managed_rule",
+            "Managed Rule",
+            1 + index,
+            str(managed_dir),
+        )
+
+    add_candidate(
+        Path.home() / ".codex" / "AGENTS.md",
+        "user_memory",
+        "User Agent Instructions (Codex)",
+        10,
+        str(Path.home()),
+    )
+    claude_user_dir = _get_claude_user_dir()
+    add_candidate(
+        claude_user_dir / "CLAUDE.md",
+        "user_memory",
+        "User Memory (Claude Code)",
+        20,
+        str(claude_user_dir),
+    )
+    for index, rule_file in enumerate(_rule_files(claude_user_dir / "rules")):
+        add_candidate(
+            rule_file,
+            "user_rule",
+            "User Rule (Claude Code)",
+            21 + index,
+            str(claude_user_dir),
+        )
+
     def register_scope(scope_dir: Path) -> None:
         # Render order is INSERTION order of this list (the `priority` field is
         # informational only — sorting by it would interleave scopes and break
         # per-scope grouping when additional_directories are present). So the
         # order here IS the contract: global -> project-root->cwd -> memory.
         candidates: list[tuple[Path, str, str, int]] = []
-        # Global user-level AGENTS.md (Codex hierarchy: ~/.codex/AGENTS.md is the
-        # baseline for all projects, then ~/.minicode/AGENTS.md). Rendered first.
-        candidates.append((Path.home() / ".codex" / "AGENTS.md", "user_memory", "User Agent Instructions (Codex)", 10))
-        candidates.append((_get_user_config_dir() / "AGENTS.md", "user_memory", "User Agent Instructions", 20))
         # AGENTS.md hierarchy: project root -> cwd (Codex behavior). Each gets
         # its own spec so the chain renders root-first, most-specific last.
         candidates += list(_agents_md_candidates(scope_dir))
-        candidates += [
-            (scope_dir / "CLAUDE.md", "project_memory", "Project Memory", 100),
-        ]
 
-        # User-level CLAUDE.md (~/.minicode/CLAUDE.md) — priority 150
-        user_config = _get_user_config_dir() / "CLAUDE.md"
-        candidates.append((user_config, "user_memory", "User Memory", 150))
-
-        candidates.append((scope_dir / ".claude" / "CLAUDE.md", "project_memory", "Project Memory", 200))
-
-        rules_dir = scope_dir / ".claude" / "rules"
-        if rules_dir.exists() and rules_dir.is_dir():
-            for rule_file in sorted(rules_dir.glob("*.md")):
-                candidates.append((rule_file, "project_rule", "Project Rule", 300))
-        candidates.append((scope_dir / "CLAUDE.local.md", "local_memory", "Local Memory", 400))
+        # CC discovers Project and Local memory from filesystem root to cwd,
+        # independently of Codex's Git-root-bounded AGENTS.md discovery.
+        # Keep every directory's CLAUDE.md, .claude/CLAUDE.md, rules, and local
+        # memory together so the closest directory remains the last authority.
+        for depth, directory in enumerate(_claude_memory_chain(scope_dir)):
+            base_priority = 100 + depth * 10
+            candidates.append((directory / "CLAUDE.md", "project_memory", "Project Memory", base_priority))
+            candidates.append((directory / ".claude" / "CLAUDE.md", "project_memory", "Project Memory", base_priority + 1))
+            rules_dir = directory / ".claude" / "rules"
+            for rule_file in _rule_files(rules_dir):
+                candidates.append((rule_file, "project_rule", "Project Rule", base_priority + 2))
+            candidates.append((directory / "CLAUDE.local.md", "local_memory", "Local Memory", base_priority + 3))
 
         for path, source_kind, label, priority in candidates:
-            resolved = path.resolve()
-            key = str(resolved)
-            if key in seen_paths or not resolved.exists() or not resolved.is_file():
-                continue
-            seen_paths.add(key)
-            specs.append((resolved, source_kind, label, priority, str(scope_dir)))
+            add_candidate(path, source_kind, label, priority, str(scope_dir))
 
     register_scope(workspace_dir)
     for directory in additional_directories:
@@ -224,6 +316,98 @@ def _build_signature(specs: list[tuple[Path, str, str, int, str]]) -> tuple[tupl
     return tuple(signature)
 
 
+def _extract_include_paths(content: str, source_path: Path) -> list[Path]:
+    """Extract CC-style @path imports while ignoring code and comments."""
+    without_comments = re.sub(r"<!--[\s\S]*?-->", "", content)
+    visible_lines: list[str] = []
+    in_fence = False
+    fence_marker = ""
+    for line in without_comments.splitlines():
+        stripped = line.lstrip()
+        marker_match = re.match(r"(```+|~~~+)", stripped)
+        if marker_match:
+            marker = marker_match.group(1)
+            if not in_fence:
+                in_fence = True
+                fence_marker = marker[0]
+            elif marker[0] == fence_marker:
+                in_fence = False
+                fence_marker = ""
+            continue
+        if in_fence:
+            continue
+        visible_lines.append(re.sub(r"`[^`]*`", "", line))
+
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for match in _INCLUDE_RE.finditer("\n".join(visible_lines)):
+        raw = match.group(1).split("#", 1)[0].replace(r"\ ", " " ).strip()
+        if not raw or raw.startswith("@") or re.match(r"^[#%^&*()]", raw):
+            continue
+        if raw.startswith("~/") or raw.startswith("~\\"):
+            candidate = Path.home() / raw[2:]
+        else:
+            parsed = Path(raw)
+            candidate = parsed if parsed.is_absolute() else source_path.parent / parsed
+        try:
+            resolved = candidate.expanduser().resolve()
+        except OSError:
+            continue
+        key = os.path.normcase(str(resolved))
+        if key not in seen:
+            seen.add(key)
+            paths.append(resolved)
+    return paths
+
+
+def _expand_guideline_imports(
+    specs: list[tuple[Path, str, str, int, str]],
+) -> list[tuple[Path, str, str, int, str]]:
+    """Expand CLAUDE.md @imports parent-first with CC's depth/dedupe rules."""
+    expanded: list[tuple[Path, str, str, int, str]] = []
+    processed: set[str] = set()
+
+    def visit(
+        spec: tuple[Path, str, str, int, str],
+        depth: int,
+    ) -> None:
+        path, source_kind, label, priority, scope = spec
+        try:
+            resolved = path.resolve()
+        except OSError:
+            return
+        key = os.path.normcase(str(resolved))
+        if key in processed or depth >= MAX_INCLUDE_DEPTH:
+            return
+        processed.add(key)
+        if not resolved.is_file():
+            return
+        expanded.append((resolved, source_kind, label, priority, scope))
+        if source_kind == "agent_instruction":
+            return
+        try:
+            content = resolved.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            return
+        allowed_root = Path(scope).resolve()
+        allow_external = source_kind in {"user_memory", "user_rule"}
+        for included in _extract_include_paths(content, resolved):
+            if not allow_external:
+                try:
+                    included.relative_to(allowed_root)
+                except ValueError:
+                    logger.warning(
+                        "Skipping external CLAUDE.md import without approval: %s",
+                        included,
+                    )
+                    continue
+            visit((included, source_kind, f"{label} import", priority, scope), depth + 1)
+
+    for item in specs:
+        visit(item, 0)
+    return expanded
+
+
 def _read_blocks(specs: list[tuple[Path, str, str, int, str]]) -> tuple[GuidelineBlock, ...]:
     blocks: list[GuidelineBlock] = []
     agents_bytes_used = 0  # cumulative AGENTS.md budget (Codex project_doc cap)
@@ -235,6 +419,13 @@ def _read_blocks(specs: list[tuple[Path, str, str, int, str]]) -> tuple[Guidelin
             continue
         if not content:
             continue
+        if source_kind != "agent_instruction" and len(content) > MAX_MEMORY_CHARACTER_COUNT:
+            logger.warning(
+                "Large CLAUDE.md memory file (%s chars > %s): %s",
+                len(content),
+                MAX_MEMORY_CHARACTER_COUNT,
+                path,
+            )
         if source_kind == "agent_instruction":
             remaining = AGENTS_MD_MAX_BYTES - agents_bytes_used
             if remaining <= 0:
@@ -279,6 +470,9 @@ def _schedule_instructions_loaded_hook(path: Path, source_kind: str) -> None:
         "project_rule": "Project",
         "local_memory": "Local",
         "user_memory": "User",
+        "user_rule": "User",
+        "managed_memory": "Managed",
+        "managed_rule": "Managed",
     }.get(source_kind, source_kind)
 
     async def _run() -> None:
@@ -301,7 +495,9 @@ def load_project_guideline_bundle(
     workspace_path = _normalize_directory(workspace_dir)
     extra_paths = _normalize_additional_directories(workspace_path, additional_directories)
     cache_key = (str(workspace_path), tuple(str(path) for path in extra_paths))
-    specs = _iter_guideline_specs(workspace_path, extra_paths)
+    specs = _expand_guideline_imports(
+        _iter_guideline_specs(workspace_path, extra_paths)
+    )
     signature = _build_signature(specs)
 
     with _GUIDELINE_CACHE_LOCK:

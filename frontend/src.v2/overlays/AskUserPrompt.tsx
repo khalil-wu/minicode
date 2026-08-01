@@ -20,12 +20,12 @@ export const AskUserPrompt = () => {
     if (!visibleAskUser) return;
     const ws = getWebSocket();
     ws?.send(buildAskUserResponseCommand(visibleAskUser.requestId, text, visibleAskUser.protocol));
-    useAppStore.getState().clearAskUser();
+    useAppStore.getState().clearAskUser(visibleAskUser.requestId);
   }, [visibleAskUser]);
 
   const cancel = useCallback(() => {
     if (!visibleAskUser) return;
-    useAppStore.getState().clearAskUser();
+    useAppStore.getState().clearAskUser(visibleAskUser.requestId);
   }, [visibleAskUser]);
 
   useEffect(() => {

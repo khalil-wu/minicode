@@ -1,4 +1,4 @@
-import { Folder, X } from "lucide-react";
+import { Blocks, Folder, MessageSquareText, X } from "lucide-react";
 import { fileIcon } from "../shell/fileTreeHelpers";
 import { useAppStore } from "../stores";
 
@@ -35,9 +35,19 @@ export const ContextChipRegion = () => {
               {fileIcon(item.name || item.path || "file", { size: 12, className: "composer-context-icon-svg" })}
               <span style={tokenNameStyle}>@{item.name}</span>
             </button>
+          ) : item.kind === "browser_annotation" ? (
+            <span style={mentionLabelStyle}>
+              <MessageSquareText size={14} />
+              <span style={tokenNameStyle}>@{item.name}</span>
+            </span>
+          ) : item.kind === "plugin" ? (
+            <span style={mentionLabelStyle}>
+              <Blocks size={14} />
+              <span style={tokenNameStyle}>@{item.name}</span>
+            </span>
           ) : (
             <span style={mentionLabelStyle}>
-              <Folder size={12} />
+              <Folder size={14} />
               <span style={tokenNameStyle}>@{item.name}</span>
             </span>
           )}
@@ -47,7 +57,7 @@ export const ContextChipRegion = () => {
             onClick={() => removeSelectedMention(item.path)}
             style={tokenRemoveStyle}
           >
-            <X size={12} />
+            <X size={14} />
           </button>
         </span>
       ))}
@@ -69,7 +79,7 @@ export const ContextChipRegion = () => {
             </button>
           ))}
           <button onClick={() => setMentionResults([])} aria-label="Clear context mentions" style={dismissStyle}>
-            <X size={13} />
+            <X size={14} />
           </button>
         </>
       )}

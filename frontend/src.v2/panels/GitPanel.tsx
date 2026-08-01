@@ -78,7 +78,7 @@ export const GitPanel = () => {
     const file = selectedFile;
     const directory = workingDirectory;
     setDiffError("");
-    void fetchWorkspaceGitDiff(file, directory).then((result) => {
+    void fetchWorkspaceGitDiff(directory, file).then((result) => {
       if (epoch !== diffEpochRef.current || file !== selectedFile || directory !== useAppStore.getState().workingDirectory) return;
       if (!result) {
         setDiffError("Could not load Git diff.");
@@ -94,7 +94,7 @@ export const GitPanel = () => {
   const switchWorktree = async (path: string) => {
     setWorktreeAction(path);
     try {
-      const result = await switchWorkspaceGitWorktree(path);
+      const result = await switchWorkspaceGitWorktree(workingDirectory, path);
       if (result?.success) {
         useAppStore.getState().setWorkingDirectory(result.project?.root_path || path);
         await refresh();
@@ -118,7 +118,7 @@ export const GitPanel = () => {
     if (!ok) return;
     setWorktreeAction(path);
     try {
-      const result = await removeWorkspaceGitWorktree(path);
+      const result = await removeWorkspaceGitWorktree(workingDirectory, path);
       if (!result?.removed) {
         await showAlert({ title: "Error", message: result?.error || "Failed to remove worktree." });
       }
@@ -137,7 +137,7 @@ export const GitPanel = () => {
             {branch}
           </span>
           <button onClick={() => void refresh()} disabled={loading} title="Refresh Git status" aria-label="Refresh Git status" className="w-6 h-6 border rounded inline-flex items-center justify-center p-0 bg-transparent cursor-pointer" style={{ borderColor: "var(--border-subtle)", borderRadius: "var(--radius-sm, 4px)", color: "var(--text-muted)" }}>
-            <RefreshCw size={13} />
+            <RefreshCw size={14} />
           </button>
         </div>
 
@@ -227,7 +227,7 @@ export const GitPanel = () => {
                       aria-label="Remove protected workspace"
                       className="inline-flex items-center justify-center p-0 bg-transparent cursor-pointer border rounded" style={{ width: 22, height: 22, borderColor: "var(--border-subtle)", borderRadius: "var(--radius-sm, 4px)", color: "var(--state-danger)" }}
                     >
-                      <Trash2 size={12} />
+                      <Trash2 size={14} />
                     </button>
                   )}
                 </div>
@@ -265,7 +265,7 @@ export const GitPanel = () => {
               aria-label="Open file in editor"
               className="w-6 h-6 border rounded inline-flex items-center justify-center p-0 bg-transparent cursor-pointer" style={{ borderColor: "var(--border-subtle)", borderRadius: "var(--radius-sm, 4px)", color: "var(--text-muted)" }}
             >
-              <ExternalLink size={13} />
+              <ExternalLink size={14} />
             </button>
           )}
           {selectedFile && (

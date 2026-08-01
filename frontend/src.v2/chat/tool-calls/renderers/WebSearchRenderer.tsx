@@ -1,6 +1,7 @@
 import { useMemo } from "react";
-import { openWebInPreview } from "../../openWebInPreview";
-import type { ToolRendererProps } from "../toolRendererRegistry";
+import { openWebTarget } from "../../openWebTarget";
+import { BrandIcon } from "../../../components/BrandIcon";
+import type { ToolCallRecord } from "../../../lib/tool-call-reducer";
 
 export const WebSearchResultsView = ({ text, structured }: { text: string; structured?: string }) => {
   const items = useMemo(() => {
@@ -42,7 +43,7 @@ export const WebSearchResultsView = ({ text, structured }: { text: string; struc
   }, [text, structured]);
 
   const openUrl = (url: string) => {
-    openWebInPreview(url);
+    openWebTarget(url);
   };
 
   if (items.length === 0) {
@@ -52,24 +53,17 @@ export const WebSearchResultsView = ({ text, structured }: { text: string; struc
   return (
     <div className="grid gap-3 w-full font-[var(--font-ui)] mt-1.5">
       <div className="text-[var(--text-muted)] text-xs font-medium font-mono">
-        SEARCH RESULTS ({items.length})
+        搜索结果（{items.length}）
       </div>
       <div className="grid gap-2">
-        {items.map((item) => {
-          let hostname = "";
-          try {
-            hostname = new URL(item.url).hostname;
-          } catch {
-            hostname = "";
-          }
-          return (
+        {items.map((item) => (
             <div
               key={item.index}
               className="bg-[var(--surface-soft)] border border-[var(--border-subtle)] rounded p-2.5 grid gap-1"
             >
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                  {hostname && <span style={domainGlyphStyle}>{hostname.slice(0, 1).toUpperCase()}</span>}
+                  <BrandIcon value={`${item.title} ${item.url}`} websiteUrl={item.url} fallback="web" size={14} />
                   <button
                     type="button"
                     onClick={() => openUrl(item.url)}
@@ -83,7 +77,7 @@ export const WebSearchResultsView = ({ text, structured }: { text: string; struc
                   onClick={() => openUrl(item.url)}
                   className="text-xs px-1.5 py-0.5 rounded bg-[var(--surface-base)] border border-[var(--border-subtle)] text-[var(--text-secondary)] cursor-pointer"
                 >
-                  Open in Preview Pane
+                  在浏览器中打开
                 </button>
               </div>
               <div className="text-xs text-[var(--text-muted)] font-mono break-all">
@@ -95,29 +89,16 @@ export const WebSearchResultsView = ({ text, structured }: { text: string; struc
                 </div>
               )}
             </div>
-          );
-        })}
+        ))}
       </div>
     </div>
   );
 };
 
-export const WebSearchToolRenderer = ({ record, resultSummary = "", rawResultSummary = "" }: ToolRendererProps) => (
+export const WebSearchToolRenderer = ({ record, resultSummary = "", rawResultSummary = "" }: {
+  record: ToolCallRecord;
+  resultSummary?: string;
+  rawResultSummary?: string;
+}) => (
   <WebSearchResultsView text={rawResultSummary || resultSummary} structured={record.contentPreview} />
 );
-
-const domainGlyphStyle: React.CSSProperties = {
-  width: 14,
-  height: 14,
-  borderRadius: "var(--radius-sm, 3px)",
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  flexShrink: 0,
-  background: "color-mix(in oklch, var(--accent-primary) 12%, var(--surface-base))",
-  border: "1px solid var(--border-subtle)",
-  color: "var(--accent-primary)",
-  fontSize: "9px",
-  fontWeight: 700,
-  fontFamily: "var(--font-ui)",
-};

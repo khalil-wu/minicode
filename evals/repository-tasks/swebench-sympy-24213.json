@@ -1,0 +1,40 @@
+{
+  "id": "swebench-sympy-24213",
+  "title": "SymPy equivalent unit dimensions in additive expressions",
+  "prompt": "Fix SymPy's unit factor and dimension collection so an Add expression accepts terms whose dimensions are mathematically equivalent even when their symbolic Dimension expressions are not structurally identical. It must continue rejecting genuinely incompatible dimensions. Inspect the dimension system APIs, implement the production fix, and run the relevant unit tests. Do not modify tests.",
+  "source": "../../artifacts/eval-sources/sympy-24213",
+  "env": {
+    "PYTHONPATH": ".",
+    "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+    "PYTHONUTF8": "1",
+    "PYTHONIOENCODING": "utf-8"
+  },
+  "baseline": [
+    {
+      "name": "prove equivalent dimension regression",
+      "argv": ["python", "-m", "pytest", "sympy/physics/units/tests/test_quantities.py::test_issue_24211", "-q"],
+      "timeout_seconds": 300
+    }
+  ],
+  "judges": [
+    {
+      "name": "official equivalent dimension regression",
+      "argv": ["python", "-m", "pytest", "sympy/physics/units/tests/test_quantities.py::test_issue_24211", "-q"],
+      "timeout_seconds": 300
+    },
+    {
+      "name": "complete units regression package",
+      "argv": ["python", "-m", "pytest", "sympy/physics/units/tests", "-q"],
+      "timeout_seconds": 900
+    },
+    {
+      "name": "units source compiler check",
+      "argv": ["python", "-m", "compileall", "-q", "sympy/physics/units"],
+      "timeout_seconds": 120
+    }
+  ],
+  "forbidden_changes": ["sympy/**/tests/**"],
+  "agent_verify_command": "python -m pytest sympy/physics/units/tests/test_quantities.py::test_issue_24211 -q",
+  "agent_verify_timeout_seconds": 300,
+  "agent_timeout_seconds": 1800
+}

@@ -6,6 +6,9 @@ import asyncio
 import re
 from dataclasses import dataclass, field
 
+from backend.runtime_env import sanitized_git_env
+from backend.subprocesses import communicate, spawn_exec
+
 
 @dataclass
 class FileDiff:
@@ -66,24 +69,26 @@ def _parse_diff_output(raw: str) -> StructuredDiff:
 
 
 async def _run_git(workspace_root: str, *args: str) -> str:
-    proc = await asyncio.create_subprocess_exec(
+    proc = await spawn_exec(
         "git", *args,
         cwd=workspace_root,
+        env=sanitized_git_env(workspace_root),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, _ = await proc.communicate()
+    stdout, _ = await communicate(proc, timeout=15)
     return stdout.decode("utf-8", errors="replace")
 
 
 async def _run_git_ok(workspace_root: str, *args: str) -> bool:
-    proc = await asyncio.create_subprocess_exec(
+    proc = await spawn_exec(
         "git", *args,
         cwd=workspace_root,
+        env=sanitized_git_env(workspace_root),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    await proc.communicate()
+    await communicate(proc, timeout=15)
     return proc.returncode == 0
 
 

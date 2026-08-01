@@ -5,11 +5,12 @@ import type {
   InspectorUpdateEvent,
   ServerEvent,
 } from "../protocol/events";
-import { maybeAutoRoutePanel } from "./displayRouting";
+import { addInspectorPayload } from "./inspectorEntries";
 
 interface ArtifactContentEvent {
   type: "artifact_content";
   artifact_id?: string;
+  conversation_id?: string;
   content?: string;
   preview?: string;
   media_type?: string;
@@ -19,22 +20,33 @@ interface ArtifactContentEvent {
 
 export const handleArtifactEvent = (e: ServerEvent, conversationId?: string): boolean => {
   const s = useAppStore.getState();
+  const eventOwner = (e as unknown as { conversation_id?: unknown }).conversation_id;
+  const owner = typeof eventOwner === "string" && eventOwner.trim()
+    ? eventOwner.trim()
+    : conversationId?.trim() || undefined;
   switch (e.type) {
     case "artifact_content": {
       const ev = e as ArtifactContentEvent;
       if (ev.artifact_id) {
+        const artifact = {
+          artifactId: ev.artifact_id,
+          content: ev.content ?? "",
+          preview: ev.preview,
+          mediaType: ev.media_type,
+          url: ev.url,
+          loadedAt: Date.now(),
+        };
         const shouldUpdatePreview = ev.purpose !== "image_preview" && ev.purpose !== "attachment";
-        if (shouldUpdatePreview) {
-          s.setPreviewArtifact({
-            artifactId: ev.artifact_id,
-            content: ev.content ?? "",
-            preview: ev.preview,
-            mediaType: ev.media_type,
-            url: ev.url,
-            loadedAt: Date.now(),
+        if (shouldUpdatePreview && owner) {
+          s.setConversationPreviewArtifact(owner, artifact);
+        } else if (shouldUpdatePreview && !owner) {
+          addInspectorPayload("artifact", ev.artifact_id, {
+            event: e.type,
+            unowned: true,
+            payload: ev,
           });
         }
-        if (ev.media_type?.startsWith("image/") && ev.url) {
+        if (owner && ev.media_type?.startsWith("image/") && ev.url) {
           window.dispatchEvent(new CustomEvent("artifact:image-preview", {
             detail: {
               artifactId: ev.artifact_id,
@@ -49,9 +61,17 @@ export const handleArtifactEvent = (e: ServerEvent, conversationId?: string): bo
     }
     case "artifact.preview": {
       const ev = e as ArtifactPreviewEvent;
+      if (!owner) {
+        addInspectorPayload("artifact", ev.artifact_id, {
+          event: e.type,
+          unowned: true,
+          payload: ev,
+        });
+        return true;
+      }
       useAppStore.setState((st) => {
-        const targetId = conversationId || st.conversationId || undefined;
-        const isActive = !targetId || targetId === st.conversationId;
+        const targetId = owner;
+        const isActive = targetId === st.conversationId;
         const sourceMessages = targetId && !isActive
           ? st.conversationMessages[targetId] ?? []
           : st.messages;
@@ -88,9 +108,17 @@ export const handleArtifactEvent = (e: ServerEvent, conversationId?: string): bo
     }
     case "citation.add": {
       const ev = e as CitationAddEvent;
+      if (!owner) {
+        addInspectorPayload("message", ev.message_id, {
+          event: e.type,
+          unowned: true,
+          payload: ev,
+        });
+        return true;
+      }
       useAppStore.setState((st) => {
-        const targetId = conversationId || st.conversationId || undefined;
-        const isActive = !targetId || targetId === st.conversationId;
+        const targetId = owner;
+        const isActive = targetId === st.conversationId;
         const sourceMessages = targetId && !isActive
           ? st.conversationMessages[targetId] ?? []
           : st.messages;
@@ -128,7 +156,6 @@ export const handleArtifactEvent = (e: ServerEvent, conversationId?: string): bo
         payload: ev.payload,
         timestamp: Date.now(),
       });
-      maybeAutoRoutePanel(ev, "inspector");
       return true;
     }
     default:

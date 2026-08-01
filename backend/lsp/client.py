@@ -29,8 +29,12 @@ import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
-from urllib.parse import unquote, urlparse
+from typing import Any, Callable
+from urllib.parse import quote, unquote, urlparse
+
+from backend.runtime_env import sanitized_subprocess_env
+from backend.sandbox.policy import SandboxPolicy
+from backend.sandbox.runner import SandboxRunner, SandboxUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -118,17 +122,27 @@ class LSPSymbol:
 class LSPClient:
     """Minimal stdio-based LSP client for a single language server."""
 
-    def __init__(self, command: str, args: list[str], workspace_root: str) -> None:
+    def __init__(
+        self,
+        command: str,
+        args: list[str],
+        workspace_root: str,
+        *,
+        server_name: str | None = None,
+        sandbox_runner: SandboxRunner | None = None,
+    ) -> None:
         self._command = command
         self._args = args
         self._workspace_root = workspace_root
+        self._server_name = server_name or Path(command).name
+        self._sandbox_runner = sandbox_runner or _lsp_sandbox_runner(workspace_root)
         self._process: asyncio.subprocess.Process | None = None
         self._stdin: asyncio.StreamWriter | None = None
         self._stdout: asyncio.StreamReader | None = None
         self._next_id = 1
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._initialized = False
-        self._opened_files: set[str] = set()
+        self._opened_files: dict[str, tuple[int, str]] = {}
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
@@ -140,9 +154,9 @@ class LSPClient:
         if self._process is not None and self._process.returncode is None:
             return
         try:
-            self._process = await asyncio.create_subprocess_exec(
-                self._command,
-                *self._args,
+            self._process = await self._sandbox_runner.spawn_interactive(
+                [self._command, *self._args],
+                container_argv=[self._server_name, *self._args],
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -152,6 +166,8 @@ class LSPClient:
             self._stdout = self._process.stdout
         except FileNotFoundError:
             raise RuntimeError(f"Language server not found: {self._command}")
+        except SandboxUnavailableError as exc:
+            raise RuntimeError(f"Language server sandbox unavailable: {exc}") from exc
         except OSError as exc:
             raise RuntimeError(f"Failed to start language server: {exc}")
 
@@ -162,18 +178,17 @@ class LSPClient:
     async def stop(self) -> None:
         if self._process and self._process.returncode is None:
             try:
+                for file_path in list(self._opened_files):
+                    await self.close_file(file_path)
                 await self._send_request("shutdown", {})
                 await self._send_notification("exit", {})
             except Exception:
                 pass
+        if self._process is not None:
             try:
-                self._process.terminate()
-                await asyncio.wait_for(self._process.wait(), timeout=3.0)
-            except (asyncio.TimeoutError, ProcessLookupError):
-                try:
-                    self._process.kill()
-                except ProcessLookupError:
-                    pass
+                await self._sandbox_runner.terminate(self._process)
+            except ProcessLookupError:
+                pass
         for task_attr in ("_reader_task", "_stderr_task"):
             task = getattr(self, task_attr)
             if not task:
@@ -197,7 +212,7 @@ class LSPClient:
     async def _initialize(self) -> None:
         result = await self._send_request("initialize", {
             "processId": os.getpid(),
-            "rootUri": _path_to_uri(self._workspace_root),
+            "rootUri": self._path_to_uri(self._workspace_root),
             "capabilities": {
                 "textDocument": {
                     "definition": {"dynamicRegistration": False},
@@ -215,7 +230,7 @@ class LSPClient:
                 },
             },
             "workspaceFolders": [
-                {"uri": _path_to_uri(self._workspace_root), "name": Path(self._workspace_root).name}
+                {"uri": self._path_to_uri(self._workspace_root), "name": Path(self._workspace_root).name}
             ],
         })
         await self._send_notification("initialized", {})
@@ -223,45 +238,66 @@ class LSPClient:
 
     async def _ensure_file_open(self, file_path: str) -> None:
         abs_path = str(Path(file_path).resolve())
-        if abs_path in self._opened_files:
-            return
         try:
             content = Path(abs_path).read_text(encoding="utf-8", errors="replace")
         except OSError:
+            return
+        content_hash = __import__("hashlib").sha256(content.encode("utf-8")).hexdigest()
+        opened = self._opened_files.get(abs_path)
+        if opened is not None:
+            version, previous_hash = opened
+            if previous_hash == content_hash:
+                return
+            version += 1
+            await self._send_notification("textDocument/didChange", {
+                "textDocument": {"uri": self._path_to_uri(abs_path), "version": version},
+                "contentChanges": [{"text": content}],
+            })
+            self._opened_files[abs_path] = (version, content_hash)
             return
         ext = Path(abs_path).suffix.lstrip(".")
         lang_id = _language_id_for_extension(ext)
         await self._send_notification("textDocument/didOpen", {
             "textDocument": {
-                "uri": _path_to_uri(abs_path),
+                "uri": self._path_to_uri(abs_path),
                 "languageId": lang_id,
                 "version": 1,
                 "text": content,
             }
         })
-        self._opened_files.add(abs_path)
+        self._opened_files[abs_path] = (1, content_hash)
+
+    async def close_file(self, file_path: str) -> None:
+        """Notify the server that a tracked document is no longer active."""
+        abs_path = str(Path(file_path).resolve())
+        if abs_path not in self._opened_files:
+            return
+        await self._send_notification("textDocument/didClose", {
+            "textDocument": {"uri": self._path_to_uri(abs_path)},
+        })
+        self._opened_files.pop(abs_path, None)
 
     async def definition(self, file_path: str, line: int, character: int) -> list[LSPLocation]:
         await self._ensure_file_open(file_path)
         result = await self._send_request("textDocument/definition", {
-            "textDocument": {"uri": _path_to_uri(str(Path(file_path).resolve()))},
+            "textDocument": {"uri": self._path_to_uri(str(Path(file_path).resolve()))},
             "position": {"line": line, "character": character},
         })
-        return _parse_locations(result)
+        return _parse_locations(result, path_mapper=self._sandbox_runner.map_path_from_sandbox)
 
     async def references(self, file_path: str, line: int, character: int) -> list[LSPLocation]:
         await self._ensure_file_open(file_path)
         result = await self._send_request("textDocument/references", {
-            "textDocument": {"uri": _path_to_uri(str(Path(file_path).resolve()))},
+            "textDocument": {"uri": self._path_to_uri(str(Path(file_path).resolve()))},
             "position": {"line": line, "character": character},
             "context": {"includeDeclaration": True},
         })
-        return _parse_locations(result)
+        return _parse_locations(result, path_mapper=self._sandbox_runner.map_path_from_sandbox)
 
     async def hover(self, file_path: str, line: int, character: int) -> LSPHover | None:
         await self._ensure_file_open(file_path)
         result = await self._send_request("textDocument/hover", {
-            "textDocument": {"uri": _path_to_uri(str(Path(file_path).resolve()))},
+            "textDocument": {"uri": self._path_to_uri(str(Path(file_path).resolve()))},
             "position": {"line": line, "character": character},
         })
         if not isinstance(result, dict):
@@ -289,7 +325,7 @@ class LSPClient:
     async def document_symbols(self, file_path: str) -> list[LSPSymbol]:
         await self._ensure_file_open(file_path)
         result = await self._send_request("textDocument/documentSymbol", {
-            "textDocument": {"uri": _path_to_uri(str(Path(file_path).resolve()))},
+            "textDocument": {"uri": self._path_to_uri(str(Path(file_path).resolve()))},
         })
         if not isinstance(result, list):
             return []
@@ -324,8 +360,8 @@ class LSPClient:
 
     async def _read_loop(self) -> None:
         buffer = b""
-        while True:
-            try:
+        try:
+            while True:
                 chunk = await self._stdout.read(4096)  # type: ignore[union-attr]
                 if not chunk:
                     break
@@ -356,11 +392,15 @@ class LSPClient:
                                 )
                             else:
                                 future.set_result(message.get("result"))
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                logger.debug("LSP read loop error: %s", exc)
-                break
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("LSP read loop error: %s", exc)
+        finally:
+            for future in self._pending.values():
+                if not future.done():
+                    future.set_exception(RuntimeError("Language server connection closed"))
+            self._pending.clear()
 
     async def _drain_stderr(self) -> None:
         """Drain language-server stderr so verbose logs cannot block stdio."""
@@ -379,6 +419,12 @@ class LSPClient:
                 logger.debug("LSP stderr drain error: %s", exc)
                 break
 
+    def _path_to_uri(self, path: str) -> str:
+        mapped = self._sandbox_runner.map_path_to_sandbox(path)
+        if mapped.startswith("/"):
+            return "file://" + quote(mapped, safe="/")
+        return _path_to_uri(mapped)
+
 
 class LSPManager:
     """Manages LSP clients per workspace root and language server type."""
@@ -395,13 +441,19 @@ class LSPManager:
         server = self.server_for_file(file_path)
         if not server:
             return False
-        return shutil.which(server) is not None
+        workspace_root = str(Path(file_path).resolve().parent)
+        executable = _resolve_server_executable(server, workspace_root)
+        if executable is None:
+            return False
+        return _lsp_sandbox_runner(workspace_root).capability().available
 
     async def get_client(self, file_path: str, workspace_root: str) -> LSPClient | None:
         server = self.server_for_file(file_path)
         if not server:
             return None
-        if not shutil.which(server):
+        workspace_root = str(Path(workspace_root).expanduser().resolve())
+        executable = _resolve_server_executable(server, workspace_root)
+        if executable is None:
             return None
         key = (workspace_root, server)
         async with self._lock:
@@ -415,14 +467,40 @@ class LSPManager:
                 self._clients.pop(key, None)
             if client is None:
                 args = _SERVER_ARGS.get(server, [])
-                client = LSPClient(server, args, workspace_root)
+                runner = _lsp_sandbox_runner(workspace_root)
+                if not runner.capability().available:
+                    logger.warning(
+                        "LSP sandbox unavailable for %s: %s",
+                        server,
+                        runner.capability().reason,
+                    )
+                    return None
+                client = LSPClient(
+                    executable,
+                    args,
+                    workspace_root,
+                    server_name=server,
+                    sandbox_runner=runner,
+                )
                 try:
                     await client.start()
                 except RuntimeError as exc:
                     logger.debug("LSP start failed for %s: %s", server, exc)
+                    try:
+                        await client.stop()
+                    except Exception:
+                        logger.debug("LSP cleanup failed after start error for %s", server, exc_info=True)
                     return None
                 self._clients[key] = client
             return client
+
+    async def close_file(self, file_path: str, workspace_root: str) -> None:
+        server = self.server_for_file(file_path)
+        if not server:
+            return
+        client = self._clients.get((workspace_root, server))
+        if client is not None and client.is_running():
+            await client.close_file(file_path)
 
     async def shutdown_all(self) -> None:
         async with self._lock:
@@ -436,21 +514,78 @@ class LSPManager:
 
 # ── Helpers ─────────────────────────────────────────────────────────
 
+def _is_within_path(candidate: Path, root: Path) -> bool:
+    try:
+        candidate.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _resolve_server_executable(server: str, workspace_root: str) -> str | None:
+    """Resolve from absolute non-workspace PATH entries only."""
+    workspace = Path(workspace_root).expanduser().resolve()
+    raw_path = str(sanitized_subprocess_env().get("PATH") or "")
+    safe_entries: list[str] = []
+    for raw_entry in raw_path.split(os.pathsep):
+        entry = raw_entry.strip().strip('"')
+        if not entry:
+            continue
+        candidate = Path(entry).expanduser()
+        if not candidate.is_absolute():
+            continue
+        try:
+            resolved_entry = candidate.resolve()
+        except OSError:
+            continue
+        if _is_within_path(resolved_entry, workspace):
+            continue
+        safe_entries.append(str(resolved_entry))
+    executable = shutil.which(server, path=os.pathsep.join(safe_entries))
+    if not executable:
+        return None
+    try:
+        resolved = Path(executable).resolve(strict=True)
+    except OSError:
+        return None
+    if _is_within_path(resolved, workspace):
+        return None
+    return str(resolved)
+
+
+def _lsp_sandbox_runner(workspace_root: str) -> SandboxRunner:
+    workspace = Path(workspace_root).expanduser().resolve()
+    return SandboxRunner(
+        SandboxPolicy(
+            workspace_root=workspace,
+            writable_roots=(),
+            readable_roots=(),
+            allow_network=False,
+            timeout=0,
+        )
+    )
+
 def _path_to_uri(path: str) -> str:
     return Path(path).resolve().as_uri()
 
 
-def _uri_to_path(uri: str) -> str:
+def _uri_to_path(uri: str, *, path_mapper: Callable[[str], str] | None = None) -> str:
     parsed = urlparse(uri)
     if parsed.scheme and parsed.scheme != "file":
         return uri
     path = unquote(parsed.path if parsed.scheme else uri)
+    if path_mapper is not None:
+        path = path_mapper(path)
     if os.name == "nt" and path.startswith("/") and len(path) >= 3 and path[2] == ":":
         path = path[1:]
     return path.replace("/", os.sep) if os.name == "nt" else path
 
 
-def _parse_locations(result: Any) -> list[LSPLocation]:
+def _parse_locations(
+    result: Any,
+    *,
+    path_mapper: Callable[[str], str] | None = None,
+) -> list[LSPLocation]:
     if not result:
         return []
     if isinstance(result, dict):
@@ -469,7 +604,7 @@ def _parse_locations(result: Any) -> list[LSPLocation]:
         start = rng.get("start", {}) if isinstance(rng, dict) else {}
         end = rng.get("end", {}) if isinstance(rng, dict) else {}
         locations.append(LSPLocation(
-            file=_uri_to_path(uri),
+            file=_uri_to_path(uri, path_mapper=path_mapper),
             line=start.get("line", 0),
             character=start.get("character", 0),
             end_line=end.get("line", 0),

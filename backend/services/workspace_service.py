@@ -11,6 +11,7 @@ from typing import Any
 
 from backend.agent.message import AgentEvent
 from backend.runtime_env import sanitized_git_env
+from backend.subprocesses import communicate, spawn_exec
 
 
 @dataclass(frozen=True)
@@ -170,7 +171,7 @@ def workspace_imported_payload(workspace_context: Any, metadata: Any) -> dict[st
     return {
         "type": "workspace.imported",
         "project": workspace_context.to_dict(),
-        "summary": workspace_context.get_project_summary()[:3000],
+        "summary": workspace_context.get_project_summary(),
         "file_count": metadata.file_count,
     }
 
@@ -341,22 +342,82 @@ def parse_gh_pr_status(output: str) -> tuple[dict[str, Any] | None, list[dict[st
 
 
 async def fetch_git_pr_status_payload(workspace_root: Any) -> dict[str, Any]:
+    automation = read_pr_automation(workspace_root)
     gh_path = shutil.which("gh")
     if not gh_path:
-        return git_pr_status_payload(error="gh CLI not found")
+        payload = git_pr_status_payload(error="gh CLI not found")
+        payload["automation"] = automation
+        return payload
 
     try:
         code, out = await _run_gh_pr_view(gh_path, cwd=str(workspace_root))
         if code == 0 and out:
             pr_info, checks = parse_gh_pr_status(out)
-            return git_pr_status_payload(pr=pr_info, checks=checks)
-        return git_pr_status_payload()
+            payload = git_pr_status_payload(pr=pr_info, checks=checks)
+        else:
+            payload = git_pr_status_payload()
     except Exception as exc:
-        return git_pr_status_payload(error=str(exc))
+        payload = git_pr_status_payload(error=str(exc))
+    payload["automation"] = automation
+    return payload
+
+
+def _pr_automation_path(workspace_root: Any) -> Path | None:
+    try:
+        root = Path(str(workspace_root or "")).expanduser().resolve()
+    except (OSError, ValueError):
+        return None
+    return root / ".minicode" / "pr_automation.json" if root.is_dir() else None
+
+
+def read_pr_automation(workspace_root: Any) -> dict[str, Any]:
+    path = _pr_automation_path(workspace_root)
+    defaults = {"auto_fix": False, "auto_merge": False}
+    if path is None or not path.exists():
+        return defaults
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return defaults
+    return {
+        "auto_fix": bool(raw.get("auto_fix", False)),
+        "auto_merge": bool(raw.get("auto_merge", False)),
+    }
+
+
+def write_pr_automation(workspace_root: Any, data: dict[str, Any]) -> dict[str, Any]:
+    path = _pr_automation_path(workspace_root)
+    if path is None:
+        raise ValueError("Open a workspace before configuring PR automation")
+    current = read_pr_automation(workspace_root)
+    for key in ("auto_fix", "auto_merge"):
+        if key in data:
+            current[key] = bool(data[key])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(current, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return current
+
+
+async def set_git_pr_automation_payload(workspace_root: Any, data: dict[str, Any]) -> dict[str, Any]:
+    current = write_pr_automation(workspace_root, data)
+    auto_merge_error = ""
+    if current["auto_merge"] and "auto_merge" in data:
+        gh_path = shutil.which("gh")
+        if not gh_path:
+            auto_merge_error = "gh CLI not found; Auto-merge was saved but cannot be enabled remotely."
+        else:
+            code, output = await _run_gh_pr_merge_auto(gh_path, cwd=str(workspace_root))
+            if code != 0:
+                auto_merge_error = output or "gh pr merge --auto failed"
+    payload = await fetch_git_pr_status_payload(workspace_root)
+    payload["automation"] = current
+    if auto_merge_error:
+        payload["error"] = auto_merge_error
+    return payload
 
 
 async def _run_gh_pr_view(gh_path: str, *, cwd: str) -> tuple[int, str]:
-    proc = await asyncio.create_subprocess_exec(
+    proc = await spawn_exec(
         gh_path,
         "pr",
         "view",
@@ -366,5 +427,20 @@ async def _run_gh_pr_view(gh_path: str, *, cwd: str) -> tuple[int, str]:
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
     )
-    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
+    stdout, stderr = await communicate(proc, timeout=15)
+    return proc.returncode or 0, (stdout or stderr or b"").decode(errors="replace").strip()
+
+
+async def _run_gh_pr_merge_auto(gh_path: str, *, cwd: str) -> tuple[int, str]:
+    proc = await spawn_exec(
+        gh_path,
+        "pr",
+        "merge",
+        "--auto",
+        "--merge",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
+    )
+    stdout, stderr = await communicate(proc, timeout=20)
     return proc.returncode or 0, (stdout or stderr or b"").decode(errors="replace").strip()

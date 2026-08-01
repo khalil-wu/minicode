@@ -1,9 +1,10 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type React from "react";
 import {
   Copy,
   StopCircle,
 } from "lucide-react";
+import stripAnsi from "strip-ansi";
 import type { ExecCellState } from "./cellTypes";
 import { shortCommand } from "./activityCellHelpers";
 import { extractCommandCommentLabel } from "../../lib/command-comment-label";
@@ -11,7 +12,7 @@ import { StatusIcon } from "../../components/icons";
 import "./cells.css";
 
 const streamOutputText = (full: string | undefined, preview: string[]): string =>
-  (full ?? preview.join("\n")).trimEnd();
+  stripAnsi(full ?? preview.join("\n")).trimEnd();
 
 /** ExecCell renders a standalone command execution summary. */
 export function ExecCell({
@@ -27,13 +28,14 @@ export function ExecCell({
     cell.status === "pending_approval" || (cell.status !== "running" && !cell.collapsed),
   );
   const [copied, setCopied] = useState(false);
+  const materializeOutput = expanded || cell.status === "running";
   const stdoutText = useMemo(
-    () => streamOutputText(cell.stdoutFull, cell.stdoutPreview),
-    [cell.stdoutFull, cell.stdoutPreview],
+    () => materializeOutput ? streamOutputText(cell.stdoutFull, cell.stdoutPreview) : "",
+    [cell.stdoutFull, cell.stdoutPreview, materializeOutput],
   );
   const stderrText = useMemo(
-    () => streamOutputText(cell.stderrFull, cell.stderrPreview),
-    [cell.stderrFull, cell.stderrPreview],
+    () => materializeOutput ? streamOutputText(cell.stderrFull, cell.stderrPreview) : "",
+    [cell.stderrFull, cell.stderrPreview, materializeOutput],
   );
   const outputText = useMemo(() => {
     const stdout = stdoutText;
@@ -51,35 +53,39 @@ export function ExecCell({
         ? "success"
         : cell.status === "failed"
           ? "failed"
-          : "cancelled";
+          : cell.status === "partial"
+            ? "partial"
+            : "cancelled";
 
   const statusLabel =
     cell.status === "pending_approval"
       ? "等待授权"
       : cell.status === "running"
         ? "运行中"
-        : cell.status === "success"
-          ? "成功"
-          : cell.status === "failed"
-            ? "失败"
-            : "已取消";
-  const statusMeta =
-    cell.status === "failed"
-      ? cell.exitCode != null ? `exit ${cell.exitCode}` : ""
-      : statusLabel;
-  const title = commandTitle(cell.status);
+        : cell.background && cell.status === "success"
+          ? "后台运行"
+          : cell.status === "success"
+            ? "成功"
+            : cell.status === "failed"
+              ? "失败"
+              : cell.status === "partial"
+                ? "未完整结束"
+                : "已取消";
+  const statusMeta = cell.exitCode != null ? `exit ${cell.exitCode}` : statusLabel;
+  const title = commandTitle(cell.status, Boolean(cell.background));
   const commandPreview = shortCommand(cell.command).replace(/^\$\s*/, "");
   // Prefer a leading `# comment` as the human-readable label (what the model
   // wrote for the user to read); fall back to the raw command preview. The full
   // command stays available via the title tooltip and the expanded shell block.
   const commandLabel = extractCommandCommentLabel(cell.command) ?? commandPreview;
+  const showExpandedCommand = commandLabel !== commandPreview;
   const collapsedOutputPreview = useMemo(
     () => compactInlineOutputPreview(stdoutText || stderrText),
     [stderrText, stdoutText],
   );
 
   const duration =
-    cell.durationMs != null
+    !cell.background && cell.durationMs != null
       ? cell.durationMs < 1000
         ? `${cell.durationMs}ms`
         : `${(cell.durationMs / 1000).toFixed(1)}s`
@@ -125,7 +131,7 @@ export function ExecCell({
           aria-expanded={expanded}
         >
           <span className={`exec-cell-status-badge exec-cell-status-${statusColor}`}>
-            <StatusIcon status={cell.status} size={12} spinningClassName="exec-cell-spin-icon" />
+            <StatusIcon status={cell.status} size={14} spinningClassName="exec-cell-spin-icon" />
           </span>
           <span className="exec-cell-title">{title}</span>
           <span className="exec-cell-command-preview" title={cell.command}>{commandLabel}</span>
@@ -142,7 +148,7 @@ export function ExecCell({
             aria-label="停止命令"
             className="exec-cell-stop-button"
           >
-            <StopCircle size={12} />
+            <StopCircle size={14} />
             停止
           </button>
         )}
@@ -154,10 +160,12 @@ export function ExecCell({
             <span>Shell</span>
             <span>{statusMeta}</span>
           </div>
-          <pre className="exec-cell-shell-command">
-            <span className="exec-cell-shell-prompt">$</span>
-            <span className="exec-cell-shell-command-text">{cell.command}</span>
-          </pre>
+          {showExpandedCommand ? (
+            <pre className="exec-cell-shell-command">
+              <span className="exec-cell-shell-prompt">$</span>
+              <span className="exec-cell-shell-command-text">{cell.command}</span>
+            </pre>
+          ) : null}
           {hasOutput ? (
             <>
               {stdoutText && (
@@ -165,6 +173,7 @@ export function ExecCell({
                   label={labelStreams ? "stdout" : undefined}
                   text={stdoutText}
                   tone="normal"
+                  followTail={cell.status === "running"}
                 />
               )}
               {stderrText && (
@@ -172,6 +181,7 @@ export function ExecCell({
                   label="stderr"
                   text={stderrText}
                   tone={cell.status === "failed" ? "error" : "warning"}
+                  followTail={cell.status === "running"}
                 />
               )}
             </>
@@ -183,9 +193,11 @@ export function ExecCell({
             <div className="exec-cell-empty-output">
               {cell.status === "cancelled"
                 ? "已取消"
-                : cell.status === "success"
-                  ? "命令已完成，无 stdout/stderr 输出。"
-                  : "无输出"}
+                : cell.background && cell.status === "success"
+                  ? "后台命令已启动；状态和输出会保留在活动任务中。"
+                  : cell.status === "success"
+                    ? "命令已完成，无 stdout/stderr 输出。"
+                    : "无输出"}
             </div>
           )}
           <button
@@ -194,7 +206,7 @@ export function ExecCell({
             title={copied ? "已复制" : "复制输出"}
             className="exec-cell-copy-button"
           >
-            <Copy size={11} />
+            <Copy size={14} />
           </button>
         </div>
       )}
@@ -221,9 +233,11 @@ function compactInlineOutputPreview(value: string): string {
   return lines.slice(-2).join(" · ");
 }
 
-function commandTitle(status: ExecCellState["status"]): string {
+function commandTitle(status: ExecCellState["status"], background: boolean): string {
   if (status === "pending_approval") return "等待运行命令";
   if (status === "running") return "正在运行命令";
+  if (background && status === "success") return "已启动后台命令";
+  if (status === "partial") return "命令未完整结束";
   if (status === "cancelled") return "命令已取消";
   return "已运行命令";
 }
@@ -232,11 +246,22 @@ function OutputSection({
   label,
   text,
   tone,
+  followTail = false,
 }: {
   label?: "stdout" | "stderr";
   text: string;
   tone: "normal" | "warning" | "error";
+  followTail?: boolean;
 }) {
+  const outputRef = useRef<HTMLPreElement>(null);
+  const stickToTailRef = useRef(true);
+
+  useLayoutEffect(() => {
+    const output = outputRef.current;
+    if (!output || !followTail || !stickToTailRef.current) return;
+    output.scrollTop = output.scrollHeight;
+  }, [followTail, text]);
+
   return (
     <section aria-label={label ? `${label} output` : "command output"} className="exec-cell-output-section">
       {label && (
@@ -244,7 +269,14 @@ function OutputSection({
           {label}
         </div>
       )}
-      <pre className={`exec-cell-output-pre exec-cell-output-pre-${tone}`}>
+      <pre
+        ref={outputRef}
+        className={`exec-cell-output-pre exec-cell-output-pre-${tone}`}
+        onScroll={(event) => {
+          const output = event.currentTarget;
+          stickToTailRef.current = output.scrollHeight - output.scrollTop - output.clientHeight < 24;
+        }}
+      >
         {text}
       </pre>
     </section>

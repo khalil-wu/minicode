@@ -14,12 +14,12 @@ export const pendingPromptTargetsConversation = (
 ): boolean => {
   if (!prompt) return false;
   const promptConversationId = normalizeId(prompt.conversationId);
-  const targetId = normalizeId(targetConversationId) ?? normalizeId(activeConversationId);
-  if (promptConversationId) return promptConversationId === targetId;
-
-  const activeId = normalizeId(activeConversationId);
-  if (!targetId) return true;
-  return !activeId || targetId === activeId;
+  const targetId = normalizeId(targetConversationId);
+  // A prompt without an owner is unscoped. Never project it into whichever
+  // conversation happens to be active; the backend must attach the owner (or
+  // the caller must render it in a generic/unowned surface).
+  void activeConversationId;
+  return Boolean(promptConversationId && targetId && promptConversationId === targetId);
 };
 
 export const hasLocalPendingPromptForConversation = (

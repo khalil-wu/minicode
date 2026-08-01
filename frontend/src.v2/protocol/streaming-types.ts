@@ -24,7 +24,6 @@ export const AGENT_PROGRESS_PHASES = [
   "status",
   "iteration",
   "subagent",
-  "workflow",
   "cache",
 ] as const;
 
@@ -39,20 +38,17 @@ export const isAgentProgressPhase = (value: unknown): value is AgentProgressPhas
 
 export type StreamingServerEventType =
   // Streaming text + tool execution
-  | "text_chunk"
-  | "text_replace"
+  | "item.started"
+  | "agent_message.delta"
+  | "item.completed"
   | "image_chunk"
   | "thinking_delta"
   | "thinking"
   | "tool_call"
   | "tool_result"
   | "tool_output_delta"
-  | "agent.loop.started"
-  | "agent.loop.completed"
   | "agent.run.started"
-  | "agent.run.updated"
   | "agent.run.completed"
-  | "agent.phase.updated"
   | "agent.item"
   | "agent.progress"
   | "runtime.span"
@@ -73,10 +69,10 @@ export type StreamingServerEventType =
   // Subagents
   | "subagent.start"
   | "subagent.event"
+  | "subagent.mailbox"
   | "subagent.progress"
   | "subagent.done"
-  | "verification.started"
-  | "verification.result"
+  | "parent.notifications"
   // Citations + inspector
   | "citation.add"
   | "inspector.update"
@@ -92,11 +88,8 @@ export type StreamingClientCommandType =
   | "task.edit"
   | "plan.edit"
   | "agent.resume"
-  | "workflow.resume"
-  | "verification.run"
   | "subagent.cancel"
   | "subagent.status"
-  | "subagent.resume"
   | "send_message"
   | "inspector.focus";
 
@@ -104,50 +97,34 @@ export type StreamingClientCommandType =
 // Event payload types
 // ──────────────────────────────────────────────────────────────────
 
-export interface TextChunkEvent {
-  type: "text_chunk";
-  content: string;
-  source?: string;
-  visibility?: "final" | "timeline" | "unsealed" | "debug" | string;
-  role?: "assistant" | "runtime" | string;
-  phase?: "final" | "model" | "tool" | "recover" | string;
-  finalize?: boolean;
-  metadata?: TextStreamMetadata;
-  segmentId?: string;
-  segment_id?: string;
-  iterationIndex?: number;
-  iteration_index?: number;
-  streamAttempt?: number;
-  stream_attempt?: number;
-  sealReason?: string;
-  seal_reason?: string;
+export interface AgentMessageItem {
+  id: string;
+  type: "agent_message";
+  text: string;
+  source?: "model_final" | "reply" | "partial" | string;
+  status?: "in_progress" | "completed" | "partial" | string;
+}
+
+export interface ItemStartedEvent {
+  type: "item.started";
+  item: AgentMessageItem;
   message_id?: string;
 }
 
-export interface TextReplaceEvent {
-  type: "text_replace";
-  content: string;
-  source?: string;
-  visibility?: "final" | "timeline" | "unsealed" | "debug" | string;
-  role?: "assistant" | "runtime" | string;
-  phase?: "final" | "model" | "tool" | "recover" | string;
+export interface AgentMessageDeltaEvent {
+  type: "agent_message.delta";
+  item_id: string;
+  delta: string;
+  message_id?: string;
 }
 
-export interface TextStreamMetadata {
-  visibility?: "final" | "timeline" | "unsealed" | "debug" | string;
-  role?: "assistant" | "runtime" | string;
-  phase?: "final" | "model" | "tool" | "recover" | string;
-  segmentId?: string;
-  segment_id?: string;
-  iterationIndex?: number;
-  iteration_index?: number;
-  streamAttempt?: number;
-  stream_attempt?: number;
-  sealReason?: string;
-  seal_reason?: string;
-  sealed?: boolean;
-  promoteAllUnsealedNarration?: boolean;
-  promote_all_unsealed_narration?: boolean;
+export interface ItemCompletedEvent {
+  type: "item.completed";
+  item: AgentMessageItem;
+  finish_reason?: string;
+  provider_raw?: ProviderRawMetadata;
+  attachments?: ReplyAttachment[];
+  message_id?: string;
 }
 
 export interface ReplyAttachment {
@@ -168,9 +145,6 @@ export interface ThinkingDeltaEvent {
   provider_reasoning_type?: string;
 }
 
-export type DisplayScope = "chat" | "activity" | "notice" | "agents" | "inspector" | "silent" | string;
-export type PanelHint = "plan" | "subagents" | "diff" | "inspector" | "tasks" | "terminal" | "preview" | string;
-
 export interface ToolCallEvent {
   type: "tool_call";
   id: string;
@@ -189,9 +163,6 @@ export interface ToolCallEvent {
   seq?: number;
   iteration_id?: string;
   phase?: "tool" | "approval" | "model" | "final" | "recover" | string;
-  display_scope?: DisplayScope;
-  panel_hint?: PanelHint;
-  requires_attention?: boolean;
 }
 
 export interface ToolErrorInfo {
@@ -238,9 +209,15 @@ export interface ToolResultEvent {
   seq?: number;
   iteration_id?: string;
   phase?: "tool" | "approval" | "model" | "final" | "recover" | string;
-  display_scope?: DisplayScope;
-  panel_hint?: PanelHint;
-  requires_attention?: boolean;
+  output_files?: Array<{
+    path: string;
+    name?: string;
+    size: number;
+    mime_type?: string;
+    is_image?: boolean;
+  }>;
+  superseded_tool_call_ids?: string[];
+  removed_file_paths?: string[];
 }
 
 export interface ToolOutputDeltaEvent {
@@ -269,24 +246,6 @@ export interface PermissionDecisionEvent {
   expiry?: "call" | "session" | "policy" | string;
 }
 
-export interface AgentLoopEvent {
-  type: "agent.loop.started" | "agent.loop.completed";
-  item_id?: string;
-  loop_id: string;
-  iteration_id?: string;
-  status?: "running" | "completed" | "failed" | "interrupted" | string;
-  title?: string;
-  summary?: string;
-  started_at?: number;
-  completed_at?: number;
-  duration_ms?: number;
-  item_count?: number;
-  tool_call_count?: number;
-  default_collapsed?: boolean;
-  transition_reason?: string;
-  transition_details?: Record<string, unknown>;
-}
-
 export interface AgentItemEvent {
   type: "agent.item";
   id: string;
@@ -309,9 +268,6 @@ export interface AgentItemEvent {
   group_id?: string;
   step_id?: string;
   tool_call_ids?: string[];
-  display_scope?: DisplayScope;
-  panel_hint?: PanelHint;
-  requires_attention?: boolean;
   skill_name?: string;
   trigger_mode?: "explicit" | "implicit" | "model" | string;
   source_level?: string;
@@ -322,9 +278,9 @@ export interface AgentItemEvent {
 export interface AgentProgressEvent {
   type: "agent.progress";
   id: string;
-  stage: "status" | "planning" | "tool" | "approval" | "verification" | "final";
+  stage: "status" | "planning" | "tool" | "approval" | "final";
   phase?: AgentProgressPhase;
-  status: "running" | "completed" | "failed" | "info";
+  status: "running" | "completed" | "partial" | "failed" | "info";
   message: string;
   label?: string;
   summary?: string;
@@ -336,9 +292,6 @@ export interface AgentProgressEvent {
   step_id?: string;
   count?: number;
   iteration_id?: string;
-  display_scope?: DisplayScope;
-  panel_hint?: PanelHint;
-  requires_attention?: boolean;
   ephemeral?: boolean;
 }
 
@@ -351,7 +304,7 @@ export interface RuntimeSpanEvent {
   turn_id?: string;
   message_id?: string;
   iteration_id?: string;
-  phase?: "context" | "provider" | "model" | "tool" | "approval" | "verification" | "verify" | "final" | "recovery" | "recover" | string;
+  phase?: "context" | "provider" | "model" | "tool" | "approval" | "final" | "recovery" | "recover" | string;
   status?: "running" | "completed" | "failed" | "info" | string;
   label?: string;
   summary?: string;
@@ -365,10 +318,7 @@ export interface RuntimeSpanEvent {
   blocking_reason?: string;
   ui_visible?: boolean;
   debug_only?: boolean;
-  requires_attention?: boolean;
   data?: Record<string, unknown>;
-  display_scope?: DisplayScope;
-  panel_hint?: PanelHint;
 }
 
 export interface AgentRunRecordPayload {
@@ -386,56 +336,14 @@ export interface AgentRunRecordPayload {
   session_id?: string;
   summary?: string;
   error?: string;
-  display_scope?: DisplayScope;
-  panel_hint?: PanelHint;
-  requires_attention?: boolean;
 }
 
 export interface AgentRunStartedEvent extends AgentRunRecordPayload {
   type: "agent.run.started";
 }
 
-export interface AgentRunUpdatedEvent extends AgentRunRecordPayload {
-  type: "agent.run.updated";
-}
-
 export interface AgentRunCompletedEvent extends AgentRunRecordPayload {
   type: "agent.run.completed";
-}
-
-export interface AgentPhaseUpdatedEvent {
-  type: "agent.phase.updated";
-  run_id: string;
-  phase: "plan" | "execute" | "verify" | "recover" | "final" | string;
-  status?: "running" | "completed" | "failed" | string;
-  summary?: string;
-  role?: string;
-  conversation_id?: string;
-  display_scope?: DisplayScope;
-  panel_hint?: PanelHint;
-  requires_attention?: boolean;
-}
-
-export interface VerificationStartedEvent {
-  type: "verification.started";
-  run_id: string;
-  command?: string;
-  conversation_id?: string;
-  display_scope?: DisplayScope;
-  panel_hint?: PanelHint;
-  requires_attention?: boolean;
-}
-
-export interface VerificationResultEvent {
-  type: "verification.result";
-  run_id: string;
-  passed: boolean;
-  output?: string;
-  command?: string;
-  conversation_id?: string;
-  display_scope?: DisplayScope;
-  panel_hint?: PanelHint;
-  requires_attention?: boolean;
 }
 
 export interface ApprovalRequestEvent {
@@ -501,7 +409,12 @@ export interface StreamResumeEvent {
   conversation_id: string;
   message_id: string | null;
   turn_id?: string;
-  accumulated_text?: string;
+  /** Ordered authoritative projection for an in-flight assistant turn. */
+  content_blocks?: Array<Record<string, unknown>>;
+  phase?: string;
+  stream_status?: string;
+  event_seq?: number;
+  last_event_type?: string;
   tool_calls_pending: Array<{
     id: string;
     name: string;
@@ -516,6 +429,26 @@ export interface StreamResumeEvent {
     iteration_id?: string;
     iterationId?: string;
     phase?: string;
+  }>;
+  tool_states?: Array<{
+    id: string;
+    name: string;
+    args?: Record<string, unknown>;
+    status?: string;
+    transition?: string;
+    started_at?: number;
+    startedAt?: number;
+    finished_at?: number;
+    finishedAt?: number;
+    duration_ms?: number;
+    durationMs?: number;
+    waiting_on?: string;
+    waitingOn?: string;
+    blocking_reason?: string;
+    blockingReason?: string;
+    outputPreview?: string;
+    stdoutPreview?: string;
+    stderrPreview?: string;
   }>;
 }
 
@@ -553,7 +486,7 @@ export interface ToolUseSummaryEvent {
   iteration_id?: string;
   tool_call_ids?: string[];
   tool_count?: number;
-  generated_by?: "heuristic" | "llm";
+  generated_by?: "runtime" | "llm";
 }
 
 // ── Subagent events ─────────────────────────────────────────────
@@ -561,30 +494,25 @@ export interface ToolUseSummaryEvent {
 export interface SubagentStartEvent {
   type: "subagent.start";
   subagent_id: string;
+  agent_path?: string;
+  mailbox_epoch?: number;
   parent_id: string;
   role: string;
   prompt?: string;
   parent_run_id?: string;
   turn_id?: string;
-  workflow_id?: string;
-  workflow_name?: string;
-  workflow_mode?: string;
   node_id?: string;
   task_id?: string;
   objective?: string;
   depends_on?: string[];
   blocked_by?: string[];
-  required_for_final?: boolean;
-  blocks_final_reply?: boolean;
+  background?: boolean;
   read_only?: boolean;
   write_scope?: string[];
   current_activity?: string;
   waiting_on?: string;
   last_progress_at?: number;
   record?: Record<string, unknown>;
-  display_scope?: DisplayScope;
-  panel_hint?: PanelHint;
-  requires_attention?: boolean;
 }
 
 export interface SubagentEventEvent {
@@ -596,6 +524,10 @@ export interface SubagentEventEvent {
 export interface SubagentProgressEvent {
   type: "subagent.progress";
   subagent_id: string;
+  /** A refreshed live state; terminal states are always sent as subagent.done. */
+  status?: "pending" | "running" | "blocked";
+  agent_path?: string;
+  mailbox_epoch?: number;
   iteration?: number;
   max_iterations?: number;
   tool_name?: string;
@@ -604,16 +536,17 @@ export interface SubagentProgressEvent {
   detail?: string;
   current_activity?: string;
   waiting_on?: string;
-  blocks_final_reply?: boolean;
   last_progress_at?: number;
-  display_scope?: DisplayScope;
-  panel_hint?: PanelHint;
-  requires_attention?: boolean;
+  activity_kind?: string;
+  activity_summary?: string;
+  user_visible?: boolean;
 }
 
 export interface SubagentDoneEvent {
   type: "subagent.done";
   subagent_id: string;
+  agent_path?: string;
+  mailbox_epoch?: number;
   summary?: string;
   error?: string;
   duration_ms?: number;
@@ -629,9 +562,6 @@ export interface SubagentDoneEvent {
   prompt_cache_fork?: Record<string, unknown>;
   cancel_requested?: boolean;
   cancelled?: boolean;
-  display_scope?: DisplayScope;
-  panel_hint?: PanelHint;
-  requires_attention?: boolean;
 }
 
 // ── Citations + inspector ───────────────────────────────────────
@@ -661,9 +591,6 @@ export interface InspectorUpdateEvent {
   target_kind: InspectorTargetKind;
   target_id: string;
   payload: Record<string, unknown>;
-  display_scope?: DisplayScope;
-  panel_hint?: PanelHint;
-  requires_attention?: boolean;
 }
 
 // ── Task / plan updates ─────────────────────────────────────────
@@ -687,6 +614,46 @@ export interface RuntimePendingApprovalSnapshot {
   conversation_id?: string;
   subtype?: string;
   tool_name?: string;
+}
+
+export interface SubagentMailboxEvent {
+  type: "subagent.mailbox";
+  subagent_id: string;
+  count: number;
+  high_water?: number;
+  mailbox_epoch?: number;
+  stale_sealed?: number;
+}
+
+export interface RuntimeQueuedUserMessageSnapshot {
+  conversation_id: string;
+  message_id: string;
+  user_message_id?: string;
+  content?: string;
+  position?: number;
+}
+
+export interface RuntimePendingTurnInputSnapshot {
+  conversation_id: string;
+  mode: "steer";
+  message_id: string;
+  user_message_id?: string;
+  target_message_id?: string;
+  content?: string;
+  attachments?: Record<string, unknown>[];
+  position?: number;
+  queued_at_ms?: number;
+}
+
+export interface RuntimeForkSnapshot {
+  fork_id: string;
+  parent_conversation_id?: string;
+  branch_conversation_id?: string;
+  message_index?: number;
+  history_length?: number;
+  estimated_tokens?: number;
+  created_at?: string;
+  status?: string;
 }
 
 export interface RuntimeSessionSnapshot {
@@ -716,6 +683,9 @@ export interface RuntimeSessionSnapshot {
   };
   pending_approval_count?: number;
   pending_approvals?: RuntimePendingApprovalSnapshot[];
+  queued_user_messages?: RuntimeQueuedUserMessageSnapshot[];
+  pending_turn_inputs?: RuntimePendingTurnInputSnapshot[];
+  forks?: RuntimeForkSnapshot[];
   running_tasks?: unknown[];
   task_summary?: Record<string, unknown>;
   capabilities?: AgentCapabilitiesPayload;
@@ -782,19 +752,6 @@ export interface AgentResumeCommand {
   conversation_id?: string;
 }
 
-export interface WorkflowResumeCommand {
-  type: "workflow.resume";
-  workflow_id: string;
-  conversation_id?: string;
-  timeout_seconds?: number;
-}
-
-export interface VerificationRunCommand {
-  type: "verification.run";
-  command?: string;
-  timeout_seconds?: number;
-}
-
 export interface SubagentCancelCommand {
   type: "subagent.cancel";
   subagent_id: string;
@@ -816,11 +773,6 @@ export interface SendMessageCommand {
   conversation_id?: string;
   task_id?: string;
   team_name?: string;
-}
-
-export interface SubagentResumeCommand {
-  type: "subagent.resume";
-  subagent_id: string;
 }
 
 export interface InspectorFocusCommand {

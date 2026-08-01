@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from backend.config import (
+    CLAUDE_CODE_CAPPED_DEFAULT_MAX_TOKENS,
     LLMSettings,
     get_anthropic_settings,
     get_custom_settings,
@@ -38,8 +40,14 @@ def build_provider_adapter(
 
             model = (model_override or anthropic_settings["model"]).strip()
             base_url = anthropic_settings["base_url"] or None
-            max_tokens = int(anthropic_settings["max_tokens"])
-            use_raw_http = bool(base_url and "api.anthropic.com" not in base_url.lower())
+            max_tokens = max(
+                1,
+                int(anthropic_settings["max_tokens"] or CLAUDE_CODE_CAPPED_DEFAULT_MAX_TOKENS),
+            )
+            # Transport follows the explicit provider selection. Do not infer
+            # it from a hostname; custom Messages gateways use the `custom`
+            # branch below.
+            use_raw_http = False
 
             return AnthropicAdapter(
                 api_key=api_key,
@@ -48,6 +56,9 @@ def build_provider_adapter(
                 max_tokens=max_tokens,
                 thinking_budget=int(anthropic_settings["thinking_budget"]) or None,
                 use_raw_http=use_raw_http,
+                cache_editing_beta_header=os.getenv(
+                    "MINICODE_ANTHROPIC_CACHE_EDITING_BETA_HEADER", ""
+                ),
             )
         except Exception as exc:
             logger.warning("Anthropic adapter construction failed: %s", exc)
@@ -66,12 +77,19 @@ def build_provider_adapter(
                         api_key=custom["api_key"],
                         model=(model_override or custom["model"]).strip(),
                         base_url=custom["base_url"] or None,
-                        max_tokens=int(custom["max_tokens"]),
+                        max_tokens=max(
+                            1,
+                            int(custom["max_tokens"] or CLAUDE_CODE_CAPPED_DEFAULT_MAX_TOKENS),
+                        ),
                         thinking_budget=int(custom["thinking_budget"]) or None,
                         use_raw_http=True,
+                        cache_editing_beta_header=os.getenv(
+                            "MINICODE_ANTHROPIC_CACHE_EDITING_BETA_HEADER", ""
+                        ),
                     )
                 openai_settings = LLMSettings(
                     api_key=custom["api_key"],
+                    provider="custom",
                     base_url=custom["base_url"],
                     model=custom["model"],
                     reasoning_effort=custom["reasoning_effort"],
@@ -133,8 +151,5 @@ def create_session_llm(
     config: "AppConfig",
     model_override: str | None = None,
 ) -> LLMAdapter:
-    """Create an LLM for a websocket session while tolerating older test stubs."""
-    try:
-        return create_llm_adapter(config, model_override=model_override)
-    except TypeError:
-        return create_llm_adapter(config)
+    """Create the LLM owned by one websocket session."""
+    return create_llm_adapter(config, model_override=model_override)

@@ -1,0 +1,336 @@
+/*
+ * ui-polish.css — 统一视觉规范最终层
+ *
+ * 加载顺序保证：main.tsx 中最后导入，覆盖早期多轮补丁留下的
+ * 互相打架的规则。本文件只负责"视觉统一"，布局结构不变。
+ *
+ * 统一目标（对标一线大厂桌面工具：Linear / Cursor / Codex）：
+ *   1. 图标    — 全局单一描边 1.75、尺寸阶梯 12/14/16/20
+ *   2. 输入栏  — 协作/代码两种模式同一视觉语言
+ *   3. 侧边栏  — 左右两侧统一的行高/圆角/hover/active 节奏
+ *   4. 聊天区  — 过程区（工作步骤）与结果区（回答）字体统一令牌化
+ *   5. 配色    — 一切颜色只走 tokens.css 令牌，消灭硬编码 hex
+ */
+
+/* ════════════════════════════════════════════════════════
+   0. 统一图标语言
+   ════════════════════════════════════════════════════════ */
+
+/* 全局 lucide 图标：单一描边粗细 + 圆润端点（components.css 已有
+ * 基础规则，这里锁定最终值并覆盖散落的 1.5/1.65/1.8/1.85/2.3） */
+svg.lucide {
+  stroke-width: var(--mc-icon-stroke);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* 图标尺寸阶梯：只保留 4 档，全部走令牌 */
+:root {
+  --mc-icon-stroke: 1.75;
+}
+
+/* ════════════════════════════════════════════════════════
+   1. 输入栏（Composer）— 协作/代码模式统一
+   ════════════════════════════════════════════════════════ */
+
+/* 统一卡片：两种模式同样的圆角、内边距、背景、边框 */
+.composer-container {
+  border-radius: var(--radius-xl) !important;
+  border: 1px solid var(--border-soft) !important;
+  background: var(--surface-base) !important;
+  box-shadow: var(--shadow-sm) !important;
+}
+
+/* 聚焦态：统一的 accent 描边光晕，两模式一致 */
+.composer-container:focus-within {
+  border-color: color-mix(in oklch, var(--accent-primary) 42%, var(--border-soft)) !important;
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent-primary) 10%, transparent) !important;
+}
+
+/* 顶部白色渐变条是早期浅色补丁残留，暗色下是脏边，彻底移除 */
+.composer-container::before {
+  content: none !important;
+  display: none !important;
+}
+
+/* 代码模式曾强制 padding:0 / radius-md —— 与协作模式割裂。
+ * 统一为同一卡片节奏。 */
+.chat-pane > .composer-container[data-layout-mode="code"],
+.composer-container[data-layout-mode="code"] {
+  border-radius: var(--radius-xl) !important;
+  background: var(--surface-base) !important;
+  border-color: var(--border-soft) !important;
+}
+
+/* 输入框文字：统一字号、行高、字重（两种模式一致） */
+.composer-textarea {
+  font-family: var(--font-prose) !important;
+  font-size: var(--text-md) !important;
+  line-height: var(--leading-relaxed) !important;
+  font-weight: 400 !important;
+  color: var(--text-primary) !important;
+  caret-color: var(--accent-primary);
+}
+
+.composer-textarea::placeholder {
+  color: var(--text-muted) !important;
+  font-weight: 400 !important;
+}
+
+/* 底部分隔线：统一柔和边框 */
+.composer-footer {
+  border-top: 1px solid var(--border-subtle) !important;
+  background: transparent !important;
+}
+
+/* footer 内的工具按钮（附件/权限/模型选择器）：统一幽灵按钮风格 */
+.composer-attach-btn,
+.composer-permission-btn,
+.composer-model-select {
+  background: transparent !important;
+  border: 1px solid transparent !important;
+  border-radius: var(--radius-full) !important;
+  color: var(--text-secondary) !important;
+  box-shadow: none !important;
+}
+
+.composer-attach-btn:hover,
+.composer-permission-btn:hover,
+.composer-model-select:hover,
+.composer-permission-btn[aria-expanded="true"],
+.composer-model-select[aria-expanded="true"] {
+  background: var(--surface-hover) !important;
+  border-color: var(--border-subtle) !important;
+  color: var(--text-primary) !important;
+  transform: none !important;
+}
+
+/* 下拉菜单项 hover：统一走令牌（曾是 #F1F5F9 硬编码，暗色下失效） */
+.composer-menu-item[data-active="true"],
+.composer-menu-choice:hover {
+  background: var(--surface-hover) !important;
+  border-color: var(--border-subtle) !important;
+}
+
+.composer-menu-item[data-selected="true"] {
+  background: var(--accent-soft) !important;
+}
+
+/* ════════════════════════════════════════════════════════
+   2. 发送/停止按钮 — 从黑方块到统一 accent 圆形按钮
+   ════════════════════════════════════════════════════════ */
+
+.composer-send-btn {
+  width: 30px !important;
+  height: 30px !important;
+  min-width: 30px !important;
+  min-height: 30px !important;
+  border-radius: var(--radius-full) !important;
+  background: var(--accent-primary) !important;
+  color: var(--text-on-accent) !important;
+  box-shadow: none !important;
+  transition: background var(--transition-fast), transform var(--transition-fast), opacity var(--transition-fast) !important;
+}
+
+.composer-send-btn:hover:not(:disabled) {
+  background: var(--accent-hover) !important;
+  transform: none !important;
+  box-shadow: none !important;
+}
+
+.composer-send-btn:active:not(:disabled) {
+  background: var(--accent-active) !important;
+  transform: scale(0.94) !important;
+}
+
+.composer-send-btn:disabled {
+  background: var(--surface-active) !important;
+  color: var(--text-muted) !important;
+  opacity: 1 !important;
+  cursor: not-allowed;
+}
+
+.composer-send-btn > svg {
+  stroke-width: 2;
+}
+
+/* 停止按钮与发送按钮同一视觉族 */
+.composer-stop-current-btn {
+  border-radius: var(--radius-full) !important;
+  background: var(--surface-soft) !important;
+  color: var(--text-muted) !important;
+}
+
+.composer-stop-current-btn:hover {
+  background: var(--state-danger-soft) !important;
+  color: var(--state-danger) !important;
+}
+
+/* ════════════════════════════════════════════════════════
+   3. 左侧边栏 — 统一导航行节奏
+   ════════════════════════════════════════════════════════ */
+
+.mc-sidebar-left {
+  background: var(--surface-sidebar);
+}
+
+.mc-sidebar-action,
+.mc-sidebar-mode-tab {
+  border-radius: var(--radius-md) !important;
+  font-size: var(--text-chrome) !important;
+  font-weight: 500 !important;
+  color: var(--text-secondary);
+}
+
+.mc-sidebar-action:hover,
+.mc-sidebar-mode-tab:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.mc-sidebar-action[data-active="true"] {
+  background: var(--surface-active) !important;
+  color: var(--text-primary) !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+}
+
+.mc-sidebar-action-icon > svg,
+.mc-sidebar-mode-icon > svg {
+  width: var(--mc-icon-md) !important;
+  height: var(--mc-icon-md) !important;
+  stroke-width: var(--mc-icon-stroke) !important;
+}
+
+/* 会话行 hover/active 与导航行同一节奏 */
+.mc-sidebar-left .session-row-hover {
+  border-radius: var(--radius-md) !important;
+}
+
+.mc-sidebar-left .session-row-hover:hover {
+  background: var(--surface-hover) !important;
+}
+
+.mc-sidebar-left .session-row-hover[data-active] {
+  background: var(--surface-active) !important;
+}
+
+/* ════════════════════════════════════════════════════════
+   4. 右侧边栏 — 与左侧统一的 tab/面板语言
+   ════════════════════════════════════════════════════════ */
+
+.mc-sidebar-right-tab-frame {
+  border-radius: var(--radius-md) !important;
+}
+
+.mc-sidebar-right-tab-frame:hover {
+  background: var(--surface-hover) !important;
+  border-color: var(--border-subtle) !important;
+}
+
+.mc-sidebar-right-tab-frame[data-active="true"] {
+  background: var(--surface-active) !important;
+  border-color: var(--border-soft) !important;
+  box-shadow: none !important;
+}
+
+.mc-sidebar-tab-icon > svg {
+  width: var(--mc-icon-md) !important;
+  height: var(--mc-icon-md) !important;
+  stroke-width: var(--mc-icon-stroke);
+}
+
+/* ════════════════════════════════════════════════════════
+   5. 过程区（工作步骤）— 字体令牌化，与结果区同一节奏
+   ════════════════════════════════════════════════════════ */
+
+/* 过程区曾是硬编码 13px + ui-monospace 孤岛，缩放设置对它无效。
+ * 统一为令牌字号 + UI 字体族，随 --app-text-scale 缩放。 */
+.agent-loop-work-area {
+  font-family: var(--font-ui);
+  font-size: var(--text-chrome);
+  line-height: var(--leading-snug);
+}
+
+.agent-loop-running-summary {
+  font-family: var(--font-ui);
+  font-size: var(--text-chrome);
+}
+
+/* 过程区内的等宽元素（命令、路径）走统一 mono 令牌 */
+.agent-loop-turn code,
+.agent-loop-process code {
+  font-family: var(--font-mono);
+}
+
+/* ════════════════════════════════════════════════════════
+   6. 结果区（回答）— 与过程区共享字体族与行高节奏
+   ════════════════════════════════════════════════════════ */
+
+.assistant-cell-content,
+.md-prose {
+  font-family: var(--font-prose) !important;
+  font-size: var(--text-sm) !important;
+  line-height: var(--leading-relaxed) !important;
+  font-weight: 400 !important;
+  color: var(--text-primary);
+}
+
+/* 用户气泡与回答区同一字号阶梯 */
+.user-cell-bubble {
+  font-family: var(--font-ui) !important;
+  font-size: var(--text-sm) !important;
+  line-height: var(--leading-normal) !important;
+}
+
+/* ════════════════════════════════════════════════════════
+   7. 协作/代码聊天区背景统一 — 消除模式切换的割裂感
+   ════════════════════════════════════════════════════════ */
+
+.chat-pane,
+.message-list-scroll {
+  background: var(--surface-base);
+}
+
+/* ════════════════════════════════════════════════════════
+   8. 首页建议卡片 — 统一图标颜色与字号
+   ════════════════════════════════════════════════════════ */
+
+.workbench-home-suggestion-card svg {
+  color: var(--accent-primary) !important;
+  stroke-width: var(--mc-icon-stroke);
+}
+
+.workbench-home-suggestion-card span {
+  font-size: var(--text-chrome) !important;
+  font-weight: 500;
+}
+
+/* ════════════════════════════════════════════════════════
+   9. 头部幽灵按钮 — 消灭 #6B7280 硬编码，统一令牌色
+   ════════════════════════════════════════════════════════ */
+
+.header-bar .btn-ghost,
+.btn-ghost {
+  color: var(--text-secondary);
+}
+
+.header-bar .btn-ghost:hover,
+.btn-ghost:hover {
+  background: var(--surface-hover);
+  border-color: var(--border-subtle);
+  color: var(--text-primary);
+}
+
+/* ════════════════════════════════════════════════════════
+   10. 侧边栏容器残留硬编码边框 — 统一令牌
+   ════════════════════════════════════════════════════════ */
+
+.sidebar-animate {
+  border-right-color: var(--border-soft) !important;
+}
+
+.sidebar-animate [role="tablist"] {
+  background: var(--surface-soft) !important;
+  border-color: var(--border-soft) !important;
+}

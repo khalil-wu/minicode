@@ -15,7 +15,6 @@ _AUTH_KEYWORDS = (
     "unauthorized",
     "authentication",
     "auth_error",
-    "401",
 )
 
 _BILLING_KEYWORDS = (
@@ -27,7 +26,11 @@ _BILLING_KEYWORDS = (
     "quota exceeded",
     "billing",
     "payment",
-    "402",
+)
+
+_CONTENT_FILTER_KEYWORDS = (
+    "content exists risk",
+    "content_filter",
 )
 
 _BLOCKED_KEYWORDS = (
@@ -38,7 +41,6 @@ _BLOCKED_KEYWORDS = (
     "cf-ray",
     "cloudflare",
     "forbidden",
-    "403",
 )
 
 _MODEL_KEYWORDS = (
@@ -51,6 +53,15 @@ _MODEL_KEYWORDS = (
     "model doesn't exist",
     "no such model",
     "model is not found",
+)
+
+_UNSUPPORTED_CAPABILITY_KEYWORDS = (
+    "no endpoints found that support image input",
+    "does not support image input",
+    "doesn't support image input",
+    "image input is not supported",
+    "image inputs are not supported",
+    "unsupported image input",
 )
 
 _NETWORK_KEYWORDS = (
@@ -80,13 +91,14 @@ _NETWORK_KEYWORDS = (
     "getaddrinfo failed",
     "name or service not known",
     "connection closed",
+    "stream ended before [done]",
+    "ended before [done]",
+    "eof_without_terminal",
     "readerror",
     "writeerror",
-    "500",
-    "502",
-    "503",
-    "504",
 )
+
+_HTTP_STATUS_PATTERN = re.compile(r"(?:\bhttp\s*|\bstatus(?:_code)?\s*[=:]\s*)(\d{3})\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -107,26 +119,45 @@ def classify_llm_error(message: str | BaseException | None) -> LLMErrorClassific
         return LLMErrorClassification(fatal=True, retryable=False, error_type="auth", provider_error_type="auth")
     if "provider_error_type=billing" in text:
         return LLMErrorClassification(fatal=True, retryable=False, error_type="billing", provider_error_type="billing")
+    if "provider_error_type=content_filter" in text:
+        return LLMErrorClassification(fatal=True, retryable=False, error_type="blocked", provider_error_type="content_filter")
     if "provider_error_type=blocked" in text:
         return LLMErrorClassification(fatal=True, retryable=False, error_type="blocked", provider_error_type="blocked")
     if "provider_error_type=model" in text:
         return LLMErrorClassification(fatal=True, retryable=False, error_type="model", provider_error_type="model")
+    if "provider_error_type=unsupported_capability" in text:
+        return LLMErrorClassification(
+            fatal=True,
+            retryable=False,
+            error_type="provider_capability",
+            provider_error_type="unsupported_capability",
+        )
     if "provider_error_type=rate_limit" in text:
         return LLMErrorClassification(fatal=False, retryable=True, error_type="api", provider_error_type="rate_limit")
     if "provider_error_type=network" in text:
         return LLMErrorClassification(fatal=False, retryable=True, error_type="api", provider_error_type="network")
 
-    if 407 in status_codes or _contains_any(text, ("proxy authentication required", "proxy auth", "407")):
+    if _contains_any(text, _UNSUPPORTED_CAPABILITY_KEYWORDS):
+        return LLMErrorClassification(
+            fatal=True,
+            retryable=False,
+            error_type="provider_capability",
+            provider_error_type="unsupported_capability",
+        )
+
+    if 407 in status_codes or _contains_any(text, ("proxy authentication required", "proxy auth")):
         return LLMErrorClassification(fatal=True, retryable=False, error_type="api", provider_error_type="proxy")
     if 401 in status_codes or _contains_any(text, _AUTH_KEYWORDS):
         return LLMErrorClassification(fatal=True, retryable=False, error_type="auth", provider_error_type="auth")
     if 402 in status_codes or _contains_any(text, _BILLING_KEYWORDS):
         return LLMErrorClassification(fatal=True, retryable=False, error_type="billing", provider_error_type="billing")
+    if _contains_any(text, _CONTENT_FILTER_KEYWORDS):
+        return LLMErrorClassification(fatal=True, retryable=False, error_type="blocked", provider_error_type="content_filter")
     if 403 in status_codes or _contains_any(text, _BLOCKED_KEYWORDS):
         return LLMErrorClassification(fatal=True, retryable=False, error_type="blocked", provider_error_type="blocked")
     if (400 in status_codes or 404 in status_codes) and _contains_any(text, _MODEL_KEYWORDS):
         return LLMErrorClassification(fatal=True, retryable=False, error_type="model", provider_error_type="model")
-    if 429 in status_codes or _contains_any(text, ("rate limit", "rate_limit", "too many requests", "429")):
+    if 429 in status_codes or _contains_any(text, ("rate limit", "rate_limit", "too many requests")):
         return LLMErrorClassification(fatal=False, retryable=True, error_type="api", provider_error_type="rate_limit")
     if "concurrency limit exceeded" in text:
         return LLMErrorClassification(fatal=False, retryable=True, error_type="api", provider_error_type="busy")
@@ -208,6 +239,8 @@ def _extract_status_codes(message: str | BaseException | None) -> set[int]:
                     codes.add(int(value))
             except (TypeError, ValueError):
                 continue
+        for match in _HTTP_STATUS_PATTERN.finditer(str(item)):
+            codes.add(int(match.group(1)))
     return codes
 
 
@@ -313,12 +346,16 @@ def sanitize_llm_error_message(
         return "\u6a21\u578b\u9274\u6743\u5931\u8d25\uff0c\u8bf7\u68c0\u67e5 API Key \u548c\u6a21\u578b\u8bbe\u7f6e\u3002" + suffix
     if kind == "billing":
         return "\u6a21\u578b\u670d\u52a1\u989d\u5ea6\u6216\u8ba1\u8d39\u4e0d\u53ef\u7528\uff0c\u8bf7\u68c0\u67e5\u8d26\u6237\u72b6\u6001\u3002" + suffix
+    if kind == "content_filter":
+        return "\u6a21\u578b\u670d\u52a1\u5546\u56e0\u5185\u5bb9\u5b89\u5168\u7b56\u7565\u62d2\u7edd\u4e86\u672c\u6b21\u8bf7\u6c42\u3002\u8bf7\u7f16\u8f91\u4e0a\u4e00\u6761\u6d88\u606f\u6216\u65b0\u5efa\u4f1a\u8bdd\u540e\u91cd\u8bd5\uff1b\u8054\u7f51\u67e5\u8be2\u65f6\u53ef\u7f29\u5c0f\u8303\u56f4\u6216\u66f4\u6362\u6765\u6e90\uff0c\u53cd\u590d\u53d1\u751f\u65f6\u53ef\u624b\u52a8\u5207\u6362\u6a21\u578b\u3002" + suffix
     if kind == "blocked":
         return "\u6a21\u578b\u8bf7\u6c42\u88ab\u670d\u52a1\u5546\u6216\u7f51\u5173\u62e6\u622a\uff0c\u8bf7\u68c0\u67e5\u6a21\u578b\u3001Base URL\u3001\u7f51\u5173\u89c4\u5219\u6216\u8bf7\u6c42\u5185\u5bb9\u3002" + suffix
     if kind == "proxy":
         return "\u8054\u7f51\u8bf7\u6c42\u5931\u8d25\uff1a\u4ee3\u7406\u8ba4\u8bc1\u5931\u8d25\uff08407 Proxy Authentication Required\uff09\u3002\u8bf7\u68c0\u67e5 HTTP_PROXY / HTTPS_PROXY \u6216\u4ee3\u7406\u8ba4\u8bc1\u4fe1\u606f\u3002" + suffix
     if kind == "model":
         return "\u6a21\u578b\u540d\u6216\u6a21\u578b\u914d\u7f6e\u65e0\u6548\uff0c\u8bf7\u68c0\u67e5 provider\u3001Base URL \u548c model \u8bbe\u7f6e\u3002" + suffix
+    if kind == "unsupported_capability":
+        return "\u5f53\u524d\u6a21\u578b\u4e0d\u652f\u6301\u56fe\u7247\u8f93\u5165\uff0c\u8bf7\u5207\u6362\u5230\u652f\u6301\u89c6\u89c9\u8f93\u5165\u7684\u6a21\u578b\u3002" + suffix
     if kind == "network":
         return "\u6a21\u578b\u670d\u52a1\u7f51\u7edc\u8bf7\u6c42\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002" + suffix
     return "\u6a21\u578b\u8c03\u7528\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u6216\u5207\u6362\u6a21\u578b\u3002" + suffix

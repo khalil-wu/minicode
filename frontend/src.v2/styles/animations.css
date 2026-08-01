@@ -23,7 +23,7 @@
 @keyframes message-appear {
   from {
     opacity: 0;
-    transform: translateY(8px);
+    transform: translateY(5px);
   }
   to {
     opacity: 1;
@@ -41,7 +41,7 @@
 @keyframes slide-in-right {
   from {
     opacity: 0;
-    transform: translateX(16px);
+    transform: translateX(10px);
   }
   to {
     opacity: 1;
@@ -53,7 +53,7 @@
 @keyframes slide-in-left {
   from {
     opacity: 0;
-    transform: translateX(-16px);
+    transform: translateX(-10px);
   }
   to {
     opacity: 1;
@@ -69,7 +69,7 @@
 
 /* New message entrance — applied to the last N turns in MessageList */
 .anim-message-appear {
-  animation: message-appear var(--duration-fast, 150ms) ease-out;
+  animation: message-appear var(--duration-base, 200ms) var(--easing-enter, ease-out) both;
 }
 
 /* Running tool pulse — applied to ToolCallCard when status === "running" */
@@ -79,27 +79,27 @@
 
 /* Right panel slide-in — applied to SidebarRight on mount */
 .anim-slide-right {
-  animation: slide-in-right var(--duration-base, 200ms) ease-out;
+  animation: slide-in-right var(--duration-base, 200ms) var(--easing-enter, ease-out) both;
 }
 
 /* Left panel slide-in — applied to SidebarLeft on mount */
 .anim-slide-left {
-  animation: slide-in-left var(--duration-base, 200ms) ease-out;
+  animation: slide-in-left var(--duration-base, 200ms) var(--easing-enter, ease-out) both;
 }
 
 /* Generic fade-in — uses the @keyframes fade-in from reset.css */
 .anim-fade-in {
-  animation: fade-in var(--duration-fast, 150ms) ease-out;
+  animation: fade-in var(--duration-base, 200ms) var(--easing-standard, ease-out) both;
 }
 
 /* Success checkmark scale-in — when activity completes */
 @keyframes checkmark-appear {
   0% {
     opacity: 0;
-    transform: scale(0.5);
+    transform: scale(0.78);
   }
   50% {
-    transform: scale(1.1);
+    transform: scale(1.03);
   }
   100% {
     opacity: 1;
@@ -110,8 +110,8 @@
 /* Error shake — subtle shake for error states */
 @keyframes error-shake {
   0%, 100% { transform: translateX(0); }
-  25% { transform: translateX(-2px); }
-  75% { transform: translateX(2px); }
+  25% { transform: translateX(-1.5px); }
+  75% { transform: translateX(1.5px); }
 }
 
 /* Button press — subtle scale down on active */
@@ -127,8 +127,8 @@
     transform: scale(0.96);
   }
   50% {
-    opacity: 0.22;
-    transform: scale(1.18);
+    opacity: 0.16;
+    transform: scale(1.1);
   }
 }
 
@@ -213,23 +213,29 @@
 .rolling-number-value {
   grid-area: value;
   display: block;
+}
+
+/* A conversation can hold hundreds of these (one per +/- count), so the
+   compositor hint is scoped to the animation window instead of living on every
+   idle element. */
+.rolling-number[data-animating="true"] .rolling-number-value {
   will-change: transform, opacity;
 }
 
 .rolling-number[data-animating="true"][data-direction="up"] .rolling-number-old {
-  animation: rolling-number-old-up 180ms cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+  animation: rolling-number-old-up var(--duration-base) cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
 }
 
 .rolling-number[data-animating="true"][data-direction="up"] .rolling-number-new {
-  animation: rolling-number-new-up 180ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: rolling-number-new-up var(--duration-base) cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 
 .rolling-number[data-animating="true"][data-direction="down"] .rolling-number-old {
-  animation: rolling-number-old-down 180ms cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+  animation: rolling-number-old-down var(--duration-base) cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
 }
 
 .rolling-number[data-animating="true"][data-direction="down"] .rolling-number-new {
-  animation: rolling-number-new-down 180ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: rolling-number-new-down var(--duration-base) cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
 
 @keyframes rolling-number-old-up {

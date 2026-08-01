@@ -18,7 +18,7 @@
   --mc-icon-document: color-mix(in oklch, var(--text-muted) 88%, var(--text-secondary));
   --mc-icon-media: color-mix(in oklch, var(--state-success) 72%, var(--text-secondary));
   --mc-icon-pdf: color-mix(in oklch, var(--state-danger) 72%, var(--text-secondary));
-  --mc-icon-style: color-mix(in oklch, var(--accent-primary) 54%, #c084fc 28%, var(--text-secondary));
+  --mc-icon-style: var(--accent-secondary);
   --mc-icon-package: color-mix(in oklch, var(--state-warning) 64%, var(--text-secondary));
   --mc-icon-terminal: color-mix(in oklch, var(--text-secondary) 82%, var(--state-info));
   --mc-icon-git: color-mix(in oklch, var(--text-muted) 70%, var(--state-warning));
@@ -74,7 +74,7 @@
 .btn-secondary {
   background: transparent;
   color: var(--text-secondary);
-  border: 1px solid var(--border-light);
+  border: 1px solid var(--border-subtle);
 }
 
 .btn-secondary:hover {
@@ -254,6 +254,10 @@
   height: var(--mc-icon-md);
 }
 
+.mc-sidebar-mode-tab .mc-sidebar-mode-icon {
+  color: inherit;
+}
+
 .settings-center-tab-icon {
   width: var(--mc-icon-md);
   height: var(--mc-icon-md);
@@ -276,6 +280,22 @@
 .settings-center-tab:hover {
   background: var(--surface-hover) !important;
   color: var(--text-primary) !important;
+}
+
+.app-route-loading {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: grid;
+  place-items: center;
+  background: var(--surface-page);
+  color: var(--text-muted);
+}
+
+.app-route-loading > svg {
+  width: 20px;
+  height: 20px;
+  stroke-width: 1.7;
 }
 
 .settings-center-tab-label {
@@ -641,7 +661,7 @@ body:has(.mc-connection-banner) .toast-container {
 /* ========== 卡片组件 ========== */
 .card {
   background: var(--bg-card);
-  border: 1px solid var(--border-light);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-sm);
   overflow: hidden;
@@ -649,7 +669,7 @@ body:has(.mc-connection-banner) .toast-container {
 
 .card-header {
   padding: var(--spacing-3) var(--spacing-4);
-  border-bottom: 1px solid var(--border-light);
+  border-bottom: 1px solid var(--border-subtle);
   font-weight: 500;
   font-size: var(--text-md);
 }
@@ -660,7 +680,7 @@ body:has(.mc-connection-banner) .toast-container {
 
 .card-footer {
   padding: var(--spacing-3) var(--spacing-4);
-  border-top: 1px solid var(--border-light);
+  border-top: 1px solid var(--border-subtle);
   background: var(--bg-card-hover);
 }
 
@@ -668,7 +688,7 @@ body:has(.mc-connection-banner) .toast-container {
 .input {
   width: 100%;
   padding: var(--spacing-2) var(--spacing-3);
-  border: 1px solid var(--border-light);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   font-family: var(--font-sans);
   font-size: var(--text-base);
@@ -773,7 +793,7 @@ body:has(.mc-connection-banner) .toast-container {
 .file-tree-scroll::-webkit-scrollbar-thumb {
   background: transparent;
   border-radius: 999px;
-  transition: background-color 160ms ease;
+  transition: background-color var(--transition-fast);
 }
 
 .file-tree-scroll:hover,
@@ -848,10 +868,11 @@ body:has(.mc-connection-banner) .toast-container {
 }
 
 .ask-user-option-card:hover {
-  background: var(--surface-hover) !important;
-  border-color: var(--accent-primary) !important;
+  background: var(--surface-hover);
+  border-color: var(--accent-primary);
   box-shadow: var(--shadow-sm);
   transform: translateY(-1px);
+
 }
 
 .ask-user-option-card:active {
@@ -867,9 +888,9 @@ body:has(.mc-connection-banner) .toast-container {
 
 .ask-user-option-card:hover .ask-user-option-letter,
 .ask-user-option-card:focus-visible .ask-user-option-letter {
-  background: var(--accent-soft) !important;
-  border-color: var(--accent-border) !important;
-  color: var(--accent-primary) !important;
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  color: var(--accent-primary);
 }
 
 .ask-user-input {
@@ -880,11 +901,13 @@ body:has(.mc-connection-banner) .toast-container {
 
 .ask-user-input:hover {
   border-color: var(--border-soft) !important;
+
 }
 
 .ask-user-input:focus {
-  border-color: var(--accent-primary) !important;
+  border-color: var(--accent-primary);
   box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent-primary) 12%, transparent);
+
 }
 
 .ask-user-send {
@@ -895,9 +918,10 @@ body:has(.mc-connection-banner) .toast-container {
 }
 
 .ask-user-send:not(:disabled):hover {
-  background: var(--accent-strong) !important;
+  background: var(--accent-strong);
   box-shadow: var(--shadow-sm);
   transform: translateY(-1px);
+
 }
 
 .ask-user-send:not(:disabled):active {
@@ -977,11 +1001,13 @@ body:has(.mc-connection-banner) .toast-container {
 }
 
 .feature-flag-row:hover {
-  background: var(--surface-hover) !important;
+  background: var(--surface-hover);
+
 }
 
 .feature-flag-row:last-child {
-  border-bottom: 0 !important;
+  border-bottom: 0;
+
 }
 
 @media (max-width: 640px) {

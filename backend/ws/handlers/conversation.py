@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import json
 import logging
 from contextlib import suppress
 from pathlib import Path
@@ -13,15 +15,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-async def _stop_conversation_run(session: "WebSocketSession", conversation_id: str, *, reason: str) -> None:
-    """Finish cancellation before deleting or clearing persisted state."""
+async def _stop_conversation_run(session: "WebSocketSession", conversation_id: str, *, reason: str) -> bool:
+    """Cancel a run and report whether its lifecycle actually converged."""
     session._run_manager.clear_user_message_queue(conversation_id)
     task = session._running_agent_task_for(conversation_id)
     if task is None:
-        return
+        return True
     await session._cancel_agent_runs(conversation_id=conversation_id, reason=reason)
-    with suppress(asyncio.CancelledError, Exception):
-        await task
+    # RunManager.cancel performs the shared bounded drain.  Never follow it
+    # with an unbounded await: a cancellation-resistant tool must block the
+    # destructive operation, not the websocket forever.
+    if task.done():
+        with suppress(asyncio.CancelledError, Exception):
+            task.result()
+        return True
+    return False
 
 
 async def handle_conversation_create(session: "WebSocketSession", data: dict[str, Any]) -> bool:
@@ -67,6 +75,149 @@ async def handle_conversation_create(session: "WebSocketSession", data: dict[str
         session._load_active_conversation_snapshot(created.id, created.context_snapshot)
         session._sync_permission_mode_with_active_conversation(source="conversation.create")
     await session._send_conversation_list()
+    return True
+
+
+async def handle_conversation_clone(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    """Clone a persisted session without sharing mutable state or worktree ownership."""
+    source_id = str(data.get("conversation_id") or session.active_conversation_id or "").strip()
+    source = session.conversation_repo.get_conversation(source_id) if source_id else None
+    if source is None:
+        await emit_conversation_not_found(session, source_id)
+        return True
+    if session._running_agent_task_for(source.id) is not None:
+        await session._emit_command_result(
+            "conversation.clone",
+            "Cannot clone a conversation while its agent run is active.",
+            level="warning",
+            data={"conversation_id": source.id, "reason": "run_active"},
+        )
+        return True
+    title = str(data.get("title") or "").strip() or None
+    clone = session.conversation_repo.clone_conversation(source.id, title=title)
+    if clone is None:
+        await emit_conversation_not_found(session, source.id)
+        return True
+    if bool(data.get("activate")):
+        session.active_conversation_id = clone.id
+        await session._switch_workspace_for_conversation(clone, announce=False)
+        session._load_active_conversation_snapshot(clone.id, clone.context_snapshot)
+        session._sync_permission_mode_with_active_conversation(source="conversation.clone")
+    await session._send_conversation_list()
+    await session._emit_command_result(
+        "conversation.clone",
+        f"Cloned conversation as {clone.title}.",
+        level="success",
+        data={
+            "conversation_id": clone.id,
+            "source_conversation_id": source.id,
+            "branch_kind": clone.branch_kind,
+            "activated": bool(data.get("activate")),
+        },
+    )
+    return True
+
+
+async def handle_conversation_merge(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    """Fast-forward a branch into its direct parent, with explicit conflicts."""
+    source_id = str(data.get("conversation_id") or session.active_conversation_id or "").strip()
+    source = session.conversation_repo.get_conversation(source_id) if source_id else None
+    if source is None:
+        await emit_conversation_not_found(session, source_id)
+        return True
+    target_id = str(data.get("target_conversation_id") or source.parent_conversation_id or "").strip()
+    target = session.conversation_repo.get_conversation(target_id) if target_id else None
+    if target is None:
+        await emit_conversation_not_found(session, target_id)
+        return True
+    if session._running_agent_task_for(source.id) is not None or session._running_agent_task_for(target.id) is not None:
+        await session._emit_command_result(
+            "conversation.merge",
+            "Stop both agent runs before merging sessions.",
+            level="warning",
+            data={"conversation_id": source.id, "target_conversation_id": target.id, "reason": "run_active"},
+        )
+        return True
+    _, updated_target, status = session.conversation_repo.merge_conversation_fast_forward(source.id, target.id)
+    messages = {
+        "merged": "Branch merged into its parent.",
+        "already_up_to_date": "The parent already contains this branch.",
+        "target_diverged": "Merge stopped: the parent changed after the branch was created.",
+        "source_is_not_direct_child": "Merge stopped: only a direct child can be merged into its parent.",
+        "already_merged_elsewhere": "Merge stopped: this branch was already merged elsewhere.",
+        "archived_conversation": "Merge stopped: archived sessions cannot be merged.",
+        "same_conversation": "A session cannot be merged into itself.",
+        "conversation_not_found": "Merge stopped: a session no longer exists.",
+    }
+    level = "success" if status in {"merged", "already_up_to_date"} else "warning"
+    active_target_merged = status == "merged" and updated_target is not None and session.active_conversation_id == updated_target.id
+    if active_target_merged and updated_target is not None:
+        from backend.services.conversation_payload_service import build_conversation_switched_payload
+
+        is_hydrating = session._load_active_conversation_snapshot(
+            updated_target.id,
+            updated_target.context_snapshot,
+            notify=True,
+        )
+        await session._send_ws_payload(
+            build_conversation_switched_payload(
+                updated_target,
+                is_hydrating=is_hydrating,
+                runtime_snapshot=session.runtime_snapshot(),
+            ),
+            log_context="conversation.switched",
+        )
+    if status in {"merged", "already_up_to_date"}:
+        await session._send_conversation_list()
+    await session._emit_command_result(
+        "conversation.merge",
+        messages.get(status, f"Merge stopped: {status}"),
+        level=level,
+        data={
+            "conversation_id": source.id,
+            "target_conversation_id": target.id,
+            "status": status,
+        },
+    )
+    return True
+
+
+async def handle_conversation_export(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    source_id = str(data.get("conversation_id") or session.active_conversation_id or "").strip()
+    if not source_id or session.conversation_repo.get_conversation(source_id) is None:
+        await emit_conversation_not_found(session, source_id)
+        return True
+    include_descendants = bool(data.get("include_descendants", True))
+    payload = session.conversation_repo.export_conversation_tree(
+        source_id,
+        include_descendants=include_descendants,
+    )
+    if payload is None:
+        await emit_conversation_not_found(session, source_id)
+        return True
+    content = json.dumps(payload, ensure_ascii=False, indent=2)
+    # Keep a single export from monopolizing the WebSocket replay buffer.
+    if len(content.encode("utf-8")) > 25 * 1024 * 1024:
+        await session._emit_command_result(
+            "conversation.export",
+            "Export is larger than 25 MiB; narrow the tree and try again.",
+            level="warning",
+            data={"conversation_id": source_id, "reason": "export_too_large"},
+        )
+        return True
+    safe_id = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in source_id)
+    await session._emit_command_result(
+        "conversation.export",
+        "Conversation export is ready to download.",
+        level="success",
+        data={
+            "conversation_id": source_id,
+            "filename": f"minicode-{safe_id}.json",
+            "mime_type": "application/json;charset=utf-8",
+            "content": content,
+            "conversation_count": len(payload.get("conversations") or []),
+        },
+    )
     return True
 
 
@@ -177,16 +328,58 @@ async def handle_conversation_unarchive(session: "WebSocketSession", data: dict[
 
 async def handle_conversation_delete(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     from backend.services.conversation_payload_service import (
+        build_worktree_cleanup_outcome,
         build_worktree_cleanup_force_required_outcome,
         parse_conversation_delete_request,
     )
 
     request = parse_conversation_delete_request(data)
     target = session.conversation_repo.get_conversation(request.conversation_id)
-    if request.cleanup_worktree and target is not None:
+    if target is None:
+        await emit_conversation_not_found(session, request.conversation_id)
+        return True
+
+    stopped = await _stop_conversation_run(
+        session,
+        request.conversation_id,
+        reason="conversation_deleted",
+    )
+    if not stopped:
+        await session._emit_command_result(
+            "conversation.delete",
+            "The agent run did not stop within the lifecycle deadline; the conversation and worktree were kept intact.",
+            level="error",
+            data={"conversation_id": request.conversation_id, "reason": "run_still_active"},
+        )
+        return True
+
+    # Release resources that can still hold or write into the workspace before
+    # taking the recoverable worktree snapshot and removing the checkout.
+    await session.terminal_manager.destroy_sessions_for_conversation(request.conversation_id)
+    from backend.preview import stop_preview_launch
+
+    await stop_preview_launch(
+        session_id=session.session_id,
+        conversation_id=request.conversation_id,
+    )
+
+    released_active_workspace = False
+    if request.cleanup_worktree and session.active_conversation_id == request.conversation_id:
+        clear_runtime = getattr(session, "_clear_workspace_runtime", None)
+        if callable(clear_runtime):
+            clear_runtime()
+            released_active_workspace = True
+
+    if request.cleanup_worktree:
         cleanup = await _cleanup_conversation_worktree(session, target, force=request.force_cleanup)
-        if not cleanup.get("removed") and cleanup.get("needs_force"):
-            outcome = build_worktree_cleanup_force_required_outcome(cleanup)
+        if not cleanup.get("removed"):
+            if released_active_workspace:
+                await session._switch_workspace_for_conversation(target, announce=False)
+            outcome = (
+                build_worktree_cleanup_force_required_outcome(cleanup)
+                if cleanup.get("needs_force")
+                else build_worktree_cleanup_outcome(cleanup)
+            )
             await session._emit_command_result(
                 outcome.command,
                 outcome.message,
@@ -194,10 +387,6 @@ async def handle_conversation_delete(session: "WebSocketSession", data: dict[str
                 data=outcome.data,
             )
             return True
-    if target is None:
-        await emit_conversation_not_found(session, request.conversation_id)
-        return True
-    await _stop_conversation_run(session, request.conversation_id, reason="conversation_deleted")
     deleted = session.conversation_repo.delete_conversation(request.conversation_id)
     if not deleted:
         await emit_conversation_not_found(session, request.conversation_id)
@@ -247,12 +436,14 @@ async def handle_conversation_worktree_handoff_preflight(session: "WebSocketSess
     if target is None:
         await emit_conversation_not_found(session, conversation_id)
         return True
-    preflight = build_handoff_preflight(
+    preflight = await asyncio.to_thread(
+        build_handoff_preflight,
         target,
         target=str(data.get("target") or ("local" if getattr(target, "git_isolated", False) else "worktree")),
         conversation_repo=session.conversation_repo,
         main_worktree_root=session._main_worktree_root,
         has_running_turn=session._running_agent_task_for(conversation_id) is not None,
+        dirty_action=str(data.get("dirty_action") or "block"),
     )
     await session._emit_command_result(
         "conversation.worktree.handoff.preflight",
@@ -265,7 +456,12 @@ async def handle_conversation_worktree_handoff_preflight(session: "WebSocketSess
 
 async def handle_conversation_worktree_handoff_execute(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     from backend.services.conversation_payload_service import create_isolated_worktree_binding
-    from backend.services.conversation_worktree_handoff_service import build_handoff_preflight, switch_main_checkout
+    from backend.services.conversation_worktree_handoff_service import (
+        build_handoff_preflight,
+        restore_workspace_stash,
+        stash_workspace_changes,
+        switch_main_checkout,
+    )
     from backend.workspace.worktree import WorktreeManager
 
     conversation_id = str(data.get("conversation_id") or "").strip()
@@ -274,12 +470,15 @@ async def handle_conversation_worktree_handoff_execute(session: "WebSocketSessio
         await emit_conversation_not_found(session, conversation_id)
         return True
     target_kind = str(data.get("target") or ("local" if getattr(conversation, "git_isolated", False) else "worktree"))
-    preflight = build_handoff_preflight(
+    dirty_action = str(data.get("dirty_action") or "block")
+    preflight = await asyncio.to_thread(
+        build_handoff_preflight,
         conversation,
         target=target_kind,
         conversation_repo=session.conversation_repo,
         main_worktree_root=session._main_worktree_root,
         has_running_turn=session._running_agent_task_for(conversation_id) is not None,
+        dirty_action=dirty_action,
     )
     if not preflight["allowed"] or str(data.get("fingerprint") or "") != preflight["fingerprint"]:
         await session._emit_command_result(
@@ -290,8 +489,26 @@ async def handle_conversation_worktree_handoff_execute(session: "WebSocketSessio
         )
         return True
 
+    source_path = Path(str(getattr(conversation, "worktree_path", "") or getattr(conversation, "workspace_root", "") or ".")).resolve()
+    stash_ref = ""
+    if dirty_action == "stash":
+        stashed, stash_ref = await asyncio.to_thread(
+            stash_workspace_changes,
+            source_path,
+            label=f"minicode-handoff-{conversation_id}",
+        )
+        if not stashed:
+            await session._emit_command_result(
+                "conversation.worktree.handoff.execute",
+                f"Could not safely stash local changes: {stash_ref}",
+                level="error",
+                data=preflight,
+            )
+            return True
+
     if target_kind == "worktree":
-        creation = create_isolated_worktree_binding(
+        creation = await asyncio.to_thread(
+            create_isolated_worktree_binding,
             conversation,
             current_workspace_root=session._current_workspace_root(),
             main_worktree_root=session._main_worktree_root,
@@ -299,7 +516,22 @@ async def handle_conversation_worktree_handoff_execute(session: "WebSocketSessio
         if not creation.created:
             await session._emit_command_result("conversation.worktree.handoff.execute", "Failed to create protected workspace.", level="error", data=preflight)
             return True
-        updated = session.conversation_repo.update_workspace_binding(
+        if stash_ref:
+            restored, error = await asyncio.to_thread(
+                restore_workspace_stash,
+                Path(creation.workspace_root),
+                stash_ref,
+            )
+            if not restored:
+                await session._emit_command_result(
+                    "conversation.worktree.handoff.execute",
+                    "The new worktree was created, but restoring stashed changes conflicted. The stash is retained for recovery.",
+                    level="error",
+                    data={**preflight, "stash_ref": stash_ref, "stash_error": error, "workspace_root": creation.workspace_root},
+                )
+                return True
+        updated = await asyncio.to_thread(
+            session.conversation_repo.update_workspace_binding,
             conversation_id,
             workspace_root=creation.workspace_root,
             git_branch=creation.git_branch,
@@ -307,7 +539,6 @@ async def handle_conversation_worktree_handoff_execute(session: "WebSocketSessio
             git_isolated=True,
         )
     else:
-        source_path = Path(str(getattr(conversation, "worktree_path", "") or "")).resolve()
         base_root = session._main_worktree_root(source_path)
         branch = str(getattr(conversation, "git_branch", "") or "").strip()
         if session.active_conversation_id == conversation_id:
@@ -315,15 +546,37 @@ async def handle_conversation_worktree_handoff_execute(session: "WebSocketSessio
             if callable(clear_runtime):
                 clear_runtime()
         manager = WorktreeManager(base_root)
-        if not manager.remove_worktree(source_path, force=False):
+        if not await asyncio.to_thread(manager.remove_worktree, source_path, force=False):
             await session._emit_command_result("conversation.worktree.handoff.execute", "Failed to remove the protected workspace.", level="error", data=preflight)
             return True
-        switched, error = switch_main_checkout(base_root, branch)
+        switched, error = await asyncio.to_thread(switch_main_checkout, base_root, branch)
         if not switched:
-            manager.create_worktree(source_path, branch=branch, new_branch=False)
+            await asyncio.to_thread(
+                manager.create_worktree,
+                source_path,
+                branch=branch,
+                new_branch=False,
+            )
+            if stash_ref:
+                await asyncio.to_thread(restore_workspace_stash, source_path, stash_ref)
             await session._emit_command_result("conversation.worktree.handoff.execute", f"Failed to switch the local checkout: {error}", level="error", data=preflight)
             return True
-        updated = session.conversation_repo.update_workspace_binding(
+        if stash_ref:
+            restored, error = await asyncio.to_thread(
+                restore_workspace_stash,
+                base_root,
+                stash_ref,
+            )
+            if not restored:
+                await session._emit_command_result(
+                    "conversation.worktree.handoff.execute",
+                    "Local checkout switched, but restoring stashed changes conflicted. The stash is retained for recovery.",
+                    level="error",
+                    data={**preflight, "stash_ref": stash_ref, "stash_error": error, "workspace_root": str(base_root)},
+                )
+                return True
+        updated = await asyncio.to_thread(
+            session.conversation_repo.update_workspace_binding,
             conversation_id,
             workspace_root=str(base_root),
             git_branch=branch,
@@ -358,7 +611,15 @@ async def handle_conversation_clear(session: "WebSocketSession", data: dict[str,
     target = session.conversation_repo.get_conversation(request.conversation_id)
     if target is None:
         return False
-    await _stop_conversation_run(session, request.conversation_id, reason="conversation_cleared")
+    stopped = await _stop_conversation_run(session, request.conversation_id, reason="conversation_cleared")
+    if not stopped:
+        await session._emit_command_result(
+            "clear",
+            "The agent run did not stop within the lifecycle deadline; conversation history was not cleared.",
+            level="error",
+            data={"conversation_id": request.conversation_id, "reason": "run_still_active"},
+        )
+        return True
     session.conversation_repo.replace_transcript(request.conversation_id, [])
     session.conversation_repo.update_summary(request.conversation_id, "")
     session.conversation_repo.update_facts(request.conversation_id, local_facts=[])
@@ -746,25 +1007,242 @@ async def handle_context_compact(session: "WebSocketSession", data: dict[str, An
     return True
 
 
+def _fork_text(value: Any) -> str:
+    """Normalize transcript/context content for fork-boundary matching."""
+    if isinstance(value, str):
+        return " ".join(value.split())
+    if isinstance(value, list):
+        return " ".join(_fork_text(item) for item in value if item is not None).strip()
+    if isinstance(value, dict):
+        for key in ("text", "content", "value"):
+            if key in value:
+                return _fork_text(value.get(key))
+    return str(value or "").strip()
+
+
+def _history_message_matches_transcript(entry: dict[str, Any], history_message: Any) -> bool:
+    """Match one persisted transcript item to one model-context message.
+
+    Context history may contain runtime-injected prefixes, so exact equality is
+    intentionally not required for user/assistant text. The ordered walk in
+    ``_resolve_context_history_index`` prevents duplicate text from selecting
+    an earlier turn.
+    """
+    role = str(entry.get("role") or "").strip().lower()
+    history_role = str(getattr(history_message, "role", "") or "").strip().lower()
+    if role != history_role or role not in {"user", "assistant"}:
+        return False
+
+    transcript_content = _fork_text(entry.get("content"))
+    history_content = _fork_text(getattr(history_message, "content", ""))
+    if transcript_content and history_content:
+        if transcript_content == history_content:
+            return True
+        # Runtime context and attachment fallbacks are prepended to user turns.
+        if role == "user" and transcript_content in history_content:
+            return True
+        # Providers may normalize assistant whitespace or append structured
+        # text around the persisted final answer.
+        if role == "assistant" and (
+            transcript_content in history_content or history_content in transcript_content
+        ):
+            return True
+        return False
+
+    if transcript_content or history_content:
+        return False
+    transcript_calls = entry.get("tool_calls")
+    history_calls = getattr(history_message, "tool_calls", None)
+    return bool(transcript_calls or history_calls or role == "assistant")
+
+
+def _resolve_context_history_index(
+    context_builder: Any,
+    transcript: list[dict[str, Any]],
+    target_transcript_index: int,
+) -> int | None:
+    """Resolve a transcript boundary to the corresponding model-history index.
+
+    The two sequences are deliberately not assumed to have the same length:
+    model history can contain runtime context, tool messages, or compaction
+    boundaries that are not persisted as user-facing transcript messages.
+    """
+    history = list(getattr(context_builder, "_history", []) or [])
+    if target_transcript_index < 0 or target_transcript_index >= len(transcript):
+        return None
+    cursor = 0
+    target_history_index: int | None = None
+    forward_complete = True
+    for transcript_index, entry in enumerate(transcript[: target_transcript_index + 1]):
+        role = str(entry.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        match_index: int | None = None
+        for history_index in range(cursor, len(history)):
+            if _history_message_matches_transcript(entry, history[history_index]):
+                match_index = history_index
+                break
+        if match_index is None:
+            forward_complete = False
+            break
+        cursor = match_index + 1
+        if transcript_index == target_transcript_index:
+            target_history_index = match_index
+    if forward_complete and target_history_index is not None:
+        return target_history_index
+
+    # Compaction can replace an old transcript prefix with a summary message.
+    # Align the target against the retained suffix from the end so a recent
+    # message remains forkable without pretending the old prefix still exists.
+    cursor = len(history) - 1
+    for transcript_index in range(len(transcript) - 1, target_transcript_index - 1, -1):
+        entry = transcript[transcript_index]
+        role = str(entry.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        match_index = None
+        for history_index in range(cursor, -1, -1):
+            if _history_message_matches_transcript(entry, history[history_index]):
+                match_index = history_index
+                break
+        if match_index is None:
+            return None
+        cursor = match_index - 1
+        if transcript_index == target_transcript_index:
+            return match_index
+    return None
+
+
 async def handle_context_fork(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    """Fork the conversation context from a specific message index."""
-    message_index = int(data.get("message_index", -1))
+    """Fork from a stable transcript message id, with index compatibility."""
+    requested_message_id = str(data.get("message_id") or "").strip()
+    requested_message_index = int(data.get("message_index", -1))
+    source_conversation = getattr(session, "active_conversation", None)
+    source_transcript = list(getattr(source_conversation, "transcript", []) or [])
+    transcript_index = requested_message_index
+    if not requested_message_id and source_transcript and transcript_index < 0:
+        # Keep legacy negative-index clients semantically aligned with the
+        # persisted transcript before calculating the model-context boundary.
+        transcript_index = max(0, len(source_transcript) + transcript_index)
+    if requested_message_id:
+        transcript_index = next(
+            (
+                index
+                for index, entry in enumerate(source_transcript)
+                if str(entry.get("id") or "").strip() == requested_message_id
+            ),
+            -1,
+        )
+        if transcript_index < 0:
+            await session._send_event({
+                "type": "error",
+                "data": {
+                    "message": f"Fork target message not found: {requested_message_id}",
+                    "error_type": "context",
+                },
+            })
+            return True
+
     ctx = session.context_builder
     try:
-        forked = ctx.fork_from(message_index)
+        context_history_index = transcript_index
+        if requested_message_id:
+            resolved = _resolve_context_history_index(ctx, source_transcript, transcript_index)
+            if resolved is None:
+                await session._send_event({
+                    "type": "error",
+                    "data": {
+                        "message": (
+                            "Fork target exists in the transcript but is no longer "
+                            "available in the active model context. Compact or restore "
+                            "the conversation before forking from it."
+                        ),
+                        "error_type": "context",
+                    },
+                })
+                return True
+            context_history_index = resolved
+        forked = ctx.fork_from(context_history_index)
         # Store the forked context for a subsequent side_query or new turn
         if not hasattr(session, "_forked_contexts"):
             session._forked_contexts = {}
-        fork_id = f"fork_{message_index}_{id(forked)}"
+        registry = getattr(session, "_fork_registry", None)
+        if registry is not None:
+            fork_record = registry.create(
+                parent_conversation_id=str(session.active_conversation_id or ""),
+                message_index=transcript_index,
+                history_length=len(forked._history),
+                estimated_tokens=forked._history_tokens_total,
+            )
+            fork_id = fork_record.fork_id
+        else:
+            # Test-only sessions without a durable session id still receive a
+            # stable-in-process id, never Python's object address.
+            from uuid import uuid4
+
+            fork_id = f"fork_{uuid4().hex[:16]}"
         session._forked_contexts[fork_id] = forked
+        fork_data = {
+            "fork_id": fork_id,
+            "message_index": transcript_index,
+            "context_history_index": context_history_index,
+            "history_length": len(forked._history),
+            "estimated_tokens": forked._history_tokens_total,
+            "parent_conversation_id": str(session.active_conversation_id or ""),
+        }
+        if requested_message_id:
+            fork_data["message_id"] = requested_message_id
+        if registry is not None:
+            fork_data.update(registry.get(fork_id).to_dict())
+        if source_conversation is not None and bool(data.get("create_branch", True)):
+            branch_transcript = source_transcript[: max(0, transcript_index + 1)]
+            branch_id = fork_id
+            branch = session.conversation_repo.create_conversation(
+                conversation_id=branch_id,
+                title=f"{getattr(source_conversation, 'title', 'Conversation')} · 分支",
+                memory_mode=getattr(source_conversation, "memory_mode", "none"),
+                permission_mode=getattr(source_conversation, "permission_mode", "default"),
+                permission_deny_rules=list(getattr(source_conversation, "permission_deny_rules", []) or []),
+                permission_overrides=dict(getattr(source_conversation, "permission_overrides", {}) or {}),
+                summary=str(getattr(source_conversation, "summary", "") or ""),
+                inherited_facts=list(getattr(source_conversation, "inherited_facts", []) or []),
+                local_facts=list(getattr(source_conversation, "local_facts", []) or []),
+                transcript=copy.deepcopy(branch_transcript),
+                context_snapshot=forked.export_snapshot(),
+                workspace_root=str(
+                    getattr(source_conversation, "worktree_path", "")
+                    or getattr(source_conversation, "workspace_root", "")
+                    or ""
+                ),
+                git_branch=str(getattr(source_conversation, "git_branch", "") or ""),
+                worktree_path="",
+                # Context branches share the checkout but never own/delete the
+                # source conversation's isolated worktree.
+                git_isolated=False,
+                parent_conversation_id=str(source_conversation.id),
+                parent_message_index=transcript_index,
+                fork_id=fork_id,
+                branch_kind="context_fork",
+            )
+            if registry is not None:
+                bound = registry.bind_branch(fork_id, branch.id)
+                if bound is not None:
+                    fork_data.update(bound.to_dict())
+            fork_data.update({
+                "branch_conversation_id": branch.id,
+                "branch_created": True,
+            })
+            if bool(data.get("activate", False)):
+                session.active_conversation_id = branch.id
+                await session._switch_workspace_for_conversation(branch, announce=False)
+                session._load_active_conversation_snapshot(branch.id, branch.context_snapshot)
+                session._sync_permission_mode_with_active_conversation(source="context.fork")
+            send_conversation_list = getattr(session, "_send_conversation_list", None)
+            if callable(send_conversation_list):
+                await send_conversation_list()
         await session._send_event({
             "type": "context_forked",
-            "data": {
-                "fork_id": fork_id,
-                "message_index": message_index,
-                "history_length": len(forked._history),
-                "estimated_tokens": forked._history_tokens_total,
-            },
+            "data": fork_data,
         })
     except Exception as exc:
         logger.warning("Context fork failed: %s", exc)
@@ -821,6 +1299,9 @@ async def handle_context_ledger(session: "WebSocketSession", data: dict[str, Any
 
 HANDLERS: dict[str, Any] = {
     "conversation.create": handle_conversation_create,
+    "conversation.clone": handle_conversation_clone,
+    "conversation.merge": handle_conversation_merge,
+    "conversation.export": handle_conversation_export,
     "conversation.switch": handle_conversation_switch,
     "conversation.list": handle_conversation_list,
     "conversation.rename": handle_conversation_rename,

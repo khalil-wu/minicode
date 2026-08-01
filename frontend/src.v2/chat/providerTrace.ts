@@ -14,6 +14,7 @@ export interface ProviderUsageSummary {
   output: number;
   cacheRead: number;
   cacheWrite: number;
+  cacheDeleted?: number;
   promptCacheTotal?: number;
   promptCacheHitRate?: number;
   reasoning: number;
@@ -184,7 +185,7 @@ export const providerUsageSummary = (raw?: ProviderRawMetadata | null): Provider
     deepSeekCacheHit > 0 || deepSeekCacheMiss > 0
       ? deepSeekCacheHit + deepSeekCacheMiss
       : undefined;
-  return {
+  const result: ProviderUsageSummary = {
     input: numberField(usage.input_tokens ?? usage.prompt_tokens ?? deepSeekPromptTotal ?? usage.input),
     output: numberField(usage.output_tokens ?? usage.completion_tokens ?? usage.output),
     cacheRead: numberField(
@@ -200,6 +201,9 @@ export const providerUsageSummary = (raw?: ProviderRawMetadata | null): Provider
     reasoning: numberField(usage.reasoning_output_tokens ?? completionDetails.reasoning_tokens ?? usage.reasoning),
     provider: raw?.provider,
   };
+  const cacheDeleted = numberField(usage.cache_deleted_input_tokens ?? usage.cacheDeleted);
+  if (cacheDeleted > 0) result.cacheDeleted = cacheDeleted;
+  return result;
 };
 
 export const providerCacheHitRate = (usage: ProviderUsageSummary): number | null => {
@@ -380,9 +384,6 @@ export const providerTraceDiagnostics = (raw?: ProviderRawMetadata | null): stri
     diagnostics.push("duplicate instruction-role content in provider input payload");
   }
   if (raw.safety?.has_encrypted_reasoning) diagnostics.push("encrypted reasoning present; content redacted");
-  if (raw.safety?.synthetic_trace || raw.event_type === "synthetic.tool_calls_no_done") {
-    diagnostics.push("synthetic provider trace: stream ended without provider DONE");
-  }
   if (raw.prompt_cache_diagnostic?.prompt_section_delta?.status === "changed") {
     diagnostics.push("prompt section delta captured");
   }
@@ -392,7 +393,7 @@ export const providerTraceDiagnostics = (raw?: ProviderRawMetadata | null): stri
   if (hit != null && hit >= 80 && (providerCalls >= 4 || toolBatches >= 4)) {
     diagnostics.push("cache hit is high; latency is likely loop/tool-bound");
   }
-  if (metrics.dynamic_iteration_budget_enabled && iterationLimit > 0 && iterationHardLimit > iterationLimit) {
+  if (iterationLimit > 0 && iterationHardLimit > iterationLimit) {
     diagnostics.push(`dynamic iteration window active: ${iterationLimit}/${iterationHardLimit}`);
   }
   if (diagnostics.length === 0) diagnostics.push("trace contract looks healthy");
@@ -955,6 +956,7 @@ export const providerTracePayloadFromDone = (
         output_tokens: fallbackUsage.output,
         cache_read_input_tokens: fallbackUsage.cacheRead,
         cache_creation_input_tokens: fallbackUsage.cacheWrite,
+        cache_deleted_input_tokens: fallbackUsage.cacheDeleted ?? 0,
         prompt_cache_total_tokens: fallbackUsage.promptCacheTotal,
         prompt_cache_hit_rate: fallbackUsage.promptCacheHitRate,
         reasoning_output_tokens: fallbackUsage.reasoning,

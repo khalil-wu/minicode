@@ -5,6 +5,7 @@ Artifact Store - session-scoped artifacts with short-lived disk persistence.
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar, Token
 import json
 import logging
 import re
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING  # noqa: F401  (reserved for forward references in later tasks)
 
 from backend.config import DATA_ROOT
+from backend.atomic_io import atomic_write_text
 
 # ── Storage paths and limits ─────────────────────────────────
 ARTIFACT_DATA_DIR = DATA_ROOT / "artifacts"
@@ -32,7 +34,7 @@ CONTENT_UNIT_SUFFIX = ".txt"
 LEGACY_SUFFIX = ".json"
 
 # ── Schema versioning ────────────────────────────────────────
-META_SIDECAR_SCHEMA_VERSION = 1
+META_SIDECAR_SCHEMA_VERSION = 2
 
 # ── Module logger ────────────────────────────────────────────
 logger = logging.getLogger(__name__)
@@ -45,6 +47,8 @@ class ArtifactMeta:
     type: str
     size: int
     preview: str
+    conversation_id: str = ""
+    workspace_root: str = ""
 
 
 def _build_preview(content: str, preview_lines: int) -> str:
@@ -104,6 +108,8 @@ class MetaSidecar:
     preview: str
     preview_lines: int
     created_at: float
+    conversation_id: str = ""
+    workspace_root: str = ""
 
     def to_meta(self) -> ArtifactMeta:
         """Project the sidecar onto the public ``ArtifactMeta`` shape."""
@@ -114,6 +120,8 @@ class MetaSidecar:
             type=self.type,
             size=self.size,
             preview=self.preview,
+            conversation_id=self.conversation_id,
+            workspace_root=self.workspace_root,
         )
 
     @classmethod
@@ -126,6 +134,8 @@ class MetaSidecar:
         content: str,
         preview_lines: int,
         created_at: float,
+        conversation_id: str = "",
+        workspace_root: str = "",
     ) -> MetaSidecar:
         """Build a sidecar from the inputs supplied to ``ArtifactStore.save``."""
 
@@ -138,6 +148,8 @@ class MetaSidecar:
             preview=_build_preview(content, preview_lines),
             preview_lines=preview_lines,
             created_at=created_at,
+            conversation_id=conversation_id,
+            workspace_root=workspace_root,
         )
 
     def to_json_payload(self) -> dict[str, object]:
@@ -152,6 +164,8 @@ class MetaSidecar:
             "preview": self.preview,
             "preview_lines": self.preview_lines,
             "created_at": self.created_at,
+            "conversation_id": self.conversation_id,
+            "workspace_root": self.workspace_root,
         }
 
     @classmethod
@@ -169,7 +183,7 @@ class MetaSidecar:
         schema_version = payload.get("schema_version")
         if not isinstance(schema_version, int) or isinstance(schema_version, bool):
             return None
-        if schema_version != META_SIDECAR_SCHEMA_VERSION:
+        if schema_version not in {1, META_SIDECAR_SCHEMA_VERSION}:
             return None
 
         artifact_id = payload.get("artifact_id")
@@ -215,6 +229,8 @@ class MetaSidecar:
             preview=preview,
             preview_lines=preview_lines,
             created_at=float(created_at),
+            conversation_id=str(payload.get("conversation_id") or ""),
+            workspace_root=str(payload.get("workspace_root") or ""),
         )
 
 
@@ -306,25 +322,23 @@ def _write_split_payload(
 ) -> None:
     """Persist a split-layout artifact to disk.
 
-    Writes the metadata sidecar JSON first, then the raw content unit. If the
-    content write fails after the sidecar has already landed, the sidecar is
-    rolled back via ``meta_path.unlink(missing_ok=True)`` and the original
-    ``OSError`` is re-raised so the caller can surface the failure. A sidecar
-    write failure has nothing to roll back and propagates directly.
+    Writes the content unit first, then publishes the metadata sidecar as the
+    authoritative record. If the sidecar write fails, the orphan content unit
+    is removed and the error propagates to the caller.
 
     This is a pure-function ``Disk_Worker`` helper intended to run on a worker
     thread via :func:`asyncio.to_thread`; it must not be called from the event
     loop thread itself.
     """
 
-    meta_path.write_text(
-        json.dumps(sidecar.to_json_payload(), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    atomic_write_text(content_path, content)
     try:
-        content_path.write_text(content, encoding="utf-8")
+        atomic_write_text(
+            meta_path,
+            json.dumps(sidecar.to_json_payload(), ensure_ascii=False, indent=2),
+        )
     except OSError:
-        meta_path.unlink(missing_ok=True)
+        content_path.unlink(missing_ok=True)
         raise
 
 
@@ -590,14 +604,7 @@ class Content_Cache:
 
 
 class ArtifactStore:
-    """Session-scoped artifact store with bounded LRU cache and async disk I/O.
-
-    Public methods are synchronous so legacy call sites work unchanged; disk
-    writes are dispatched via :func:`asyncio.to_thread` when a running loop is
-    available, with a synchronous fallback when it is not. Cleanup runs on a
-    recurring background task scheduled lazily on the first save observed by a
-    running loop.
-    """
+    """Session-scoped artifact store with bounded LRU and durable writes."""
 
     def __init__(
         self,
@@ -642,8 +649,30 @@ class ArtifactStore:
         self._metadata_index: dict[str, ArtifactMeta] = {}
         self._preview_lines_index: dict[str, int] = {}
         self._lock = threading.Lock()
-        self._pending_writes: set[asyncio.Task[None]] = set()
         self._cleanup_task: asyncio.Task[None] | None = None
+        self._owner_context: ContextVar[tuple[str, str]] = ContextVar(
+            f"artifact_owner_{id(self)}",
+            default=("", ""),
+        )
+
+    def bind_owner(self, conversation_id: str, workspace_root: str = "") -> Token:
+        return self._owner_context.set((str(conversation_id or ""), str(workspace_root or "")))
+
+    def reset_owner(self, token: Token) -> None:
+        self._owner_context.reset(token)
+
+    @staticmethod
+    def _owner_matches(meta: ArtifactMeta, conversation_id: str, workspace_root: str) -> bool:
+        if conversation_id and meta.conversation_id != conversation_id:
+            return False
+        if workspace_root:
+            if not meta.workspace_root:
+                return False
+            try:
+                return Path(meta.workspace_root).resolve() == Path(workspace_root).resolve()
+            except OSError:
+                return meta.workspace_root == workspace_root
+        return True
 
     # ── Small accessors ───────────────────────────────────────
 
@@ -666,6 +695,8 @@ class ArtifactStore:
         source: str,
         type: str = "text",
         preview_lines: int = 5,
+        conversation_id: str | None = None,
+        workspace_root: str | Path | None = None,
     ) -> str:
         # Validate content BEFORE any cache mutation, index mutation, or disk
         # write so a rejection leaves all state untouched.
@@ -681,6 +712,9 @@ class ArtifactStore:
 
         artifact_id = f"art_{uuid.uuid4().hex[:8]}"
         created_at = time.time()
+        bound_conversation, bound_workspace = self._owner_context.get()
+        owner_conversation = bound_conversation if conversation_id is None else str(conversation_id or "")
+        owner_workspace = bound_workspace if workspace_root is None else str(workspace_root or "")
         sidecar = MetaSidecar.from_save(
             artifact_id=artifact_id,
             source=source,
@@ -688,77 +722,42 @@ class ArtifactStore:
             content=content,
             preview_lines=preview_lines,
             created_at=created_at,
+            conversation_id=owner_conversation,
+            workspace_root=owner_workspace,
         )
         meta = sidecar.to_meta()
 
-        # Synchronous in-memory update under a short-held lock. Eviction is
-        # bounded to OrderedDict ops; we do not touch disk while the lock is
-        # held.
+        meta_path = self._storage_dir / f"{artifact_id}{META_SIDECAR_SUFFIX}"
+        content_path = self._storage_dir / f"{artifact_id}{CONTENT_UNIT_SUFFIX}"
+        _write_split_payload(meta_path, content_path, sidecar, content)
+
+        # Publish to the in-memory indexes only after the durable record exists.
         with self._lock:
             self._metadata_index[artifact_id] = meta
             self._preview_lines_index[artifact_id] = preview_lines
             self._content_cache.put(artifact_id, content)
-
-        # Schedule the disk write off the calling thread when a loop is
-        # available; otherwise fall back to a synchronous write so callers
-        # constructing the store outside any loop (e.g. unit tests) still
-        # observe the artifact on disk.
-        meta_path = self._storage_dir / f"{artifact_id}{META_SIDECAR_SUFFIX}"
-        content_path = self._storage_dir / f"{artifact_id}{CONTENT_UNIT_SUFFIX}"
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            logger.info(
-                "artifact deferred write id=%s reason=no-running-loop", artifact_id
-            )
-            try:
-                _write_split_payload(meta_path, content_path, sidecar, content)
-            except OSError as exc:
-                logger.error(
-                    "artifact write failed id=%s error=%r", artifact_id, exc
-                )
-        else:
-            try:
-                task = loop.create_task(
-                    asyncio.to_thread(
-                        _write_split_payload,
-                        meta_path,
-                        content_path,
-                        sidecar,
-                        content,
-                    )
-                )
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.warning(
-                    "artifact deferred write id=%s reason=%r", artifact_id, exc
-                )
-            else:
-                self._pending_writes.add(task)
-
-                def _on_done(
-                    t: asyncio.Task[None], _aid: str = artifact_id
-                ) -> None:
-                    self._pending_writes.discard(t)
-                    try:
-                        exc = t.exception()
-                    except asyncio.CancelledError:
-                        return
-                    if exc is not None:
-                        logger.error(
-                            "artifact write failed id=%s error=%r", _aid, exc
-                        )
-
-                task.add_done_callback(_on_done)
 
         self._ensure_cleanup_scheduled()
         return artifact_id
 
     # ── Read methods ──────────────────────────────────────────
 
-    def get(self, artifact_id: str) -> str | None:
+    def get(
+        self,
+        artifact_id: str,
+        *,
+        conversation_id: str | None = None,
+        workspace_root: str | Path | None = None,
+    ) -> str | None:
         if not _is_safe_artifact_id(artifact_id):
             return None
+        bound_conversation, bound_workspace = self._owner_context.get()
+        owner_conversation = bound_conversation if conversation_id is None else str(conversation_id or "")
+        owner_workspace = bound_workspace if workspace_root is None else str(workspace_root or "")
+        if owner_conversation or owner_workspace:
+            meta = self.get_meta(artifact_id)
+            if meta is None or not self._owner_matches(meta, owner_conversation, owner_workspace):
+                return None
         with self._lock:
             cached = self._content_cache.get(artifact_id)
         if cached is not None:
@@ -818,12 +817,26 @@ class ArtifactStore:
 
         return None
 
-    def get_preview(self, artifact_id: str, lines: int = 5) -> str | None:
+    def get_preview(
+        self,
+        artifact_id: str,
+        lines: int = 5,
+        *,
+        conversation_id: str | None = None,
+        workspace_root: str | Path | None = None,
+    ) -> str | None:
         if lines <= 0:
             return ""
 
         meta = self.get_meta(artifact_id)
         if meta is None:
+            return None
+        bound_conversation, bound_workspace = self._owner_context.get()
+        owner_conversation = bound_conversation if conversation_id is None else str(conversation_id or "")
+        owner_workspace = bound_workspace if workspace_root is None else str(workspace_root or "")
+        if (owner_conversation or owner_workspace) and not self._owner_matches(
+            meta, owner_conversation, owner_workspace
+        ):
             return None
 
         with self._lock:
@@ -833,7 +846,11 @@ class ArtifactStore:
             stripped = _strip_preview_overflow_suffix(meta.preview)
             return "\n".join(stripped.split("\n")[:lines])
 
-        content = self.get(artifact_id)
+        content = self.get(
+            artifact_id,
+            conversation_id=owner_conversation,
+            workspace_root=owner_workspace,
+        )
         if content is None:
             return None
         return _build_preview(content, lines)
@@ -966,6 +983,10 @@ class ArtifactStore:
 
         if self._cleanup_task is not None:
             self._cleanup_task.cancel()
+
+    async def flush(self) -> None:
+        """Compatibility hook; save() is already durable when it returns."""
+        return None
 
 
 def type_of(value: object) -> str:

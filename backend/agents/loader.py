@@ -4,22 +4,36 @@ Mirrors Claude Code's ``agents/`` directory: a user defines a subagent by
 dropping a markdown file whose YAML frontmatter holds ``name`` / ``description``
 / ``model`` / ``tools`` and whose body is the subagent's system prompt.
 Discovered agents become selectable ``subagent_type`` values in the Task tool,
-alongside the built-in types (general-purpose / explore / plan / implement /
-verification). Frontmatter parsing reuses the skill loader's dependency-free
-YAML parser.
+alongside the built-in types (general-purpose / explore / plan).
 """
 
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from backend.config import PROJECT_ROOT
-from backend.skills.loader import SkillLoader
+import yaml
+
+from backend.agent.claude_md import _find_project_root, _get_managed_claude_dir
+from backend.workspace.state import get_explicit_active_workspace_root
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        separator = "," if "," in value else None
+        return [item.strip() for item in value.split(separator) if item.strip()]
+    return []
+
+
+def _extract_body(raw: str) -> str:
+    return re.sub(r"^---\s*\n.*?\n---\s*\n?", "", raw, count=1, flags=re.DOTALL).strip()
 
 
 @dataclass
@@ -36,31 +50,53 @@ class AgentDefinition:
     source_path: Path | None = None
 
 
-def _agent_search_dirs() -> list[Path]:
-    """Project-local dirs first (higher priority), then user-global.
+def _project_agent_dirs(workspace_root: Path | None) -> list[Path]:
+    """Return CC project agent directories, closest scope first."""
+    if workspace_root is None:
+        return []
+    current = workspace_root.expanduser().resolve()
+    boundary = _find_project_root(current)
+    directories: list[Path] = []
+    home = Path.home().resolve()
+    while current != home:
+        directory = current / ".claude" / "agents"
+        if directory.is_dir():
+            directories.append(directory)
+        if boundary is not None and current == boundary:
+            break
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return directories
 
-    ``.claude/agents`` is included for compatibility with the Claude Code
-    ecosystem (cc walks ``.claude/agents`` from cwd up to the home dir).
+
+def _agent_search_dirs(workspace_root: Path | None = None) -> list[Path]:
+    """Return Claude Code agent scopes in effective precedence order.
+
+    Managed definitions override project definitions; the closest project scope
+    then overrides parent project and user definitions. This is CC's active
+    agent precedence. The install tree is deliberately absent: it is not
+    a project scope and previously made agents depend on where MiniCode itself
+    happened to be installed.
     """
+    root = workspace_root or get_explicit_active_workspace_root()
     return [
-        PROJECT_ROOT / ".mini-code" / "agents",
-        PROJECT_ROOT / ".codex" / "agents",
-        PROJECT_ROOT / ".claude" / "agents",
-        PROJECT_ROOT / "agents",
-        Path.home() / ".mini-code" / "agents",
-        Path.home() / ".codex" / "agents",
+        _get_managed_claude_dir() / ".claude" / "agents",
+        *_project_agent_dirs(root),
         Path.home() / ".claude" / "agents",
     ]
 
 
-def discover_agents() -> dict[str, AgentDefinition]:
+def discover_agents(workspace_root: str | Path | None = None) -> dict[str, AgentDefinition]:
     """Scan agent directories and return {name: AgentDefinition}.
 
-    Project-local directories take precedence over user-global (first wins),
-    matching cc's project-over-user priority.
+    Managed and project-local directories take precedence over user-global
+    definitions (first wins), matching CC's active-agent priority.
     """
     agents: dict[str, AgentDefinition] = {}
-    for directory in _agent_search_dirs():
+    root = Path(workspace_root).resolve() if workspace_root is not None else None
+    for directory in _agent_search_dirs(root):
         if not directory.is_dir():
             continue
         for md_file in sorted(directory.glob("*.md")):
@@ -85,17 +121,23 @@ def _parse_agent_file(path: Path) -> AgentDefinition | None:
 
     fm_match = _FRONTMATTER_RE.match(raw)
     if fm_match:
-        fm = SkillLoader._parse_simple_yaml(fm_match.group(1))
+        try:
+            payload = yaml.safe_load(fm_match.group(1))
+        except yaml.YAMLError:
+            return None
+        if not isinstance(payload, Mapping):
+            return None
+        fm = payload
         name = str(fm.get("name") or name).strip()
         description = str(fm.get("description") or "").strip()
         model = str(fm.get("model") or "").strip()
-        tools = SkillLoader._to_list(fm.get("tools"))
-        disallowed = SkillLoader._to_list(
+        tools = _string_list(fm.get("tools"))
+        disallowed = _string_list(
             fm.get("disallowed_tools") or fm.get("disallowedTools") or []
         )
         effort = str(fm.get("effort") or "").strip()
 
-    body = SkillLoader._extract_body(raw)
+    body = _extract_body(raw)
     if not body and not description:
         return None  # empty file — skip
 
@@ -111,9 +153,11 @@ def _parse_agent_file(path: Path) -> AgentDefinition | None:
     )
 
 
-def get_custom_agent(name: str) -> AgentDefinition | None:
+def get_custom_agent(
+    name: str, workspace_root: str | Path | None = None
+) -> AgentDefinition | None:
     """Look up a single custom agent by name (None if not defined)."""
-    return discover_agents().get(name)
+    return discover_agents(workspace_root).get(name)
 
 
 # ── Write API (Agent editor) ────────────────────────────────────────
@@ -121,9 +165,16 @@ def get_custom_agent(name: str) -> AgentDefinition | None:
 _AGENT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 
 
-def _user_agents_dir() -> Path:
-    """Writable directory for user-defined agents (project-local)."""
-    return PROJECT_ROOT / ".mini-code" / "agents"
+def _writable_agents_dir(workspace_root: str | Path | None = None) -> Path:
+    """Return the active project's standard Claude Code agent directory."""
+    root = (
+        Path(workspace_root).expanduser().resolve()
+        if workspace_root is not None
+        else get_explicit_active_workspace_root()
+    )
+    if root is None:
+        raise ValueError("Open a workspace before creating or editing a project agent.")
+    return root / ".claude" / "agents"
 
 
 def _yaml_escape(value: str) -> str:
@@ -163,6 +214,7 @@ def save_custom_agent(
     tools: list[str] | None = None,
     disallowed_tools: list[str] | None = None,
     effort: str = "",
+    workspace_root: str | Path | None = None,
 ) -> AgentDefinition:
     """Create or overwrite a user-defined agent markdown file.
 
@@ -175,11 +227,12 @@ def save_custom_agent(
             "Agent name must be 1-64 chars: letters, digits, dash or underscore."
         )
 
-    existing = get_custom_agent(clean_name)
-    target_dir = _user_agents_dir()
+    writable_dir = _writable_agents_dir(workspace_root)
+    existing = get_custom_agent(clean_name, workspace_root)
+    target_dir = writable_dir
     if existing and existing.source_path is not None:
         # Edit in place only when the file already lives in a writable dir.
-        if _user_agents_dir() in existing.source_path.parents:
+        if writable_dir in existing.source_path.parents:
             target_dir = existing.source_path.parent
 
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -199,7 +252,9 @@ def save_custom_agent(
     return agent
 
 
-def delete_custom_agent(name: str) -> bool:
+def delete_custom_agent(
+    name: str, workspace_root: str | Path | None = None
+) -> bool:
     """Delete a user-defined agent file. Returns False if not found or not deletable.
 
     Only deletes files inside the writable user directory; built-in/global
@@ -208,10 +263,11 @@ def delete_custom_agent(name: str) -> bool:
     clean_name = (name or "").strip()
     if not _AGENT_NAME_RE.match(clean_name):
         return False
-    agent = get_custom_agent(clean_name)
+    writable_dir = _writable_agents_dir(workspace_root)
+    agent = get_custom_agent(clean_name, workspace_root)
     if agent is None or agent.source_path is None:
         return False
-    if _user_agents_dir() not in agent.source_path.parents:
+    if writable_dir not in agent.source_path.parents:
         return False
     try:
         agent.source_path.unlink()

@@ -1,6 +1,5 @@
 import { useAppStore } from "../stores";
 import type { ServerEvent } from "../protocol/events";
-import { pushToast } from "../overlays/ToastContainer";
 import { normalizeSkillList, normalizeSlashCommands } from "../lib/catalog-normalizers";
 
 export const handleCommandCatalogEvent = (e: ServerEvent): boolean => {
@@ -9,32 +8,6 @@ export const handleCommandCatalogEvent = (e: ServerEvent): boolean => {
     case "skills.list": {
       if (e.skills) {
         s.setAvailableSkills(normalizeSkillList(e.skills));
-      }
-      return true;
-    }
-    case "skill_activated": {
-      const ev = e as unknown as { skill_name?: string; trigger_mode?: string; data?: { skill_name?: string; trigger_mode?: string } };
-      const name = ev.skill_name ?? ev.data?.skill_name;
-      const triggerMode = ev.trigger_mode ?? ev.data?.trigger_mode;
-      if (name) {
-        const skill = useAppStore.getState().availableSkills.find((item) => item.name === name);
-        if (!triggerMode || triggerMode === "explicit") {
-          useAppStore.getState().addSelectedSkill({
-            name,
-            description: skill?.description,
-            sourceLevel: skill?.source_level,
-          });
-          pushToast(`Skill active: ${name}`, "success");
-        }
-      }
-      return true;
-    }
-    case "skill_deactivated": {
-      const ev = e as unknown as { skill_name?: string; data?: { skill_name?: string } };
-      const name = ev.skill_name ?? ev.data?.skill_name;
-      if (name) {
-        useAppStore.getState().removeSelectedSkill(name);
-        pushToast(`Skill inactive: ${name}`, "info");
       }
       return true;
     }

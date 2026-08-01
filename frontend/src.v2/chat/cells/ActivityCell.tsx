@@ -1,5 +1,5 @@
-import { memo, useEffect, useMemo, useState, useCallback } from "react";
-import { ChevronDown, ChevronRight, Copy, Eye, EyeOff } from "lucide-react";
+import { memo, useEffect, useMemo, useState } from "react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import type { ActivityCellState } from "./cellTypes";
 import { useAppStore } from "../../stores";
 import {
@@ -13,11 +13,11 @@ import {
   isHttpUrl,
   fileLabel,
   formatDuration,
+  readableRecordLabel,
 } from "./activityCellHelpers";
 import { subscribeSecondTick } from "../../lib/shared-tick";
-import { openWebInPreview } from "../openWebInPreview";
+import { openWebTarget } from "../openWebTarget";
 import { normalizeAgentErrorMessage, purifyToolErrorText } from "../errorMessages";
-import { toolDisplayName } from "../toolUtils";
 import "./cells.css";
 
 /** Real-time elapsed timer — ticks every second while tool is running.
@@ -56,39 +56,22 @@ export const ActivityCell = memo(function ActivityCell({
   const developerMode = useAppStore((s) => s.viewMode === "verbose");
   const shouldAutoExpand = forceExpanded || !cell.collapsed;
   const [isExpanded, setIsExpanded] = useState(shouldAutoExpand);
-  const [showErrorDetail, setShowErrorDetail] = useState(false);
-  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     setIsExpanded(shouldAutoExpand);
   }, [cell.id, cell.status, cell.collapsed, shouldAutoExpand]);
 
-  const copyOutput = useCallback(() => {
-    const records = cell.toolCallRecords ?? [];
-    const outputs = records
-      .map((r) => {
-        const output = r.outputPreview || r.contentPreview || (/^read_artifact$/i.test(r.name) ? r.summary : "") || r.errorInfo?.user_summary || "";
-        return output ? `${r.name}:\n${output}` : "";
-      })
-      .filter(Boolean)
-      .join("\n\n");
-
-    if (!outputs) return;
-
-    navigator.clipboard.writeText(outputs).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1200);
-    });
-  }, [cell.toolCallRecords]);
-
   const hasRecords = Boolean(cell.toolCallRecords?.length);
   const canToggle = !isActive && hasRecords;
   const isRunning = isActive || cell.status === "running";
   const isFailed = cell.status === "failed" || cell.status === "interrupted";
+  const isPartial = cell.status === "partial";
   const elapsed = useElapsedTime(cell.startedAt, isRunning);
   const recordDetails = useMemo(
-    () => hasRecords ? describeRecordDetails(cell.toolCallRecords!, developerMode) : [],
-    [cell.toolCallRecords, developerMode, hasRecords],
+    () => isExpanded && hasRecords
+      ? describeRecordDetails(cell.toolCallRecords!, developerMode)
+      : [],
+    [cell.toolCallRecords, developerMode, hasRecords, isExpanded],
   );
 
   const name = readableTimelineTitle(cell);
@@ -98,7 +81,9 @@ export const ActivityCell = memo(function ActivityCell({
     ? "activity-cell-running"
     : isFailed
       ? "activity-cell-failed"
-      : "activity-cell-completed";
+      : isPartial
+        ? "activity-cell-partial"
+        : "activity-cell-completed";
 
   return (
     <div className={`activity-cell ${cellStateClass}`}>
@@ -116,7 +101,8 @@ export const ActivityCell = memo(function ActivityCell({
             className="activity-cell-dot"
             data-running={isRunning}
             data-failed={isFailed}
-            data-completed={!isRunning && !isFailed}
+            data-partial={isPartial}
+            data-completed={!isRunning && !isFailed && !isPartial}
           >
             ●
           </span>
@@ -135,7 +121,7 @@ export const ActivityCell = memo(function ActivityCell({
 
           {canToggle && (
             <span className="activity-cell-toggle">
-              {isExpanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+              {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
             </span>
           )}
 
@@ -144,7 +130,7 @@ export const ActivityCell = memo(function ActivityCell({
               <span className="activity-cell-long-running">仍在运行</span>
               <span
                 className="activity-cell-info-icon"
-                title={getLongRunningExplanation(cell)}
+                title={getLongRunningExplanation()}
                 aria-label="Long running activity"
               >
                 i
@@ -153,20 +139,6 @@ export const ActivityCell = memo(function ActivityCell({
           )}
         </button>
 
-        {hasRecords && (cell.status === "done" || cell.status === "failed") && (
-          <button
-            type="button"
-            className="activity-cell-copy-btn"
-            onClick={(e) => {
-              e.stopPropagation();
-              copyOutput();
-            }}
-            title={copied ? "已复制" : "复制输出"}
-            aria-label={copied ? "已复制" : "复制输出"}
-          >
-            <Copy size={10} />
-          </button>
-        )}
       </div>
 
       {/* Expanded: detailed records */}
@@ -187,7 +159,7 @@ export const ActivityCell = memo(function ActivityCell({
         </div>
       )}
 
-      {!isActive && isExpanded && hasOutputPreview(cell.toolCallRecords) && (
+      {!isFailed && !isActive && isExpanded && hasOutputPreview(cell.toolCallRecords) && (
         <div className="activity-cell-output-preview">
           <pre className="activity-cell-output-pre">{getOutputPreview(cell.toolCallRecords)}</pre>
         </div>
@@ -200,32 +172,23 @@ export const ActivityCell = memo(function ActivityCell({
         </div>
       )}
 
-      {/* Failed tool actions */}
-      {isFailed && !isActive && (
-        <div className="activity-cell-failed-actions">
-          <button
-            type="button"
-            className="cell-action-btn"
-            onClick={() => setShowErrorDetail((v) => !v)}
-            title={showErrorDetail ? "隐藏错误详情" : "查看错误详情"}
-          >
-            {showErrorDetail ? <EyeOff size={12} /> : <Eye size={12} />} {showErrorDetail ? "隐藏详情" : "查看详情"}
-          </button>
-        </div>
-      )}
-
-      {/* Error detail panel */}
-      {isFailed && showErrorDetail && hasRecords && (
+      {/* Failed records use the same disclosure row as every other tool. */}
+      {isFailed && isExpanded && hasRecords && (
         <div className="activity-cell-error-detail">
           {cell.toolCallRecords!.map((record, i) => {
-            const rawError = purifyToolErrorText(record.errorInfo?.user_summary || record.outputPreview || "");
+            const rawError = purifyToolErrorText(
+              developerMode
+                ? record.developerDetail || record.outputPreview || record.userSummary || record.errorInfo?.user_summary || ""
+                : record.outputPreview || record.userSummary || record.errorInfo?.user_summary || "",
+            );
             const error = developerMode
               ? rawError
               : normalizeAgentErrorMessage(rawError, { includeProviderDetails: false });
             if (!error) return null;
+            const label = developerMode ? record.name : readableRecordLabel(record);
             return (
               <div key={`error-${i}`} className="activity-cell-error-item">
-                <div className="activity-cell-error-label">{developerMode ? record.name : toolDisplayName(record.name)}</div>
+                {label && <div className="activity-cell-error-label">{label}</div>}
                 <pre className="activity-cell-error-pre">{error}</pre>
               </div>
             );
@@ -257,7 +220,7 @@ function DetailTarget({
         title={text}
         onClick={(event) => {
           event.stopPropagation();
-          if (openWebInPreview(text)) event.preventDefault();
+          if (openWebTarget(text)) event.preventDefault();
         }}
       >
         {text}

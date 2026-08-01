@@ -61,6 +61,24 @@ def get_active_workspace_root(default_root: str | Path | None = None) -> Path:
 
     return fallback
 
+
+def get_explicit_active_workspace_root() -> Path | None:
+    """Return an opened/persisted workspace, never an implicit process fallback."""
+    global _active_workspace_root
+    if _active_workspace_root is not None:
+        if _active_workspace_root.exists() and _active_workspace_root.is_dir():
+            return _active_workspace_root
+        set_active_workspace_root(None)
+        return None
+
+    persisted = _read_persisted_workspace_root()
+    if persisted is not None and persisted.exists() and persisted.is_dir():
+        _active_workspace_root = persisted
+        return persisted
+    if persisted is not None:
+        _write_persisted_workspace_root(None)
+    return None
+
 def set_active_workspace_root(root: str | Path | None) -> Path | None:
     global _active_workspace_root
     if root is None:

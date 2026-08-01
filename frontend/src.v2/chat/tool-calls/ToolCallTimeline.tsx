@@ -4,14 +4,14 @@ import { getToolCallsFromMessage } from "../../lib/content-blocks";
 import type { CSSProperties } from "react";
 import type { AgentProgressEntry, ChatMessage } from "../../stores/types";
 
-export type TimelinePhase = "context" | "model" | "tool" | "approval" | "subagent" | "workflow" | "cache" | "recovery" | "final";
+export type TimelinePhase = "context" | "model" | "tool" | "approval" | "subagent" | "cache" | "recovery" | "final";
 
 export type TimelineItem = {
   id: string;
   phase: TimelinePhase;
   label: string;
   summary?: string;
-  status: "running" | "completed" | "failed" | "blocked" | "partial" | "info";
+  status: "running" | "completed" | "failed" | "blocked" | "partial" | "cancelled" | "info";
   startedAt: number;
   finishedAt?: number;
   toolName?: string;
@@ -50,13 +50,12 @@ const PHASE_LABELS: Record<TimelinePhase, string> = {
   tool: "Tools",
   approval: "Approval",
   subagent: "Subagents",
-  workflow: "Workflow",
   cache: "Cache",
   recovery: "Recovery",
   final: "Final",
 };
 
-const PHASE_ORDER: TimelinePhase[] = ["context", "model", "tool", "approval", "subagent", "workflow", "cache", "recovery", "final"];
+const PHASE_ORDER: TimelinePhase[] = ["context", "model", "tool", "approval", "subagent", "cache", "recovery", "final"];
 
 export const ToolCallTimeline = ({ limit = 40 }: { limit?: number } = {}) => {
   const messages = useAppStore((s) => s.messages);
@@ -184,9 +183,11 @@ export function buildRunTimelineItems(
   const toolItems = messages.flatMap((message) =>
     getToolCallsFromMessage(message).map((tc) => ({
       id: `tool:${tc.id}`,
-      phase: phaseForTool(tc.name),
-      label: tc.name,
-      summary: tc.displaySummary || tc.inputSummary || tc.summary || tc.contentPreview || "",
+      phase: phaseForTool(tc.phase),
+      label: tc.status === "running" || tc.status === "pending"
+        ? tc.displayHint || "Tool"
+        : tc.displaySummary || tc.displayHint || "Tool",
+      summary: tc.inputSummary || tc.userSummary || tc.sourceUrl || "",
       status: normalizeToolStatus(tc.status),
       startedAt: tc.startedAt || message.timestamp || Date.now(),
       finishedAt: tc.finishedAt,
@@ -291,7 +292,6 @@ function groupTimelineItems(items: TimelineItem[]): Record<TimelinePhase, Timeli
     tool: [],
     approval: [],
     subagent: [],
-    workflow: [],
     cache: [],
     recovery: [],
     final: [],
@@ -301,23 +301,23 @@ function groupTimelineItems(items: TimelineItem[]): Record<TimelinePhase, Timeli
 function phaseForProgress(entry: AgentProgressEntry): TimelinePhase {
   if (entry.phase === "approval" || entry.stage === "approval") return "approval";
   if (entry.phase === "subagent") return "subagent";
-  if (entry.phase === "workflow") return "workflow";
   if (entry.phase === "cache") return "cache";
   if (entry.phase === "recover") return "recovery";
   if (entry.phase === "tool" || entry.stage === "tool") return "tool";
-  if (entry.phase === "final" || entry.stage === "final" || entry.stage === "verification") return "final";
+  if (entry.phase === "final" || entry.stage === "final") return "final";
   if (entry.phase === "model" || entry.phase === "planning" || entry.stage === "planning") return "model";
   return "context";
 }
 
-function phaseForTool(name: string): TimelinePhase {
-  if (/(?:approve|review|permission)/i.test(name)) return "approval";
-  return "tool";
+function phaseForTool(value?: string): TimelinePhase {
+  return value && PHASE_ORDER.includes(value as TimelinePhase)
+    ? value as TimelinePhase
+    : "tool";
 }
 
 function normalizeToolStatus(status: string): TimelineItem["status"] {
   if (status === "success") return "completed";
-  if (status === "failed" || status === "blocked" || status === "partial" || status === "running") return status;
+  if (status === "failed" || status === "blocked" || status === "partial" || status === "running" || status === "cancelled") return status;
   return "info";
 }
 
@@ -331,6 +331,8 @@ function statusLabel(status: TimelineItem["status"]): string {
       return "Blocked";
     case "partial":
       return "Partial";
+    case "cancelled":
+      return "Cancelled";
     case "running":
       return "Running";
     default:
@@ -341,6 +343,7 @@ function statusLabel(status: TimelineItem["status"]): string {
 function statusColor(status: TimelineItem["status"]): string {
   if (status === "completed") return "var(--state-success)";
   if (status === "failed") return "var(--state-danger)";
+  if (status === "cancelled") return "var(--text-muted)";
   if (status === "blocked" || status === "partial") return "var(--state-warning)";
   if (status === "info") return "var(--text-muted)";
   return "var(--accent-primary)";

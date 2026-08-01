@@ -123,4 +123,4 @@ const iconWrapStyle: React.CSSProperties = { width: 38, height: 38, display: "in
 const thumbStyle: React.CSSProperties = { width: 38, height: 38, objectFit: "cover", borderRadius: "var(--radius-sm, 6px)", border: "1px solid var(--border-subtle)", flexShrink: 0 };
 const summaryStyle: React.CSSProperties = { fontSize: "var(--text-sm)", fontWeight: 600, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 const metaRowStyle: React.CSSProperties = { display: "flex", alignItems: "center", gap: 7, marginTop: 4, fontSize: "var(--text-xs)" };
-const kindTagStyle: React.CSSProperties = { fontSize: 10, fontFamily: "var(--font-mono)", padding: "1px 6px", borderRadius: "var(--radius-sm, 4px)", background: "var(--surface-base)", color: "var(--text-muted)", border: "1px solid var(--border-subtle)" };
+const kindTagStyle: React.CSSProperties = { fontSize: "var(--text-3xs)", fontFamily: "var(--font-mono)", padding: "1px 6px", borderRadius: "var(--radius-sm, 4px)", background: "var(--surface-base)", color: "var(--text-muted)", border: "1px solid var(--border-subtle)" };

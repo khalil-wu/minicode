@@ -17,6 +17,7 @@ CURATED_CONNECTORS: list[dict[str, Any]] = [
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
         "tags": ["files", "core"],
+        "docsUrl": "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem",
     },
     {
         "name": "github",
@@ -26,6 +27,7 @@ CURATED_CONNECTORS: list[dict[str, Any]] = [
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-github"],
         "tags": ["git", "github", "vcs"],
+        "docsUrl": "https://github.com/github/github-mcp-server",
     },
     {
         "name": "memory",
@@ -35,6 +37,7 @@ CURATED_CONNECTORS: list[dict[str, Any]] = [
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-memory"],
         "tags": ["memory", "knowledge"],
+        "docsUrl": "https://github.com/modelcontextprotocol/servers/tree/main/src/memory",
     },
     {
         "name": "postgres",
@@ -116,6 +119,7 @@ CURATED_CONNECTORS: list[dict[str, Any]] = [
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-fetch"],
         "tags": ["web", "http", "fetch"],
+        "docsUrl": "https://github.com/modelcontextprotocol/servers/tree/main/src/fetch",
     },
     {
         "name": "sequential-thinking",
@@ -125,6 +129,7 @@ CURATED_CONNECTORS: list[dict[str, Any]] = [
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
         "tags": ["reasoning", "thinking"],
+        "docsUrl": "https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking",
     },
 ]
 

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, Menu, Notification, shell } = require("electron");
+const { app, BrowserWindow, crashReporter, dialog, Menu, Notification, shell } = require("electron");
 const fs = require("node:fs");
 const crypto = require("node:crypto");
 const path = require("node:path");
@@ -11,10 +11,27 @@ const utils = require("./utils");
 const security = require("./security");
 const backendSidecar = require("./backend-sidecar");
 const cdpBridge = require("./cdp-bridge");
+const embeddedBrowserManager = require("./embedded-browser-manager");
+const embeddedBrowserBridge = require("./embedded-browser-bridge");
 const ptyManager = require("./pty-manager");
 const windowManager = require("./window-manager");
 const ipcHandlers = require("./ipc-handlers");
 const updater = require("./updater");
+const crashReporting = require("./crash-reporter");
+
+// html.to.design capture is an explicitly enabled development aid. Keep the
+// dependency out of the packaged startup path and save captures locally.
+const FIGMA_CAPTURE_ENABLED =
+  !app.isPackaged && process.env.MINICODE_ENABLE_FIGMA_CAPTURE === "1";
+let figmaCaptureSdk = null;
+if (FIGMA_CAPTURE_ENABLED) {
+  try {
+    figmaCaptureSdk = require("@divriots/h2d-electron-sdk");
+    figmaCaptureSdk.mountCapture(app);
+  } catch (error) {
+    console.warn("[desktop] html.to.design capture could not be initialized", error);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Optional native PTY
@@ -64,6 +81,28 @@ function resolvePythonCommand() {
 
 const PYTHON_COMMAND = resolvePythonCommand();
 
+function resolveCodexSandboxExecutable() {
+  if (process.env.MINICODE_CODEX_SANDBOX_EXE) {
+    return process.env.MINICODE_CODEX_SANDBOX_EXE;
+  }
+  if (process.platform !== "win32") return "";
+  const candidate = app.isPackaged
+    ? path.join(process.resourcesPath, "windows-sandbox", "codex.exe")
+    : path.join(
+        __dirname,
+        "node_modules",
+        "@openai",
+        "codex-win32-x64",
+        "vendor",
+        "x86_64-pc-windows-msvc",
+        "bin",
+        "codex.exe",
+      );
+  return fs.existsSync(candidate) ? candidate : "";
+}
+
+const CODEX_SANDBOX_EXECUTABLE = resolveCodexSandboxExecutable();
+
 // ---------------------------------------------------------------------------
 // Module-level state
 // ---------------------------------------------------------------------------
@@ -72,6 +111,7 @@ let pendingDeepLink = null;
 let startupFailureWindow = null;
 let startupRetryInFlight = false;
 let lastPickedWorkspaceRoot = "";
+const recentDiagnosticIncidents = [];
 let startupFailureState = {
   title: "MiniCode Desktop couldn't finish startup",
   message: "The desktop shell could not reach the backend sidecar yet.",
@@ -91,14 +131,21 @@ if (
   app.commandLine.appendSwitch("disable-gpu");
   app.commandLine.appendSwitch("disable-gpu-compositing");
   app.commandLine.appendSwitch("disable-gpu-rasterization");
-  app.commandLine.appendSwitch("disable-software-rasterizer");
 }
 if (process.env.MINICODE_DISABLE_CHROMIUM_SANDBOX === "1") {
   app.commandLine.appendSwitch("no-sandbox");
 }
+if (process.env.MINICODE_ENABLE_EMBEDDED_BROWSER_CDP === "1") {
+  app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1");
+  app.commandLine.appendSwitch(
+    "remote-debugging-port",
+    process.env.MINICODE_BROWSER_DEBUG_PORT || "9222",
+  );
+}
 if (process.env.MINICODE_USER_DATA_DIR) {
   app.setPath("userData", process.env.MINICODE_USER_DATA_DIR);
 }
+crashReporting.init({ crashReporter, app, logger: appendDesktopLog });
 
 const singleInstanceLock = app.requestSingleInstanceLock();
 if (!singleInstanceLock) {
@@ -139,6 +186,18 @@ function appendDesktopLog(message) {
   } catch {
     // noop
   }
+}
+
+function recordDiagnosticIncident(kind, details = {}) {
+  const incident = {
+    kind: String(kind || "unknown"),
+    at: new Date().toISOString(),
+    details: details && typeof details === "object" ? details : { message: String(details) },
+  };
+  recentDiagnosticIncidents.push(incident);
+  if (recentDiagnosticIncidents.length > 50) recentDiagnosticIncidents.shift();
+  appendDesktopLog(`[desktop:incident] ${JSON.stringify(incident)}`);
+  return incident;
 }
 
 function isBenignPipeError(error) {
@@ -183,9 +242,10 @@ process.on("uncaughtException", (error) => {
     appendDesktopLog(`[desktop] suppressed uncaughtException: ${error.message}`);
     return;
   }
-  appendDesktopLog(
-    `[desktop] uncaughtException: ${error instanceof Error && error.stack ? error.stack : String(error)}`
-  );
+  recordDiagnosticIncident("uncaughtException", {
+    message: error instanceof Error ? error.message : String(error),
+    stack: error instanceof Error ? error.stack : undefined,
+  });
 });
 
 process.on("unhandledRejection", (reason) => {
@@ -193,9 +253,10 @@ process.on("unhandledRejection", (reason) => {
     appendDesktopLog(`[desktop] suppressed unhandledRejection: ${reason.message}`);
     return;
   }
-  appendDesktopLog(
-    `[desktop] unhandledRejection: ${reason instanceof Error && reason.stack ? reason.stack : String(reason)}`
-  );
+  recordDiagnosticIncident("unhandledRejection", {
+    message: reason instanceof Error ? reason.message : String(reason),
+    stack: reason instanceof Error ? reason.stack : undefined,
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -230,7 +291,9 @@ function buildDiagnosticsPayload() {
         defaultPermissionMode: "ask_permissions",
         backendPermissionMode: "confirm",
         networkAccess: "tool_layer_approval_required",
-        windowsSandbox: "app_layer",
+        windowsSandbox: "docker_workspace_container_fail_closed",
+        windowsWorkspaceIsolation: "container_required",
+        hostEscalation: "explicit_permission_only",
       },
     },
     runtime: {
@@ -249,6 +312,8 @@ function buildDiagnosticsPayload() {
       restartAttempt: backendSidecar.getBackendRestartAttempt(),
       manageBackend: MANAGE_BACKEND,
       pythonCommand: PYTHON_COMMAND,
+      sandboxRuntime: process.env.MINICODE_SANDBOX_RUNTIME || "auto",
+      sandboxImage: process.env.MINICODE_SANDBOX_IMAGE || "minicode-agent-sandbox:latest",
     },
     windows: {
       hasMainWindow: Boolean(windowManager.getMainWindow() && !windowManager.getMainWindow().isDestroyed()),
@@ -260,6 +325,7 @@ function buildDiagnosticsPayload() {
       desktopLogPath: logPath,
       desktopLogExists: fs.existsSync(logPath),
     },
+    recentIncidents: recentDiagnosticIncidents.slice(),
   };
 }
 
@@ -310,7 +376,6 @@ function getRendererAdditionalArguments() {
   return [
     `--minicode-api-base-url=${resolvedApiBaseUrl}`,
     `--minicode-ws-base-url=${resolvedWsBaseUrl}`,
-    `--minicode-runtime-token=${RUNTIME_TOKEN}`,
   ];
 }
 
@@ -411,6 +476,39 @@ function showDesktopNotification(payload) {
   return true;
 }
 
+async function captureCurrentWindowForFigma() {
+  const win = BrowserWindow.getFocusedWindow() || windowManager.getMainWindow();
+  if (!figmaCaptureSdk || !win || win.isDestroyed()) {
+    dialog.showErrorBox(
+      "Figma capture unavailable",
+      "Start MiniCode with MINICODE_ENABLE_FIGMA_CAPTURE=1 and try again.",
+    );
+    return;
+  }
+
+  try {
+    const { bytes, filename } = await figmaCaptureSdk.captureWebContents(win.webContents);
+    const suggestedName = `${filename || `minicode-${Date.now()}`}.h2d`;
+    const result = await dialog.showSaveDialog(win, {
+      title: "Save current window for Figma",
+      defaultPath: path.join(app.getPath("documents"), suggestedName),
+      filters: [{ name: "html.to.design capture", extensions: ["h2d"] }],
+      properties: ["createDirectory", "showOverwriteConfirmation"],
+    });
+    if (result.canceled || !result.filePath) return;
+    const outputPath = result.filePath.toLowerCase().endsWith(".h2d")
+      ? result.filePath
+      : `${result.filePath}.h2d`;
+    await fs.promises.writeFile(outputPath, Buffer.from(bytes));
+    appendDesktopLog(`[desktop] Figma capture saved: ${outputPath}`);
+    shell.showItemInFolder(outputPath);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    appendDesktopLog(`[desktop] Figma capture failed: ${message}`);
+    dialog.showErrorBox("Figma capture failed", message);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Application menu
 // ---------------------------------------------------------------------------
@@ -484,7 +582,14 @@ function buildApplicationMenu() {
           accelerator: "Ctrl+`",
           click: () => { sendWorkbenchMenuEvent("minicode:shortcut:terminal"); },
         },
-        { label: "Reload", accelerator: "F5", click: () => mainWindow?.reload() },
+        {
+          label: "Reload",
+          accelerator: "F5",
+          click: () => {
+            const win = windowManager.getMainWindow();
+            if (win && !win.isDestroyed()) win.reload();
+          },
+        },
         { role: "forceReload" },
         { role: "toggleDevTools" },
         { type: "separator" },
@@ -492,6 +597,16 @@ function buildApplicationMenu() {
         { role: "zoomIn" },
         { role: "zoomOut" },
         { role: "togglefullscreen" },
+        ...(FIGMA_CAPTURE_ENABLED
+          ? [
+              { type: "separator" },
+              {
+                label: "Capture current window to Figma...",
+                accelerator: "Ctrl+Shift+F12",
+                click: () => { void captureCurrentWindowForFigma(); },
+              },
+            ]
+          : []),
       ],
     },
     {
@@ -643,6 +758,12 @@ try {
 security.init({
   initialRoots: trustedWorkspaceRoots,
   approvedRoots: legacyActiveWorkspaceRoot ? [legacyActiveWorkspaceRoot] : [],
+  readOnlyRoots: [path.join(app.getPath("userData"), "data", "tool-results")],
+  userOutputRoots: [
+    app.getPath("desktop"),
+    app.getPath("documents"),
+    app.getPath("downloads"),
+  ],
   trustedRootsFile: trustedWorkspaceLedgerPath,
   logger: appendDesktopLog,
 });
@@ -665,6 +786,10 @@ backendSidecar.init({
     get resolvedFrontendUrl() { return resolvedFrontendUrl; },
     runtimeToken: RUNTIME_TOKEN,
     stateRoot: app.getPath("userData"),
+    desktopDir: app.getPath("desktop"),
+    documentsDir: app.getPath("documents"),
+    downloadsDir: app.getPath("downloads"),
+    codexSandboxExe: CODEX_SANDBOX_EXECUTABLE,
     restartInitialDelayMs: BACKEND_RESTART_INITIAL_DELAY_MS,
     restartMaxDelayMs: BACKEND_RESTART_MAX_DELAY_MS,
     restartJitterRatio: 0.15,
@@ -693,6 +818,18 @@ windowManager.init({
   getAppRoot,
   onMainWindowCreated: closeStartupFailureWindow,
   getPendingDeepLink: () => pendingDeepLink,
+  onDiagnosticIncident: recordDiagnosticIncident,
+});
+
+embeddedBrowserManager.init({
+  appendDesktopLog,
+  getMainWindow: () => windowManager.getMainWindow(),
+});
+
+embeddedBrowserBridge.init({
+  manager: embeddedBrowserManager,
+  token: RUNTIME_TOKEN,
+  appendDesktopLog,
 });
 
 ipcHandlers.init({
@@ -712,6 +849,7 @@ ipcHandlers.init({
   navigateChromeTarget: cdpBridge.navigateChromeTarget,
   clickChromeTarget: cdpBridge.clickChromeTarget,
   typeIntoChromeTarget: cdpBridge.typeIntoChromeTarget,
+  embeddedBrowserManager,
   ptyManager,
   updater,
   get lastPickedWorkspaceRoot() { return lastPickedWorkspaceRoot; },
@@ -769,11 +907,24 @@ app.on("open-url", (event, url) => {
   dispatchDeepLink(url);
 });
 
-app.on("before-quit", () => {
-  backendSidecar.stopBackendSidecar();
+let quitCleanupComplete = false;
+let quitCleanupStarted = false;
+app.on("before-quit", (event) => {
+  if (quitCleanupComplete) return;
+  event.preventDefault();
+  if (quitCleanupStarted) return;
+  quitCleanupStarted = true;
   ptyManager.killAllSessions();
+  embeddedBrowserManager.disposeAll();
   windowManager.clearWindowStateSaveTimer();
   windowManager.persistWindowState();
+  void Promise.allSettled([
+    backendSidecar.stopBackendSidecar(),
+    embeddedBrowserBridge.stop(),
+  ]).finally(() => {
+    quitCleanupComplete = true;
+    app.quit();
+  });
 });
 
 app.on("window-all-closed", () => {
@@ -786,6 +937,16 @@ app.on("activate", async () => {
   if (BrowserWindow.getAllWindows().length === 0) {
     await attemptAppStartup("activate");
   }
+});
+
+app.on("child-process-gone", (_event, details) => {
+  recordDiagnosticIncident("child-process-gone", {
+    type: details?.type,
+    reason: details?.reason,
+    exitCode: details?.exitCode,
+    serviceName: details?.serviceName,
+    name: details?.name,
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -801,11 +962,20 @@ app.whenReady().then(async () => {
   }
   buildApplicationMenu();
   ipcHandlers.registerIpcHandlers();
+  const embeddedBrowserEndpoint = await embeddedBrowserBridge.start();
+  process.env.MINICODE_EMBEDDED_BROWSER_ENDPOINT = embeddedBrowserEndpoint;
+  process.env.MINICODE_EMBEDDED_BROWSER_TOKEN = RUNTIME_TOKEN;
   appendDesktopLog("[desktop] app ready");
   const initialDeepLink = process.argv.find(
     (arg) => typeof arg === "string" && arg.startsWith("minicode://"),
   );
   if (initialDeepLink) dispatchDeepLink(initialDeepLink);
-  await attemptAppStartup("when-ready");
-  updater.init({ app, getMainWindow: () => windowManager.getMainWindow(), logger: appendDesktopLog });
+  const rollbackLaunched = await updater.init({
+    app,
+    getMainWindow: () => windowManager.getMainWindow(),
+    logger: appendDesktopLog,
+  });
+  if (rollbackLaunched) return;
+  const startupSucceeded = await attemptAppStartup("when-ready");
+  if (startupSucceeded) updater.markHealthy();
 });

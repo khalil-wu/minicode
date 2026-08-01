@@ -76,7 +76,7 @@ export interface AgentCapabilitySummary {
   skills?: number;
   mcp_resource_bridge?: boolean;
   deferred_bridge?: boolean;
-  skill_bridge?: boolean;
+  skill_catalog?: boolean;
 }
 
 export interface AgentCapabilityTool {
@@ -107,11 +107,11 @@ export interface AgentCapabilityNamedItem {
   enabled?: unknown;
   args?: unknown;
   display_name?: unknown;
+  short_description?: unknown;
   icon?: unknown;
+  icon_large?: unknown;
+  brand_color?: unknown;
   version?: unknown;
-  triggers?: unknown;
-  tools_required?: unknown;
-  mcp_required?: unknown;
   mcp_dependencies?: unknown;
   allow_implicit_invocation?: unknown;
   default_prompt?: unknown;
@@ -237,9 +237,9 @@ export const formatDeferredCapability = (summary: AgentCapabilitySummary | undef
 };
 
 export const formatSkillCapability = (summary: AgentCapabilitySummary | undefined): string => {
-  const label = capabilityFlagLabel(summary?.skill_bridge);
+  const label = capabilityFlagLabel(summary?.skill_catalog);
   const count = finiteNumber(summary?.skills);
-  if (summary?.skill_bridge === undefined && count != null) return `${count} ${count === 1 ? "skill" : "skills"}`;
+  if (summary?.skill_catalog === undefined && count != null) return `${count} ${count === 1 ? "skill" : "skills"}`;
   return count == null ? label : `${label} (${count})`;
 };
 

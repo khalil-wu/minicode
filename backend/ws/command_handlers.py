@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from backend.agent.message import AgentEvent
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -47,18 +50,6 @@ class SessionCommandHandlersMixin:
         from backend.hooks.runtime import run_cwd_changed_hook
 
         await run_cwd_changed_hook(old_cwd=old_cwd, new_cwd=new_cwd)
-
-    # ── Skill toggle ─────────────────────────────────────
-
-    async def _toggle_skill(self, skill_name: str, *, activate: bool) -> None:
-        from backend.services.skills_service import toggle_skill_events
-        from backend.ws.command_results import emit_command_error
-
-        for event in toggle_skill_events(self.skill_manager, skill_name, activate=activate):
-            if event.type == "error":
-                await emit_command_error(self, "skills.toggle", event)
-            else:
-                await self._send_event(event)
 
     # ── LLM model selection ──────────────────────────────
 
@@ -181,17 +172,68 @@ class SessionCommandHandlersMixin:
         if project_path is None:
             return False
 
+        old_workspace_context = getattr(self, "_workspace_context", None)
+        old_workspace_root = workspace_context_root(old_workspace_context)
+        ctx: Any | None = None
+        restart_file_watcher = getattr(self, "_restart_file_watcher", None)
+        from backend.commands.slash_commands import refresh_slash_commands
+
+        def refresh_commands() -> None:
+            registry = getattr(self, "command_registry", None)
+            if registry is not None:
+                refresh_slash_commands(registry)
+
+        async def rollback_workspace() -> None:
+            """Restore every session surface changed before indexing completes."""
+
+            if ctx is None or getattr(self, "_workspace_context", None) is not ctx:
+                return
+            from backend.workspace.state import clear_active_workspace_root
+
+            self._workspace_context = old_workspace_context
+            restored_root = Path(old_workspace_root) if old_workspace_root else None
+            if restored_root is not None:
+                set_active_workspace(restored_root)
+                if callable(restart_file_watcher):
+                    restart_file_watcher(restored_root)
+            else:
+                clear_active_workspace_root()
+                watcher = getattr(self, "file_watcher", None)
+                if watcher is not None:
+                    watcher.stop()
+                    self.file_watcher = None
+
+            skill_manager = getattr(self, "skill_manager", None)
+            if skill_manager is not None and hasattr(skill_manager, "set_project_root"):
+                skill_manager.set_project_root(restored_root)
+            refresh_commands()
+            try:
+                await self._run_cwd_changed_hook(
+                    old_cwd=str(project_path),
+                    new_cwd=str(restored_root) if restored_root is not None else "",
+                )
+            except Exception:
+                logger.debug("Workspace rollback cwd hook failed", exc_info=True)
+            send_capabilities = getattr(self, "_send_runtime_capabilities", None)
+            if callable(send_capabilities):
+                await send_capabilities(source="workspace.activate.rollback")
+
         try:
             ctx = create_workspace_context(project_path)
-            old_workspace_root = workspace_context_root(getattr(self, "_workspace_context", None))
             # 先切换全局工作区指针与会话上下文，使 git/file API 立即指向新目录，
             # 再做耗时的文件索引扫描。
             self._workspace_context = ctx
             set_active_workspace(project_path)
+            refresh_commands()
+            skill_manager = getattr(self, "skill_manager", None)
+            if skill_manager is not None and hasattr(skill_manager, "set_project_root"):
+                skill_manager.set_project_root(project_path)
             await self._run_cwd_changed_hook(old_cwd=old_workspace_root, new_cwd=str(project_path))
-            restart_file_watcher = getattr(self, "_restart_file_watcher", None)
             if callable(restart_file_watcher):
                 restart_file_watcher(project_path)
+            send_capabilities = getattr(self, "_send_runtime_capabilities", None)
+            if callable(send_capabilities):
+                await send_capabilities(source="workspace.activate")
             async def initialize_workspace() -> bool:
                 try:
                     metadata = await ctx.initialize()
@@ -205,6 +247,10 @@ class SessionCommandHandlersMixin:
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
+                    # Only roll back if this activation is still current. A
+                    # newer switch may have replaced it while initialization
+                    # was running and must not be overwritten by this failure.
+                    await rollback_workspace()
                     message = f"Failed to switch session workspace: {exc}"
                     if error_command:
                         from backend.ws.command_results import emit_command_error
@@ -222,6 +268,7 @@ class SessionCommandHandlersMixin:
                 self._workspace_context_task = asyncio.create_task(initialize_workspace())
             return True
         except Exception as exc:
+            await rollback_workspace()
             message = f"Failed to switch session workspace: {exc}"
             if error_command:
                 from backend.ws.command_results import emit_command_error

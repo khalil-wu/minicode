@@ -8,9 +8,8 @@ agent can call them like built-in tools. Tool names follow:
 
 from __future__ import annotations
 
-import json
 import logging
-from collections import OrderedDict
+from pathlib import Path
 from typing import Any
 
 from backend.artifact.store import ArtifactStore
@@ -20,8 +19,50 @@ from backend.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
-# Store large MCP outputs as artifacts instead of sending the full text inline.
-ARTIFACT_THRESHOLD = 2000
+_BUNDLED_OPEN_WORLD_READERS = {
+    ("websearch", "search"): ("-m", "backend.mcp.servers.websearch"),
+    ("websearch", "fetch_page"): ("-m", "backend.mcp.servers.websearch"),
+}
+
+_BUNDLED_NATIVE_EQUIVALENTS = {
+    ("websearch", "search"): "web_search",
+    ("websearch", "fetch_page"): "web_fetch",
+}
+
+_BUNDLED_OWNER_SCOPED_TOOLS = {
+    ("docparse", "parse"): ("-m", "backend.mcp.servers.docparse"),
+    ("docparse", "get_section"): ("-m", "backend.mcp.servers.docparse"),
+    ("docparse", "get_full_text"): ("-m", "backend.mcp.servers.docparse"),
+}
+
+
+def _is_trusted_bundled_reader(
+    server_name: str,
+    tool_name: str,
+    client: MCPClient | Any,
+) -> bool:
+    """Trust only MiniCode's own stdio module, never extension annotations."""
+    expected_args = _BUNDLED_OPEN_WORLD_READERS.get((server_name, tool_name))
+    if expected_args is None:
+        return False
+    command = str(getattr(client, "_command", "") or "").strip()
+    executable = Path(command).name.lower()
+    args = tuple(str(arg) for arg in (getattr(client, "_args", None) or ()))
+    return executable in {"python", "python.exe", "python3", "python3.exe"} and args == expected_args
+
+
+def _is_trusted_owner_scoped_tool(
+    server_name: str,
+    tool_name: str,
+    client: MCPClient | Any,
+) -> bool:
+    expected_args = _BUNDLED_OWNER_SCOPED_TOOLS.get((server_name, tool_name))
+    if expected_args is None:
+        return False
+    command = str(getattr(client, "_command", "") or "").strip()
+    executable = Path(command).name.lower()
+    args = tuple(str(arg) for arg in (getattr(client, "_args", None) or ()))
+    return executable in {"python", "python.exe", "python3", "python3.exe"} and args == expected_args
 
 
 class MCPToolProxy(BaseTool):
@@ -31,10 +72,6 @@ class MCPToolProxy(BaseTool):
     reconnection (which creates a new MCPClient instance) is transparently
     picked up on the next ``execute()`` call.
     """
-
-    # Class-level LRU cache for read-only tool results (shared across all instances).
-    _result_cache: OrderedDict = OrderedDict()
-    _RESULT_CACHE_MAX = 128
 
     def __init__(
         self,
@@ -62,6 +99,11 @@ class MCPToolProxy(BaseTool):
         self.read_only = bool(ann.get("readOnlyHint", False))
         self.destructive = bool(ann.get("destructiveHint", False))
         self.open_world = bool(ann.get("openWorldHint", False))
+        self._trusted_bundled_reader = _is_trusted_bundled_reader(
+            server_name,
+            tool_def.name,
+            client_or_manager,
+        )
         self.always_load = bool(
             meta.get("anthropic/alwaysLoad") or meta.get("alwaysLoad") or False
         )
@@ -81,7 +123,12 @@ class MCPToolProxy(BaseTool):
         return self._static_client
 
     def is_read_only(self, args: dict[str, Any] | None = None) -> bool:
-        return self.read_only and not (self.destructive or self.open_world)
+        # Extension metadata is untrusted. The bundled web reader is the only
+        # open-world exception because its implementation is owned by MiniCode;
+        # approval floors remain independent in PermissionChecker.
+        return self.read_only and not self.destructive and (
+            not self.open_world or self._trusted_bundled_reader
+        )
 
     def get_schema(self) -> ToolSchema:
         """Build a ToolSchema from the MCP tool definition."""
@@ -101,11 +148,11 @@ class MCPToolProxy(BaseTool):
 
         return MCPToolSpecAdapter.from_tool_def(self._server_name, self._tool_def).build_spec(self.name)
 
-    async def execute(self, args: dict[str, Any]) -> ToolResult:
+    async def execute(self, args: dict[str, Any], *, context: Any | None = None) -> ToolResult:
         """Execute the MCP tool and normalize the result into ToolResult.
 
-        Read-only, non-destructive, closed-world tools benefit from an LRU
-        result cache keyed on (server, tool, args) to avoid redundant MCP calls.
+        Tool annotations describe permission risk, not result immutability.
+        Every invocation reaches the server so mutable remote state stays fresh.
         """
         client = self._client
         if client is None or not client.connected:
@@ -114,19 +161,48 @@ class MCPToolProxy(BaseTool):
                 "Check .mcp.json or restart the server."
             )
 
-        # --- result cache lookup (read-only tools only) ---
-        cache_key: str | None = None
-        if self.read_only and not (self.destructive or self.open_world):
-            cache_key = (
-                f"{self._server_name}::{self._tool_def.name}::"
-                f"{json.dumps(args, sort_keys=True, ensure_ascii=False)}"
-            )
-            if cache_key in MCPToolProxy._result_cache:
-                MCPToolProxy._result_cache.move_to_end(cache_key)
-                return MCPToolProxy._result_cache[cache_key]
-
         try:
-            result: MCPCallResult = await client.call_tool(self._tool_def.name, args)
+            request_owner = None
+            if context is not None:
+                metadata = getattr(context, "metadata", {}) or {}
+                request_owner = {
+                    "session_id": str(getattr(context, "session_id", "") or ""),
+                    "conversation_id": str(getattr(context, "conversation_id", "") or ""),
+                    "task_id": str(getattr(context, "task_id", "") or ""),
+                    "run_id": str(metadata.get("run_id") or ""),
+                    "rollout_budget": metadata.get("_rollout_budget"),
+                    "deadline_monotonic": getattr(context, "deadline_monotonic", None),
+                    # Server-initiated MCP requests inherit the exact tool-call
+                    # owner.  Keeping the cancellation object here lets sampling
+                    # and elicitation stop with the originating turn instead of
+                    # outliving a cancelled tool call in the shared MCP client.
+                    "cancel_event": getattr(context, "cancel_event", None),
+                }
+            request_meta = None
+            if context is not None and _is_trusted_owner_scoped_tool(
+                self._server_name,
+                self._tool_def.name,
+                client,
+            ):
+                request_meta = {
+                    "minicode.dev/owner": {
+                        "conversation_id": str(getattr(context, "conversation_id", "") or ""),
+                        "workspace_root": str(getattr(context, "workspace_root", "") or ""),
+                    },
+                }
+            if request_meta:
+                result: MCPCallResult = await client.call_tool(
+                    self._tool_def.name,
+                    args,
+                    request_owner=request_owner,
+                    request_meta=request_meta,
+                )
+            else:
+                result = await client.call_tool(
+                    self._tool_def.name,
+                    args,
+                    request_owner=request_owner,
+                )
         except Exception as exc:
             return self._error_result(f"MCP tool '{self._tool_def.name}' failed: {exc}")
 
@@ -134,34 +210,11 @@ class MCPToolProxy(BaseTool):
         if result.is_error:
             return self._error_result(result_text or "MCP tool execution failed")
 
-        full_text = result_text
-        if len(full_text) > ARTIFACT_THRESHOLD and self._artifact_store:
-            artifact_id = self._artifact_store.save(
-                content=full_text,
-                source=self.name,
-                type="mcp_result",
-            )
-            lines = full_text.split("\n")
-            preview = "\n".join(lines[:5])
-            summary = (
-                f"MCP {self._server_name}.{self._tool_def.name} completed successfully\n"
-                f"Returned {len(full_text)} chars across {len(lines)} lines"
-            )
-            result_obj = self._success_result(
-                content=summary,
-                artifact_id=artifact_id,
-                artifact_preview=preview,
-            )
-        else:
-            result_obj = self._success_result(content=full_text)
-
-        # --- store in result cache (read-only tools only) ---
-        if cache_key is not None:
-            MCPToolProxy._result_cache[cache_key] = result_obj
-            if len(MCPToolProxy._result_cache) > MCPToolProxy._RESULT_CACHE_MAX:
-                MCPToolProxy._result_cache.popitem(last=False)
-
-        return result_obj
+        # Result sizing and artifact promotion belong to the shared tool
+        # execution path (Pi's 2,000-line/50-KiB contract). Keeping an MCP-only
+        # character threshold here caused a second, undocumented truncation
+        # policy and made the same tool behave differently through MCP.
+        return self._success_result(content=result_text)
 
 
 class MCPToolRegistry:
@@ -191,6 +244,21 @@ class MCPToolRegistry:
         registered_names: list[str] = []
 
         for tool_def in tools:
+            native_equivalent = _BUNDLED_NATIVE_EQUIVALENTS.get(
+                (server_name, tool_def.name)
+            )
+            if (
+                native_equivalent
+                and self._tool_registry.has_tool(native_equivalent)
+                and _is_trusted_bundled_reader(server_name, tool_def.name, client)
+            ):
+                logger.info(
+                    "[MCPRegistry] Skipped legacy bundled tool %s/%s; native %s is registered",
+                    server_name,
+                    tool_def.name,
+                    native_equivalent,
+                )
+                continue
             proxy = MCPToolProxy(
                 server_name=server_name,
                 tool_def=tool_def,

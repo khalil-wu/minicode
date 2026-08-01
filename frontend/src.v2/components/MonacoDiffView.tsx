@@ -171,7 +171,7 @@ export function MonacoDiffView({
         >
           <span
             style={{
-              fontSize: "12px",
+              fontSize: "var(--text-xxs)",
               color: "var(--text-secondary, #aaa)",
               fontFamily: "monospace",
             }}
@@ -221,7 +221,8 @@ export function MonacoDiffView({
             renderSideBySide: true,
             minimap: { enabled: false },
             scrollBeyondLastLine: false,
-            fontSize: 13,
+            fontSize: 15,
+            lineHeight: 23,
             lineNumbers: "on",
             wordWrap: "on",
             padding: { top: 8 },
@@ -243,7 +244,7 @@ const acceptBtnStyle: React.CSSProperties = {
   cursor: "pointer",
   background: "var(--accent-primary, #0d7c3e)",
   color: "#fff",
-  fontSize: "12px",
+  fontSize: "var(--text-xxs)",
 };
 
 const rejectBtnStyle: React.CSSProperties = {
@@ -253,5 +254,5 @@ const rejectBtnStyle: React.CSSProperties = {
   cursor: "pointer",
   background: "transparent",
   color: "var(--text-secondary, #aaa)",
-  fontSize: "12px",
+  fontSize: "var(--text-xxs)",
 };

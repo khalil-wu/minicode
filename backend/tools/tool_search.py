@@ -323,10 +323,13 @@ class ToolSearchTool(BaseTool):
     name = "tool_search"
     read_only = True
     permission = PermissionLevel.AUTO
+    result_kind = "generic"
+    activity_kind = "genericTool"
+    display_label = "Find tools"
     description = (
         "Search deferred tools that are not directly listed in the current tool set. "
-        "Use when the directly listed tools do not cover a needed capability such as browser/desktop control, document work, connector actions, optional MCP tools, or specialized workflows. "
-        "Use 'select:tool_name' for exact tools. Results include full schemas by default so matching tools can be invoked with tool_call; use include_schemas=false only for lightweight diagnostics."
+        "When to use: the directly listed tools do not cover a needed capability such as browser/desktop control, document work, connector actions, optional MCP tools, or specialized workflows. "
+        "Use 'select:tool_name' for exact tools. Results include full schemas by default so matching tools can be invoked with tool_call; if a result lacks a schema, use tool_describe before tool_call. Use include_schemas=false only for lightweight diagnostics."
     )
 
     def model_description(self) -> str:
@@ -361,9 +364,6 @@ class ToolSearchTool(BaseTool):
             toolset="core",
             exposure="core",
             required_args=("query",),
-            arg_roles={"query": "search_query"},
-            repair_policy={"query": "resource_resolver"},
-            empty_args_policy="repair_or_block",
         )
 
     def get_schema(self) -> ToolSchema:
@@ -472,7 +472,7 @@ class ToolDescribeTool(BaseTool):
     permission = PermissionLevel.AUTO
     description = (
         "Load the full JSON schema for one deferred tool returned by tool_search. "
-        "This is required before tool_call unless the schema is already known or tool_search returned it. "
+        "This schema is required before tool_call unless tool_search already returned it. "
         "Do not infer arguments from the short search result."
     )
 
@@ -489,7 +489,6 @@ class ToolDescribeTool(BaseTool):
             toolset="core",
             exposure="core",
             required_args=("name",),
-            empty_args_policy="block",
         )
 
     def get_schema(self) -> ToolSchema:
@@ -552,6 +551,9 @@ class ToolDescribeTool(BaseTool):
 
 class ToolCallTool(BaseTool):
     name = "tool_call"
+    result_kind = "generic"
+    activity_kind = "genericTool"
+    display_label = "Call tool"
     read_only = False
     permission = PermissionLevel.AUTO
     description = (
@@ -570,7 +572,6 @@ class ToolCallTool(BaseTool):
             toolset="core",
             exposure="core",
             required_args=("name", "arguments"),
-            empty_args_policy="block",
         )
 
     def get_schema(self) -> ToolSchema:

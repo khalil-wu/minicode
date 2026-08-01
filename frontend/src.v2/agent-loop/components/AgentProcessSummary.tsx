@@ -1,5 +1,5 @@
 import { CheckCircle2, ChevronDown, ChevronRight, CircleAlert, LoaderCircle } from "lucide-react";
-import type { AgentTurnStatus } from "../types";
+import type { AgentTurnStatus } from "../projection/project-turn";
 
 export function AgentProcessSummary({
   status,
@@ -17,6 +17,8 @@ export function AgentProcessSummary({
   const completedLabel =
     status === "failed"
       ? "出错"
+      : status === "partial"
+        ? "部分完成"
       : status === "stopped"
         ? "已停止"
         : "完成";
@@ -27,7 +29,7 @@ export function AgentProcessSummary({
   if (running && !hasTimelineItems) {
     return (
       <div className="agent-loop-running-summary agent-loop-thinking-indicator" aria-label="Agent is processing" role="status">
-        <LoaderCircle size={13} className="agent-loop-thinking-spinner" aria-hidden="true" />
+        <LoaderCircle size={14} className="agent-loop-thinking-spinner" aria-hidden="true" />
         <span className="agent-loop-thinking-shimmer" data-text={label}>{label}</span>
       </div>
     );
@@ -44,11 +46,11 @@ export function AgentProcessSummary({
       >
         <span className="agent-loop-process-summary-icon" aria-hidden="true">
           {running ? (
-            <LoaderCircle size={13} className="agent-loop-thinking-spinner" />
-          ) : status === "failed" ? (
-            <CircleAlert size={13} className="agent-loop-failed-icon" />
+            <LoaderCircle size={14} className="agent-loop-thinking-spinner" />
+          ) : status === "failed" || status === "partial" ? (
+            <CircleAlert size={14} className="agent-loop-failed-icon" />
           ) : (
-            <CheckCircle2 size={13} className="agent-loop-done-icon" />
+            <CheckCircle2 size={14} className="agent-loop-done-icon" />
           )}
         </span>
         <span className="chat-turn-process-summary-text">

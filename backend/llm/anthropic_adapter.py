@@ -4,7 +4,6 @@ Anthropic Claude 适配器（DESIGN.md §一 LLM Adapter）。
 增强特性：
   - 消息交替规则保证（user/assistant 严格交替）
   - message_delta 最终 usage（含 cache tokens）
-  - 自动 retry（429 rate limit / 529 overloaded）
   - stop_reason 处理（end_turn / tool_use / max_tokens）
   - system prompt byte-stable prefix split
   - extended thinking 支持（Claude 4+）
@@ -12,7 +11,6 @@ Anthropic Claude 适配器（DESIGN.md §一 LLM Adapter）。
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -38,16 +36,7 @@ from backend.llm.capabilities import ProviderCapabilities, capabilities_from_ant
 
 logger = logging.getLogger(__name__)
 
-_MAX_RETRIES = 3
-_RETRY_BASE_DELAY = 1.0
-_RETRYABLE_STATUS_CODES = {429, 529}
 _DELTA_DEBOUNCE_BYTES = 128
-_THINKING_TRIGGER_RE = re.compile(
-    r"(debug|fix|bug|error|traceback|refactor|architect|design|plan|"
-    r"implement|analy[sz]e|reason|review|test|multi[- ]?step|"
-    r"修复|报错|错误|调试|重构|架构|设计|计划|分析|实现|测试|审查)",
-    re.IGNORECASE,
-)
 
 _ANTHROPIC_PROMPT_CACHE_CONTROL = {"type": "ephemeral"}
 
@@ -66,18 +55,6 @@ def _cache_ttl_1h_enabled() -> bool:
     return os.getenv("MINICODE_CACHE_TTL_1H", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _cache_reference_enabled() -> bool:
-    """Whether to tag tool_result blocks with ``cache_reference`` (opt-in).
-
-    In cc this only happens when the cache-editing beta (``useCachedMC``,
-    first-party + repl_main_thread only) is active — it is NOT part of the
-    stable public Messages API. Default off; enable via
-    MINICODE_CACHE_TOOL_RESULT_REFERENCE=1 against gateways that support it.
-    The gateway-fallback path strips it if rejected.
-    """
-    return os.getenv("MINICODE_CACHE_TOOL_RESULT_REFERENCE", "").strip().lower() in {"1", "true", "yes", "on"}
-
-
 def _cache_control() -> dict[str, Any]:
     """Build the cache_control marker, cc's ``getCacheControl`` equivalent."""
     if _cache_ttl_1h_enabled():
@@ -93,15 +70,6 @@ def _clean_error_message(exc: Exception) -> str:
     if len(msg) > 300:
         msg = msg[:300] + "..."
     return msg
-
-
-def _is_retryable(exc: Exception) -> bool:
-    """判断是否可重试（429/529）。"""
-    status_code = getattr(exc, "status_code", None)
-    if status_code and status_code in _RETRYABLE_STATUS_CODES:
-        return True
-    cls_name = exc.__class__.__name__
-    return "RateLimitError" in cls_name or "OverloadedError" in cls_name
 
 
 def _anthropic_request_metadata(metadata: dict[str, Any] | None) -> dict[str, str]:
@@ -270,6 +238,7 @@ def _safe_anthropic_request_params(kwargs: dict[str, Any]) -> dict[str, Any]:
             params[key] = kwargs[key]
     # Detect cache_control at any level (system blocks, tools, messages)
     cache_breakpoints = 0
+    cache_edit_count = 0
     system = kwargs.get("system")
     if isinstance(system, list):
         for block in system:
@@ -289,8 +258,17 @@ def _safe_anthropic_request_params(kwargs: dict[str, Any]) -> dict[str, Any]:
                     for block in content:
                         if isinstance(block, dict) and "cache_control" in block:
                             cache_breakpoints += 1
+                        if isinstance(block, dict) and block.get("type") == "cache_edits":
+                            edits = block.get("edits")
+                            cache_edit_count += len(edits) if isinstance(edits, list) else 0
     params["cache_control_present"] = cache_breakpoints > 0 or "cache_control" in kwargs
     params["cache_breakpoints"] = cache_breakpoints
+    params["cache_edit_count"] = cache_edit_count
+    params["cache_editing_header_present"] = bool(
+        cache_edit_count
+        and isinstance(kwargs.get("extra_headers"), dict)
+        and kwargs["extra_headers"].get("anthropic-beta")
+    )
     params["metadata_present"] = "metadata" in kwargs
     params["system_blocks"] = len(kwargs.get("system") or []) if isinstance(kwargs.get("system"), list) else 0
     params["tools_len"] = len(kwargs.get("tools") or []) if isinstance(kwargs.get("tools"), list) else 0
@@ -350,33 +328,68 @@ class AnthropicAdapter(LLMAdapter):
     # API position 2 (after system prompt), so any byte-level change busts
     # the entire tool block AND everything downstream. Memoizing per-adapter
     # (session) locks the schema bytes at first render — mid-session tool
-    # description drift no longer churns the serialized array.
-    # Mirrors cc's toolSchemaCache.ts.
+    # description drift no longer churns the serialized array. The cache key
+    # includes the input schema fingerprint, matching current Claude Code: a
+    # reconnected MCP tool with the same name but a new contract must not reuse
+    # a stale first-render schema.
     _tool_schema_cache: dict[str, dict[str, Any]]
 
     def __init__(
         self,
         api_key: str,
-        model: str = "claude-sonnet-4-6",
+        model: str = "",
         base_url: str | None = None,
-        max_tokens: int = 8192,
+        max_tokens: int = 8_000,
         thinking_budget: int | None = None,
         use_auth_token: bool = False,
         use_raw_http: bool = False,
+        cache_editing_beta_header: str = "",
     ) -> None:
         self._api_key = api_key
         self._model = model
         self._base_url = base_url
-        self._max_tokens = max_tokens
+        self._max_tokens = max(1, int(max_tokens or 8_000))
         self._thinking_budget = thinking_budget
         self._use_auth_token = use_auth_token
         self._use_raw_http = use_raw_http
+        # Cache editing is a private provider capability. It is disabled unless
+        # the caller supplies the exact provider-declared beta header; MiniCode
+        # never guesses or enables it from a generic feature flag.
+        self._cache_editing_beta_header = str(cache_editing_beta_header or "").strip()
+        self._cache_editing_disabled_reason = ""
+        self._pending_cache_deletions: list[str] = []
+        self._pinned_cache_edits: list[tuple[int, str, dict[str, Any]]] = []
         self._client = None
         self._tool_schema_cache = {}
+
+    async def aclose(self) -> None:
+        client = self._client
+        self._client = None
+        close = getattr(client, "close", None)
+        if callable(close):
+            await close()
 
     @property
     def capabilities(self) -> ProviderCapabilities:
         return capabilities_from_anthropic_adapter(self)
+
+    def queue_cache_deletions(self, tool_call_ids: list[str] | tuple[str, ...]) -> bool:
+        """Queue provider-native deletions when the configured provider supports them."""
+        if not self._cache_editing_beta_header or self._cache_editing_disabled_reason:
+            return False
+        known = set(self._pending_cache_deletions)
+        known.update(
+            str(edit.get("cache_reference") or "")
+            for _, _, block in self._pinned_cache_edits
+            for edit in block.get("edits", [])
+            if isinstance(edit, dict)
+        )
+        for raw_id in tool_call_ids:
+            call_id = str(raw_id or "").strip()
+            if call_id and call_id not in known:
+                self._pending_cache_deletions.append(call_id)
+                known.add(call_id)
+        return True
 
     def _get_client(self):
         """懒初始化 Anthropic 客户端。"""
@@ -390,7 +403,6 @@ class AnthropicAdapter(LLMAdapter):
 
         kwargs: dict[str, Any] = {
             "auth_token" if self._use_auth_token else "api_key": self._api_key,
-            "max_retries": 0,  # 我们自己管理 retry
         }
         if self._base_url:
             kwargs["base_url"] = self._base_url
@@ -399,35 +411,9 @@ class AnthropicAdapter(LLMAdapter):
         return self._client
 
     async def _call_with_retry(self, **kwargs: Any):
-        """带指数退避的 retry 封装。"""
+        """Create one message through the official Anthropic SDK policy."""
         client = self._get_client()
-        last_exc = None
-
-        for attempt in range(_MAX_RETRIES):
-            try:
-                return await client.messages.create(**kwargs)
-            except Exception as exc:
-                last_exc = exc
-                if _is_retryable(exc) and attempt < _MAX_RETRIES - 1:
-                    delay = _RETRY_BASE_DELAY * (2 ** attempt)
-                    # 429 响应可能包含 retry-after
-                    resp = getattr(exc, "response", None)
-                    if resp and hasattr(resp, "headers"):
-                        ra = resp.headers.get("retry-after")
-                        if ra:
-                            try:
-                                delay = max(delay, float(ra))
-                            except (ValueError, TypeError):
-                                pass
-                    logger.warning(
-                        "Anthropic API 可重试错误 (attempt %d/%d), %.1fs 后重试: %s",
-                        attempt + 1, _MAX_RETRIES, delay, _clean_error_message(exc),
-                    )
-                    await asyncio.sleep(delay)
-                else:
-                    raise
-
-        raise last_exc  # type: ignore[misc]
+        return await client.messages.create(**kwargs)
 
     async def stream_chat(
         self,
@@ -442,8 +428,17 @@ class AnthropicAdapter(LLMAdapter):
 
         # Add cache_control breakpoints to last message and last tool.
         # System blocks get cache_control from _build_system_blocks.
-        cached_messages, cached_tools = self._add_cache_breakpoints(
-            api_messages, anthropic_tools if tools else None,
+        pending_cache_deletions = tuple(self._pending_cache_deletions)
+        cache_editing_enabled = bool(
+            self._cache_editing_beta_header and not self._cache_editing_disabled_reason
+        )
+        cached_messages, cached_tools, new_cache_edit_pin = self._add_cache_breakpoints(
+            api_messages,
+            anthropic_tools if tools else None,
+            cache_editing=cache_editing_enabled,
+            new_cache_deletions=pending_cache_deletions,
+            pinned_cache_edits=tuple(self._pinned_cache_edits),
+            skip_cache_write=bool((metadata or {}).get("prompt_cache_skip_write")),
         )
 
         kwargs: dict[str, Any] = {
@@ -461,6 +456,12 @@ class AnthropicAdapter(LLMAdapter):
         # into HTTP headers. _strip_all_cache_control removes it on fallback.
         if _cache_ttl_1h_enabled():
             kwargs["extra_headers"] = {"anthropic-beta": _EXTENDED_CACHE_TTL_BETA_HEADER}
+        if cache_editing_enabled:
+            extra_headers = dict(kwargs.get("extra_headers") or {})
+            existing_beta = str(extra_headers.get("anthropic-beta") or "").strip()
+            beta_values = [value for value in (existing_beta, self._cache_editing_beta_header) if value]
+            extra_headers["anthropic-beta"] = ",".join(dict.fromkeys(beta_values))
+            kwargs["extra_headers"] = extra_headers
 
         # System prompt: split stable/dynamic blocks with cache_control on
         # the stable prefix so Anthropic caches it across turns.
@@ -469,7 +470,12 @@ class AnthropicAdapter(LLMAdapter):
 
         # Extended thinking（Claude 4+）
         if self._should_enable_thinking(messages, anthropic_tools):
-            kwargs["thinking"] = {"type": "enabled", "budget_tokens": self._thinking_budget}
+            # Anthropic hard-rejects budget_tokens >= max_tokens. Clamp exactly
+            # like Claude Code (claude.ts: thinkingBudget = min(maxOutputTokens-1,
+            # requestedBudget)) so a user setting thinking_budget >= max_tokens
+            # does not produce a 400.
+            budget_tokens = min(self._thinking_budget, self._max_tokens - 1)
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget_tokens}
 
         if tools and cached_tools:
             kwargs["tools"] = cached_tools
@@ -486,6 +492,8 @@ class AnthropicAdapter(LLMAdapter):
 
         if self._use_raw_http:
             async for event in self._stream_chat_raw_http(kwargs, request_summary=request_summary):
+                if event.type == StreamEventType.DONE:
+                    self._commit_cache_edit_request(pending_cache_deletions, new_cache_edit_pin)
                 yield event
             return
 
@@ -499,7 +507,14 @@ class AnthropicAdapter(LLMAdapter):
                     "Anthropic gateway rejected cache_control; retrying without all cache markers: %s",
                     _clean_error_message(exc),
                 )
-                retry_kwargs = self._strip_all_cache_control(kwargs)
+                retry_kwargs = self._strip_all_cache_control(
+                    kwargs,
+                    cache_editing_beta_header=self._cache_editing_beta_header,
+                )
+                if cache_editing_enabled:
+                    self._cache_editing_disabled_reason = "provider_rejected_cache_editing_request"
+                    pending_cache_deletions = ()
+                    new_cache_edit_pin = None
                 request_summary = _anthropic_safe_request_summary(
                     model=self._model,
                     system_text=system_text,
@@ -547,6 +562,9 @@ class AnthropicAdapter(LLMAdapter):
                                 output_tokens=getattr(usage_obj, "output_tokens", 0),
                                 cache_creation_input_tokens=getattr(usage_obj, "cache_creation_input_tokens", 0),
                                 cache_read_input_tokens=getattr(usage_obj, "cache_read_input_tokens", 0),
+                                cache_deleted_input_tokens=getattr(usage_obj, "cache_deleted_input_tokens", 0),
+                                # Anthropic reports cache reads separately from input_tokens.
+                                input_includes_cache_read=False,
                             )
                         stop_reason = getattr(msg, "stop_reason", "") or ""
 
@@ -642,7 +660,10 @@ class AnthropicAdapter(LLMAdapter):
                         except (json.JSONDecodeError, TypeError):
                             from backend.llm.json_repair import repair_tool_json
                             arguments = repair_tool_json(current_tool_args) or {"_raw": current_tool_args}
-                        completed_tool_call = ToolCallEvent(id=current_tool_id, name=current_tool_name, arguments=arguments)
+                            arguments_repaired = True
+                        else:
+                            arguments_repaired = False
+                        completed_tool_call = ToolCallEvent(id=current_tool_id, name=current_tool_name, arguments=arguments, arguments_repaired=arguments_repaired)
                         pending_tool_calls.append(completed_tool_call)
                         yield StreamEvent(
                             type=StreamEventType.TOOL_CALL,
@@ -668,6 +689,11 @@ class AnthropicAdapter(LLMAdapter):
                                 output_tokens=out_tokens,
                                 cache_creation_input_tokens=usage.cache_creation_input_tokens,
                                 cache_read_input_tokens=usage.cache_read_input_tokens,
+                                cache_deleted_input_tokens=max(
+                                    usage.cache_deleted_input_tokens,
+                                    int(getattr(usage_obj, "cache_deleted_input_tokens", 0) or 0),
+                                ),
+                                input_includes_cache_read=False,
                             )
 
                 elif event_type == "message_stop":
@@ -696,6 +722,7 @@ class AnthropicAdapter(LLMAdapter):
         if stop_reason == "max_tokens":
             logger.warning("Claude 响应因 max_tokens 截断")
 
+        self._commit_cache_edit_request(pending_cache_deletions, new_cache_edit_pin)
         yield StreamEvent(
             type=StreamEventType.DONE,
             usage=usage,
@@ -708,6 +735,7 @@ class AnthropicAdapter(LLMAdapter):
                     "output_tokens": usage.output_tokens,
                     "cache_creation_input_tokens": usage.cache_creation_input_tokens,
                     "cache_read_input_tokens": usage.cache_read_input_tokens,
+                    "cache_deleted_input_tokens": usage.cache_deleted_input_tokens,
                 },
                 "request_summary": request_summary,
             },
@@ -756,6 +784,8 @@ class AnthropicAdapter(LLMAdapter):
             headers = self._raw_headers()
             if isinstance(extra_headers, dict):
                 headers.update({str(k): str(v) for k, v in extra_headers.items()})
+            # Provider stream liveness is owned by the turn/stream wait
+            # policy; the raw transport must not add a second idle timeout.
             async with httpx.AsyncClient(timeout=None, follow_redirects=True) as client:
                 async with client.stream(
                     "POST",
@@ -796,6 +826,9 @@ class AnthropicAdapter(LLMAdapter):
                                     output_tokens=int(usage_obj.get("output_tokens") or 0),
                                     cache_creation_input_tokens=int(usage_obj.get("cache_creation_input_tokens") or 0),
                                     cache_read_input_tokens=int(usage_obj.get("cache_read_input_tokens") or 0),
+                                    cache_deleted_input_tokens=int(usage_obj.get("cache_deleted_input_tokens") or 0),
+                                    # Anthropic reports cache reads separately from input_tokens.
+                                    input_includes_cache_read=False,
                                 )
                             stop_reason = str(message.get("stop_reason") or "") if isinstance(message, dict) else ""
 
@@ -866,8 +899,11 @@ class AnthropicAdapter(LLMAdapter):
                                 except (json.JSONDecodeError, TypeError):
                                     from backend.llm.json_repair import repair_tool_json
                                     arguments = repair_tool_json(current_tool_args) or {"_raw": current_tool_args}
+                                    arguments_repaired = True
+                                else:
+                                    arguments_repaired = False
                                 pending_tool_calls.append(
-                                    ToolCallEvent(id=current_tool_id, name=current_tool_name, arguments=arguments)
+                                    ToolCallEvent(id=current_tool_id, name=current_tool_name, arguments=arguments, arguments_repaired=arguments_repaired)
                                 )
                                 yield StreamEvent(
                                     type=StreamEventType.TOOL_CALL,
@@ -889,6 +925,11 @@ class AnthropicAdapter(LLMAdapter):
                                     output_tokens=int(usage_obj.get("output_tokens") or 0),
                                     cache_creation_input_tokens=usage.cache_creation_input_tokens,
                                     cache_read_input_tokens=usage.cache_read_input_tokens,
+                                    cache_deleted_input_tokens=max(
+                                        usage.cache_deleted_input_tokens,
+                                        int(usage_obj.get("cache_deleted_input_tokens") or 0),
+                                    ),
+                                    input_includes_cache_read=False,
                                 )
                         elif event_type == "message_stop":
                             saw_message_stop = True
@@ -922,20 +963,26 @@ class AnthropicAdapter(LLMAdapter):
                     "output_tokens": usage.output_tokens,
                     "cache_creation_input_tokens": usage.cache_creation_input_tokens,
                     "cache_read_input_tokens": usage.cache_read_input_tokens,
+                    "cache_deleted_input_tokens": usage.cache_deleted_input_tokens,
                 },
                 "request_summary": request_summary or {},
             },
             provider_items=provider_items,
         )
 
-    async def simple_chat(self, messages: list[LLMMessage]) -> str:
+    async def simple_chat(
+        self,
+        messages: list[LLMMessage],
+        *,
+        max_tokens: int | None = None,
+    ) -> str:
         """非流式调用。"""
         system_text, api_messages = self._convert_messages(messages)
 
-        cached_messages, _ = self._add_cache_breakpoints(api_messages)
+        cached_messages, _, _ = self._add_cache_breakpoints(api_messages)
         kwargs: dict[str, Any] = {
             "model": self._model,
-            "max_tokens": self._max_tokens,
+            "max_tokens": min(self._max_tokens, max(1, int(max_tokens))) if max_tokens else self._max_tokens,
             "messages": cached_messages,
         }
 
@@ -967,9 +1014,14 @@ class AnthropicAdapter(LLMAdapter):
                 text_parts.append(getattr(block, "text", ""))
 
         text = "\n".join(text_parts).strip()
-        # Side calls (compaction/reflection/recovery) must still be counted toward
+        # Side calls (compaction/recovery) must still be counted toward
         # cost/token totals — the streaming DONE path doesn't see them.
-        self.record_non_stream_usage(getattr(response, "usage", None), provider="anthropic", model_id=self._model)
+        self.record_non_stream_usage(
+            getattr(response, "usage", None),
+            provider="anthropic",
+            model_id=self._model,
+            input_includes_cache_read=False,
+        )
         if not text:
             raise RuntimeError("Claude 返回空内容")
 
@@ -1005,11 +1057,29 @@ class AnthropicAdapter(LLMAdapter):
             })
         return blocks
 
+    def _commit_cache_edit_request(
+        self,
+        consumed_ids: tuple[str, ...],
+        new_pin: tuple[int, str, dict[str, Any]] | None,
+    ) -> None:
+        if consumed_ids:
+            consumed = set(consumed_ids)
+            self._pending_cache_deletions = [
+                call_id for call_id in self._pending_cache_deletions if call_id not in consumed
+            ]
+        if new_pin is not None and all(existing[2] != new_pin[2] for existing in self._pinned_cache_edits):
+            self._pinned_cache_edits.append(new_pin)
+
     @staticmethod
     def _add_cache_breakpoints(
         api_messages: list[dict[str, Any]],
         anthropic_tools: list[dict[str, Any]] | None = None,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        *,
+        cache_editing: bool = False,
+        new_cache_deletions: tuple[str, ...] = (),
+        pinned_cache_edits: tuple[tuple[int, str, dict[str, Any]], ...] = (),
+        skip_cache_write: bool = False,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], tuple[int, str, dict[str, Any]] | None]:
         """Add cache_control breakpoints to messages and tools.
 
         Mirrors cc's ``addCacheBreakpoints``:
@@ -1024,16 +1094,28 @@ class AnthropicAdapter(LLMAdapter):
           3. Conversation history prefix (grows turn-by-turn)
         """
         cache_control = _cache_control()
+        def message_anchor(message: dict[str, Any]) -> str:
+            raw = json.dumps(
+                message,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+        message_anchors = [message_anchor(message) for message in api_messages]
         messages = [dict(msg) for msg in api_messages]
-        if messages:
-            last = messages[-1]
-            content = last.get("content")
+        marker_index = len(messages) - 2 if skip_cache_write else len(messages) - 1
+        if 0 <= marker_index < len(messages):
+            marker = messages[marker_index]
+            content = marker.get("content")
             if isinstance(content, list) and content:
                 blocks = [dict(block) for block in content]
                 blocks[-1]["cache_control"] = dict(cache_control)
-                last["content"] = blocks
+                marker["content"] = blocks
             elif isinstance(content, str):
-                last["content"] = [
+                marker["content"] = [
                     {"type": "text", "text": content, "cache_control": dict(cache_control)}
                 ]
 
@@ -1043,8 +1125,8 @@ class AnthropicAdapter(LLMAdapter):
             # last cache_control — we use strict before"). Opt-in: cc only
             # sends this under the cache-editing beta (useCachedMC), not on
             # the public Messages API. Only user messages carry tool_results.
-            if _cache_reference_enabled():
-                for msg in messages[:-1]:
+            if cache_editing:
+                for msg in messages[:marker_index]:
                     if msg.get("role") != "user":
                         continue
                     content = msg.get("content")
@@ -1068,15 +1150,72 @@ class AnthropicAdapter(LLMAdapter):
                     if changed:
                         msg["content"] = new_blocks
 
+        new_pin: tuple[int, str, dict[str, Any]] | None = None
+        if cache_editing:
+            seen_references: set[str] = set()
+
+            def insert_edits(message_index: int, block: dict[str, Any]) -> None:
+                message = messages[message_index]
+                if message.get("role") != "user":
+                    return
+                content = message.get("content")
+                if not isinstance(content, list):
+                    content = [{"type": "text", "text": str(content or "")}]
+                edits = []
+                for edit in block.get("edits", []):
+                    reference = str(edit.get("cache_reference") or "") if isinstance(edit, dict) else ""
+                    if reference and reference not in seen_references:
+                        edits.append({"type": "delete", "cache_reference": reference})
+                        seen_references.add(reference)
+                if not edits:
+                    return
+                insert_at = 0
+                while insert_at < len(content) and isinstance(content[insert_at], dict) and content[insert_at].get("type") == "tool_result":
+                    insert_at += 1
+                next_content = [dict(item) if isinstance(item, dict) else item for item in content]
+                next_content.insert(insert_at, {"type": "cache_edits", "edits": edits})
+                message["content"] = next_content
+
+            for message_index, anchor, block in pinned_cache_edits:
+                resolved_index = int(message_index)
+                if not (
+                    0 <= resolved_index < len(messages)
+                    and message_anchors[resolved_index] == anchor
+                ):
+                    resolved_index = next(
+                        (index for index, candidate in enumerate(message_anchors) if candidate == anchor),
+                        -1,
+                    )
+                if resolved_index >= 0 and isinstance(block, dict):
+                    insert_edits(resolved_index, block)
+
+            if new_cache_deletions:
+                block = {
+                    "type": "cache_edits",
+                    "edits": [
+                        {"type": "delete", "cache_reference": call_id}
+                        for call_id in new_cache_deletions
+                    ],
+                }
+                for message_index in range(len(messages) - 1, -1, -1):
+                    if messages[message_index].get("role") == "user":
+                        insert_edits(message_index, block)
+                        new_pin = (message_index, message_anchors[message_index], block)
+                        break
+
         tools = list(anthropic_tools or [])
         if tools:
             tools[-1] = dict(tools[-1])
             tools[-1]["cache_control"] = dict(cache_control)
 
-        return messages, tools
+        return messages, tools, new_pin
 
     @staticmethod
-    def _strip_all_cache_control(kwargs: dict[str, Any]) -> dict[str, Any]:
+    def _strip_all_cache_control(
+        kwargs: dict[str, Any],
+        *,
+        cache_editing_beta_header: str = "",
+    ) -> dict[str, Any]:
         """Remove all cache_control and cache_reference markers for gateway fallback.
 
         Strips cache_control from system blocks, tool definitions, and
@@ -1091,9 +1230,22 @@ class AnthropicAdapter(LLMAdapter):
         # sending it without any cache_control is pointless and some gateways
         # reject unknown beta headers.
         extra_headers = cleaned.get("extra_headers")
-        if isinstance(extra_headers, dict) and extra_headers.get("anthropic-beta") == _EXTENDED_CACHE_TTL_BETA_HEADER:
+        if isinstance(extra_headers, dict) and extra_headers.get("anthropic-beta"):
             extra_headers = dict(extra_headers)
-            extra_headers.pop("anthropic-beta", None)
+            beta_values = [
+                value.strip()
+                for value in str(extra_headers.get("anthropic-beta") or "").split(",")
+                if value.strip()
+            ]
+            removed = {
+                _EXTENDED_CACHE_TTL_BETA_HEADER,
+                str(cache_editing_beta_header or "").strip(),
+            }
+            remaining = [value for value in beta_values if value not in removed]
+            if remaining:
+                extra_headers["anthropic-beta"] = ",".join(remaining)
+            else:
+                extra_headers.pop("anthropic-beta", None)
             if extra_headers:
                 cleaned["extra_headers"] = extra_headers
             else:
@@ -1134,6 +1286,7 @@ class AnthropicAdapter(LLMAdapter):
                         if isinstance(block, dict)
                         else block
                         for block in content
+                        if not (isinstance(block, dict) and block.get("type") == "cache_edits")
                     ]
                     new_messages.append(new_msg)
                 else:
@@ -1160,7 +1313,7 @@ class AnthropicAdapter(LLMAdapter):
 
         # 第一遍：提取 system + 初步转换
         for msg in messages:
-            if msg.role == "system":
+            if msg.role in {"system", "developer"}:
                 if msg.content:
                     system_parts.append(msg.content)
                 continue
@@ -1226,6 +1379,8 @@ class AnthropicAdapter(LLMAdapter):
                     "role": "tool_result",
                     "tool_use_id": msg.tool_call_id or "",
                     "content": msg.content,
+                    "is_error": bool(getattr(msg, "is_error", False)),
+                    "images": list(getattr(msg, "images", []) or []),
                 })
 
         # 第二遍：保证 user/assistant 交替 + 合并连续 tool_result
@@ -1237,18 +1392,42 @@ class AnthropicAdapter(LLMAdapter):
 
             if msg["role"] == "tool_result":
                 # 合并连续的 tool_result 为一条 user 消息
-                tool_results: list[dict[str, Any]] = [{
-                    "type": "tool_result",
-                    "tool_use_id": msg["tool_use_id"],
-                    "content": msg["content"],
-                }]
+                def _tool_result_block(m: dict[str, Any]) -> dict[str, Any]:
+                    # Render inline images (cc FileReadTool image block) as
+                    # Anthropic image blocks inside the tool_result content; fall
+                    # back to a plain string when there are none.
+                    images = m.get("images") or []
+                    if images:
+                        blocks: list[dict[str, Any]] = []
+                        for img in images:
+                            if img.get("data"):
+                                blocks.append({
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": img.get("media_type") or "image/png",
+                                        "data": img["data"],
+                                    },
+                                })
+                        if m["content"]:
+                            blocks.append({"type": "text", "text": m["content"]})
+                        content: Any = blocks or m["content"]
+                    else:
+                        content = m["content"]
+                    block = {
+                        "type": "tool_result",
+                        "tool_use_id": m["tool_use_id"],
+                        "content": content,
+                    }
+                    # Anthropic is_error (cc messages.ts): mark failed tool results.
+                    if m.get("is_error"):
+                        block["is_error"] = True
+                    return block
+
+                tool_results: list[dict[str, Any]] = [_tool_result_block(msg)]
                 j = i + 1
                 while j < len(raw_messages) and raw_messages[j]["role"] == "tool_result":
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": raw_messages[j]["tool_use_id"],
-                        "content": raw_messages[j]["content"],
-                    })
+                    tool_results.append(_tool_result_block(raw_messages[j]))
                     j += 1
                 api_messages.append({"role": "user", "content": tool_results})
                 i = j
@@ -1322,25 +1501,8 @@ class AnthropicAdapter(LLMAdapter):
         messages: list[LLMMessage],
         anthropic_tools: list[dict[str, Any]],
     ) -> bool:
-        if not self._thinking_budget or self._thinking_budget <= 0:
-            return False
-        if anthropic_tools:
-            return True
-        if any(getattr(message, "documents", None) for message in messages):
-            return True
-        latest_user = next(
-            (str(message.content or "") for message in reversed(messages) if message.role == "user"),
-            "",
-        ).lower()
-        if len(latest_user) >= 160:
-            return True
-        return bool(
-            re.search(
-                r"\b(debug|fix|failing|test|implement|refactor|analyze|investigate|plan|design|"
-                r"compare|review|optimi[sz]e|architecture|trace|root cause)\b",
-                latest_user,
-            )
-        )
+        del messages, anthropic_tools
+        return bool(self._thinking_budget and self._thinking_budget > 0)
 
     @staticmethod
     def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1371,16 +1533,9 @@ class AnthropicAdapter(LLMAdapter):
     def _convert_tools_cached(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Convert tools with session-level schema caching.
 
-        Mirrors cc's ``toolSchemaCache``: the rendered Anthropic tool schema
-        (name + description + input_schema) is cached per tool name for the
-        adapter's lifetime. This prevents mid-session changes (MCP reconnects,
-        dynamic tool descriptions, feature flag flips) from churning the
-        serialized tool array bytes and busting the prompt cache.
-
-        Cache key is the tool name; if a tool's schema genuinely changes
-        (rare — usually a different tool with the same name), the first
-        render wins and the new schema is ignored until the adapter is
-        recreated (new session / /clear).
+        Mirrors current Claude Code's ``toolSchemaCache``: description drift is
+        stable for one name/schema pair, while a genuine input-schema change
+        receives a distinct cache entry.
         """
         result: list[dict[str, Any]] = []
         for tool in tools:
@@ -1390,16 +1545,18 @@ class AnthropicAdapter(LLMAdapter):
             name = str(func.get("name", "")).strip()
             if not name:
                 continue
-            cached = self._tool_schema_cache.get(name)
+            input_schema = func.get("parameters", {"type": "object", "properties": {}})
+            cache_key = f"{name}:{_json_fingerprint(input_schema)}"
+            cached = self._tool_schema_cache.get(cache_key)
             if cached is not None:
                 result.append(cached)
                 continue
             at: dict[str, Any] = {
                 "name": name,
                 "description": func.get("description", ""),
-                "input_schema": func.get("parameters", {"type": "object", "properties": {}}),
+                "input_schema": input_schema,
             }
-            self._tool_schema_cache[name] = at
+            self._tool_schema_cache[cache_key] = at
             result.append(at)
         return result
 

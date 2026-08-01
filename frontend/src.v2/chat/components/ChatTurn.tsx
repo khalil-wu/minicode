@@ -4,26 +4,21 @@ import type {
   AssistantMarkdownCellState,
   ChatTurnState,
   DiffCellState,
-  ExecCellState,
   HistoryCellState,
   StreamingAssistantTailCellState,
   UserMessageCellState,
 } from "../cells/cellTypes";
 import { AgentTurn } from "../../agent-loop/components/AgentTurn";
 import type { RenderAgentCellArgs } from "../../agent-loop/components/AgentTurn";
-import { projectChatTurnToAgentLoop, isTestCommand } from "../../agent-loop/projection/project-turn";
+import { projectChatTurnToAgentLoop } from "../../agent-loop/projection/project-turn";
 import {
   ActivityCell,
-  ActivityGroupCell,
   AssistantMarkdownCell,
   DiffCell,
   ErrorCell,
   ExecCell,
-  ExecGroupCell,
-  PlanCell,
   StatusNoticeCell,
   ThinkingCell,
-  TurnSummaryCell,
   UserMessageCell,
 } from "../cells";
 import { MarkdownRenderer } from "../messages/MarkdownRenderer";
@@ -38,15 +33,13 @@ import { sendClientCommand } from "../../protocol/ws-outbox";
 export const ChatTurn = memo(function ChatTurn({
   turn,
   wide = false,
+  liveGitChanges,
 }: {
   turn: ChatTurnState;
   wide?: boolean;
+  liveGitChanges?: GitChangesState["live"];
 }) {
-  const committedCells = useMemo(
-    () => groupActivityCells(turn.committedCells),
-    [turn.committedCells],
-  );
-  const liveGitChanges = useAppStore((s) => s.gitChanges.live);
+  const committedCells = turn.committedCells;
   const committedCellsWithLiveDiff = useMemo(
     () => appendLiveDiffCell(committedCells, liveGitChanges, turn),
     [committedCells, liveGitChanges, turn],
@@ -128,129 +121,6 @@ function mergeLiveDiffFiles(files: NonNullable<GitChangesState["live"]>["files"]
   return [...byPath.values()];
 }
 
-function groupActivityCells(cells: ChatTurnState["committedCells"]): ChatTurnState["committedCells"] {
-  const grouped: ChatTurnState["committedCells"] = [];
-  let buffer: Extract<HistoryCellState, { kind: "activity" }>[] = [];
-  let execBuffer: ExecCellState[] = [];
-
-  const flush = () => {
-    if (buffer.length === 0) return;
-
-    if (!shouldGroupActivityBuffer(buffer)) {
-      buffer.forEach(cell => grouped.push(cell));
-    } else {
-      const status = groupStatus(buffer);
-      grouped.push({
-        kind: "activity_group",
-        id: `activity-group-${activityGroupKey(buffer)}-${buffer[0]?.id ?? grouped.length}`,
-        cells: buffer,
-        status,
-        collapsed: status === "done",
-        startedAt: Math.min(...buffer.map((cell) => cell.startedAt)),
-        completedAt: latestCompletedAt(buffer),
-      });
-    }
-    buffer = [];
-  };
-
-  const flushExec = () => {
-    if (execBuffer.length === 0) return;
-
-    const status = execGroupStatus(execBuffer);
-    grouped.push({
-      kind: "exec_group",
-      id: `exec-group-${execBuffer[0]?.id ?? grouped.length}`,
-      cells: execBuffer,
-      status,
-      collapsed: status === "done",
-      startedAt: Math.min(...execBuffer.map((cell) => cell.createdAt)),
-      completedAt: latestExecCompletedAt(execBuffer),
-    });
-    execBuffer = [];
-  };
-
-  for (const cell of cells) {
-    if (cell.kind === "activity") {
-      flushExec();
-      if (!canGroupActivityCell(cell)) {
-        flush();
-        grouped.push(cell);
-        continue;
-      }
-      const nextKey = activityGroupKey([cell]);
-      const currentKey = buffer.length ? activityGroupKey(buffer) : nextKey;
-      if (buffer.length > 0 && nextKey !== currentKey) flush();
-      buffer.push(cell);
-      continue;
-    }
-    if (cell.kind === "exec" && canGroupExecCell(cell)) {
-      flush();
-      const currentKey = execBuffer.length ? execGroupKey(execBuffer) : execGroupKey([cell]);
-      const nextKey = execGroupKey([cell]);
-      if (execBuffer.length > 0 && nextKey !== currentKey) flushExec();
-      execBuffer.push(cell);
-      continue;
-    }
-    flush();
-    flushExec();
-    grouped.push(cell);
-  }
-  flush();
-  flushExec();
-  return grouped;
-}
-
-function canGroupExecCell(cell: ExecCellState): boolean {
-  return cell.status !== "pending_approval";
-}
-
-function execGroupKey(cells: ExecCellState[]): "test" | "command" {
-  return cells.every((cell) => isTestCommand(cell.command)) ? "test" : "command";
-}
-
-function execGroupStatus(cells: ExecCellState[]): "running" | "done" | "failed" {
-  if (cells.some((cell) => cell.status === "failed" || cell.status === "cancelled")) return "failed";
-  if (cells.some((cell) => cell.status === "running" || cell.status === "pending_approval")) return "running";
-  return "done";
-}
-
-function latestExecCompletedAt(cells: ExecCellState[]): number | undefined {
-  const values = cells.map((cell) => cell.completedAt).filter((value): value is number => Number.isFinite(value));
-  return values.length ? Math.max(...values) : undefined;
-}
-
-function canGroupActivityCell(cell: Extract<HistoryCellState, { kind: "activity" }>): boolean {
-  if (cell.status === "failed" || cell.status === "interrupted") return false;
-  return activityGroupKey([cell]) !== "solo";
-}
-
-function shouldGroupActivityBuffer(cells: Extract<HistoryCellState, { kind: "activity" }>[]): boolean {
-  if (cells.some((cell) => cell.status === "failed" || cell.status === "interrupted")) return false;
-  return activityGroupKey(cells) !== "solo";
-}
-
-function activityGroupKey(cells: Extract<HistoryCellState, { kind: "activity" }>[]): "context" | "command" | "change" | "tool" | "solo" {
-  const kinds = new Set(cells.map((cell) => cell.activityKind));
-  if ([...kinds].every((kind) => kind === "fileRead" || kind === "workspaceSearch" || kind === "webSearch" || kind === "mcpToolCall")) {
-    return "context";
-  }
-  if (kinds.size === 1 && kinds.has("commandExecution")) return "command";
-  if (kinds.size === 1 && kinds.has("fileChange")) return "change";
-  if (kinds.size === 1 && kinds.has("genericTool")) return "tool";
-  return "solo";
-}
-
-function groupStatus(cells: Extract<HistoryCellState, { kind: "activity" }>[]) {
-  if (cells.some((cell) => cell.status === "failed" || cell.status === "interrupted")) return "failed";
-  if (cells.some((cell) => cell.status === "running")) return "running";
-  return "done";
-}
-
-function latestCompletedAt(cells: Extract<HistoryCellState, { kind: "activity" }>[]): number | undefined {
-  const values = cells.map((cell) => cell.completedAt).filter((value): value is number => Number.isFinite(value));
-  return values.length ? Math.max(...values) : undefined;
-}
-
 // ── CellWithContextMenu ─────────────────────────────────────────────
 
 function CellWithContextMenu({
@@ -285,13 +155,13 @@ function buildCellMenuItems(cell: HistoryCellState): ContextMenuItem[] {
   const items: ContextMenuItem[] = [
     {
       label: "Copy message",
-      icon: <Copy size={13} />,
+      icon: <Copy size={14} />,
       onClick: () => { void navigator.clipboard.writeText(text); },
       disabled: isStreaming,
     },
     {
       label: "Copy as Markdown",
-      icon: <FileDown size={13} />,
+      icon: <FileDown size={14} />,
       onClick: () => {
         const mdSource = cell.kind === "assistant_markdown"
           ? cell.markdownSource
@@ -307,7 +177,7 @@ function buildCellMenuItems(cell: HistoryCellState): ContextMenuItem[] {
     if (cell.queueState === "queued" && cell.queueMessageId) {
       items.push({
         label: "Cancel queued message",
-        icon: <X size={13} />,
+        icon: <X size={14} />,
         onClick: () => {
           sendClientCommand({
             type: "user_message.queue.cancel",
@@ -320,7 +190,7 @@ function buildCellMenuItems(cell: HistoryCellState): ContextMenuItem[] {
     } else {
       items.push({
         label: "Recall and edit",
-        icon: <RotateCcw size={13} />,
+        icon: <RotateCcw size={14} />,
         onClick: () => {
           interruptActiveRunBeforeLocalRecall();
           useAppStore.getState().recallMessage(cell.id);
@@ -331,7 +201,7 @@ function buildCellMenuItems(cell: HistoryCellState): ContextMenuItem[] {
   } else if (cell.kind === "assistant_markdown" && cell.messageId) {
     items.push({
       label: "Recall and edit",
-      icon: <RotateCcw size={13} />,
+      icon: <RotateCcw size={14} />,
       onClick: () => {
         interruptActiveRunBeforeLocalRecall();
         useAppStore.getState().recallMessage(cell.messageId!);
@@ -343,7 +213,7 @@ function buildCellMenuItems(cell: HistoryCellState): ContextMenuItem[] {
   items.push({ separator: true, label: "" });
   items.push({
     label: "Search in conversation",
-    icon: <Search size={13} />,
+    icon: <Search size={14} />,
     shortcut: "Ctrl+F",
     onClick: () => {
       window.dispatchEvent(new CustomEvent("chat:request-search"));
@@ -371,6 +241,8 @@ function getCellText(cell: HistoryCellState): string | null {
       return cell.markdownSource;
     case "streaming_assistant_tail":
       return cell.partialMarkdown;
+    case "streaming_assistant_narration":
+      return cell.partialMarkdown;
     case "thinking":
       return cell.content;
     case "error":
@@ -379,8 +251,6 @@ function getCellText(cell: HistoryCellState): string | null {
       return cell.command;
     case "status_notice":
       return cell.message ? `${cell.title}: ${cell.message}` : cell.title;
-    case "turn_summary":
-      return cell.items.map((item) => [item.label, item.detail].filter(Boolean).join(" ")).join(", ");
     default:
       return null;
   }
@@ -404,26 +274,14 @@ export function HistoryCellRenderer({
     case "status_notice":
       return <StatusNoticeCell cell={cell} />;
 
-    case "turn_summary":
-      return <TurnSummaryCell cell={cell} />;
-
     case "thinking":
-      return <ThinkingCell cell={cell} isStreaming={isActive} />;
+      return <ThinkingCell cell={cell} isStreaming={cell.isStreaming || isActive} />;
 
     case "activity":
       return <ActivityCell cell={cell} isActive={isActive} />;
 
-    case "activity_group":
-      return <ActivityGroupCell cells={cell.cells} isActive={isActive} defaultCollapsed={cell.collapsed} />;
-
-    case "plan":
-      return <PlanCell cell={cell} />;
-
     case "exec":
       return <ExecCell cell={cell} isActive={isActive} onStop={onStopExecution} />;
-
-    case "exec_group":
-      return <ExecGroupCell cells={cell.cells} isActive={isActive} onStop={onStopExecution} defaultCollapsed={cell.collapsed} />;
 
     case "diff":
       return <DiffCell cell={cell} />;
@@ -436,6 +294,13 @@ export function HistoryCellRenderer({
 
     case "streaming_assistant_tail":
       return <StreamingAssistantTailCell cell={cell} />;
+
+    case "streaming_assistant_narration":
+      return (
+        <div className="agent-loop-process-note agent-loop-live-narration" data-status="running">
+          <MarkdownRenderer content={cell.partialMarkdown} isStreaming />
+        </div>
+      );
 
     default:
       return null;

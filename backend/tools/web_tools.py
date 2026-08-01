@@ -21,7 +21,6 @@ from urllib.parse import urlparse
 from typing import Any
 
 from backend.artifact.store import ArtifactStore
-from backend.agent.search_plan import build_search_plan
 from backend.permissions.context import ToolExecutionContext
 from backend.permissions.network import assess_network_url
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
@@ -29,13 +28,11 @@ from backend.tools.html_sanitizer import assess_extraction, sanitize_html
 
 logger = logging.getLogger(__name__)
 
-WEB_FETCH_TOKEN_LIMIT = 2000
-WEB_FETCH_TIMEOUT = 15
-WEB_FETCH_MAX_CHARS = 200_000
+# Claude Code WebFetch resource controls. Network lifetime is owned by the
+# enclosing turn/cancellation signal; do not add a second local timeout.
+WEB_FETCH_MAX_CHARS = 100_000
 CONTENT_PREVIEW_CHARS = 800
-
-WEB_SEARCH_MAX_RESULTS = 8
-WEB_SEARCH_TIMEOUT = 12
+WEB_REQUEST_TIMEOUT_SECONDS = 60.0
 
 HOSTILE_FETCH_DOMAINS = {
     "zhihu.com",
@@ -109,6 +106,26 @@ def _filter_results_by_domains(
             continue
         filtered.append(result)
     return filtered
+
+
+def _search_source_preview(results: list[dict[str, str]]) -> str:
+    """Keep citation metadata without duplicating every search snippet.
+
+    The readable tool content already carries titles, URLs and snippets for the
+    model. ``content_preview`` is protocol/UI metadata, so repeating snippets
+    there can double the context and force a pointless tool-result file read.
+    """
+    import json
+
+    sources = [
+        {
+            "title": str(result.get("title") or "").strip(),
+            "url": str(result.get("url") or "").strip(),
+        }
+        for result in results
+        if str(result.get("url") or "").strip()
+    ]
+    return json.dumps(sources, ensure_ascii=False, separators=(",", ":"))
 
 
 def _is_permitted_redirect(original_url: str, redirect_url: str) -> bool:
@@ -192,9 +209,10 @@ def _detect_proxy() -> str | None:
 def _wrap_untrusted_content(content: str, tool_name: str) -> str:
     """Wrap external content in untrusted-content markers to prevent prompt injection.
 
-    Only wraps if content is a string longer than 200 chars and not already wrapped.
+    All external text is wrapped so short responses cannot be mistaken for host
+    instructions either.
     """
-    if not isinstance(content, str) or len(content) <= 200:
+    if not isinstance(content, str):
         return content
     if content.startswith("<untrusted_tool_result"):
         return content
@@ -212,31 +230,23 @@ class WebFetchTool(BaseTool):
     """抓取 URL 内容，返回清洗后正文 + 来源元数据。"""
 
     name = "web_fetch"
+    should_defer = False
     read_only = True
     open_world = True
     result_kind = "web"
     activity_kind = "webSearch"
     display_label = "Fetch"
-    panel_hint = "inspector"
-    # Self-bounds via WEB_FETCH_TOKEN_LIMIT and artifacts large pages.
+    timeout_seconds = WEB_REQUEST_TIMEOUT_SECONDS
+    # Claude Code caps processed markdown at 100K characters.
     max_result_chars = None
     description = (
-        "Fetch and extract content from a specific URL; returns cleaned text, source URL, and extraction status. "
-        "Fetch URLs from prior web_search results, not workspace files. For GitHub URLs, prefer gh via run_command when the current turn already has shell access and the task is repo-oriented. "
-        "When fetched content informs the answer, cite it with a compact [1] marker and do not append raw URLs or a Sources/References section. "
-        "Do not write routine process prose between web_fetch calls; tool activity already shows what was opened. "
-        "Search snippets are candidate evidence. Fetch a relevant source before making confident specific claims; use snippets alone only for low-risk simple facts or when fetch is unavailable. "
-        "verify dates, identifiers, authors, and project links from the fetched page. Also verify release/version metadata and bibliographic details. Prefer primary sources. Do not cite commentary/blog summaries as primary evidence. "
-        "When a citation label would be empty or low-value, omit it rather than leaving an empty label. "
-        "Use prompt='what to extract' for focused extraction from large pages."
+        "Fetches content from a specified URL and processes it using an AI model. "
+        "Takes a URL and a prompt, converts HTML to text, and returns the model's response about the content."
     )
     permission = PermissionLevel.AUTO
 
     def model_description(self) -> str:
-        return (
-            "Fetch and extract content from a specific URL. "
-            "Use URLs from prior web_search results and cite fetched content with a compact [1] marker."
-        )
+        return self.description
 
     def model_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -244,9 +254,13 @@ class WebFetchTool(BaseTool):
             description=self.model_description(),
             parameters={
                 "type": "object",
-                "required": ["url"],
+                "required": ["url", "prompt"],
                 "properties": {
                     "url": {"type": "string"},
+                    "prompt": {
+                        "type": "string",
+                        "description": "The prompt to run on the fetched content.",
+                    },
                 },
             },
         )
@@ -257,16 +271,27 @@ class WebFetchTool(BaseTool):
 
 
     async def _extract_with_prompt(self, text: str, prompt: str, context) -> str:
-        """Use session LLM to extract relevant info from large page (ClaudeCode pattern)."""
-        try:
-            llm = getattr(context, "llm", None) if context else None
-            if llm is None:
-                return ""
-            from backend.llm.base import LLMMessage
-            content = f"Web page content:\n---\n{text}\n---\n\n{prompt}\n\nAnswer concisely based only on the content above."
-            return await llm.simple_chat([LLMMessage(role="user", content=content)])
-        except Exception:
+        """Apply Claude Code's WebFetch secondary-model prompt contract."""
+
+        llm = getattr(context, "llm", None) if context else None
+        if llm is None:
             return ""
+        from backend.llm.base import LLMMessage
+
+        content = (
+            "Web page content:\n---\n"
+            f"{text[:WEB_FETCH_MAX_CHARS]}\n"
+            "---\n\n"
+            f"{prompt}\n\n"
+            "Provide a concise response based only on the content above. In your response:\n"
+            " - Enforce a strict 125-character maximum for quotes from any source document. "
+            "Open Source Software is ok as long as we respect the license.\n"
+            " - Use quotation marks for exact language from articles; any language outside of the quotation "
+            "should never be word-for-word the same.\n"
+            " - You are not a lawyer and never comment on the legality of your own prompts and responses.\n"
+            " - Never produce or reproduce exact song lyrics."
+        )
+        return await llm.simple_chat([LLMMessage(role="user", content=content)])
 
     def _get_client(self):
         if self._client is not None:
@@ -281,7 +306,7 @@ class WebFetchTool(BaseTool):
         proxy_url = _detect_proxy()
 
         self._client = httpx.AsyncClient(
-            timeout=WEB_FETCH_TIMEOUT,
+            timeout=WEB_REQUEST_TIMEOUT_SECONDS,
             follow_redirects=False,
             proxy=proxy_url,
             trust_env=False,
@@ -292,7 +317,7 @@ class WebFetchTool(BaseTool):
         )
         return self._client
 
-    async def _get_with_permitted_redirects(self, url: str, max_redirects: int = 5):
+    async def _get_with_permitted_redirects(self, url: str, max_redirects: int = 10):
         """Fetch, following only same-host redirects (cc getWithPermittedRedirects).
 
         Returns (response, redirect_url). When a cross-host redirect is hit,
@@ -320,16 +345,7 @@ class WebFetchTool(BaseTool):
         return ToolSpec(
             name=self.name,
             capability="web.fetch",
-            required_args=("url",),
-            arg_roles={"url": "latest_url"},
-            arg_sources={"url": ("previous_search_result",)},
-            repair_policy={"url": "resource_resolver"},
-            accepted_resource_types=("web_url",),
-            empty_args_policy="repair_or_block",
-            blocked_guidance=(
-                "missing required url. Fetch a known URL from previous search results, or answer/ask a clarification; "
-                "do not call web_fetch again with empty arguments."
-            ),
+            required_args=("url", "prompt"),
         )
 
     def get_schema(self) -> ToolSchema:
@@ -338,7 +354,7 @@ class WebFetchTool(BaseTool):
             description=self.description,
             parameters={
                 "type": "object",
-                "required": ["url"],
+                "required": ["url", "prompt"],
                 "properties": {
                     "url": {
                         "type": "string",
@@ -346,23 +362,20 @@ class WebFetchTool(BaseTool):
                     },
                     "prompt": {
                         "type": "string",
-                        "description": "What you want from this page, e.g. 'the 7-day forecast' or 'the pricing table'. Large pages are auto-summarized to a concise answer; pass a prompt to focus that summary. Omit only for small pages.",
-                    },
-                    "max_length": {
-                        "type": "integer",
-                        "description": "Maximum characters to fetch. Defaults to 200000.",
+                        "description": "The prompt to run on the fetched content.",
                     },
                 },
             },
         )
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
-        url = args.get("url", "")
-        prompt = args.get("prompt", "").strip()
-        max_length = args.get("max_length", WEB_FETCH_MAX_CHARS)
+        url = str(args.get("url") or "").strip()
+        prompt = str(args.get("prompt") or "").strip()
 
         if not url:
             return self._error_result("Missing url parameter")
+        if not prompt:
+            return self._error_result("Missing prompt parameter")
 
         if not url.startswith(("http://", "https://")):
             return self._error_result("URL must start with http:// or https://")
@@ -404,8 +417,8 @@ class WebFetchTool(BaseTool):
                 charset = content_type.split("charset=")[-1].split(";")[0].strip()
 
             raw = resp.content
-            if len(raw) > max_length:
-                raw = raw[:max_length]
+            if len(raw) > WEB_FETCH_MAX_CHARS:
+                raw = raw[:WEB_FETCH_MAX_CHARS]
 
             raw_text = raw.decode(charset, errors="replace")
 
@@ -414,13 +427,7 @@ class WebFetchTool(BaseTool):
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
             if status_code in {401, 403} or _is_hostile_fetch_url(url):
                 return ToolResult(
-                    content=(
-                        f"Fetch limited for {url}: the site blocked direct extraction "
-                        f"({status_code or 'anti-bot'}). "
-                        "Do not retry this URL. Pick a DIFFERENT URL from your web_search results. "
-                        "Only if no relevant page can be fetched, answer from candidate search snippets with [1] citation markers. "
-                        "Lead with the usable answer; mention the limitation only locally and neutrally."
-                    ),
+                    content=f"Fetch failed for {url}: the site blocked direct extraction ({status_code or 'anti-bot'}).",
                     is_error=False,
                     source_url=url,
                     extraction_status="failed",
@@ -430,99 +437,47 @@ class WebFetchTool(BaseTool):
                     result_kind="web",
                 )
             return ToolResult(
-                content=(
-                    f"Fetch failed for {url}: {exc}\n\n"
-                    "IMPORTANT: This URL may be temporarily unreachable. "
-                    "Try a DIFFERENT URL from your web_search results — pick the next most relevant candidate. "
-                    "If all URLs fail, answer from candidate search snippets with [1] markers. "
-                    "Do not frame the whole reply as incomplete; say neutrally that pages that did not open are not used as primary evidence."
-                ),
+                content=f"Fetch failed for {url}: {exc}",
                 is_error=True,
                 source_url=url,
                 extraction_status="failed",
                 evidence_type="fetched",
             )
 
-        # JSON: return directly with metadata
-        if "application/json" in content_type:
-            estimated_tokens = len(raw_text) // 4
-            preview = raw_text[:CONTENT_PREVIEW_CHARS]
-            if estimated_tokens <= WEB_FETCH_TOKEN_LIMIT:
-                return ToolResult(
-                    content=_wrap_untrusted_content(raw_text[:8000], "web_fetch"),
-                    source_url=url,
-                    extraction_status="ok",
-                    evidence_type="fetched",
-                    content_preview=preview,
-                )
-            artifact_id = self._artifact_store.save(
-                content=raw_text[:max_length],
-                source=f"web_fetch({url})",
-                type="json_content",
-            )
-            return ToolResult(
-                content=_wrap_untrusted_content(f"已抓取 JSON（约 {estimated_tokens} tokens）", "web_fetch"),
-                source_url=url,
-                extraction_status="ok",
-                evidence_type="fetched",
-                artifact_id=artifact_id,
-                content_preview=preview,
-            )
-
-        # HTML → sanitized text
         raw_length = len(raw_text)
-        if "<html" in raw_text.lower() or "<body" in raw_text.lower():
-            cleaned = sanitize_html(raw_text)
-        else:
+        if "application/json" in content_type:
             cleaned = raw_text.strip()
-
-        status = assess_extraction(cleaned, raw_length)
+            status = "ok" if cleaned else "failed"
+            artifact_type = "json_content"
+        else:
+            if "<html" in raw_text.lower() or "<body" in raw_text.lower():
+                cleaned = sanitize_html(raw_text)
+            else:
+                cleaned = raw_text.strip()
+            status = assess_extraction(cleaned, raw_length)
+            artifact_type = "web_content"
         preview = cleaned[:CONTENT_PREVIEW_CHARS] if cleaned else ""
-        estimated_tokens = len(cleaned) // 4
-
-        # cc WebFetch pattern: summarize non-trivially large pages into a concise
-        # answer so the caller gets digested content in ONE fetch — instead of an
-        # artifact pointer that forces a fetch→read_artifact→fetch loop (the
-        # over-research pattern). Use the model-given prompt, or a default
-        # extraction prompt when none is supplied.
-        if estimated_tokens > WEB_FETCH_TOKEN_LIMIT:
-            extract_prompt = prompt or (
-                "Extract the key information from this page: main facts, data, "
-                "names, dates, and any direct answer to a likely question. Be "
-                "concise and faithful to the page; omit navigation, menus, and "
-                "boilerplate."
-            )
-            extracted = await self._extract_with_prompt(cleaned[:32000], extract_prompt, context)
-            if extracted:
-                return ToolResult(
-                    content=_wrap_untrusted_content(extracted, "web_fetch"),
-                    source_url=url,
-                    extraction_status=status,
-                    evidence_type="fetched",
-                    content_preview=preview,
-                    display_summary=f"Extracted: {(prompt or 'key info')[:60]}",
-                )
-            # summarization unavailable (no llm / failure) → fall through to artifact
-
-        if estimated_tokens <= WEB_FETCH_TOKEN_LIMIT:
+        extracted = await self._extract_with_prompt(cleaned, prompt, context)
+        if extracted:
             return ToolResult(
-                content=_wrap_untrusted_content(cleaned[:8000] if cleaned else "页面无可提取正文内容", "web_fetch"),
+                content=_wrap_untrusted_content(extracted, "web_fetch"),
                 source_url=url,
                 extraction_status=status,
                 evidence_type="fetched",
                 content_preview=preview,
+                display_summary=f"Fetched {urlparse(url).netloc or url}",
             )
 
-        # Large content → artifact (store cleaned text, not raw HTML)
         artifact_id = self._artifact_store.save(
-            content=cleaned[:max_length],
+            content=cleaned,
             source=f"web_fetch({url})",
-            type="web_content",
+            type=artifact_type,
         )
-        artifact_preview = self._artifact_store.get_preview(artifact_id, lines=10)
+        artifact_preview = self._artifact_store.get_preview(artifact_id)
 
         return ToolResult(
-            content=_wrap_untrusted_content(f"已抓取 {url}（约 {estimated_tokens} tokens，extraction: {status}）", "web_fetch"),
+            content="Fetched the URL, but no session LLM was available to apply the required prompt.",
+            is_error=True,
             source_url=url,
             extraction_status=status,
             evidence_type="fetched",
@@ -536,20 +491,14 @@ class WebSearchTool(BaseTool):
     """联网搜索工具 — 只返回候选来源列表，不把摘要当事实。"""
 
     name = "web_search"
+    should_defer = False
     read_only = True
     open_world = True
     result_kind = "search"
     activity_kind = "webSearch"
     display_label = "Search web"
-    panel_hint = "inspector"
-    description = (
-        "Search the web for current information such as news, versions, live data, and weather. Returns candidate titles, URLs, and snippets. "
-        "Do not use for stable knowledge, workspace files, or full-page extraction. Stop after one successful search when the returned evidence is already enough to answer. "
-        "Do not repeat the same query. When multiple angles are useful, Issue multiple web_search calls in the same turn with 2-4 distinct queries that vary keywords, scope, language, or time range. "
-        "Search snippets are candidate evidence; fetch a relevant source before specific or high-impact claims when possible. routine search/fetch continuation should be tool-only unless findings change direction. "
-        "choose primary sources for final citations; blogs/reposts are discovery leads or commentary, not primary evidence. Cite web-backed answers with compact [1], [2] citation markers only. Do not append a Sources/References section; UI renders source links separately. "
-        "Only select results that match the requested location, entity, or topic."
-    )
+    timeout_seconds = WEB_REQUEST_TIMEOUT_SECONDS
+    description = "Search the web for current information and return candidate titles, URLs, and snippets."
     permission = PermissionLevel.AUTO
 
     def model_description(self) -> str:
@@ -563,7 +512,17 @@ class WebSearchTool(BaseTool):
                 "type": "object",
                 "required": ["query"],
                 "properties": {
-                    "query": {"type": "string"},
+                    "query": {"type": "string", "description": "The search query to use."},
+                    "allowed_domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Only include search results from these domains.",
+                    },
+                    "blocked_domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Never include search results from these domains.",
+                    },
                 },
             },
         )
@@ -584,9 +543,9 @@ class WebSearchTool(BaseTool):
         proxy_url = _detect_proxy()
 
         self._client = httpx.AsyncClient(
-            timeout=WEB_SEARCH_TIMEOUT,
+            timeout=WEB_REQUEST_TIMEOUT_SECONDS,
             follow_redirects=True,
-            max_redirects=3,
+            max_redirects=10,
             proxy=proxy_url,
             trust_env=False,
             headers={
@@ -608,15 +567,6 @@ class WebSearchTool(BaseTool):
             name=self.name,
             capability="web.search",
             required_args=("query",),
-            arg_roles={"query": "search_query"},
-            arg_sources={"query": ("user_message", "search_plan")},
-            repair_policy={"query": "resource_resolver"},
-            accepted_resource_types=("search_need",),
-            empty_args_policy="repair_or_block",
-            blocked_guidance=(
-                "missing required query. Use a concrete query derived from the user request, or answer/ask a clarification; "
-                "do not call web_search again with empty arguments."
-            ),
         )
 
     def get_schema(self) -> ToolSchema:
@@ -629,11 +579,7 @@ class WebSearchTool(BaseTool):
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Search query string with specific, targeted keywords.",
-                    },
-                    "max_results": {
-                        "type": "integer",
-                        "description": f"Maximum number of results to return. Defaults to {WEB_SEARCH_MAX_RESULTS}, max 20.",
+                        "description": "The search query to use.",
                     },
                     "allowed_domains": {
                         "type": "array",
@@ -651,8 +597,7 @@ class WebSearchTool(BaseTool):
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
         raw_query = args.get("query", "").strip()
-        query = build_search_plan(raw_query).normalized_query if raw_query else ""
-        max_results = min(int(args.get("max_results", WEB_SEARCH_MAX_RESULTS)), 20)
+        query = " ".join(raw_query.split()) if raw_query else ""
         allowed_domains = _normalize_domain_list(args.get("allowed_domains"))
         blocked_domains = _normalize_domain_list(args.get("blocked_domains"))
 
@@ -666,7 +611,7 @@ class WebSearchTool(BaseTool):
 
         errors: list[str] = []
         try:
-            results = await self._api_search(query, max_results)
+            results = await self._api_search(query)
         except Exception as exc:
             logger.warning("web_search API provider failed query=%r: %s", query, exc)
             errors.append(f"API: {exc}")
@@ -684,7 +629,6 @@ class WebSearchTool(BaseTool):
                 if result.get("snippet"):
                     lines.append(f"    Snippet: {result['snippet']}")
                 lines.append("")
-            import json as _json
             return ToolResult(
                 content=_wrap_untrusted_content("\n".join(lines).strip(), "web_search"),
                 extraction_status="ok",
@@ -692,25 +636,24 @@ class WebSearchTool(BaseTool):
                 display_summary=f"Searched web: {query}",
                 provider=provider or None,
                 result_kind="search",
-                content_preview=_json.dumps(results, ensure_ascii=False),
+                content_preview=_search_source_preview(results),
             )
 
         # API providers unavailable (no keys or failed) — fall through to legacy scrapers
         if not errors and not getattr(self, "_last_provider", ""):
             logger.info("web_search: no API key configured, falling through to DuckDuckGo/Bing")
-        return await self._legacy_execute_removed(query, max_results, allowed_domains, blocked_domains)
+        return await self._legacy_execute_removed(query, allowed_domains, blocked_domains)
 
     async def _legacy_execute_removed(
         self,
         query: str,
-        max_results: int,
         allowed_domains: list[str] | None = None,
         blocked_domains: list[str] | None = None,
     ) -> ToolResult:
         errors: list[str] = []
         # Try Bing first (more reliable in mainland China), DuckDuckGo as fallback
         try:
-            results = await self._bing_search(query, max_results)
+            results = await self._bing_search(query)
         except Exception as exc:
             logger.warning("web_search Bing 失败 query=%r: %s", query, exc)
             errors.append(f"Bing: {exc}")
@@ -718,7 +661,7 @@ class WebSearchTool(BaseTool):
 
         if not results:
             try:
-                results = await self._duckduckgo_search(query, max_results)
+                results = await self._duckduckgo_search(query)
             except Exception as exc:
                 logger.warning("web_search DuckDuckGo 失败 query=%r: %s", query, exc)
                 errors.append(f"DuckDuckGo: {exc}")
@@ -752,39 +695,37 @@ class WebSearchTool(BaseTool):
                 lines.append(f"    片段: {result['snippet']}")
             lines.append("")
 
-        import json as _json
         content = _wrap_untrusted_content("\n".join(lines).strip(), "web_search")
         return ToolResult(
             content=content,
             extraction_status="ok",
             evidence_type="candidate",
-            content_preview=_json.dumps(results, ensure_ascii=False),
+            content_preview=_search_source_preview(results),
         )
 
-    async def _api_search(self, query: str, max_results: int) -> list[dict[str, str]]:
+    async def _api_search(self, query: str) -> list[dict[str, str]]:
         tavily_key = _secret_env("TAVILY_API_KEY")
         if tavily_key:
             self._last_provider = "Tavily"
-            return await self._tavily_search(query, max_results, tavily_key)
+            return await self._tavily_search(query, tavily_key)
         brave_key = _secret_env("BRAVE_SEARCH_API_KEY")
         if brave_key:
             self._last_provider = "Brave"
-            return await self._brave_search(query, max_results, brave_key)
+            return await self._brave_search(query, brave_key)
         serpapi_key = _secret_env("SERPAPI_API_KEY")
         if serpapi_key:
             self._last_provider = "SerpAPI"
-            return await self._serpapi_search(query, max_results, serpapi_key)
+            return await self._serpapi_search(query, serpapi_key)
         self._last_provider = ""
         return []
 
-    async def _tavily_search(self, query: str, max_results: int, api_key: str) -> list[dict[str, str]]:
+    async def _tavily_search(self, query: str, api_key: str) -> list[dict[str, str]]:
         client = self._get_client()
         resp = await client.post(
             "https://api.tavily.com/search",
             json={
                 "query": query,
                 "search_depth": "basic",
-                "max_results": min(max_results, 10),
                 "include_answer": False,
                 "include_raw_content": False,
             },
@@ -796,17 +737,17 @@ class WebSearchTool(BaseTool):
             {
                 "title": str(item.get("title") or "").strip(),
                 "url": str(item.get("url") or "").strip(),
-                "snippet": _clean_html_text(str(item.get("content") or ""))[:280],
+                "snippet": _clean_html_text(str(item.get("content") or "")),
             }
-            for item in items[:max_results]
+            for item in items
             if str(item.get("title") or "").strip() and str(item.get("url") or "").startswith(("http://", "https://"))
         ]
 
-    async def _brave_search(self, query: str, max_results: int, api_key: str) -> list[dict[str, str]]:
+    async def _brave_search(self, query: str, api_key: str) -> list[dict[str, str]]:
         client = self._get_client()
         resp = await client.get(
             "https://api.search.brave.com/res/v1/web/search",
-            params={"q": query, "count": min(max_results, 20), "country": "cn", "search_lang": "zh-hans"},
+            params={"q": query, "country": "cn", "search_lang": "zh-hans"},
             headers={"X-Subscription-Token": api_key, "Accept": "application/json"},
         )
         resp.raise_for_status()
@@ -815,17 +756,17 @@ class WebSearchTool(BaseTool):
             {
                 "title": str(item.get("title") or "").strip(),
                 "url": str(item.get("url") or "").strip(),
-                "snippet": _clean_html_text(str(item.get("description") or ""))[:280],
+                "snippet": _clean_html_text(str(item.get("description") or "")),
             }
-            for item in items[:max_results]
+            for item in items
             if str(item.get("title") or "").strip() and str(item.get("url") or "").startswith(("http://", "https://"))
         ]
 
-    async def _serpapi_search(self, query: str, max_results: int, api_key: str) -> list[dict[str, str]]:
+    async def _serpapi_search(self, query: str, api_key: str) -> list[dict[str, str]]:
         client = self._get_client()
         resp = await client.get(
             "https://serpapi.com/search.json",
-            params={"q": query, "num": min(max_results, 20), "hl": "zh-cn", "api_key": api_key},
+            params={"q": query, "hl": "zh-cn", "api_key": api_key},
         )
         resp.raise_for_status()
         items = resp.json().get("organic_results") or []
@@ -833,13 +774,13 @@ class WebSearchTool(BaseTool):
             {
                 "title": str(item.get("title") or "").strip(),
                 "url": str(item.get("link") or "").strip(),
-                "snippet": _clean_html_text(str(item.get("snippet") or ""))[:280],
+                "snippet": _clean_html_text(str(item.get("snippet") or "")),
             }
-            for item in items[:max_results]
+            for item in items
             if str(item.get("title") or "").strip() and str(item.get("link") or "").startswith(("http://", "https://"))
         ]
 
-    async def _duckduckgo_search(self, query: str, max_results: int) -> list[dict[str, str]]:
+    async def _duckduckgo_search(self, query: str) -> list[dict[str, str]]:
         encoded_query = urllib.parse.quote_plus(query)
         url = f"https://html.duckduckgo.com/html/?q={encoded_query}&kl=cn-zh"
 
@@ -848,10 +789,10 @@ class WebSearchTool(BaseTool):
         resp.raise_for_status()
 
         html = resp.text
-        results = self._parse_ddg_html(html, max_results)
+        results = self._parse_ddg_html(html)
         return results
 
-    async def _bing_search(self, query: str, max_results: int) -> list[dict[str, str]]:
+    async def _bing_search(self, query: str) -> list[dict[str, str]]:
         encoded_query = urllib.parse.quote_plus(query)
         url = f"https://www.bing.com/search?q={encoded_query}&setlang=zh-CN&mkt=zh-CN"
 
@@ -859,10 +800,10 @@ class WebSearchTool(BaseTool):
         resp = await client.get(url)
         resp.raise_for_status()
 
-        return self._parse_bing_html(resp.text, max_results)
+        return self._parse_bing_html(resp.text)
 
     @staticmethod
-    def _parse_ddg_html(html: str, max_results: int) -> list[dict[str, str]]:
+    def _parse_ddg_html(html: str, max_results: int | None = None) -> list[dict[str, str]]:
         results: list[dict[str, str]] = []
 
         result_blocks = re.findall(
@@ -872,7 +813,7 @@ class WebSearchTool(BaseTool):
         )
 
         for block in result_blocks:
-            if len(results) >= max_results:
+            if max_results is not None and len(results) >= max_results:
                 break
 
             title_match = re.search(
@@ -905,7 +846,7 @@ class WebSearchTool(BaseTool):
                 results.append({
                     "title": title,
                     "url": real_url,
-                    "snippet": snippet[:280],
+                    "snippet": snippet,
                 })
 
         if not results:
@@ -914,12 +855,12 @@ class WebSearchTool(BaseTool):
         return results
 
     @staticmethod
-    def _parse_bing_html(html: str, max_results: int) -> list[dict[str, str]]:
+    def _parse_bing_html(html: str, max_results: int | None = None) -> list[dict[str, str]]:
         results: list[dict[str, str]] = []
 
         blocks = re.findall(r'<li[^>]+class="b_algo"[^>]*>(.*?)</li>', html, flags=re.S | re.I)
         for block in blocks:
-            if len(results) >= max_results:
+            if max_results is not None and len(results) >= max_results:
                 break
 
             title_match = re.search(r'<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>\s*</h2>', block, flags=re.S | re.I)
@@ -931,7 +872,7 @@ class WebSearchTool(BaseTool):
             snippet = ""
             snippet_match = re.search(r'<p[^>]*>(.*?)</p>', block, flags=re.S | re.I)
             if snippet_match:
-                snippet = _clean_html_text(snippet_match.group(1))[:280]
+                snippet = _clean_html_text(snippet_match.group(1))
 
             if title and url.startswith(("http://", "https://")):
                 results.append({"title": title, "url": url, "snippet": snippet})
@@ -951,11 +892,11 @@ def _extract_ddg_url(raw: str) -> str:
     return ""
 
 
-def _fallback_parse_ddg(html: str, max_results: int) -> list[dict[str, str]]:
+def _fallback_parse_ddg(html: str, max_results: int | None = None) -> list[dict[str, str]]:
     results: list[dict[str, str]] = []
     seen: set[str] = set()
     for m in re.finditer(r'href="(https?://[^"]{10,})"[^>]*>(.*?)</a>', html, flags=re.S | re.I):
-        if len(results) >= max_results:
+        if max_results is not None and len(results) >= max_results:
             break
         url = m.group(1)
         if "duckduckgo.com" in url:

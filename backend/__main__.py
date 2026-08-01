@@ -6,6 +6,9 @@ import sys
 
 logger = logging.getLogger(__name__)
 DEFAULT_WS_MAX_SIZE_BYTES = 1024 * 1024
+# The desktop client owns liveness with an application-level ping/pong and
+# reconnect/replay loop. Keep Uvicorn's transport ping disabled by default so
+# there is one timeout authority; deployments may opt in explicitly.
 DEFAULT_WS_PING_INTERVAL_SECONDS: float | None = None
 
 

@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pathspec.gitignore import GitIgnoreSpec
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_INDEX_MAX_FILES = 50_000
@@ -149,6 +151,7 @@ class WorkspaceContext:
         self.metadata: ProjectMetadata | None = None
         self.file_index: dict[str, FileIndexEntry] = {}
         self._gitignore_patterns: list[str] = []
+        self._gitignore_spec = GitIgnoreSpec.from_lines([])
         self.max_index_files = max(1, int(max_index_files or DEFAULT_INDEX_MAX_FILES))
         self.index_truncated = False
 
@@ -171,6 +174,7 @@ class WorkspaceContext:
 
         # 3. 加载 .gitignore
         self._gitignore_patterns = self._load_gitignore()
+        self._gitignore_spec = GitIgnoreSpec.from_lines(self._gitignore_patterns)
 
         # 先就位 metadata（CLAUDE.md / 项目类型立即可用），文件统计在索引完成后回填
         self.metadata = ProjectMetadata(
@@ -248,24 +252,19 @@ class WorkspaceContext:
 
         def scan_filesystem() -> tuple[dict[str, FileIndexEntry], bool]:
             results: dict[str, FileIndexEntry] = {}
-            patterns = self._gitignore_patterns
-            # 无通配符的 gitignore 目录规则可直接用于剪枝
-            prunable = {p.rstrip("/").lstrip("/") for p in patterns if "*" not in p and "/" not in p.rstrip("/")}
+            ignore_spec = self._gitignore_spec
             truncated = False
 
             def file_ignored(rel_path: str, name: str) -> bool:
                 if Path(name).suffix.lower() in DEFAULT_IGNORED_FILE_SUFFIXES:
                     return True
-                for pattern in patterns:
-                    if pattern in rel_path or name == pattern:
-                        return True
-                return False
+                return ignore_spec.match_file(rel_path.replace(os.sep, "/"))
 
             # 在线程池中执行同步的递归扫描；剪枝避免走入 node_modules/.git 等大目录
             for dirpath, dirnames, filenames in os.walk(self.root_path):
                 dirnames[:] = [
                     d for d in dirnames
-                    if d not in DEFAULT_IGNORED_DIRS and d not in prunable
+                    if d not in DEFAULT_IGNORED_DIRS
                 ]
                 rel_dir = os.path.relpath(dirpath, self.root_path)
                 for name in filenames:
@@ -330,21 +329,9 @@ class WorkspaceContext:
         if self.index_truncated:
             lines.append(f"**索引状态**: 已截断到前 {self.max_index_files} 个文件")
 
-        if self.metadata.claude_md_content:
-            lines.extend([
-                f"",
-                f"## 项目指令 (CLAUDE.md)",
-                f"",
-                self.metadata.claude_md_content[:2000],
-            ])
-
-        # File tree (capped at 50 entries)
-        file_list = sorted(self.file_index.keys())[:50]
-        if file_list:
-            lines.extend(["", "## 文件结构 (前50项)", ""])
-            lines.extend(f"  {f}" for f in file_list)
-            if len(self.file_index) > 50:
-                lines.append(f"  ... 共 {len(self.file_index)} 个文件")
+        # Project instructions are injected by the dedicated context-builder
+        # path. File discovery is owned by list_files, so this summary does not
+        # carry a second prompt source or a capped file tree.
 
         return "\n".join(lines)
 

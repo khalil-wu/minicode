@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -13,14 +14,13 @@ from typing import Any
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 
 
-MAX_CANDIDATES = 16
-PROBE_TIMEOUT_SECONDS = 5
-
-
 class DetectPythonEnvironmentTool(BaseTool):
     """Discover Python interpreters, virtual environments, and conda envs."""
 
     name = "detect_python_environment"
+    result_kind = "environment"
+    activity_kind = "genericTool"
+    display_label = "Detect Python environment"
     description = (
         "Inspect local Python environments before installing Python dependencies. "
         "Use this before pip/conda/mamba/uv installs, especially for large packages "
@@ -32,8 +32,8 @@ class DetectPythonEnvironmentTool(BaseTool):
     permission = PermissionLevel.AUTO
     read_only = True
     should_defer = True
-    timeout_seconds = 20.0
     search_hint = "python env conda miniconda venv virtualenv pip packages torch dependency install"
+    workspace_path_fields = ("cwd",)
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -63,15 +63,28 @@ class DetectPythonEnvironmentTool(BaseTool):
             capability="environment.inspect",
             toolset="default",
             exposure="deferred",
-            arg_roles={"package_names": "model_generated", "cwd": "workspace_path"},
         )
 
     async def execute(self, args: dict[str, Any], context: Any = None) -> ToolResult:
         packages = _normalize_packages(args.get("package_names"))
         workspace = _resolve_workspace(args.get("cwd"), context)
-        candidates = _discover_python_candidates(workspace)
-        envs = [_probe_python(path, packages) for path in candidates[:MAX_CANDIDATES]]
-        conda = _discover_conda()
+        deadline_timeout = _remaining_deadline_seconds(context)
+        candidates = await asyncio.to_thread(_discover_python_candidates, workspace)
+        # SECURITY: never execute an interpreter that lives inside the workspace.
+        # A hostile repo can ship .venv/bin/python (or Scripts/python.exe) that is
+        # actually a payload; probing runs it, and this tool is AUTO/read_only so
+        # it would fire with no confirmation -> arbitrary code execution just by
+        # pointing the agent at a repo. Trusted out-of-workspace interpreters
+        # (sys.executable, PATH, conda in home/system) are still probed; workspace
+        # interpreters are reported as detected-but-not-executed. Running one is a
+        # deliberate act the model must do via run_command (sandboxed + gated).
+        envs = await asyncio.gather(*(
+            asyncio.to_thread(_probe_python, path, packages, deadline_timeout)
+            if not _is_within_workspace(path, workspace)
+            else asyncio.sleep(0, result=_detected_not_probed(path))
+            for path in candidates
+        ))
+        conda = await asyncio.to_thread(_discover_conda, deadline_timeout)
 
         if context is not None and hasattr(context, "metadata"):
             context.metadata["python_environment_checked"] = True
@@ -110,7 +123,18 @@ def _normalize_packages(value: Any) -> list[str]:
         name = str(item or "").strip()
         if name and name.replace("_", "").replace("-", "").replace(".", "").isalnum():
             packages.append(name.replace("-", "_"))
-    return packages[:12]
+    return packages
+
+
+def _remaining_deadline_seconds(context: Any) -> float | None:
+    """Return the enclosing turn budget without inventing a tool timeout."""
+    deadline = getattr(context, "deadline_monotonic", None) if context is not None else None
+    if deadline is None:
+        return None
+    try:
+        return max(0.0, float(deadline) - asyncio.get_running_loop().time())
+    except (TypeError, ValueError, RuntimeError):
+        return None
 
 
 def _resolve_workspace(value: Any, context: Any) -> Path | None:
@@ -119,6 +143,36 @@ def _resolve_workspace(value: Any, context: Any) -> Path | None:
         return Path(raw).expanduser().resolve()
     workspace_root = getattr(context, "workspace_root", None) if context else None
     return Path(workspace_root).expanduser().resolve() if workspace_root else None
+
+
+def _is_within_workspace(path: Path, workspace: Path | None) -> bool:
+    """True when ``path`` resolves inside ``workspace`` (an untrusted tree).
+
+    Both sides are already resolved (``_resolve_workspace`` resolves the root;
+    ``_discover_python_candidates`` resolves each candidate), so this is a pure
+    prefix check with no extra I/O. Symlinks were collapsed by resolve(), so a
+    workspace symlink pointing outside is treated by its real location.
+    """
+    if workspace is None:
+        return False
+    try:
+        path.relative_to(workspace)
+        return True
+    except ValueError:
+        return False
+
+
+def _detected_not_probed(path: Path) -> dict[str, Any]:
+    """Report a workspace-local interpreter without executing it (see execute)."""
+    return {
+        "path": str(path),
+        "ok": False,
+        "error": (
+            "Interpreter is inside the workspace and was not executed for safety. "
+            "Use run_command to run it explicitly (sandboxed and permission-gated)."
+        ),
+        "in_workspace": True,
+    }
 
 
 def _discover_python_candidates(workspace: Path | None) -> list[Path]:
@@ -160,7 +214,7 @@ def _discover_python_candidates(workspace: Path | None) -> list[Path]:
     return candidates
 
 
-def _probe_python(path: Path, packages: list[str]) -> dict[str, Any]:
+def _probe_python(path: Path, packages: list[str], timeout: float | None = None) -> dict[str, Any]:
     script = (
         "import importlib.util, json, platform, sys; "
         f"pkgs={packages!r}; "
@@ -178,7 +232,7 @@ def _probe_python(path: Path, packages: list[str]) -> dict[str, Any]:
             [str(path), "-c", script],
             capture_output=True,
             text=True,
-            timeout=PROBE_TIMEOUT_SECONDS,
+            timeout=timeout,
             encoding="utf-8",
             errors="replace",
         )
@@ -205,10 +259,10 @@ def _probe_python(path: Path, packages: list[str]) -> dict[str, Any]:
     }
 
 
-def _discover_conda() -> dict[str, Any]:
+def _discover_conda(timeout: float | None = None) -> dict[str, Any]:
     executables = [p for p in (shutil.which("conda"), shutil.which("mamba"), shutil.which("micromamba")) if p]
     roots = _common_conda_roots()
-    envs = _conda_env_paths()
+    envs = _conda_env_paths(timeout)
     return {
         "executables": executables,
         "common_roots": [str(root) for root in roots if root.exists()],
@@ -234,7 +288,7 @@ def _common_conda_roots() -> list[Path]:
     return roots
 
 
-def _conda_env_paths() -> list[Path]:
+def _conda_env_paths(timeout: float | None = None) -> list[Path]:
     envs: list[Path] = []
     seen: set[str] = set()
 
@@ -255,7 +309,7 @@ def _conda_env_paths() -> list[Path]:
                 [conda, "env", "list", "--json"],
                 capture_output=True,
                 text=True,
-                timeout=8,
+                timeout=timeout,
                 encoding="utf-8",
                 errors="replace",
             )
@@ -272,7 +326,7 @@ def _conda_env_paths() -> list[Path]:
             for child in envs_dir.iterdir():
                 if child.is_dir():
                     add(child)
-    return envs[:MAX_CANDIDATES]
+    return envs
 
 
 def _summary(packages: list[str], found: dict[str, list[str]], envs: list[dict[str, Any]], conda: dict[str, Any]) -> str:

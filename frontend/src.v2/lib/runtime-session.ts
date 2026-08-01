@@ -6,10 +6,10 @@ const pendingLabel = (
   pending: PendingApproval | null | undefined,
   fallbackCount?: number,
 ): string | null => {
-  if (pending?.type === "ask_user" || pending?.subtype === "elicitation") return "Waiting for reply";
-  if (pending?.tool_name) return `Waiting for ${pending.tool_name}`;
-  if (pending?.type === "approval_request" || pending?.type === "control_request") return "Waiting for approval";
-  if (Number(fallbackCount ?? 0) > 0) return "Waiting for approval";
+  if (pending?.type === "ask_user" || pending?.subtype === "elicitation") return "等待回复";
+  if (pending?.tool_name) return `等待 ${pending.tool_name}`;
+  if (pending?.type === "approval_request" || pending?.type === "control_request") return "等待批准";
+  if (Number(fallbackCount ?? 0) > 0) return "等待批准";
   return null;
 };
 

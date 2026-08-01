@@ -188,6 +188,33 @@ def _tool_schema_size_summary(tool_schemas: list[dict[str, Any]] | None) -> dict
     }
 
 
+def _message_cache_shadow(message: Any) -> dict[str, Any]:
+    """Hash-only message shape used to locate cache-prefix divergence."""
+    role = str(getattr(message, "role", "") or "")
+    content = str(getattr(message, "content", "") or "")
+    tool_call_id = str(getattr(message, "tool_call_id", "") or "")
+    raw_calls = getattr(message, "tool_calls", None) or []
+    call_shapes = [
+        {
+            "id_hash": _short_sha256(str(getattr(call, "id", "") or "")),
+            "name": _safe_tool_name(str(getattr(call, "name", "") or "")),
+            "arguments_hash": _json_fingerprint(getattr(call, "arguments", None) or {}),
+        }
+        for call in raw_calls
+    ]
+    provider_items = getattr(message, "provider_items", None) or []
+    return {
+        "role": role,
+        "content_hash": _short_sha256(content),
+        "content_chars": len(content),
+        "tool_call_id_hash": _short_sha256(tool_call_id),
+        "tool_calls_hash": _json_fingerprint(call_shapes),
+        "tool_call_count": len(call_shapes),
+        "provider_items_hash": _json_fingerprint(provider_items),
+        "provider_item_count": len(provider_items) if isinstance(provider_items, list) else 0,
+    }
+
+
 def build_prompt_cache_safe_params(
     *,
     messages: list[Any],
@@ -223,45 +250,14 @@ def build_prompt_cache_safe_params(
         "tool_names": _safe_tool_names_from_schemas(tool_schemas),
         **tool_size_summary,
         "message_count": len(messages),
+        "message_shadows": [_message_cache_shadow(message) for message in messages],
         "metadata_keys": sorted(str(key) for key in metadata.keys()),
         "prompt_section_summary": cache_section_summary,
     }
 
 
 def _cache_relevant_prompt_section_summary(summary: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(summary, dict):
-        return {}
-    raw_sections = summary.get("sections")
-    if not isinstance(raw_sections, list):
-        return dict(summary)
-    sections = [
-        dict(row)
-        for row in raw_sections
-        if isinstance(row, dict) and str(row.get("layer") or "") != "volatile"
-    ]
-    layers = {
-        layer: {"chars": 0, "sections": 0, "cache_break_sections": 0}
-        for layer in ("stable", "context", "volatile")
-    }
-    for row in sections:
-        layer = str(row.get("layer") or "context")
-        if layer not in layers:
-            continue
-        layers[layer]["chars"] += int(row.get("chars") or 0)
-        layers[layer]["sections"] += 1
-        if row.get("cache_break"):
-            layers[layer]["cache_break_sections"] += 1
-    return {
-        "section_count": len(sections),
-        "total_chars": sum(int(row.get("chars") or 0) for row in sections),
-        "layers": layers,
-        "sections": sections,
-        "largest_sections": [
-            dict(row)
-            for row in summary.get("largest_sections", [])
-            if isinstance(row, dict) and str(row.get("layer") or "") != "volatile"
-        ],
-    }
+    return dict(summary) if isinstance(summary, dict) else {}
 
 
 def _tracking_key(summary: dict[str, Any], source: str) -> str:
@@ -347,13 +343,14 @@ def prompt_cache_usage_stats(usage: Any, provider_raw: Any | None = None) -> dic
     input_tokens = _int_attr(usage, "input_tokens")
     cache_read = _int_attr(usage, "cache_read_input_tokens")
     cache_creation = _int_attr(usage, "cache_creation_input_tokens")
+    cache_deleted = _int_attr(usage, "cache_deleted_input_tokens")
     total = prompt_cache_effective_prompt_tokens(
         input_tokens=input_tokens,
         cache_read_tokens=cache_read,
         cache_creation_tokens=cache_creation,
         provider=provider,
     )
-    return {
+    stats: dict[str, float | int] = {
         "prompt_cache_total_tokens": total,
         "prompt_cache_hit_rate": prompt_cache_hit_rate(
             input_tokens=input_tokens,
@@ -362,6 +359,9 @@ def prompt_cache_usage_stats(usage: Any, provider_raw: Any | None = None) -> dic
             provider=provider,
         ),
     }
+    if cache_deleted:
+        stats["cache_deleted_input_tokens"] = cache_deleted
+    return stats
 
 
 def _request_param_hash(summary: dict[str, Any]) -> str:
@@ -434,6 +434,35 @@ def _diff_request_summaries(
     if section_diff["status"] == "changed":
         changes.append("prompt sections changed")
         details["prompt_section_delta"] = section_diff
+
+    previous_messages = previous.get("message_shadows")
+    current_messages = current.get("message_shadows")
+    if isinstance(previous_messages, list) and isinstance(current_messages, list):
+        common = 0
+        for previous_message, current_message in zip(previous_messages, current_messages):
+            if previous_message != current_message:
+                break
+            common += 1
+        if common < max(len(previous_messages), len(current_messages)):
+            previous_first = previous_messages[common] if common < len(previous_messages) else None
+            current_first = current_messages[common] if common < len(current_messages) else None
+            changed_fields: list[str] = []
+            if isinstance(previous_first, dict) and isinstance(current_first, dict):
+                changed_fields = sorted(
+                    key
+                    for key in set(previous_first) | set(current_first)
+                    if previous_first.get(key) != current_first.get(key)
+                )
+            details["message_prefix_delta"] = {
+                "common_message_count": common,
+                "previous_message_count": len(previous_messages),
+                "current_message_count": len(current_messages),
+                "first_diverging_index": common,
+                "previous_role": previous_first.get("role") if isinstance(previous_first, dict) else None,
+                "current_role": current_first.get("role") if isinstance(current_first, dict) else None,
+                "changed_fields": changed_fields,
+            }
+            changes.append("message prefix changed")
 
     return changes, details
 

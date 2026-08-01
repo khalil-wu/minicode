@@ -1,4 +1,4 @@
-import { Clock3, Copy, Image as ImageIcon, LoaderCircle, RotateCcw, Trash2, X } from "lucide-react";
+import { Clock3, Copy, CornerDownLeft, Image as ImageIcon, LoaderCircle, RotateCcw, Trash2, X } from "lucide-react";
 import { fileIcon } from "../../shell/fileTreeHelpers";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type React from "react";
@@ -154,12 +154,18 @@ export function UserMessageCell({ cell }: { cell: UserMessageCellState }) {
           ) : null}
           {cell.queueState ? (
             <div className="user-cell-queue-status" data-status={cell.queueState}>
-              <Clock3 size={11} />
+              <Clock3 size={14} />
               <span>
                 {cell.queueState === "queued"
                   ? `Queued${cell.queuePosition ? ` · ${cell.queuePosition}` : ""}`
                   : "Queue cancelled"}
               </span>
+            </div>
+          ) : null}
+          {cell.steeredIntoMessageId ? (
+            <div className="user-cell-queue-status" data-status="steered" title="这条消息已注入当前运行中的 Agent turn">
+              <CornerDownLeft size={14} />
+              <span>已引导当前任务</span>
             </div>
           ) : null}
           {cell.attachments && cell.attachments.length > 0 && (
@@ -180,11 +186,11 @@ export function UserMessageCell({ cell }: { cell: UserMessageCellState }) {
                       : `Preview ${attachment.name}`}
                   >
                     {pendingPreviewArtifactId === attachment.artifactId ? (
-                      <LoaderCircle size={13} className="animate-spin" aria-hidden="true" />
+                      <LoaderCircle size={14} className="animate-spin" aria-hidden="true" />
                     ) : failedPreviewArtifactId === attachment.artifactId ? (
-                      <X size={13} aria-hidden="true" />
+                      <X size={14} aria-hidden="true" />
                     ) : (
-                      <ImageIcon size={13} aria-hidden="true" />
+                      <ImageIcon size={14} aria-hidden="true" />
                     )}
                     <span>{attachment.name}</span>
                   </button>
@@ -201,20 +207,20 @@ export function UserMessageCell({ cell }: { cell: UserMessageCellState }) {
       </div>
       <div className="user-cell-actions">
         <button type="button" onClick={copy} title={copied ? "已复制" : "复制消息"} aria-label={copied ? "已复制" : "复制消息"} className="cell-action-btn">
-          <Copy size={12} />
+          <Copy size={14} />
         </button>
         {cell.queueState === "queued" ? (
           <button type="button" onClick={cancelQueuedMessage} title="取消排队消息" aria-label="取消排队消息" className="cell-action-btn">
-            <X size={12} />
+            <X size={14} />
           </button>
         ) : (
           <button type="button" onClick={recall} title="撤回到输入框编辑" aria-label="撤回到输入框" className="cell-action-btn user-cell-edit-action">
-            <RotateCcw size={12} />
+            <RotateCcw size={14} />
             <span>编辑</span>
           </button>
         )}
         <button type="button" onClick={deleteWithConfirm} title="删除消息" aria-label="删除消息" className="cell-action-btn">
-          <Trash2 size={12} />
+          <Trash2 size={14} />
         </button>
       </div>
       {preview ? (

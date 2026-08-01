@@ -53,18 +53,6 @@ class TeamMemorySyncTool(BaseTool):
             toolset="memory",
             exposure="deferred",
             required_args=(),
-            arg_roles={
-                "facts": "generated_content",
-                "summary": "generated_content",
-                "fact_type": "control",
-                "task_ids": "control",
-            },
-            repair_policy={"facts": "needs_model_generation", "summary": "needs_model_generation"},
-            empty_args_policy="block",
-            blocked_guidance=(
-                "Provide durable facts/summary to save, or set include_completed_task_outputs=true "
-                "with filters for completed shared tasks."
-            ),
         )
 
     def get_schema(self) -> ToolSchema:

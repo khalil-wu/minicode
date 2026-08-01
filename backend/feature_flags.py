@@ -15,17 +15,14 @@ from typing import Any, Mapping
 DEFAULT_FEATURE_FLAGS: dict[str, bool] = {
     # Existing behaviour defaults remain unchanged.
     "reactive_compact": True,
-    "coordinator_mode": True,
-    "plugin_commands": True,
-    "plugin_template_commands": True,
-    "plugin_protocol_commands": True,
-    "plugin_local_ui_commands": True,
-    "plugin_local_jsx_commands": True,
     "plugin_lifecycle_api": True,
     "plugin_skills": True,
     "sdk_query": True,
     "mcp_roots": True,
-    "mcp_sampling": True,
+    # Host-side LLM sampling lets an MCP server ask MiniCode to call the model.
+    # Keep it opt-in: every enabled request still needs a turn/session owner and
+    # policy checks before it can run.
+    "mcp_sampling": False,
     "mcp_elicitation": True,
     "mcp_websocket_transport": True,
     "mcp_streamable_http_transport": True,

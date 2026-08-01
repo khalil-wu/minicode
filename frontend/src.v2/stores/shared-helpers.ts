@@ -30,7 +30,6 @@ export const LS = {
   },
   permissionMode: "minicode.composer.permissionMode",
   agentMode: "minicode.composer.agentMode",
-  promptPersona: "minicode.composer.promptPersona",
   remoteImagePolicy: "minicode.markdown.remoteImagePolicy",
   conversation: {
     activeId: "minicode.conversation.active-id",
@@ -39,8 +38,10 @@ export const LS = {
 };
 
 export const DEFAULT_WORKSPACE_KEY = "__default__";
-export const LEFT_SIDEBAR_MIN_WIDTH = 252;
-export const LEFT_SIDEBAR_MAX_WIDTH = 380;
+export const LEFT_SIDEBAR_DEFAULT_WIDTH = 320;
+export const LEFT_SIDEBAR_MIN_WIDTH = 272;
+export const LEFT_SIDEBAR_MAX_WIDTH = 400;
+export const RIGHT_SIDEBAR_DEFAULT_WIDTH = 380;
 export const RIGHT_SIDEBAR_MAX = 1040;
 
 // ── LocalStorage read/write ────────────────────────────────────────
@@ -67,9 +68,15 @@ export const applyTheme = (mode: UISlice["themeMode"]) => {
   let resolved: "dark" | "light" = "dark";
   if (mode === "light") resolved = "light";
   else if (mode === "dark") resolved = "dark";
-  else
-    resolved = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
-  document.documentElement.setAttribute("data-theme", resolved);
+  else {
+    const mediaQuery = typeof window !== "undefined" && typeof window.matchMedia === "function"
+      ? window.matchMedia("(prefers-color-scheme: light)")
+      : null;
+    resolved = mediaQuery?.matches ? "light" : "dark";
+  }
+  if (typeof document !== "undefined") {
+    document.documentElement.setAttribute("data-theme", resolved);
+  }
 };
 
 export const applyTextScale = (s: number) => {
@@ -164,10 +171,10 @@ export const loadInitialLayout = () => {
     ? left <= 0
       ? 0
       : clamp(LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_MAX_WIDTH, left)
-    : 320;
+    : LEFT_SIDEBAR_DEFAULT_WIDTH;
   return {
     leftSidebarWidth,
-    rightSidebarWidth: clamp(320, RIGHT_SIDEBAR_MAX, Number.isFinite(right) ? right : 440),
+    rightSidebarWidth: clamp(320, RIGHT_SIDEBAR_MAX, Number.isFinite(right) ? right : RIGHT_SIDEBAR_DEFAULT_WIDTH),
     rightPanelOpen: rightOpen,
     dockHeight: clamp(180, 520, Number.isFinite(dock) ? dock : 240),
     dockCollapsed: collapsed,
@@ -187,9 +194,8 @@ export const preferredRightSidebarWidth = (
   const preferred =
     tab === "preview" ? 440 :
       tab === "browser" ? 680 :
-        tab === "terminal" ? 720 :
-          tab === "subagents" ? 360 :
-            tab === "artifacts" ? 360 :
+        tab === "subagents" ? RIGHT_SIDEBAR_DEFAULT_WIDTH :
+            tab === "artifacts" ? RIGHT_SIDEBAR_DEFAULT_WIDTH :
             0;
   if (!preferred || currentWidth >= preferred) return currentWidth;
   return clamp(320, RIGHT_SIDEBAR_MAX, preferred);
@@ -217,7 +223,7 @@ export const automaticRightPanelState = (
     rightStackTab: tab,
     rightPanelOpen: true,
     rightSidebarWidth,
-    dockCollapsed: tab === "terminal" ? true : state.dockCollapsed,
+    dockCollapsed: state.dockCollapsed,
   };
 };
 
@@ -253,6 +259,7 @@ const blankEditorTab = (path: string): EditorTab => ({
   largeFile: false,
   loadWarning: null,
   sizeBytes: undefined,
+  readOnly: false,
 });
 
 export const loadPersistedEditorTabs = (workspace?: string | null): EditorTab[] => {
@@ -410,14 +417,14 @@ export const findLastStreamingIndex = (messages: AppStore["messages"]): number =
 export const computeToolCallCount = (messages: ChatMessage[]): number =>
   messages.reduce((sum, m) => sum + getToolCallsFromMessage(m).length, 0);
 
-export const progressConversationKey = (conversationId?: string): string => conversationId || "__active__";
+export const progressConversationKey = (conversationId?: string): string => conversationId?.trim() || "__unowned__";
 
 export const conversationWorkspacePath = (conversation?: AppStore["conversations"][number] | null): string =>
   conversation?.worktreePath || conversation?.workspaceRoot || "";
 
 // ── Thinking metadata helpers ──────────────────────────────────────
 
-const THINKING_METADATA_KEYS = ["source", "visibility", "is_raw_provider_reasoning", "provider_reasoning_type"] as const;
+const THINKING_METADATA_KEYS = ["source", "visibility", "is_raw_provider_reasoning", "provider_reasoning_type", "phase"] as const;
 
 export const normalizeThinkingMetadata = (
   metadata?: Partial<Omit<ThinkingContentBlock, "type" | "content">>,
@@ -432,6 +439,7 @@ export const normalizeThinkingMetadata = (
   if (metadata.provider_reasoning_type !== undefined) {
     normalized.provider_reasoning_type = metadata.provider_reasoning_type;
   }
+  if (metadata.phase !== undefined) normalized.phase = metadata.phase;
   return normalized;
 };
 
@@ -443,43 +451,74 @@ export const thinkingMetadataMatches = (
 
 // ── Tool call resume helpers ───────────────────────────────────────
 
-const pendingToolCallToRecord = (tc: PendingToolCallResume) => ({
+const resumeToolStatus = (status: PendingToolCallResume["status"]): ToolCallRecord["status"] => {
+  const normalized = String(status || "running").toLowerCase();
+  if (normalized === "completed") return "success";
+  if (normalized === "error") return "failed";
+  if (normalized === "waiting_approval") return "pending";
+  if (["pending", "running", "success", "failed", "blocked", "partial", "timeout", "cancelled"].includes(normalized)) {
+    return normalized as ToolCallRecord["status"];
+  }
+  return "running";
+};
+
+const pendingToolCallToRecord = (
+  tc: PendingToolCallResume,
+  fallbackStartedAt?: number,
+): ToolCallRecord => ({
   id: tc.id,
   name: tc.name,
   args: tc.args ?? {},
-  status: tc.status === "pending" ? "pending" as const : "running" as const,
-  startedAt: tc.startedAt ?? tc.started_at ?? Date.now(),
+  status: resumeToolStatus(tc.status),
+  transition: tc.transition,
+  startedAt: tc.startedAt ?? tc.started_at ?? fallbackStartedAt ?? Date.now(),
+  finishedAt: tc.finishedAt ?? tc.finished_at,
+  durationMs: tc.durationMs ?? tc.duration_ms,
   displayHint: tc.displayHint ?? tc.display_hint,
   inputSummary: tc.inputSummary ?? tc.input_summary,
   turnId: tc.turnId ?? tc.turn_id,
   iterationId: tc.iterationId ?? tc.iteration_id,
   phase: tc.phase,
+  waitingOn: tc.waitingOn ?? tc.waiting_on,
+  blockingReason: tc.blockingReason ?? tc.blocking_reason,
+  outputPreview: tc.outputPreview,
+  stdoutPreview: tc.stdoutPreview,
+  stderrPreview: tc.stderrPreview,
 });
 
 export const mergeResumeToolCalls = (
   blocks: ContentBlock[],
   pendingToolCalls?: PendingToolCallResume[],
+  preserveText = false,
 ): ContentBlock[] => {
-  const next = blocks.filter((block) => block.type !== "text");
+  const next = preserveText
+    ? blocks.slice()
+    : blocks.filter((block) => block.type !== "text" && block.type !== "thinking");
   for (const pending of pendingToolCalls ?? []) {
-    const record = pendingToolCallToRecord(pending);
+    const candidate = pendingToolCallToRecord(pending);
     const existingIndex = next.findIndex((block) =>
-      block.type === "tool_call" && sameToolCallRecord(block.record, record)
+      block.type === "tool_call" && sameToolCallRecord(block.record, candidate)
     );
     if (existingIndex >= 0) {
       const existing = next[existingIndex];
       if (existing.type === "tool_call") {
+        const record = pendingToolCallToRecord(pending, existing.record.startedAt);
+        const definedRecord = Object.fromEntries(
+          Object.entries(record).filter(([, value]) => value !== undefined),
+        ) as Partial<ToolCallRecord>;
         next[existingIndex] = {
           type: "tool_call",
           record: {
             ...existing.record,
-            ...record,
+            ...definedRecord,
+            args: pending.args ?? existing.record.args,
+            name: pending.name || existing.record.name,
           },
         };
       }
       continue;
     }
-    next.push({ type: "tool_call", record });
+    next.push({ type: "tool_call", record: candidate });
   }
   return next;
 };
@@ -490,6 +529,7 @@ export function conversationResetPayload(): Record<string, unknown> {
     pendingApproval: null,
     approvalQueue: [],
     pendingDiffReview: null,
+    diffReviewQueue: [],
     diffReview: null,
     previewArtifact: null,
     livePreviewUrl: null,
@@ -499,6 +539,7 @@ export function conversationResetPayload(): Record<string, unknown> {
     rightStackTabLocked: false,
     allowedRemoteImageDomains: [],
     pendingAskUser: null,
+    askUserQueue: [],
     plan: null,
     todos: [],
     subagents: [],

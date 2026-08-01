@@ -47,6 +47,54 @@ def _normalize_quotes(text: str) -> str:
     return text.translate(_SMART_QUOTE_MAP)
 
 
+def _closest_edit_excerpt(content: str, old_string: str) -> str:
+    """Return nearby real file text so an exact-match failure is recoverable.
+
+    This does not perform a fuzzy replacement. It only gives the model a small
+    deterministic excerpt from the current file so the next edit can use exact,
+    freshly observed content instead of entering a read/edit retry loop.
+    """
+
+    lines = content.splitlines()
+    requested = old_string.splitlines()
+    if not lines or not requested:
+        return ""
+
+    anchor = next((line for line in requested if line.strip()), requested[0])
+    normalized_anchor = _normalize_quotes(anchor).strip()
+    candidate_index = -1
+    for index, line in enumerate(lines):
+        if _normalize_quotes(line).strip() == normalized_anchor:
+            candidate_index = index
+            break
+
+    if candidate_index < 0 and normalized_anchor:
+        best_ratio = 0.0
+        for index, line in enumerate(lines[:20_000]):
+            candidate = _normalize_quotes(line).strip()
+            if not candidate:
+                continue
+            ratio = difflib.SequenceMatcher(None, normalized_anchor, candidate).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                candidate_index = index
+        if best_ratio < 0.35:
+            candidate_index = -1
+
+    if candidate_index < 0:
+        return ""
+
+    excerpt_start = max(0, candidate_index - 1)
+    excerpt_size = min(12, max(4, len(requested) + 2))
+    excerpt_end = min(len(lines), excerpt_start + excerpt_size)
+    excerpt = "\n".join(lines[excerpt_start:excerpt_end])
+    return (
+        f"Closest current file excerpt (lines {excerpt_start + 1}-{excerpt_end}):\n"
+        f"{excerpt}\n"
+        "Retry once with a smaller old_string copied exactly from this excerpt."
+    )
+
+
 class EditFileTool(BaseTool):
     """
     Replace one exact string in a text file.
@@ -56,16 +104,15 @@ class EditFileTool(BaseTool):
 
     name = "edit_file"
     mutates_workspace = True
-    timeout_seconds = 30.0
     result_kind = "edit"
     activity_kind = "fileChange"
     display_label = "Edit"
-    panel_hint = "diff"
     description = (
         "Make targeted string replacements in an existing file. Read the file first, pass expected_hash, and make old_string match exactly without line-number prefixes. "
         "old_string must be unique unless replace_all is true; use write_file for mostly new content."
     )
     permission = PermissionLevel.DIFF_REVIEW
+    workspace_path_fields = ("file_path",)
 
     def model_description(self) -> str:
         return (
@@ -82,11 +129,21 @@ class EditFileTool(BaseTool):
                     "file_path": {"type": "string"},
                     "old_string": {"type": "string"},
                     "new_string": {"type": "string"},
+                    # Without this the model must issue one call per occurrence
+                    # for a rename. expected_hash stays out of the model-facing
+                    # schema because the runtime injects the read-time hash.
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "Replace every occurrence instead of requiring old_string to be unique. Default false.",
+                    },
                 },
                 "required": ["file_path", "old_string", "new_string"],
             },
-            strict=True,
         )
+
+    def streamed_input_preview(self, args: dict[str, Any]) -> dict[str, Any]:
+        file_path = args.get("file_path")
+        return {"file_path": file_path} if isinstance(file_path, str) else {}
 
     def get_spec(self):
         from backend.tools.contracts import ToolSpec
@@ -95,25 +152,6 @@ class EditFileTool(BaseTool):
             name=self.name,
             capability="workspace.edit",
             required_args=("file_path", "old_string", "new_string"),
-            arg_roles={
-                "file_path": "workspace_file",
-                "old_string": "generated_content",
-                "new_string": "generated_content",
-                "expected_hash": "write_guard",
-            },
-            repair_policy={
-                "file_path": "resource_resolver",
-                "old_string": "needs_model_generation",
-                "new_string": "needs_model_generation",
-                "expected_hash": "runtime_control",
-            },
-            accepted_resource_types=("workspace_file",),
-            rejected_resource_types=("uploaded_document", "web_url"),
-            empty_args_policy="repair_or_block",
-            blocked_guidance=(
-                "edit_file requires file_path plus complete old_string/new_string content. "
-                "Read the file first, generate the exact edit, then retry."
-            ),
         )
 
     def get_schema(self) -> ToolSchema:
@@ -214,10 +252,14 @@ class EditFileTool(BaseTool):
                 if start >= 0 and norm_content.find(norm_old, start + 1) == -1:
                     normalized_match = (start, len(old_string))
             if normalized_match is None:
+                excerpt = _closest_edit_excerpt(content, old_string)
+                diagnostic = f"\n{excerpt}" if excerpt else ""
                 return self._error_result(
                     f"old_string was not found in {file_path}. "
                     "Make sure whitespace and line endings match exactly "
-                    "(watch for smart/curly quotes vs straight quotes)."
+                    "(watch for smart/curly quotes vs straight quotes). "
+                    f"Current content_hash: {content_hash(content)}."
+                    f"{diagnostic}"
                 )
         elif not replace_all and count > 1:
             return self._error_result(
@@ -235,20 +277,19 @@ class EditFileTool(BaseTool):
             new_content = content.replace(old_string, new_string, 1)
 
         try:
-            await _emit_write_preview_progress(
-                context,
-                file_path=file_path,
-                old_content=content,
-                new_content=new_content,
-                display_path=_workspace_display_path(path, file_path, context),
-            )
-
             _atomic_write_text(path, new_content)
 
             # Invalidate file caches after editing.
             cache = get_global_file_cache()
             cache.invalidate(path)
             clear_list_files_cache()
+            await _emit_write_diff(
+                context,
+                file_path=file_path,
+                old_content=content,
+                new_content=new_content,
+                display_path=_workspace_display_path(path, file_path, context),
+            )
         except PermissionError:
             return self._error_result(f"No permission to write file: {file_path}")
 

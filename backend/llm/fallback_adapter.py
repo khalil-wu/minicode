@@ -64,7 +64,10 @@ def _error_is_transient(error_message: str) -> bool:
 
 
 def _exception_is_transient(exc: BaseException) -> bool:
-    return is_retryable_llm_error(f"{type(exc).__name__}: {exc}")
+    # Preserve structured status/response fields and the chained cause. The
+    # shared classifier already understands them; flattening to text can lose
+    # a 429/5xx when the exception message itself omits the status code.
+    return is_retryable_llm_error(exc)
 
 
 class FallbackLLMAdapter(LLMAdapter):
@@ -79,6 +82,18 @@ class FallbackLLMAdapter(LLMAdapter):
     @property
     def adapters(self) -> list[LLMAdapter]:
         return list(self._adapters)
+
+    async def aclose(self) -> None:
+        """Close every owned provider adapter, preserving all close attempts."""
+        import asyncio
+
+        closers = []
+        for adapter in self._adapters:
+            close = getattr(adapter, "aclose", None)
+            if callable(close):
+                closers.append(close())
+        if closers:
+            await asyncio.gather(*closers, return_exceptions=True)
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -96,6 +111,7 @@ class FallbackLLMAdapter(LLMAdapter):
             yielded_text = False
             yielded_non_restartable_content = False
             fallback_error_message: str | None = None
+            structured_transient_error = False
             incomplete_eof = False
 
             try:
@@ -113,6 +129,7 @@ class FallbackLLMAdapter(LLMAdapter):
                         yielded_text = True
                     elif event.type in (
                         StreamEventType.IMAGE_CHUNK,
+                        StreamEventType.THINKING_CHUNK,
                         StreamEventType.TOOL_CALL_START,
                         StreamEventType.TOOL_CALL_DELTA,
                         StreamEventType.TOOL_CALL,
@@ -132,6 +149,7 @@ class FallbackLLMAdapter(LLMAdapter):
                 ):
                     raise
                 fallback_error_message = f"{type(exc).__name__}: {exc}"
+                structured_transient_error = True
 
             if fallback_error_message is None:
                 fallback_error_message = "provider stream ended without DONE"
@@ -141,8 +159,14 @@ class FallbackLLMAdapter(LLMAdapter):
             if (
                 is_last
                 or yielded_non_restartable_content
-                or is_fatal_llm_error(last_error)
-                or (not incomplete_eof and not _error_is_transient(last_error))
+                or (
+                    not incomplete_eof
+                    and not structured_transient_error
+                    and (
+                        is_fatal_llm_error(last_error)
+                        or not _error_is_transient(last_error)
+                    )
+                )
             ):
                 yield StreamEvent(type=StreamEventType.ERROR, content=last_error)
                 return
@@ -170,12 +194,17 @@ class FallbackLLMAdapter(LLMAdapter):
             content=last_error or "all LLM adapters failed without response",
         )
 
-    async def simple_chat(self, messages: list[LLMMessage]) -> str:
+    async def simple_chat(
+        self,
+        messages: list[LLMMessage],
+        *,
+        max_tokens: int | None = None,
+    ) -> str:
         last_exc: BaseException | None = None
         for index, adapter in enumerate(self._adapters):
             is_last = index == len(self._adapters) - 1
             try:
-                return await adapter.simple_chat(messages)
+                return await adapter.simple_chat(messages, max_tokens=max_tokens)
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 if is_last or is_fatal_llm_error(exc) or not _exception_is_transient(exc):

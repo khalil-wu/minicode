@@ -1,9 +1,9 @@
-import { ArrowRight, Copy, ListChecks, LoaderCircle, OctagonAlert } from "lucide-react";
-import { useId, useMemo, useState, type CSSProperties } from "react";
+import { ArrowRight, Check, Circle, Copy, ListChecks, LoaderCircle, OctagonAlert } from "lucide-react";
+import { useEffect, useId, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useAppStore } from "../../stores";
 import { planStepTodoStatus, shouldSurfacePlanProgress } from "../../lib/planVisibility";
-import { coordinatorNoticeKindForSubagent, effectiveSubagentStatus, type CoordinatorNoticeKind } from "../../lib/collaborationDisplay";
-import { hasCompletedAssistantReply, projectAgentViews, type AgentDisplayStatus } from "../../lib/agent-view-model";
+import { effectiveSubagentStatus } from "../../lib/collaborationDisplay";
+import { projectAgentViews, type AgentDisplayStatus } from "../../lib/agent-view-model";
 import type { ConversationAgentState, ConversationMeta, GitChangesState, PlanState, SubagentState, TodoItem } from "../../stores/types";
 import { RollingNumber } from "../../components/RollingNumber";
 import { initialDiffReviewPatch } from "../diffReviewState";
@@ -17,7 +17,6 @@ export function InlineTaskList({ wide = false }: InlineTaskListProps = {}) {
   const todos = useAppStore((s) => s.todos);
   const plan = useAppStore((s) => s.plan);
   const subagents = useAppStore((s) => s.subagents);
-  const messages = useAppStore((s) => s.messages);
   const isStreaming = useAppStore((s) => s.isStreaming);
   const gitChanges = useAppStore((s) => s.gitChanges);
   const conversationId = useAppStore((s) => s.conversationId);
@@ -26,13 +25,31 @@ export function InlineTaskList({ wide = false }: InlineTaskListProps = {}) {
   const conversationAgentStates = useAppStore((s) => s.conversationAgentStates);
   const requestConversationSwitch = useAppStore((s) => s.requestConversationSwitch);
   const [collaborationPreviewVisible, setCollaborationPreviewVisible] = useState(false);
+  const [workPreviewVisible, setWorkPreviewVisible] = useState(false);
   const collaborationPreviewId = useId();
+  const workPreviewId = useId();
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!workPreviewVisible) return;
+    const closeOnOutside = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setWorkPreviewVisible(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setWorkPreviewVisible(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [workPreviewVisible]);
 
   const currentSummary = useMemo(() => summarizeWork(todos, plan), [todos, plan]);
-  const parentCompleted = useMemo(() => hasCompletedAssistantReply(messages), [messages]);
   const collaborationSummary = useMemo(
-    () => parentCompleted && !isStreaming ? null : summarizeCollaboration(subagents),
-    [subagents, parentCompleted, isStreaming],
+    () => summarizeCollaboration(subagents),
+    [subagents],
   );
   const backgroundSummary = useMemo(
     () => summarizeBackgroundRun({
@@ -129,7 +146,7 @@ export function InlineTaskList({ wide = false }: InlineTaskListProps = {}) {
       useAppStore.getState().setRightStackTab("subagents");
       return;
     }
-    if (canExpandCurrent) useAppStore.getState().setRightStackTab("tasks");
+    if (canExpandCurrent) setWorkPreviewVisible((visible) => !visible);
   };
   const pillAriaLabel = isBackground
     ? `查看运行中的对话：${conversationTitle || backgroundConversationId || activeLabel}`
@@ -164,6 +181,7 @@ export function InlineTaskList({ wide = false }: InlineTaskListProps = {}) {
 
   return (
     <div
+      ref={rootRef}
       className="inline-task-list"
       data-state={stateTone}
       data-kind={kind}
@@ -185,6 +203,8 @@ export function InlineTaskList({ wide = false }: InlineTaskListProps = {}) {
         onClick={handlePillClick}
         aria-label={pillAriaLabel}
         aria-describedby={collaborationPreviewVisible && canPreviewCollaboration ? collaborationPreviewId : undefined}
+        aria-controls={workPreviewVisible && canExpandCurrent ? workPreviewId : undefined}
+        aria-expanded={canExpandCurrent ? workPreviewVisible : undefined}
         onMouseEnter={() => canPreviewCollaboration && setCollaborationPreviewVisible(true)}
         onMouseLeave={() => canPreviewCollaboration && setCollaborationPreviewVisible(false)}
         onFocus={() => canPreviewCollaboration && setCollaborationPreviewVisible(true)}
@@ -205,7 +225,7 @@ export function InlineTaskList({ wide = false }: InlineTaskListProps = {}) {
             title="查看运行中的对话"
           >
             <span>{visibleCountLabel}</span>
-            <ArrowRight size={12} />
+            <ArrowRight size={14} />
           </span>
         ) : !isCollaboration ? (
           <span key={visibleCountLabel} className="inline-task-pill-count">
@@ -228,6 +248,44 @@ export function InlineTaskList({ wide = false }: InlineTaskListProps = {}) {
           </span>
         )}
       </button>
+      {workPreviewVisible && canExpandCurrent && (
+        <div
+          id={workPreviewId}
+          className="inline-task-work-preview"
+          role="region"
+          aria-label={kind === "plan" ? "计划进度" : "任务进度"}
+        >
+          <div className="inline-task-work-preview-header">
+            <span>{kind === "plan" ? "计划进度" : "任务进度"}</span>
+            <span>{completed}/{total}</span>
+          </div>
+          <div className="inline-task-work-preview-list">
+            {items.map((item, index) => {
+              const ItemIcon = item.status === "completed"
+                ? Check
+                : item.status === "blocked"
+                  ? OctagonAlert
+                  : item.status === "in_progress"
+                    ? LoaderCircle
+                    : Circle;
+              return (
+                <div key={item.id || `${index}-${item.content}`} className="inline-task-work-preview-row" data-status={item.status}>
+                  <ItemIcon size={14} aria-hidden="true" />
+                  <span>{item.status === "in_progress" && item.activeForm ? item.activeForm : item.content}</span>
+                </div>
+              );
+            })}
+          </div>
+          <button
+            type="button"
+            className="inline-task-work-preview-action"
+            onClick={() => useAppStore.getState().setRightStackTab("tasks")}
+          >
+            <span>打开上下文详情</span>
+            <ArrowRight size={14} />
+          </button>
+        </div>
+      )}
       {collaborationPreviewVisible && canPreviewCollaboration && (
         <div
           id={collaborationPreviewId}
@@ -300,7 +358,7 @@ interface InlinePreviewItem {
 
 function summarizeCollaboration(subagents: SubagentState[]): InlineSummary | null {
   const userVisibleSubagents = subagents.filter((subagent) => subagent.role !== "message");
-  const visible = userVisibleSubagents.filter((subagent) => subagent.role !== "workflow" && !subagent.id.startsWith("workflow-"));
+  const visible = userVisibleSubagents;
   const visibleCandidates = visible.length > 0 ? visible : userVisibleSubagents;
   const candidates = selectCurrentCollaborationBatch(visibleCandidates);
   const previewItems = projectAgentViews(candidates).map((view) => ({
@@ -311,6 +369,7 @@ function summarizeCollaboration(subagents: SubagentState[]): InlineSummary | nul
   }));
   const active = candidates.filter((subagent) => ["running", "pending", "blocked"].includes(effectiveSubagentStatus(subagent)));
   const errors = candidates.filter((subagent) => effectiveSubagentStatus(subagent) === "error");
+  const attention = candidates.filter((subagent) => ["partial", "cancelled"].includes(effectiveSubagentStatus(subagent)));
   if (active.length === 0) {
     if (errors.length > 0) {
       const label = `${errors.length} 个任务需要处理`;
@@ -331,34 +390,40 @@ function summarizeCollaboration(subagents: SubagentState[]): InlineSummary | nul
         hasBlocked: true,
       };
     }
+    if (attention.length > 0) {
+      const label = `${attention.length} 个任务需要处理`;
+      return {
+        kind: "collaboration",
+        total: attention.length,
+        completed: 0,
+        items: [],
+        previewItems,
+        activeTask: {
+          id: "collaboration-attention",
+          content: label,
+          activeForm: label,
+          status: "blocked",
+        },
+        activeIndex: attention.length,
+        allCompleted: false,
+        hasBlocked: true,
+      };
+    }
     return null;
   }
 
   const running = active.filter((subagent) => effectiveSubagentStatus(subagent) === "running").length;
   const blocked = active.filter((subagent) => effectiveSubagentStatus(subagent) === "blocked").length;
-  const notices = active
-    .map(coordinatorNoticeKindForSubagent)
-    .filter((kind): kind is CoordinatorNoticeKind => Boolean(kind));
-  const collectOnly = blocked > 0 && notices.length === blocked && notices.every((kind) => kind === "collect_results");
   const completed = candidates.filter((subagent) =>
     ["done", "partial", "cancelled", "error"].includes(effectiveSubagentStatus(subagent)),
   ).length;
-  // Keep the pill as a compact stage indicator: once collaboration starts,
-  // show one active slot and advance the numerator as workers finish. Counting
-  // every concurrently running worker makes a three-agent batch jump straight
-  // to 3/3 before any result is ready.
-  const started = Math.min(candidates.length, completed + (running > 0 ? 1 : 0) + blocked);
-  let label = `${started}/${candidates.length}`;
-  if (blocked > 0 && notices.includes("collect_results")) {
-    label = "结果正在整理";
-  } else if (blocked > 0 && notices.includes("duplicate_delegation")) {
-    label = "相同任务已在处理";
-  } else if (blocked > 0 && notices.includes("capacity")) {
-    label = "任务较多，正在依次处理";
-  } else if (blocked > 0) {
+  // The fraction is completion progress, not an active-worker cursor.
+  // Concurrent workers remain 0/N until one reaches a terminal state.
+  let label = `${completed}/${candidates.length}`;
+  if (blocked > 0) {
     label = `${blocked} 个任务需要处理`;
   }
-  const status: InlineWorkItem["status"] = running > 0 || collectOnly
+  const status: InlineWorkItem["status"] = running > 0
     ? "in_progress"
     : blocked > 0
       ? "blocked"
@@ -376,9 +441,9 @@ function summarizeCollaboration(subagents: SubagentState[]): InlineSummary | nul
       activeForm: label,
       status,
     },
-    activeIndex: started,
+    activeIndex: completed,
     allCompleted: false,
-    hasBlocked: blocked > 0 && !collectOnly,
+    hasBlocked: blocked > 0,
   };
 }
 
@@ -392,7 +457,7 @@ function selectCurrentCollaborationBatch(subagents: SubagentState[]): SubagentSt
     ["running", "pending", "blocked"].includes(effectiveSubagentStatus(subagent)),
   );
   if (active.length === 0) {
-    return subagents.filter((subagent) => effectiveSubagentStatus(subagent) === "error");
+    return subagents.filter((subagent) => ["error", "partial", "cancelled"].includes(effectiveSubagentStatus(subagent)));
   }
 
   const activeTurnIds = [...new Set(active.map((subagent) => subagent.turnId).filter(Boolean))] as string[];
@@ -430,7 +495,7 @@ function selectCurrentCollaborationBatch(subagents: SubagentState[]): SubagentSt
 
   // Older event producers do not attach parentRunId. In that case, keep
   // recently finished siblings in the current burst so the compact progress
-  // advances 1/3 -> 2/3 instead of shrinking its denominator to 1/2. A
+  // keeps a stable denominator instead of shrinking from 1/3 to 1/2. A
   // timestamp window prevents unrelated historical work from being counted.
   const newestActiveAt = Math.max(
     ...active.map((subagent) => subagent.lastEventAt ?? subagent.lastProgressAt ?? 0),

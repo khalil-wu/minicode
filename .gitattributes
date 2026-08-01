@@ -1,0 +1,5 @@
+* text=auto eol=lf
+
+# Keep Windows launchers native while normalizing source and configuration.
+*.bat text eol=crlf
+*.cmd text eol=crlf

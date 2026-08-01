@@ -80,9 +80,9 @@ async def run_session_end_hook(*, session_id: str, reason: str = "") -> None:
     if not clean_session_id:
         return
     try:
-        from backend.hooks import get_hook_manager
+        from backend.hooks.manager import get_hook_manager_for_session
 
-        hook_mgr = get_hook_manager()
+        hook_mgr = get_hook_manager_for_session(clean_session_id)
         if hook_mgr:
             await hook_mgr.run_session_end(session_id=clean_session_id, reason=clean_reason)
     except Exception:

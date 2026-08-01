@@ -3,6 +3,7 @@ import { useAppStore } from "../stores";
 import { isDesktop } from "../desktop/runtime";
 import { openWorkspaceFolder } from "../workspace/openWorkspaceFolder";
 import { openSettings } from "../lib/settings-navigation";
+import { LEFT_SIDEBAR_DEFAULT_WIDTH } from "../stores/shared-helpers";
 
 export const useDesktopEvents = () => {
   useEffect(() => {
@@ -14,10 +15,14 @@ export const useDesktopEvents = () => {
         store.createConversation({ appMode: store.appMode, bindWorkspace: Boolean(store.workingDirectory) });
       },
       "open-settings": () => openSettings(),
-      "toggle-terminal": () => useAppStore.getState().toggleDock(),
+      "toggle-terminal": () => {
+        const store = useAppStore.getState();
+        if (!store.dockCollapsed && store.activeBottomTab === "terminal") store.closeBottomDock();
+        else store.openBottomTab("terminal");
+      },
       "toggle-sidebar": () => {
         const store = useAppStore.getState();
-        store.setLeftSidebarWidth(store.leftSidebarWidth > 0 ? 0 : 320);
+        store.setLeftSidebarWidth(store.leftSidebarWidth > 0 ? 0 : LEFT_SIDEBAR_DEFAULT_WIDTH);
       },
       "open-import-modal": () => {
         void openWorkspaceFolder();

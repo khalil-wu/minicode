@@ -1,16 +1,16 @@
 import { useEffect, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from "react";
-import { CalendarClock, Code2, FolderOpen, Layers, MessageSquareText, Plus, Search, WandSparkles } from "lucide-react";
+import { Blend, ChevronDown, Clock3, Code2, Files, FolderOpen, MessageSquareText, Moon, Search, Settings, SquarePen, Sun } from "lucide-react";
 import { useAppStore } from "../stores";
-import { LEFT_SIDEBAR_MAX_WIDTH, LEFT_SIDEBAR_MIN_WIDTH } from "../stores/shared-helpers";
+import { LEFT_SIDEBAR_DEFAULT_WIDTH, LEFT_SIDEBAR_MAX_WIDTH, LEFT_SIDEBAR_MIN_WIDTH } from "../stores/shared-helpers";
 import { FileTree } from "./FileTree";
 import { ConfirmDialog, type ConfirmDialogState } from "./sidebarComponents";
 import { ConversationsTab } from "./ConversationsTab";
-import { modeSwitchStyle, modeSwitchButtonStyle } from "./sidebarStyles";
 import { isConversationRunning } from "./sessionStatus";
 import { openWorkspaceFolder } from "../workspace/openWorkspaceFolder";
 import { openAutomations } from "../lib/automations-navigation";
 import { capabilityFeatureEnabled } from "../protocol/capabilities";
+import { modeSwitchButtonStyle, modeSwitchStyle } from "./sidebarStyles";
 
 type SidebarTab = "conversations" | "files";
 
@@ -22,20 +22,21 @@ export const SidebarLeft = ({
   onNavigate?: () => void;
 }) => {
   const appMode = useAppStore((s) => s.appMode);
+  const themeMode = useAppStore((s) => s.themeMode);
   const conversationId = useAppStore((s) => s.conversationId);
   const leftSidebarWidth = useAppStore((s) => s.leftSidebarWidth);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const setAppMode = useAppStore((s) => s.setAppMode);
+  const setThemeMode = useAppStore((s) => s.setThemeMode);
   const setLeftSidebarWidth = useAppStore((s) => s.setLeftSidebarWidth);
   const createConversation = useAppStore((s) => s.createConversation);
   const toggleCommandPalette = useAppStore((s) => s.toggleCommandPalette);
-  const toggleLiveArtifacts = useAppStore((s) => s.toggleLiveArtifacts);
   const toggleSkillsMarketplace = useAppStore((s) => s.toggleSkillsMarketplace);
+  const toggleSettings = useAppStore((s) => s.toggleSettings);
   const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities);
   const globalSearchEnabled = capabilityFeatureEnabled(runtimeCapabilities, "global_search", true);
-  const [tab, setTab] = useState<SidebarTab>(appMode === "cowork" ? "conversations" : "files");
+  const [tab, setTab] = useState<SidebarTab>(appMode === "code" ? "files" : "conversations");
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState>(null);
-  const codeMode = tab === "files";
   const isOpen = embedded || leftSidebarWidth > 0;
 
   const runningCount = useAppStore((s) => {
@@ -54,16 +55,21 @@ export const SidebarLeft = ({
   });
 
   useEffect(() => {
-    setTab(appMode === "cowork" ? "conversations" : "files");
+    setTab(appMode === "code" ? "files" : "conversations");
   }, [appMode]);
 
-  const switchSidebarTab = (nextTab: SidebarTab) => {
-    setTab(nextTab);
-    setAppMode(nextTab === "conversations" ? "cowork" : "code");
+  const switchAppMode = (nextMode: "cowork" | "code") => {
+    setAppMode(nextMode);
+    setTab(nextMode === "code" ? "files" : "conversations");
     onNavigate?.();
   };
-  const startSession = (mode: "cowork" | "code") => {
-    createConversation({ appMode: mode, bindWorkspace: Boolean(workingDirectory) });
+  const switchSidebarTab = (nextTab: SidebarTab) => {
+    setTab(nextTab);
+    if (nextTab === "files" && appMode !== "code") setAppMode("code");
+    onNavigate?.();
+  };
+  const startSession = () => {
+    createConversation({ appMode, bindWorkspace: appMode === "code" && Boolean(workingDirectory) });
     onNavigate?.();
   };
   const navigate = (action: () => void) => {
@@ -106,7 +112,7 @@ export const SidebarLeft = ({
     handle.addEventListener("lostpointercapture", cleanup);
   };
 
-  const resetSidebarWidth = () => setLeftSidebarWidth(320);
+  const resetSidebarWidth = () => setLeftSidebarWidth(LEFT_SIDEBAR_DEFAULT_WIDTH);
   const handleResizeKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     const step = event.shiftKey ? 48 : 16;
     let nextWidth: number | null = null;
@@ -114,12 +120,15 @@ export const SidebarLeft = ({
     else if (event.key === "ArrowRight") nextWidth = leftSidebarWidth + step;
     else if (event.key === "Home") nextWidth = LEFT_SIDEBAR_MIN_WIDTH;
     else if (event.key === "End") nextWidth = LEFT_SIDEBAR_MAX_WIDTH;
-    else if (event.key === "Enter") nextWidth = 320;
+    else if (event.key === "Enter") nextWidth = LEFT_SIDEBAR_DEFAULT_WIDTH;
     if (nextWidth == null) return;
     event.preventDefault();
     setLeftSidebarWidth(nextWidth);
   };
   const openAutomationsPanel = () => navigate(openAutomations);
+  const resolvedTheme = document.documentElement.getAttribute("data-theme");
+  const isDarkTheme = themeMode === "dark" || (themeMode === "system" && resolvedTheme !== "light");
+  const nextThemeLabel = isDarkTheme ? "切换到浅色模式" : "切换到深色模式";
 
   const sidebarWidth = embedded ? "100%" : isOpen ? `${leftSidebarWidth}px` : 0;
 
@@ -133,9 +142,9 @@ export const SidebarLeft = ({
         display: "flex",
         flexDirection: "column",
         overflow: "hidden",
-        padding: "14px 10px 10px",
+        padding: isOpen ? "14px 10px 10px" : 0,
         boxSizing: "border-box",
-        borderRight: embedded ? 0 : "1px solid color-mix(in oklch, var(--border-subtle) 55%, transparent)",
+        borderRight: embedded || !isOpen ? 0 : "1px solid color-mix(in oklch, var(--border-subtle) 55%, transparent)",
         width: sidebarWidth,
         minWidth: sidebarWidth,
         maxWidth: sidebarWidth,
@@ -144,71 +153,63 @@ export const SidebarLeft = ({
         pointerEvents: isOpen ? "auto" : "none",
       }}
     >
-      {/* Tab bar */}
-      <div role="tablist" aria-label="Mode switch" style={modeSwitchStyle}>
-        {(["conversations", "files"] as const).map((t) => (
-          <button
-            key={t}
-            role="tab"
-            className="mc-sidebar-mode-tab"
-            aria-selected={tab === t}
-            tabIndex={tab === t ? 0 : -1}
-            onClick={() => switchSidebarTab(t)}
-            style={{
-              ...modeSwitchButtonStyle,
-              background: tab === t ? "var(--surface-base)" : "transparent",
-              borderColor: tab === t ? "var(--border-soft)" : "transparent",
-              color: tab === t ? "var(--text-primary)" : "var(--text-muted)",
-              fontWeight: tab === t ? 650 : 500,
-            }}
-          >
-            <span className="mc-sidebar-mode-icon" aria-hidden="true">
-              {t === "conversations" ? <MessageSquareText /> : <Code2 />}
-            </span>
-            {t === "conversations" ? "Cowork" : "Code"}
-            {t === "conversations" && runningCount > 0 && (
-              <span
-                aria-label={`${runningCount} running tasks`}
-                title={`${runningCount} running tasks`}
-                style={{
-                fontSize: 10,
-                background: "var(--state-info)",
-                color: "var(--text-on-accent)",
-                borderRadius: 999,
-                padding: "0 5px",
-                fontWeight: 700,
-                lineHeight: "16px",
-                minWidth: 16,
-                textAlign: "center",
-              }}>
-                {runningCount}
-              </span>
-            )}
-          </button>
-        ))}
+      <div className="mc-sidebar-brand-row">
+        <button
+          type="button"
+          className="mc-sidebar-brand"
+          onClick={() => switchSidebarTab("conversations")}
+          aria-label="返回会话列表"
+        >
+          <span>MiniCode</span>
+          <ChevronDown className="mc-sidebar-brand-chevron" aria-hidden="true" />
+        </button>
+        {runningCount > 0 && (
+          <span className="mc-sidebar-running-count" aria-label={`${runningCount} 个任务运行中`}>
+            {runningCount} 运行中
+          </span>
+        )}
       </div>
 
-      {!codeMode && (
-        <nav className="mc-sidebar-nav" aria-label="Workspace navigation" style={{ display: "grid", gap: 3, padding: "10px 4px 12px" }}>
-          <SidebarAction icon={<Plus />} label="New task" onClick={() => startSession("cowork")} />
-          <SidebarAction icon={<FolderOpen />} label="Projects" onClick={() => navigate(() => void openWorkspaceFolder())} />
-          <SidebarAction
-            icon={<CalendarClock />}
-            label="Automations"
-            onClick={openAutomationsPanel}
-          />
-          <SidebarAction icon={<Layers />} label="Live artifacts" onClick={() => navigate(() => toggleLiveArtifacts())} />
-          <SidebarAction icon={<WandSparkles />} label="Customize" onClick={() => navigate(() => toggleSkillsMarketplace())} />
-        </nav>
-      )}
+      <div role="tablist" aria-label="工作模式" style={{ ...modeSwitchStyle, margin: "8px 2px 2px" }}>
+        <button
+          type="button"
+          role="tab"
+          className="mc-sidebar-mode-tab"
+          aria-selected={appMode === "cowork"}
+          tabIndex={appMode === "cowork" ? 0 : -1}
+          onClick={() => switchAppMode("cowork")}
+          style={modeSwitchButtonStyle}
+        >
+          <span className="mc-sidebar-mode-icon" aria-hidden="true"><MessageSquareText /></span>
+          协作
+        </button>
+        <button
+          type="button"
+          role="tab"
+          className="mc-sidebar-mode-tab"
+          aria-selected={appMode === "code"}
+          tabIndex={appMode === "code" ? 0 : -1}
+          onClick={() => switchAppMode("code")}
+          style={modeSwitchButtonStyle}
+        >
+          <span className="mc-sidebar-mode-icon" aria-hidden="true"><Code2 /></span>
+          代码
+        </button>
+      </div>
 
-      {codeMode && (
-        <nav className="mc-sidebar-nav" aria-label="Code navigation" style={{ display: "grid", gap: 3, padding: "10px 4px 12px" }}>
-          <SidebarAction icon={<Plus />} label="New session" onClick={() => startSession("code")} />
-          {globalSearchEnabled && <SidebarAction icon={<Search />} label="Search" onClick={() => navigate(() => toggleCommandPalette())} />}
-          <SidebarAction icon={<FolderOpen />} label={workingDirectory ? "Switch folder" : "Open folder"} onClick={() => navigate(() => void openWorkspaceFolder())} />
-        </nav>
-      )}
+      <nav className="mc-sidebar-nav" aria-label="工作区导航" style={{ display: "grid", gap: 2, padding: "8px 2px 12px" }}>
+        <SidebarAction icon={<SquarePen />} label="新建任务" onClick={startSession} />
+        {globalSearchEnabled && <SidebarAction icon={<Search />} label="搜索" onClick={() => navigate(() => toggleCommandPalette())} />}
+        <SidebarAction icon={<FolderOpen />} label={workingDirectory ? "切换项目" : "打开项目"} onClick={() => navigate(() => void openWorkspaceFolder())} />
+        <SidebarAction icon={<Clock3 />} label="已安排" onClick={openAutomationsPanel} />
+        <SidebarAction icon={<Blend />} label="技能" onClick={() => navigate(() => toggleSkillsMarketplace())} />
+        <SidebarAction
+          icon={tab === "files" ? <MessageSquareText /> : <Files />}
+          label={tab === "files" ? "返回会话" : "项目文件"}
+          active={tab === "files"}
+          onClick={() => switchSidebarTab(tab === "files" ? "conversations" : "files")}
+        />
+      </nav>
 
       {tab === "conversations" && (
         <ConversationsTab
@@ -220,18 +221,33 @@ export const SidebarLeft = ({
 
       {tab === "files" && <FileTree onNavigate={onNavigate} />}
 
+      <div className="mc-sidebar-footer">
+        <div className="mc-sidebar-footer-row">
+          <SidebarAction icon={<Settings />} label="设置" onClick={() => navigate(() => toggleSettings())} />
+          <button
+            type="button"
+            className="btn-ghost mc-sidebar-theme-toggle"
+            aria-label={nextThemeLabel}
+            title={nextThemeLabel}
+            onClick={() => setThemeMode(isDarkTheme ? "light" : "dark")}
+          >
+            {isDarkTheme ? <Sun aria-hidden="true" /> : <Moon aria-hidden="true" />}
+          </button>
+        </div>
+      </div>
+
       {isOpen && !embedded && (
         <div
           className="mc-sidebar-left-resize-handle"
           role="separator"
           aria-orientation="vertical"
-          aria-label="Resize left sidebar"
+          aria-label="调整左侧栏宽度"
           aria-valuemin={LEFT_SIDEBAR_MIN_WIDTH}
           aria-valuemax={LEFT_SIDEBAR_MAX_WIDTH}
            aria-valuenow={Math.round(leftSidebarWidth)}
            aria-valuetext={`${Math.round(leftSidebarWidth)} pixels`}
            tabIndex={0}
-          title="Drag to resize left sidebar; double-click to reset"
+          title="拖动调整左侧栏宽度，双击恢复默认"
           onPointerDown={startResize}
            onDoubleClick={resetSidebarWidth}
            onKeyDown={handleResizeKeyDown}
@@ -257,15 +273,18 @@ export const SidebarLeft = ({
 const SidebarAction = ({
   icon,
   label,
+  active = false,
   onClick,
 }: {
   icon: ReactNode;
   label: string;
+  active?: boolean;
   onClick: () => void;
 }) => (
   <button
     type="button"
     className="btn-ghost mc-sidebar-action"
+    data-active={active ? "true" : undefined}
     onClick={onClick}
   >
     <span className="mc-sidebar-action-icon" aria-hidden="true">{icon}</span>

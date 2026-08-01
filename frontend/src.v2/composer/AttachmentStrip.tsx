@@ -89,8 +89,14 @@ const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment
         </div>
       )}
       {(a.status === "error" || a.error) && (
-        <div
+        <button
+          type="button"
           aria-label={`${a.name} ${a.status === "error" ? "upload failed" : "upload warning"}`}
+          title={a.error || (a.status === "error" ? "Upload failed" : "Upload warning")}
+          onClick={(event) => {
+            event.stopPropagation();
+            if (a.status === "error" && a.localFile) retryComposerAttachment(a.id);
+          }}
           style={{
             position: "absolute",
             left: 3,
@@ -99,19 +105,24 @@ const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment
             minHeight: 16,
             padding: "1px 4px",
             borderRadius: "var(--radius-sm, 4px)",
+            border: 0,
             background: "var(--backdrop-strong)",
             color: a.status === "error" ? "var(--state-danger)" : "var(--state-warning)",
-            fontSize: 10,
+            fontSize: "var(--text-3xs)",
             fontWeight: 700,
             lineHeight: "14px",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-            textAlign: "center",
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 2,
+            cursor: a.status === "error" && a.localFile ? "pointer" : "default",
           }}
         >
-          <TriangleAlert size={12} aria-hidden="true" />
-        </div>
+          {a.status === "error" && a.localFile
+            ? <RotateCcw size={12} aria-hidden="true" />
+            : <TriangleAlert size={12} aria-hidden="true" />}
+          <span>{a.status === "error" ? "重试" : "警告"}</span>
+        </button>
       )}
       <button
         onClick={(event) => {
@@ -136,7 +147,7 @@ const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment
           padding: 0,
         }}
       >
-        <X size={11} />
+        <X size={14} />
       </button>
       {previewOpen && a.dataUrl ? (
         <ImageLightbox src={a.dataUrl} alt={a.name} title={a.name} onClose={closePreview} />
@@ -204,7 +215,7 @@ const FileChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment;
           className="shrink-0"
           style={fileChipActionStyle}
         >
-          <RotateCcw size={13} />
+          <RotateCcw size={14} />
         </button>
       ) : null}
       <button
@@ -226,7 +237,7 @@ const FileChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment;
           justifyContent: "center",
         }}
       >
-        <X size={13} />
+        <X size={14} />
       </button>
     </div>
   );

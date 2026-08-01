@@ -191,7 +191,7 @@ export const gitBadgeStyle: React.CSSProperties = {
   display: "inline-flex",
   alignItems: "center",
   justifyContent: "center",
-  fontSize: 10,
+  fontSize: "var(--text-3xs)",
   fontWeight: 750,
   borderRadius: 4,
   background: "var(--surface-page)",
@@ -201,13 +201,13 @@ export const gitBadgeStyle: React.CSSProperties = {
 
 export const folderCountStyle: React.CSSProperties = {
   color: "var(--text-tertiary)",
-  fontSize: 10,
+  fontSize: "var(--text-3xs)",
   flexShrink: 0,
 };
 
 export const fileMetaStyle: React.CSSProperties = {
   color: "var(--text-tertiary)",
-  fontSize: 10,
+  fontSize: "var(--text-3xs)",
   flexShrink: 0,
 };
 
@@ -254,8 +254,8 @@ export const searchResultNameStyle: React.CSSProperties = {
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
   color: "var(--text-primary)",
-  fontSize: "14px",
-  lineHeight: "18px",
+  fontSize: "var(--text-sm)",
+  lineHeight: "20px",
 };
 
 export const searchResultPathStyle: React.CSSProperties = {
@@ -265,6 +265,6 @@ export const searchResultPathStyle: React.CSSProperties = {
   whiteSpace: "nowrap",
   color: "var(--text-muted)",
   fontFamily: "var(--font-mono)",
-  fontSize: "11px",
+  fontSize: "var(--text-2xs)",
   lineHeight: "14px",
 };

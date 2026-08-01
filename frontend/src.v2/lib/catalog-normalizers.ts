@@ -1,29 +1,11 @@
 import type { SkillInfo, SlashCommand } from "../stores/types";
+import { skillAssetResourceUrlWithToken } from "../protocol/api";
 
 const stringValue = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
-const numberValue = (value: unknown): number | undefined => {
-  const num = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(num) ? num : undefined;
-};
-
 const stringArray = (value: unknown): string[] | undefined => {
   if (!Array.isArray(value)) return undefined;
   const items = value.map(stringValue).filter(Boolean);
   return items.length > 0 ? items : [];
-};
-
-const skillUsage = (value: unknown): SkillInfo["usage"] | undefined => {
-  if (!value || typeof value !== "object") return undefined;
-  const payload = value as Record<string, unknown>;
-  const usage = {
-    load_count: numberValue(payload.load_count),
-    reuse_count: numberValue(payload.reuse_count),
-    failure_count: numberValue(payload.failure_count),
-    unload_count: numberValue(payload.unload_count),
-    last_event: stringValue(payload.last_event) || undefined,
-    last_invoked_at: stringValue(payload.last_invoked_at) || undefined,
-  };
-  return Object.values(usage).some((item) => item !== undefined) ? usage : undefined;
 };
 
 export const normalizeSkillInfo = (skill: unknown): SkillInfo | null => {
@@ -31,15 +13,19 @@ export const normalizeSkillInfo = (skill: unknown): SkillInfo | null => {
   const payload = skill as Record<string, unknown>;
   const name = stringValue(payload.name);
   if (!name) return null;
+  const path = stringValue(payload.path);
+  const icon = stringValue(payload.icon);
+  const iconLarge = stringValue(payload.icon_large);
   return {
     name,
     description: stringValue(payload.description),
+    path: path || undefined,
     display_name: stringValue(payload.display_name) || undefined,
-    icon: stringValue(payload.icon) || undefined,
+    short_description: stringValue(payload.short_description) || undefined,
+    icon: icon && path ? skillAssetResourceUrlWithToken(path, "small") : undefined,
+    icon_large: iconLarge && path ? skillAssetResourceUrlWithToken(path, "large") : undefined,
+    brand_color: stringValue(payload.brand_color) || undefined,
     version: stringValue(payload.version) || undefined,
-    triggers: stringArray(payload.triggers),
-    tools_required: stringArray(payload.tools_required),
-    mcp_required: stringArray(payload.mcp_required),
     mcp_dependencies: stringArray(payload.mcp_dependencies),
     allow_implicit_invocation: typeof payload.allow_implicit_invocation === "boolean"
       ? payload.allow_implicit_invocation
@@ -47,7 +33,6 @@ export const normalizeSkillInfo = (skill: unknown): SkillInfo | null => {
     default_prompt: stringValue(payload.default_prompt) || undefined,
     source_level: stringValue(payload.source_level ?? payload.level) || undefined,
     active: Boolean(payload.active),
-    usage: skillUsage(payload.usage),
   };
 };
 
@@ -59,7 +44,7 @@ export const normalizeSkillList = (skills: unknown): SkillInfo[] => (
 
 const commandType = (value: unknown): SlashCommand["type"] => {
   const raw = stringValue(value);
-  if (raw === "template" || raw === "protocol" || raw === "local-jsx") return raw;
+  if (raw === "template" || raw === "protocol") return raw;
   return "local";
 };
 

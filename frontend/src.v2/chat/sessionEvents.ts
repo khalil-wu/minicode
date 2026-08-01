@@ -35,7 +35,9 @@ import { sendClientCommand } from "../protocol/ws-outbox";
 import { normalizeSkillList, normalizeSlashCommands } from "../lib/catalog-normalizers";
 import { selectableModelsForProvider } from "../lib/provider-models";
 import { normalizeContextLedger } from "./contextLedger";
-import { isAgentProgressPhase } from "../protocol/streaming-types";
+import {
+  isAgentProgressPhase,
+} from "../protocol/streaming-types";
 
 type ConversationSummary = ConversationSummaryPayload;
 type ConversationPayload = ConversationRecordPayload;
@@ -51,7 +53,6 @@ const setAvailableModelsForCurrentProvider = (
   models: string[] | undefined,
   currentModel: string,
   provider?: string,
-  baseUrl?: string,
   modelsSource?: string,
 ) => {
   if (!models) return;
@@ -60,7 +61,6 @@ const setAvailableModelsForCurrentProvider = (
     models,
     currentModel || state.currentModel,
     provider || state.currentProvider,
-    baseUrl || state.currentProviderBaseUrl,
     modelsSource ?? state.modelsSource,
   ));
   if (modelsSource !== undefined) {
@@ -70,14 +70,29 @@ const setAvailableModelsForCurrentProvider = (
 
 export const applyUserMessageQueueUpdate = (event: UserMessageQueueUpdatedEvent) => {
   const conversationId = event.conversation_id;
+  const steeredCurrentTurn = event.status === "dequeued" && (
+    event.turn_mode === "steer" || event.reason === "steered_current_turn"
+  );
   const updateMessages = (messages: ChatMessage[]): ChatMessage[] => {
+    const steerTargetMessageId = steeredCurrentTurn
+      ? event.target_message_id || messages.find((message) => (
+          message.role === "assistant"
+          && message.id !== event.message_id
+          && Boolean(message.isStreaming || message.isThinkingStreaming)
+        ))?.id
+      : undefined;
     const cancelledPosition = event.status === "cancelled"
       ? messages.find((message) => (
           message.id === event.user_message_id || message.queueMessageId === event.message_id
         ))?.queuePosition
       : undefined;
-    return messages
+    const updated = messages
     .filter((message) => {
+      if (steeredCurrentTurn && message.role === "assistant" && message.id === event.message_id) {
+        // A steer continues the already-streaming assistant turn. The queued
+        // assistant placeholder must not become a second streaming answer.
+        return false;
+      }
       if (event.status !== "cancelled") return true;
       const queuedUser = message.role === "user" && (
         message.id === event.user_message_id || message.queueMessageId === event.message_id
@@ -109,7 +124,10 @@ export const applyUserMessageQueueUpdate = (event: UserMessageQueueUpdatedEvent)
           ...message,
           queueState: undefined,
           queuePosition: undefined,
-          ...(isAssistant ? { isStreaming: true } : {}),
+          ...(isUser && steeredCurrentTurn
+            ? { steeredIntoMessageId: steerTargetMessageId }
+            : {}),
+          ...(isAssistant && !steeredCurrentTurn ? { isStreaming: true } : {}),
         };
       }
       return {
@@ -118,6 +136,25 @@ export const applyUserMessageQueueUpdate = (event: UserMessageQueueUpdatedEvent)
         queuePosition: undefined,
       };
     });
+    if (!steeredCurrentTurn || !steerTargetMessageId) return updated;
+    const steeredUserIndex = updated.findIndex((message) => (
+      message.role === "user"
+      && (message.id === event.user_message_id || message.queueMessageId === event.message_id)
+    ));
+    const targetAssistantIndex = updated.findIndex((message) => (
+      message.role === "assistant" && message.id === steerTargetMessageId
+    ));
+    if (steeredUserIndex < 0 || targetAssistantIndex < 0 || steeredUserIndex < targetAssistantIndex) {
+      return updated;
+    }
+    const reordered = [...updated];
+    const [steeredUser] = reordered.splice(steeredUserIndex, 1);
+    const insertBefore = reordered.findIndex((message) => (
+      message.role === "assistant" && message.id === steerTargetMessageId
+    ));
+    if (!steeredUser || insertBefore < 0) return updated;
+    reordered.splice(insertBefore, 0, steeredUser);
+    return reordered;
   };
 
   useAppStore.setState((state) => {
@@ -129,7 +166,7 @@ export const applyUserMessageQueueUpdate = (event: UserMessageQueueUpdatedEvent)
           [conversationId]: {
             ...thread,
             messages: updateMessages(thread.messages),
-            isStreaming: event.status === "dequeued" ? true : thread.isStreaming,
+            isStreaming: event.status === "dequeued" && !steeredCurrentTurn ? true : thread.isStreaming,
           },
         },
       };
@@ -138,7 +175,7 @@ export const applyUserMessageQueueUpdate = (event: UserMessageQueueUpdatedEvent)
     const isActive = conversationId === state.conversationId;
     const source = isActive ? state.messages : state.conversationMessages[conversationId] ?? [];
     const messages = updateMessages(source);
-    const streaming = event.status === "dequeued"
+    const streaming = event.status === "dequeued" && !steeredCurrentTurn
       ? true
       : messages.some((message) => message.isStreaming || message.isThinkingStreaming);
     const resetRunState = {
@@ -151,7 +188,7 @@ export const applyUserMessageQueueUpdate = (event: UserMessageQueueUpdatedEvent)
       ...(isActive ? {
         messages,
         isStreaming: streaming,
-        ...(event.status === "dequeued" ? resetRunState : {}),
+        ...(event.status === "dequeued" && !steeredCurrentTurn ? resetRunState : {}),
       } : {}),
       conversationMessages: {
         ...state.conversationMessages,
@@ -161,7 +198,7 @@ export const applyUserMessageQueueUpdate = (event: UserMessageQueueUpdatedEvent)
         ...state.conversationStreaming,
         [conversationId]: streaming,
       },
-      ...(event.status === "dequeued" ? {
+      ...(event.status === "dequeued" && !steeredCurrentTurn ? {
         conversationAgentStates: {
           ...state.conversationAgentStates,
           [conversationId]: resetRunState,
@@ -181,6 +218,12 @@ const toConversationMeta = (conversation: ConversationSummary) => ({
   worktreePath: maybeString(conversation.worktree_path),
   gitIsolated: conversation.git_isolated,
   goal: toConversationGoal(conversation.goal),
+  parentConversationId: maybeString(conversation.parent_conversation_id),
+  parentMessageIndex: typeof conversation.parent_message_index === "number" ? conversation.parent_message_index : undefined,
+  forkId: maybeString(conversation.fork_id),
+  branchKind: maybeString(conversation.branch_kind),
+  mergedIntoConversationId: maybeString(conversation.merged_into_conversation_id),
+  mergedAt: maybeString(conversation.merged_at),
 });
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -190,8 +233,8 @@ const PLAN_STATUSES = new Set<PlanState["status"]>(["draft", "accepted", "execut
 const PLAN_STEP_STATUSES = new Set<PlanState["steps"][number]["status"]>(["pending", "running", "done", "skipped", "failed"]);
 const TODO_STATUSES = new Set<TodoItem["status"]>(["pending", "in_progress", "completed", "blocked"]);
 const SUBAGENT_STATUSES = new Set<SubagentState["status"]>(["pending", "running", "blocked", "done", "partial", "cancelled", "error"]);
-const PROGRESS_STAGES = new Set<AgentProgressEntry["stage"]>(["status", "planning", "tool", "approval", "verification", "final"]);
-const PROGRESS_STATUSES = new Set<AgentProgressEntry["status"]>(["running", "completed", "failed", "info"]);
+const PROGRESS_STAGES = new Set<AgentProgressEntry["stage"]>(["status", "planning", "tool", "approval", "final"]);
+const PROGRESS_STATUSES = new Set<AgentProgressEntry["status"]>(["running", "completed", "partial", "failed", "info"]);
 
 const normalizePlanFromSnapshot = (value: unknown): PlanState | null => {
   if (!isRecord(value) || !Array.isArray(value.steps)) return null;
@@ -255,22 +298,28 @@ const normalizeSubagentsFromSnapshot = (value: unknown): SubagentState[] => {
           content: String(message.content ?? ""),
           createdAt: Number(message.createdAt ?? message.created_at ?? Date.now()),
           seq: typeof message.seq === "number" ? message.seq : undefined,
+          senderMailboxEpoch: typeof (message.senderMailboxEpoch ?? message.sender_mailbox_epoch) === "number"
+            ? Number(message.senderMailboxEpoch ?? message.sender_mailbox_epoch)
+            : undefined,
+          recipientMailboxEpoch: typeof (message.recipientMailboxEpoch ?? message.recipient_mailbox_epoch) === "number"
+            ? Number(message.recipientMailboxEpoch ?? message.recipient_mailbox_epoch)
+            : undefined,
           deliveryStatus: message.deliveryStatus === "sending" || message.deliveryStatus === "sent" || message.deliveryStatus === "failed"
             ? message.deliveryStatus as SubagentMessageState["deliveryStatus"]
             : undefined,
         })).filter((message) => Boolean(message.messageId) && Boolean(message.content))
         : undefined;
       const normalizeDelegatedText = (candidate: unknown): string | undefined => {
-        const text = maybeString(candidate as string | null | undefined);
-        if (!text || /^running\s+[a-z0-9_.:-]+$/i.test(text) || /^tool started\s*:/i.test(text)) {
-          return undefined;
-        }
-        return text;
+        return maybeString(candidate as string | null | undefined);
       };
       return {
         id: String(subagent.id ?? subagent.subagent_id ?? "").trim(),
         role: String(subagent.role ?? "subagent"),
         status: SUBAGENT_STATUSES.has(status) ? status : "running",
+        agentPath: maybeString((subagent.agentPath ?? subagent.agent_path) as string | null | undefined),
+        mailboxEpoch: typeof (subagent.mailboxEpoch ?? subagent.mailbox_epoch) === "number"
+          ? Number(subagent.mailboxEpoch ?? subagent.mailbox_epoch)
+          : undefined,
         summary: normalizeDelegatedText(subagent.summary),
         parentRunId: maybeString((subagent.parentRunId ?? subagent.parent_run_id) as string | null | undefined),
         iteration: typeof subagent.iteration === "number" ? subagent.iteration : undefined,
@@ -281,9 +330,6 @@ const normalizeSubagentsFromSnapshot = (value: unknown): SubagentState[] => {
             : undefined,
         currentTool: maybeString((subagent.currentTool ?? subagent.tool_name) as string | null | undefined),
         detail: normalizeDelegatedText(subagent.detail),
-        workflowId: maybeString((subagent.workflowId ?? subagent.workflow_id) as string | null | undefined),
-        workflowName: maybeString((subagent.workflowName ?? subagent.workflow_name) as string | null | undefined),
-        workflowMode: maybeString((subagent.workflowMode ?? subagent.workflow_mode) as string | null | undefined),
         nodeId: maybeString((subagent.nodeId ?? subagent.node_id) as string | null | undefined),
         taskId: maybeString((subagent.taskId ?? subagent.task_id) as string | null | undefined),
         dependsOn: stringList(subagent.dependsOn ?? subagent.depends_on),
@@ -291,9 +337,7 @@ const normalizeSubagentsFromSnapshot = (value: unknown): SubagentState[] => {
         objective: maybeString(subagent.objective as string | null | undefined),
         currentActivity: normalizeDelegatedText(subagent.currentActivity ?? subagent.current_activity),
         waitingOn: maybeString((subagent.waitingOn ?? subagent.waiting_on) as string | null | undefined),
-        blocksFinalReply: typeof (subagent.blocksFinalReply ?? subagent.blocks_final_reply) === "boolean"
-          ? Boolean(subagent.blocksFinalReply ?? subagent.blocks_final_reply)
-          : undefined,
+        background: typeof subagent.background === "boolean" ? subagent.background : undefined,
         resultAvailable: typeof (subagent.resultAvailable ?? subagent.result_available) === "boolean"
           ? Boolean(subagent.resultAvailable ?? subagent.result_available)
           : undefined,
@@ -337,11 +381,6 @@ const normalizeAgentProgressFromSnapshot = (value: unknown, conversationId: stri
         stepId: maybeString((progress.stepId ?? progress.step_id) as string | null | undefined),
         count: typeof progress.count === "number" ? progress.count : undefined,
         iterationId: maybeString((progress.iterationId ?? progress.iteration_id) as string | null | undefined),
-        displayScope: maybeString((progress.displayScope ?? progress.display_scope) as string | null | undefined),
-        panelHint: maybeString((progress.panelHint ?? progress.panel_hint) as string | null | undefined),
-        requiresAttention: typeof (progress.requiresAttention ?? progress.requires_attention) === "boolean"
-          ? Boolean(progress.requiresAttention ?? progress.requires_attention)
-          : undefined,
         timestamp: typeof progress.timestamp === "number" ? progress.timestamp : Date.now(),
         conversationId: maybeString(progress.conversationId as string | null | undefined) ?? conversationId,
       };
@@ -436,11 +475,228 @@ const fallbackVisibleConversationId = (
 const upsertConversationMeta = (conversation: ConversationSummary) => {
   useAppStore.setState((state) => {
     const meta = toConversationMeta(conversation);
+    const existingIndex = state.conversations.findIndex((item) => item.id === meta.id);
+    if (existingIndex >= 0) {
+      const conversations = [...state.conversations];
+      conversations[existingIndex] = meta;
+      return { conversations };
+    }
     return {
-      conversations: [
-        meta,
-        ...state.conversations.filter((item) => item.id !== meta.id),
-      ],
+      conversations: [meta, ...state.conversations],
+    };
+  });
+};
+
+const applyQueuedUserMessageSnapshot = (
+  entries: RuntimeSessionSnapshot["queued_user_messages"],
+) => {
+  if (!Array.isArray(entries) || entries.length === 0) return;
+  useAppStore.setState((state) => {
+    const conversationMessages = { ...state.conversationMessages };
+    let activeMessages = state.messages;
+    for (const entry of entries) {
+      const conversationId = String(entry?.conversation_id || "").trim();
+      const messageId = String(entry?.message_id || "").trim();
+      if (!conversationId || !messageId) continue;
+      const userMessageId = String(entry.user_message_id || `user_${messageId}`).trim();
+      const position = typeof entry.position === "number" ? entry.position : undefined;
+      const content = String(entry.content || "");
+      const current = conversationMessages[conversationId] ? [...conversationMessages[conversationId]] : [];
+      const userIndex = current.findIndex((message) => message.id === userMessageId || message.queueMessageId === messageId);
+      const assistantIndex = current.findIndex((message) => message.id === messageId);
+      const timestamp = Date.now();
+      if (userIndex >= 0) {
+        current[userIndex] = {
+          ...current[userIndex],
+          queueState: "queued",
+          queuePosition: position,
+          queueMessageId: messageId,
+        };
+      } else {
+        current.push({
+          id: userMessageId,
+          role: "user",
+          content,
+          artifacts: [],
+          timestamp,
+          queueState: "queued",
+          queuePosition: position,
+          queueMessageId: messageId,
+        });
+      }
+      if (assistantIndex >= 0) {
+        current[assistantIndex] = {
+          ...current[assistantIndex],
+          queueState: "queued",
+          queuePosition: position,
+          queueMessageId: messageId,
+          isStreaming: false,
+          isThinkingStreaming: false,
+        };
+      } else {
+        current.push({
+          id: messageId,
+          role: "assistant",
+          content: "",
+          artifacts: [],
+          timestamp,
+          queueState: "queued",
+          queuePosition: position,
+          queueMessageId: messageId,
+          isStreaming: false,
+        });
+      }
+      conversationMessages[conversationId] = current;
+      if (state.conversationId === conversationId) activeMessages = current;
+    }
+    return { conversationMessages, messages: activeMessages };
+  });
+};
+
+const attachmentRefsFromRuntimeInput = (
+  attachments: Record<string, unknown>[] | undefined,
+): NonNullable<ChatMessage["attachmentRefs"]> => {
+  if (!Array.isArray(attachments)) return [];
+  return attachments.flatMap((attachment) => {
+    const name = String(attachment.file_name ?? attachment.name ?? "").trim();
+    const artifactId = String(attachment.artifact_id ?? attachment.artifactId ?? "").trim();
+    if (!name || !artifactId) return [];
+    const mediaType = String(attachment.media_type ?? attachment.mediaType ?? "application/octet-stream");
+    const rawKind = String(attachment.kind ?? (mediaType.startsWith("image/") ? "image" : "document"));
+    return [{
+      id: String(attachment.id ?? artifactId),
+      name,
+      kind: rawKind === "image" ? "image" as const : rawKind === "document" ? "document" as const : "file" as const,
+      mediaType,
+      sizeBytes: Number(attachment.size_bytes ?? attachment.sizeBytes ?? 0),
+      artifactId,
+      docId: String(attachment.doc_id ?? attachment.docId ?? ""),
+      inputSource: attachment.input_source === "pasted_text" || attachment.inputSource === "pasted_text"
+        ? "pasted_text" as const
+        : "upload" as const,
+    }];
+  });
+};
+
+const applyPendingTurnInputSnapshot = (
+  entries: RuntimeSessionSnapshot["pending_turn_inputs"],
+) => {
+  if (!Array.isArray(entries) || entries.length === 0) return;
+  useAppStore.setState((state) => {
+    const conversationMessages = { ...state.conversationMessages };
+    let activeMessages = state.messages;
+    for (const entry of entries) {
+      if (entry?.mode !== "steer") continue;
+      const conversationId = String(entry.conversation_id || "").trim();
+      const messageId = String(entry.message_id || "").trim();
+      const userMessageId = String(entry.user_message_id || `user_${messageId}`).trim();
+      const targetMessageId = String(entry.target_message_id || "").trim();
+      if (!conversationId || !messageId || !userMessageId) continue;
+      const current = conversationMessages[conversationId]
+        ? [...conversationMessages[conversationId]]
+        : state.conversationId === conversationId
+          ? [...state.messages]
+          : [];
+      const withoutPlaceholder = current.filter((message) => !(
+        message.role === "assistant" && message.id === messageId
+      ));
+      const existingUserIndex = withoutPlaceholder.findIndex((message) => (
+        message.role === "user"
+        && (message.id === userMessageId || message.queueMessageId === messageId)
+      ));
+      const attachmentRefs = attachmentRefsFromRuntimeInput(entry.attachments);
+      const restoredUser: ChatMessage = existingUserIndex >= 0
+        ? {
+            ...withoutPlaceholder[existingUserIndex]!,
+            queueState: undefined,
+            queuePosition: undefined,
+            queueMessageId: messageId,
+            steeredIntoMessageId: targetMessageId || undefined,
+            ...(attachmentRefs.length ? { attachmentRefs } : {}),
+          }
+        : {
+            id: userMessageId,
+            role: "user",
+            content: String(entry.content || ""),
+            attachmentRefs,
+            artifacts: [],
+            timestamp: Number(entry.queued_at_ms || Date.now()),
+            queueMessageId: messageId,
+            steeredIntoMessageId: targetMessageId || undefined,
+          };
+      if (existingUserIndex >= 0) withoutPlaceholder.splice(existingUserIndex, 1);
+      const targetIndex = targetMessageId
+        ? withoutPlaceholder.findIndex((message) => message.role === "assistant" && message.id === targetMessageId)
+        : -1;
+      if (targetIndex >= 0) withoutPlaceholder.splice(targetIndex, 0, restoredUser);
+      else withoutPlaceholder.push(restoredUser);
+      conversationMessages[conversationId] = withoutPlaceholder;
+      if (state.conversationId === conversationId) activeMessages = withoutPlaceholder;
+    }
+    return { conversationMessages, messages: activeMessages };
+  });
+};
+
+const applyActiveStreamSnapshot = (session: RuntimeSessionSnapshot) => {
+  const activeStreamIds = Array.isArray(session.active_stream_conversation_ids)
+    ? session.active_stream_conversation_ids.map((id) => String(id || "").trim()).filter(Boolean)
+    : [];
+  if (activeStreamIds.length === 0) return;
+  const activeStreamSet = new Set(activeStreamIds);
+  const steerTargets = new Map<string, Set<string>>();
+  for (const entry of session.pending_turn_inputs ?? []) {
+    const conversationId = String(entry?.conversation_id || "").trim();
+    const targetMessageId = String(entry?.target_message_id || "").trim();
+    if (!conversationId || !targetMessageId) continue;
+    const targets = steerTargets.get(conversationId) ?? new Set<string>();
+    targets.add(targetMessageId);
+    steerTargets.set(conversationId, targets);
+  }
+
+  const markStreamingAssistant = (messages: ChatMessage[], conversationId: string): ChatMessage[] => {
+    const targets = steerTargets.get(conversationId);
+    let fallbackIndex = -1;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index]?.role === "assistant") {
+        fallbackIndex = index;
+        break;
+      }
+    }
+    return messages.map((message, index) => (
+      message.role === "assistant"
+      && ((targets?.has(message.id) ?? false) || (!targets?.size && index === fallbackIndex))
+        ? { ...message, isStreaming: true }
+        : message
+    ));
+  };
+
+  useAppStore.setState((state) => {
+    const conversationMessages = { ...state.conversationMessages };
+    const conversationStreaming = { ...state.conversationStreaming };
+    const sideChats = { ...state.sideChats };
+    let activeMessages = state.messages;
+    for (const conversationId of activeStreamIds) {
+      conversationStreaming[conversationId] = true;
+      if (sideChats[conversationId]) {
+        sideChats[conversationId] = {
+          ...sideChats[conversationId],
+          isStreaming: true,
+          messages: markStreamingAssistant(sideChats[conversationId].messages, conversationId),
+        };
+        continue;
+      }
+      const source = conversationMessages[conversationId]
+        ?? (state.conversationId === conversationId ? state.messages : []);
+      const messages = markStreamingAssistant(source, conversationId);
+      conversationMessages[conversationId] = messages;
+      if (state.conversationId === conversationId) activeMessages = messages;
+    }
+    return {
+      conversationMessages,
+      conversationStreaming,
+      sideChats,
+      messages: activeMessages,
+      ...(state.conversationId && activeStreamSet.has(state.conversationId) ? { isStreaming: true } : {}),
     };
   });
 };
@@ -545,6 +801,9 @@ const clearActiveConversationView = () => {
 const applyRuntimeSessionSnapshot = (session: RuntimeSessionSnapshot | undefined | null) => {
   if (!session) return;
   useAppStore.getState().setRuntimeSession(session);
+  applyQueuedUserMessageSnapshot(session.queued_user_messages);
+  applyPendingTurnInputSnapshot(session.pending_turn_inputs);
+  applyActiveStreamSnapshot(session);
   if (session.permission_mode) {
     useAppStore.setState({ permissionMode: fromBackendPermissionMode(session.permission_mode) });
   }
@@ -581,7 +840,7 @@ export const handleSessionEvent = (
         baseUrl: stringValue(ev.base_url),
         wireApi: stringValue(ev.wire_api),
       });
-            setAvailableModelsForCurrentProvider(ev.available_models, model, maybeString(ev.provider), stringValue(ev.base_url), maybeString(ev.models_source));
+            setAvailableModelsForCurrentProvider(ev.available_models, model, maybeString(ev.provider), maybeString(ev.models_source));
       const workingDirectory = maybeString(ev.working_directory);
       if (workingDirectory && !activeConversationWorkspace()) {
         s.setWorkingDirectory(workingDirectory);
@@ -634,7 +893,7 @@ export const handleSessionEvent = (
         wireApi: stringValue(ev.wire_api),
       });
       if (workspaceRoot && !switchEventWillHydrate) s.setWorkingDirectory(workspaceRoot);
-            setAvailableModelsForCurrentProvider(ev.available_models, model, provider, stringValue(ev.base_url), maybeString(ev.models_source));
+            setAvailableModelsForCurrentProvider(ev.available_models, model, provider, maybeString(ev.models_source));
       if (activeConversationIsArchived) {
         clearActiveConversationView();
       } else if (switchEventWillHydrate) {
@@ -652,6 +911,12 @@ export const handleSessionEvent = (
       }
       if (ev.type === "session.restored" && ev.missed_events) {
         pushToast("Connection was lost during an active run; some events may be missing.", "warning", 8000);
+        // Replay has a bounded server window. Re-fetch the durable transcript
+        // before accepting more deltas so timeline/tool cards cannot remain
+        // silently absent after a long disconnect.
+        if (activeConversationId) {
+          sendClientCommand({ type: "conversation.switch", conversation_id: activeConversationId });
+        }
       }
       return true;
     }

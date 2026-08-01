@@ -86,76 +86,23 @@ export type RuntimeSlashPanelDraftDeps = {
   sendClientCommand: SendClientCommand;
 };
 
-export const FALLBACK_RUNTIME_SLASH_COMMANDS: RuntimeSlashMenuItem[] = [
-  { name: "/plan", description: "Enable plan mode", section: "Project", keywords: ["design", "readonly", "proposal"] },
-  { name: "/review", description: "Review code changes", section: "Review", keywords: ["diff", "pr", "quality"] },
-  { name: "/debug", description: "Debug the current issue", section: "Review", keywords: ["bug", "failure", "diagnose"] },
-  { name: "/refactor", description: "Refactor safely", section: "Review", keywords: ["cleanup", "rewrite"] },
-  { name: "/test", description: "Add or update tests", section: "Review", keywords: ["verify", "coverage"] },
-  { name: "/docs", description: "Write developer docs", section: "Review", keywords: ["readme", "documentation"] },
-  { name: "/explain", description: "Explain code paths", section: "Review", keywords: ["understand", "trace"] },
-  { name: "/commit", description: "Prepare a commit summary", section: "Project", keywords: ["git", "changes"] },
-  { name: "/skills", description: "Browse skills", section: "Skills", keywords: ["capabilities", "workflow"] },
-  { name: "/model", description: "Choose or inspect the active model", section: "System", keywords: ["provider", "gpt", "reasoning"] },
-  { name: "/mcp", description: "Show MCP servers and tools", section: "Tools", keywords: ["connectors", "tools", "servers"] },
-  { name: "/permissions", description: "Inspect or change permissions", section: "System", keywords: ["sandbox", "approval", "access"] },
-  { name: "/effort", description: "Set reasoning effort", section: "System", keywords: ["model", "thinking"] },
-  { name: "/goal", description: "Set or manage the thread goal", section: "Project", keywords: ["objective", "task", "long running"] },
-  { name: "/new", description: "Start a new conversation", section: "Project", keywords: ["thread", "session"] },
-  { name: "/clear", description: "Clear conversation", section: "Project", keywords: ["reset", "messages"] },
-  { name: "/compact", description: "Compact context", section: "Context", keywords: ["summary", "compress"] },
-  { name: "/summary", description: "Show or update the task summary", section: "Context", keywords: ["recap", "handoff", "transcript"] },
-  { name: "/memory", description: "Set memory mode", section: "Context", keywords: ["remember", "preferences"] },
-  { name: "/archive", description: "Archive conversation", section: "Project", keywords: ["thread", "hide"] },
-  { name: "/unarchive", description: "Unarchive conversation", section: "Project", keywords: ["thread", "restore"] },
-  { name: "/tasks", description: "Show running tasks", section: "Tools", keywords: ["background", "jobs"] },
-  { name: "/terminal", description: "Inspect terminal sessions and output", section: "Tools", keywords: ["shell", "logs", "build", "tests"] },
-  { name: "/browser", description: "Open or inspect the browser preview", section: "Tools", keywords: ["preview", "web", "app"] },
-  { name: "/worktree", description: "Inspect or manage worktree isolation", section: "Workspace", keywords: ["branch", "git", "isolation"] },
-  { name: "/automation", description: "Create or inspect thread automations", section: "Tools", keywords: ["schedule", "monitor", "wake"] },
-  { name: "/status", description: "Show runtime status", section: "System", keywords: ["health", "agent"] },
-  { name: "/usage", description: "Show token, context, and cost usage", section: "Context", keywords: ["tokens", "budget"] },
-  { name: "/context", description: "Show context token budget", section: "Context", keywords: ["tokens", "window"] },
-  { name: "/cost", description: "Show session cost breakdown", section: "Context", keywords: ["usage", "spend"] },
-  { name: "/init", description: "Generate a CLAUDE.md for this project", section: "Project", keywords: ["instructions", "repo"] },
-  { name: "/help", description: "Show slash command help", section: "System", keywords: ["commands", "shortcuts"] },
-];
-
-const SLASH_MENU_ORDER = FALLBACK_RUNTIME_SLASH_COMMANDS.map((item) => item.name);
-const FALLBACK_MENU_DESCRIPTION = new Map(
-  FALLBACK_RUNTIME_SLASH_COMMANDS.map((item) => [item.name, item.description]),
-);
-const FALLBACK_MENU_METADATA = new Map(
-  FALLBACK_RUNTIME_SLASH_COMMANDS.map((item) => [item.name, item]),
-);
-
 const result = (sent: boolean, reset: RuntimeSlashCommandResult["reset"]): RuntimeSlashCommandResult => ({
   sent,
   reset,
 });
 
 export const buildRuntimeSlashMenuItems = (slashCommands: SlashCommand[]): RuntimeSlashMenuItem[] => {
-  const rawItems = slashCommands.length > 0
-    ? slashCommands.map((command) => {
-        const name = command.label?.startsWith("/") ? command.label : `/${command.command}`;
-        const fallback = FALLBACK_MENU_METADATA.get(name);
-        return {
-          name,
-          description: command.description || fallback?.description || FALLBACK_MENU_DESCRIPTION.get(name) || "",
-          section: fallback?.section ?? "Commands",
-          keywords: fallback?.keywords,
-        };
-      })
-    : FALLBACK_RUNTIME_SLASH_COMMANDS;
-
-  return rawItems
-    .filter((item, index, list) => list.findIndex((other) => other.name === item.name) === index)
-    .sort((a, b) => {
-      const ai = SLASH_MENU_ORDER.indexOf(a.name);
-      const bi = SLASH_MENU_ORDER.indexOf(b.name);
-      if (ai !== -1 || bi !== -1) return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
-      return a.name.localeCompare(b.name);
-    });
+  const seen = new Set<string>();
+  return slashCommands.flatMap((command) => {
+    const name = command.label?.startsWith("/") ? command.label : `/${command.command}`;
+    if (seen.has(name)) return [];
+    seen.add(name);
+    return [{
+      name,
+      description: command.description || "",
+      section: "Commands" as const,
+    }];
+  });
 };
 
 /**
@@ -269,8 +216,7 @@ export const shouldTokenizeRuntimeSlashCommand = (
     item.name.toLowerCase() === normalized ||
     item.label.toLowerCase() === `/${normalized}`
   );
-  if (match) return match.type === "template";
-  return new Set(["review", "debug", "refactor", "test", "docs", "explain", "commit"]).has(normalized);
+  return match?.type === "template";
 };
 
 const isSkillsSlashLine = (commandLine: string): boolean => /^\/skills(?:\s|$)/i.test(commandLine);
@@ -283,7 +229,6 @@ export const syncRuntimeSlashPanelForDraft = (
   if (slashCommandLine && !deps.slashPanelOpen) {
     deps.openSlashPanel();
     deps.setMenuFilter(slashCommandLine);
-    deps.sendClientCommand({ type: "skills.list" });
     if (isSkillsSlashLine(slashCommandLine)) {
       deps.sendClientCommand({ type: "skills.list" });
     }
@@ -293,9 +238,6 @@ export const syncRuntimeSlashPanelForDraft = (
   if (deps.slashPanelOpen) {
     if (slashCommandLine) {
       deps.setMenuFilter(slashCommandLine);
-      if (isSkillsSlashLine(slashCommandLine)) {
-        deps.sendClientCommand({ type: "skills.list" });
-      }
       return true;
     }
 
@@ -304,17 +246,6 @@ export const syncRuntimeSlashPanelForDraft = (
   }
 
   return false;
-};
-
-const findRuntimeSkill = (skills: SkillInfo[] | undefined, query: string): SkillInfo | null => {
-  const normalized = query.trim().toLowerCase();
-  if (!normalized) return null;
-  const items = skills ?? [];
-  return (
-    items.find((skill) => skill.name.toLowerCase() === normalized) ??
-    items.find((skill) => skill.name.toLowerCase().includes(normalized)) ??
-    null
-  );
 };
 
 const findExactRuntimeSkill = (skills: SkillInfo[] | undefined, query: string): SkillInfo | null => {
@@ -329,6 +260,27 @@ export const resolveRuntimeSlashMenuSelection = (
 ): RuntimeSlashMenuSelection => {
   if (!value) return { kind: "close" };
 
+  const encodedSkillPath = value.match(/^skill-path:(.+)$/)?.[1];
+  const encodedSkillName = value.match(/^skill-name:(.+)$/)?.[1];
+  if (encodedSkillPath || encodedSkillName) {
+    const skillPath = encodedSkillPath ? decodeURIComponent(encodedSkillPath) : "";
+    const skillName = encodedSkillName ? decodeURIComponent(encodedSkillName) : "";
+    const selected = (state.availableSkills ?? []).find((skill) => (
+      skillPath ? skill.path === skillPath : skill.name === skillName
+    ));
+    if (selected) {
+      return {
+        kind: "skill",
+        skill: {
+          name: selected.name,
+          path: selected.path,
+          description: selected.description,
+          sourceLevel: selected.source_level,
+        },
+      };
+    }
+  }
+
   const command = value.match(/^(\/[a-z][\w-]*)/i)?.[1] ?? value;
   const commandName = command.replace(/^\//, "").toLowerCase();
   const skill = findExactRuntimeSkill(state.availableSkills, commandName);
@@ -337,6 +289,7 @@ export const resolveRuntimeSlashMenuSelection = (
       kind: "skill",
       skill: {
         name: skill.name,
+        path: skill.path,
         description: skill.description,
         sourceLevel: skill.source_level,
       },
@@ -354,86 +307,6 @@ export const executeRuntimeSlashCommand = async (
   commandLine: string,
   deps: RuntimeSlashCommandDeps,
 ): Promise<RuntimeSlashCommandResult> => {
-  const [cmdRaw, ...restParts] = commandLine.trim().split(/\s+/);
-  const cmd = cmdRaw.toLowerCase();
-  const rest = restParts.join(" ");
-
-  if (cmd === "/plan") {
-    const state = deps.getState();
-    const enteringPlan = state.permissionMode !== "plan" || state.agentMode !== "plan";
-    if (enteringPlan) {
-      state.setAgentMode?.("plan");
-      state.setPermissionMode?.("plan");
-      state.upsertSystemMessage?.(
-        "system-plan-mode-status",
-        "Plan mode enabled. The agent will inspect and propose a plan before making changes.",
-        { replacePrefix: "Plan mode" },
-      );
-    } else if (!rest) {
-      state.upsertSystemMessage?.(
-        "system-plan-mode-status",
-        "Already in plan mode.",
-        { replacePrefix: "Plan mode" },
-      );
-    }
-    if (rest && rest.toLowerCase() !== "open") {
-      const sent = await deps.sendUserMessage?.(rest);
-      return result(Boolean(sent), sent ? "composer" : "none");
-    }
-    return result(true, "input");
-  }
-
-  const skill = findRuntimeSkill(deps.getState().availableSkills, cmd.replace(/^\//, ""));
-  if (skill) {
-    deps.getState().addSelectedSkill?.({
-      name: skill.name,
-      description: skill.description,
-      sourceLevel: skill.source_level,
-    });
-    deps.sendClientCommand({ type: "load_skill", skill_name: skill.name });
-    if (rest) {
-      const sent = await deps.sendUserMessage?.(rest);
-      return result(Boolean(sent), sent ? "composer" : "none");
-    }
-    return result(true, "input");
-  }
-
-  if (cmd === "/clear") {
-    const ok = await deps.confirmClear();
-    if (!ok) return result(false, "none");
-    const state = deps.getState();
-    if (state.conversationId) {
-      deps.sendClientCommand({ type: "conversation.clear", conversation_id: state.conversationId });
-      state.hydrateConversationMessages?.(state.conversationId, [], { activate: true, isStreaming: false });
-    } else {
-      deps.setState({ messages: [], isStreaming: false });
-    }
-    return result(true, "input");
-  }
-
-  if (cmd === "/skills" && !rest) {
-    const state = deps.getState();
-    if (!state.skillsMarketplaceOpen) state.toggleSkillsMarketplace?.();
-    deps.sendClientCommand({ type: "skills.list" });
-    deps.sendClientCommand({ type: "skills.marketplace.list" });
-    return result(true, "input");
-  }
-
-  if ((cmd === "/automation" || cmd === "/automations") && !rest) {
-    const state = deps.getState();
-    if (!state.automationsOpen) state.toggleAutomations?.();
-    deps.sendClientCommand({ type: "scheduler.list" });
-    return result(true, "input");
-  }
-
-  if (cmd === "/compact") {
-    deps.getState().upsertSystemMessage?.(
-      "system-compact-status",
-      "Compacting context...",
-      { replacePrefix: "Context compact" },
-    );
-  }
-
   const sent = await deps.sendChatMessage({
     displayContent: commandLine,
     backendContent: commandLine,

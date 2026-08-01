@@ -3,7 +3,12 @@ import { useAppStore } from "../stores";
 import { wsProtocols, wsUrl } from "../protocol/api";
 import type { ClientCommand, ServerEvent } from "../protocol/events";
 import { normalizeInboundServerEvent } from "../protocol/server-event-validation";
-import { registerWebSocketSender } from "../protocol/ws-outbox";
+import {
+  commandWithClientCommandId,
+  rejectClientCommandResult,
+  registerWebSocketSender,
+} from "../protocol/ws-outbox";
+export { commandWithClientCommandId } from "../protocol/ws-outbox";
 import { pushToast } from "../overlays/ToastContainer";
 import { handleChatStreamEvent } from "../chat/chatStreamEvents";
 import { handleRuntimeEvent } from "../chat/runtimeEvents";
@@ -19,15 +24,17 @@ import { handleNoticeEvent } from "../chat/noticeEvents";
 import { createStreamBuffer } from "../lib/stream-buffer";
 import { LS, readLS } from "../stores/shared-helpers";
 
-const RECONNECT_BASE_MS = 500;
-const RECONNECT_MAX_MS = 8000;
-const RECONNECT_STABLE_MS = 5000;
-const QUEUE_STALE_MS = 10_000;
-const QUEUE_MAX_AGE_MS = 60_000;
-const COMMAND_ACK_TIMEOUT_MS = 5000;
-const COMMAND_COALESCE_DELAY_MS = 50;
-const PING_INTERVAL_MS = 30_000;
-const INBOUND_PROBE_DEADLINE_MS = 60_000;
+// Transport policy follows Claude Code's WebSocket transport: reconnects are
+// bounded by a total budget, use bounded jitter, and heartbeat liveness is
+// decided by the matching pong rather than arbitrary inbound traffic.
+const RECONNECT_BASE_MS = 1_000;
+const RECONNECT_MAX_MS = 30_000;
+const RECONNECT_BUDGET_MS = 600_000;
+const RECONNECT_JITTER_FACTOR = 0.25;
+const PING_INTERVAL_MS = 10_000;
+const PONG_TIMEOUT_MS = 60_000;
+const MAX_BUFFERED_CLIENT_COMMANDS = 1_000;
+const PERMANENT_CLOSE_CODES = new Set([1002, 4001, 4003]);
 
 export interface QueuedCommand {
   cmd: ClientCommand;
@@ -39,7 +46,6 @@ export const isTimeSensitiveCommand = (cmd: ClientCommand): boolean =>
   || cmd.type === "answer"
   || cmd.type === "control_response"
   || cmd.type === "control_cancel_request"
-  || cmd.type === "approval.respond"
   || cmd.type === "interrupt";
 
 export const coalescingKeyForClientCommand = (cmd: ClientCommand): string => {
@@ -90,27 +96,13 @@ export const isQueueableWhenOffline = (cmd: ClientCommand): boolean => {
 
 export const shouldReplayQueuedCommand = (
   queued: QueuedCommand,
-  now: number = Date.now(),
+  _now: number = Date.now(),
 ): boolean => {
-  const age = now - queued.queuedAt;
-  if (queued.cmd.type === "user_message") return true;
-  if (age > QUEUE_MAX_AGE_MS) return false;
-  if (isTimeSensitiveCommand(queued.cmd) && age > QUEUE_STALE_MS) return false;
+  // A client command is durable once it has an id.  The server owns
+  // de-duplication and ordering, so the browser must never discard a command
+  // merely because a reconnect took longer than an invented local TTL.
+  void queued;
   return true;
-};
-
-const createClientCommandId = (): string => {
-  const randomPart = typeof crypto.randomUUID === "function"
-    ? crypto.randomUUID().replace(/-/g, "")
-    : `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
-  return `cmd_${randomPart}`;
-};
-
-export const commandWithClientCommandId = (cmd: ClientCommand): ClientCommand => {
-  if (typeof cmd.client_command_id === "string" && cmd.client_command_id) {
-    return cmd;
-  }
-  return { ...cmd, client_command_id: createClientCommandId() };
 };
 
 export interface WebSocketHandle {
@@ -170,7 +162,6 @@ const browserSessionId = (() => {
   return created;
 })();
 const RECENT_INBOUND_EVENT_IDS_MAX = 1024;
-const PENDING_CLIENT_COMMAND_ACK_IDS_MAX = 512;
 const NON_REPLAYABLE_CURSOR_EVENT_TYPES = new Set<string>([
   "conversation.list",
   "conversation.switched",
@@ -186,7 +177,7 @@ const NON_REPLAYABLE_CURSOR_EVENT_TYPES = new Set<string>([
 const recentInboundEventIds: string[] = [];
 const recentInboundEventIdSet = new Set<string>();
 const pendingClientCommandAckIdQueue: string[] = [];
-const pendingClientCommandAcks = new Map<string, ReturnType<typeof setTimeout> | null>();
+const pendingClientCommands = new Map<string, ClientCommand>();
 let lastReceivedServerSeq = 0;
 
 export const getWebSocket = (): WebSocketHandle | null => singleton;
@@ -207,20 +198,24 @@ export const shouldAdvanceReplayCursor = (event: ServerEvent): boolean => {
 };
 
 export const shouldProcessInboundEvent = (event: ServerEvent): boolean => {
+  const eventId = event.event_id;
+  if (typeof eventId !== "string" || !eventId) return true;
+  return !recentInboundEventIdSet.has(eventId);
+};
+
+export const commitProcessedInboundEvent = (event: ServerEvent): void => {
   const seq = Number((event as { seq?: unknown }).seq);
   if (shouldAdvanceReplayCursor(event) && Number.isFinite(seq) && seq > lastReceivedServerSeq) {
     lastReceivedServerSeq = seq;
   }
   const eventId = event.event_id;
-  if (typeof eventId !== "string" || !eventId) return true;
-  if (recentInboundEventIdSet.has(eventId)) return false;
+  if (typeof eventId !== "string" || !eventId || recentInboundEventIdSet.has(eventId)) return;
   recentInboundEventIdSet.add(eventId);
   recentInboundEventIds.push(eventId);
   while (recentInboundEventIds.length > RECENT_INBOUND_EVENT_IDS_MAX) {
     const removed = recentInboundEventIds.shift();
     if (removed) recentInboundEventIdSet.delete(removed);
   }
-  return true;
 };
 
 export const eventsFromSessionReplay = (event: ServerEvent): ServerEvent[] => {
@@ -236,57 +231,58 @@ export const eventsFromSessionReplay = (event: ServerEvent): ServerEvent[] => {
 };
 
 export const resetPendingClientCommandAcksForTests = () => {
-  for (const timeoutId of pendingClientCommandAcks.values()) {
-    if (timeoutId) clearTimeout(timeoutId);
-  }
   pendingClientCommandAckIdQueue.length = 0;
-  pendingClientCommandAcks.clear();
+  pendingClientCommands.clear();
 };
 
 export const getPendingClientCommandAckIdsForTests = (): string[] =>
-  Array.from(pendingClientCommandAcks.keys());
+  pendingClientCommandAckIdQueue.filter((id) => pendingClientCommands.has(id));
 
-const shouldWarnOnMissingCommandAck = (cmd: ClientCommand): boolean =>
-  isTimeSensitiveCommand(cmd)
-  || cmd.type === "user_message"
-  || cmd.type === "interrupt";
+const pendingClientCommandPayloads = (): ClientCommand[] =>
+  pendingClientCommandAckIdQueue
+    .map((id) => pendingClientCommands.get(id))
+    .filter((cmd): cmd is ClientCommand => Boolean(cmd));
+
+const hasPendingClientCommand = (clientCommandId: string): boolean =>
+  pendingClientCommands.has(clientCommandId);
+
+export const getPendingClientCommandCountForTests = (): number => pendingClientCommands.size;
 
 export const shouldTrackClientCommandAck = (cmd: ClientCommand): boolean =>
   cmd.type !== "ping";
 
 const clearPendingClientCommandAck = (clientCommandId: string) => {
-  const timeoutId = pendingClientCommandAcks.get(clientCommandId);
-  if (timeoutId) clearTimeout(timeoutId);
-  pendingClientCommandAcks.delete(clientCommandId);
+  pendingClientCommands.delete(clientCommandId);
+  const index = pendingClientCommandAckIdQueue.indexOf(clientCommandId);
+  if (index >= 0) pendingClientCommandAckIdQueue.splice(index, 1);
 };
 
 export const trackPendingClientCommandAck = (cmd: ClientCommand) => {
   if (!shouldTrackClientCommandAck(cmd)) return;
   if (typeof cmd.client_command_id !== "string" || !cmd.client_command_id) return;
-  clearPendingClientCommandAck(cmd.client_command_id);
-  const timeoutId = shouldWarnOnMissingCommandAck(cmd)
-    ? setTimeout(() => {
-        pendingClientCommandAcks.delete(cmd.client_command_id as string);
-        pushToast(
-          "Command delivery was not confirmed. Check the connection before retrying.",
-          "warning",
-          5000,
-        );
-      }, COMMAND_ACK_TIMEOUT_MS)
-    : null;
-  pendingClientCommandAcks.set(cmd.client_command_id, timeoutId);
-  pendingClientCommandAckIdQueue.push(cmd.client_command_id);
-  while (pendingClientCommandAckIdQueue.length > PENDING_CLIENT_COMMAND_ACK_IDS_MAX) {
-    const removed = pendingClientCommandAckIdQueue.shift();
-    if (removed) clearPendingClientCommandAck(removed);
+  const existing = pendingClientCommands.get(cmd.client_command_id);
+  if (existing) {
+    pendingClientCommands.set(cmd.client_command_id, cmd);
+    return;
   }
+  if (pendingClientCommands.size >= MAX_BUFFERED_CLIENT_COMMANDS) return;
+  pendingClientCommands.set(cmd.client_command_id, cmd);
+  pendingClientCommandAckIdQueue.push(cmd.client_command_id);
 };
 
 export const acknowledgeClientCommand = (event: ServerEvent): boolean => {
   if (event.type !== "client.command.ack") return false;
-  const clientCommandId = (event as unknown as { client_command_id?: unknown }).client_command_id;
+  const ack = event as unknown as {
+    client_command_id?: unknown;
+    accepted?: unknown;
+    reason?: unknown;
+  };
+  const clientCommandId = ack.client_command_id;
   if (typeof clientCommandId !== "string" || !clientCommandId) return true;
   clearPendingClientCommandAck(clientCommandId);
+  if (ack.accepted === false) {
+    rejectClientCommandResult(clientCommandId, String(ack.reason || "Command was rejected by the server"));
+  }
   return true;
 };
 
@@ -298,18 +294,57 @@ export const useWebSocketConnection = () => {
   useEffect(() => {
     let alive = true;
     let timer: number | null = null;
-    let stableTimer: number | null = null;
     let heartbeatCleanup = () => {};
     const coalescedCommands = new Map<string, ClientCommand>();
-    const coalescedTimers = new Map<string, number>();
+    const coalescedMicrotasks = new Set<string>();
+    let awaitingSessionRestore = false;
+    let reconnectStartedAt: number | null = null;
+    let reconnectExhausted = false;
 
     let hasConnectedOnce = false;
+
+    const bufferedCommandCount = (): number =>
+      pendingClientCommands.size + queue.current.length + coalescedCommands.size;
+
+    const enqueueOfflineCommand = (cmd: ClientCommand): boolean => {
+      const command = commandWithClientCommandId(cmd);
+      const clientCommandId = String(command.client_command_id || "");
+      if (
+        (clientCommandId && hasPendingClientCommand(clientCommandId))
+        || queue.current.some((queued) => queued.cmd.client_command_id === clientCommandId)
+        || Array.from(coalescedCommands.values()).some(
+          (queued) => queued.client_command_id === clientCommandId,
+        )
+      ) {
+        return true;
+      }
+      if (bufferedCommandCount() >= MAX_BUFFERED_CLIENT_COMMANDS) {
+        // Returning false is the explicit backpressure signal. Silently
+        // dropping a user command would make delivery unverifiable.
+        return false;
+      }
+      queue.current.push({ cmd: command, queuedAt: Date.now() });
+      return true;
+    };
 
     const sendCommandNow = (cmd: ClientCommand): boolean => {
       const active = ref.current;
       if (!active || active.readyState !== WebSocket.OPEN) return false;
       const command = commandWithClientCommandId(cmd);
-      active.send(JSON.stringify(command));
+      const clientCommandId = String(command.client_command_id || "");
+      if (
+        shouldTrackClientCommandAck(command)
+        && clientCommandId
+        && !hasPendingClientCommand(clientCommandId)
+        && pendingClientCommands.size >= MAX_BUFFERED_CLIENT_COMMANDS
+      ) {
+        return false;
+      }
+      try {
+        active.send(JSON.stringify(command));
+      } catch {
+        return false;
+      }
       trackPendingClientCommandAck(command);
       return true;
     };
@@ -317,11 +352,10 @@ export const useWebSocketConnection = () => {
     const flushCoalescedCommand = (key: string) => {
       const pending = coalescedCommands.get(key);
       coalescedCommands.delete(key);
-      coalescedTimers.delete(key);
       if (!pending) return;
       if (sendCommandNow(pending)) return;
       if (isQueueableWhenOffline(pending)) {
-        queue.current.push({ cmd: commandWithClientCommandId(pending), queuedAt: Date.now() });
+        enqueueOfflineCommand(pending);
       }
     };
 
@@ -333,60 +367,73 @@ export const useWebSocketConnection = () => {
       if (!key) {
         return sendCommandNow(cmd);
       }
-      coalescedCommands.set(key, commandWithClientCommandId(cmd));
-      const existingTimer = coalescedTimers.get(key);
-      if (existingTimer !== undefined) window.clearTimeout(existingTimer);
-      coalescedTimers.set(
-        key,
-        window.setTimeout(() => flushCoalescedCommand(key), COMMAND_COALESCE_DELAY_MS),
-      );
+      const command = commandWithClientCommandId(cmd);
+      if (!coalescedCommands.has(key) && bufferedCommandCount() >= MAX_BUFFERED_CLIENT_COMMANDS) {
+        return false;
+      }
+      coalescedCommands.set(key, command);
+      if (!coalescedMicrotasks.has(key)) {
+        coalescedMicrotasks.add(key);
+        const flush = () => {
+          coalescedMicrotasks.delete(key);
+          if (alive) flushCoalescedCommand(key);
+        };
+        if (typeof queueMicrotask === "function") queueMicrotask(flush);
+        else void Promise.resolve().then(flush);
+      }
       return true;
     };
 
+    const flushOfflineQueue = () => {
+      const now = Date.now();
+      const pending = queue.current;
+      queue.current = [];
+      for (const queued of pending) {
+        if (!shouldReplayQueuedCommand(queued, now)) continue;
+        sendOrCoalesceCommand(queued.cmd);
+      }
+    };
+
+    const replayPendingClientCommands = (): void => {
+      for (const command of pendingClientCommandPayloads()) {
+        if (!sendCommandNow(command)) break;
+      }
+    };
+
     const connect = () => {
-      if (!alive) return;
+      if (!alive || reconnectExhausted) return;
       timer = null;
       const url = wsUrl("/ws", { session_id: browserSessionId });
       const protocols = wsProtocols();
       const ws = protocols ? new WebSocket(url, protocols) : new WebSocket(url);
       ref.current = ws;
       let pingInterval: number | null = null;
-      let inboundProbeTimer: number | null = null;
-
-      const clearInboundProbe = () => {
-        if (inboundProbeTimer !== null) {
-          window.clearTimeout(inboundProbeTimer);
-          inboundProbeTimer = null;
-        }
-      };
-
-      const markInboundActivity = () => {
-        clearInboundProbe();
-      };
+      let pongTimeout: number | null = null;
+      let awaitingPong = false;
 
       const clearHeartbeatTimers = () => {
         if (pingInterval !== null) {
           window.clearInterval(pingInterval);
           pingInterval = null;
         }
-        clearInboundProbe();
+        if (pongTimeout !== null) {
+          window.clearTimeout(pongTimeout);
+          pongTimeout = null;
+        }
+        awaitingPong = false;
       };
       heartbeatCleanup = clearHeartbeatTimers;
 
       ws.addEventListener("open", () => {
         if (!alive || ref.current !== ws) return;
-        // Treat the connection as "stable" — and only then reset the backoff —
-        // after it has stayed open for a few seconds. Resetting immediately lets
-        // a flapping server (open→close→open) restart backoff from the base
-        // every cycle, producing a reconnect storm.
-        stableTimer = window.setTimeout(() => {
-          reconnectAttempt.current = 0;
-        }, RECONNECT_STABLE_MS);
+        const wasReconnect = hasConnectedOnce || reconnectAttempt.current > 0;
+        reconnectAttempt.current = 0;
+        reconnectStartedAt = null;
         useAppStore.getState().setConnected(true);
 
         // 🆕 显示重连成功提示（如果不是首次连接）
-        if (hasConnectedOnce && reconnectAttempt.current > 0) {
-          pushToast("Connected", "success", 2000);
+        if (wasReconnect) {
+          pushToast("已重新连接", "success", 2000);
         }
 
         const state = useAppStore.getState();
@@ -394,7 +441,8 @@ export const useWebSocketConnection = () => {
         const restoreWorkspaceRoot = restoreConversationId
           ? workspaceRootForConversationRestore({ ...state, conversationId: restoreConversationId })
           : "";
-        if (hasConnectedOnce || restoreConversationId) {
+        awaitingSessionRestore = Boolean(hasConnectedOnce || restoreConversationId);
+        if (awaitingSessionRestore) {
           textStreamBuffer.destroy();
           thinkingStreamBuffer.destroy();
           sendOrCoalesceCommand({
@@ -406,76 +454,54 @@ export const useWebSocketConnection = () => {
         }
         sendOrCoalesceCommand({ type: "conversation.list" });
 
-        // Replay the offline queue AFTER session.restore so a queued
-        // user_message / control_response reaches the backend only once its
-        // conversation + workspace context has been restored.
-        const now = Date.now();
-        for (const queued of queue.current) {
-          if (!shouldReplayQueuedCommand(queued, now)) continue;
-          sendOrCoalesceCommand(queued.cmd);
+        if (!awaitingSessionRestore) {
+          replayPendingClientCommands();
+          flushOfflineQueue();
         }
-        queue.current = [];
 
         sendOrCoalesceCommand({ type: "commands.list" });
         hasConnectedOnce = true;
 
         pingInterval = window.setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) {
-            sendCommandNow({ type: "ping" });
-            if (inboundProbeTimer === null) {
-              inboundProbeTimer = window.setTimeout(() => {
-                inboundProbeTimer = null;
-                if (!alive || ref.current !== ws || ws.readyState !== WebSocket.OPEN) return;
-                ws.close();
-              }, INBOUND_PROBE_DEADLINE_MS);
-            }
-          }
+          if (ws.readyState !== WebSocket.OPEN) return;
+          if (!sendCommandNow({ type: "ping" })) return;
+          if (awaitingPong) return;
+          awaitingPong = true;
+          pongTimeout = window.setTimeout(() => {
+            pongTimeout = null;
+            if (alive && ref.current === ws && awaitingPong) ws.close();
+          }, PONG_TIMEOUT_MS);
         }, PING_INTERVAL_MS);
       });
 
-      ws.addEventListener("close", () => {
+      ws.addEventListener("close", (event) => {
         if (!alive || ref.current !== ws) return;
         clearHeartbeatTimers();
         heartbeatCleanup = () => {};
         ref.current = null;
         useAppStore.getState().setConnected(false);
-        if (stableTimer !== null) {
-          window.clearTimeout(stableTimer);
-          stableTimer = null;
+        if (hasConnectedOnce) {
+          pushToast("Connection lost. Reconnecting...", "warning", Infinity);
         }
 
-        // 🆕 显示离线提示（如果已经连接过，且不是首次断开）
-        if (hasConnectedOnce && reconnectAttempt.current === 0) {
-          // 延迟 5 秒显示提示，避免短暂断线时闪烁
-          setTimeout(() => {
-            if (!useAppStore.getState().isConnected) {
-              pushToast(
-                "Connection lost. Reconnecting...",
-                "warning",
-                Infinity  // 持续显示直到重连
-              );
-            }
-          }, 5000);
+        const closeCode = Number((event as CloseEvent).code || 0);
+        if (PERMANENT_CLOSE_CODES.has(closeCode)) {
+          reconnectExhausted = true;
+          return;
         }
-
-        // Drop any pending approval / diff / ask-user prompt: its request id
-        // dies with the socket, so the modal would be un-actionable (the stale
-        // response is silently ignored) and would wedge the composer. The
-        // backend re-emits any still-live prompt after session.restore.
-        useAppStore.setState({
-          pendingApproval: null,
-          approvalQueue: [],
-          pendingDiffReview: null,
-          diffReview: null,
-          pendingAskUser: null,
-        });
-        // Exponential backoff with jitter so many clients don't reconnect in
-        // lockstep after a shared outage.
+        const now = Date.now();
+        if (reconnectStartedAt === null) reconnectStartedAt = now;
+        const remainingBudget = RECONNECT_BUDGET_MS - (now - reconnectStartedAt);
+        if (remainingBudget <= 0) {
+          reconnectExhausted = true;
+          return;
+        }
         const base = Math.min(
           RECONNECT_MAX_MS,
           RECONNECT_BASE_MS * 2 ** reconnectAttempt.current,
         );
-        const delay = base * (1 + Math.random() * 0.3);
+        const jitter = base * ((Math.random() * 2 - 1) * RECONNECT_JITTER_FACTOR);
+        const delay = Math.min(remainingBudget, Math.max(0, base + jitter));
         reconnectAttempt.current += 1;
         timer = window.setTimeout(connect, delay);
       });
@@ -491,7 +517,6 @@ export const useWebSocketConnection = () => {
 
       ws.addEventListener("message", (ev) => {
         if (!alive || ref.current !== ws) return;
-        markInboundActivity();
         let parsed: ServerEvent | null;
         try {
           parsed = normalizeInboundServerEvent(JSON.parse(ev.data));
@@ -499,10 +524,24 @@ export const useWebSocketConnection = () => {
           return;
         }
         if (!parsed) return;
+        if (parsed.type === "pong") {
+          awaitingPong = false;
+          if (pongTimeout !== null) {
+            window.clearTimeout(pongTimeout);
+            pongTimeout = null;
+          }
+        }
         if (!shouldProcessInboundEvent(parsed)) return;
         acknowledgeClientCommand(parsed);
-        handleServerEvent(parsed);
-        for (const sub of subscribers) sub(parsed);
+        const handled = processInboundEvent(parsed);
+        if (handled && (parsed.type === "session.restored" || parsed.type === "session.synced")) {
+          awaitingSessionRestore = false;
+          replayPendingClientCommands();
+          flushOfflineQueue();
+        }
+        if (handled) {
+          for (const sub of subscribers) sub(parsed);
+        }
       });
     };
 
@@ -512,11 +551,13 @@ export const useWebSocketConnection = () => {
       send: (cmd) => {
         const ws = ref.current;
         if (ws && ws.readyState === WebSocket.OPEN) {
+          if (awaitingSessionRestore && cmd.type === "user_message") {
+            return enqueueOfflineCommand(cmd);
+          }
           return sendOrCoalesceCommand(cmd);
         }
         if (isQueueableWhenOffline(cmd)) {
-          queue.current.push({ cmd: commandWithClientCommandId(cmd), queuedAt: Date.now() });
-          return true;
+          return enqueueOfflineCommand(cmd);
         }
         return false;
       },
@@ -534,10 +575,8 @@ export const useWebSocketConnection = () => {
     return () => {
       alive = false;
       if (timer !== null) window.clearTimeout(timer);
-      if (stableTimer !== null) window.clearTimeout(stableTimer);
       heartbeatCleanup();
-      for (const timerId of coalescedTimers.values()) window.clearTimeout(timerId);
-      coalescedTimers.clear();
+      coalescedMicrotasks.clear();
       coalescedCommands.clear();
       const ownedSocket = ref.current;
       ref.current = null;
@@ -548,8 +587,13 @@ export const useWebSocketConnection = () => {
   }, []);
 };
 
-const textStreamBuffer = createStreamBuffer((buffered, conversationId, source, metadata, messageId) => {
-  useAppStore.getState().appendTextChunk(buffered, conversationId, source, metadata, messageId);
+const textStreamBuffer = createStreamBuffer((buffered, conversationId, itemId, _metadata, messageId) => {
+  useAppStore.getState().appendAgentMessageDelta(
+    itemId || "agent-message",
+    buffered,
+    conversationId,
+    messageId,
+  );
 });
 
 const thinkingStreamBuffer = createStreamBuffer((buffered, conversationId, _source, metadata, messageId) => {
@@ -562,26 +606,48 @@ const conversationIdFor = (e: ServerEvent): string | undefined => {
   return cid;
 };
 
-const handleServerEvent = (e: ServerEvent) => {
+const handleServerEvent = (e: ServerEvent): boolean => {
   if (e.type === "session.replay") {
     for (const replayed of eventsFromSessionReplay(e)) {
       if (!shouldProcessInboundEvent(replayed)) continue;
-      handleServerEvent(replayed);
-      for (const sub of subscribers) sub(replayed);
+      if (processInboundEvent(replayed)) {
+        for (const sub of subscribers) sub(replayed);
+      }
     }
-    return;
+    return true;
   }
 
   const cid = conversationIdFor(e);
-  if (handleChatStreamEvent(e, cid, { textStreamBuffer, thinkingStreamBuffer })) return;
-  if (handleRuntimeEvent(e, cid)) return;
-  if (handleControlEvent(e)) return;
-  if (handleSessionEvent(e, { textStreamBuffer, thinkingStreamBuffer })) return;
-  if (handleArtifactEvent(e, cid)) return;
-  if (handleCommandCatalogEvent(e)) return;
-  if (handlePeripheralEvent(e)) return;
-  if (handleCommandResultEvent(e)) return;
-  if (handlePreviewEvent(e)) return;
-  if (handleNoticeEvent(e, cid)) return;
-  handleDiffEvent(e);
+  if (handleChatStreamEvent(e, cid, { textStreamBuffer, thinkingStreamBuffer })) return true;
+  if (handleRuntimeEvent(e, cid)) return true;
+  if (handleControlEvent(e)) return true;
+  if (handleSessionEvent(e, { textStreamBuffer, thinkingStreamBuffer })) return true;
+  if (handleArtifactEvent(e, cid)) return true;
+  if (handleCommandCatalogEvent(e)) return true;
+  if (handlePeripheralEvent(e)) return true;
+  if (handleCommandResultEvent(e)) return true;
+  if (handlePreviewEvent(e)) return true;
+  if (handleNoticeEvent(e, cid)) return true;
+  return handleDiffEvent(e);
+};
+
+// Advance the replay cursor only after the event has been applied.  This is
+// the same durable-event rule used by the backend: a handler failure must be
+// replayable after reconnect instead of being acknowledged by the cursor.
+const processInboundEvent = (event: ServerEvent): boolean => {
+  try {
+    const handled = handleServerEvent(event);
+    if (!handled) {
+      console.warn("[ws] Known server event was not routed; leaving it replayable", event);
+      return false;
+    }
+    commitProcessedInboundEvent(event);
+    return handled;
+  } catch (error) {
+    console.error("[ws] Failed to apply server event; leaving it replayable", {
+      event,
+      error,
+    });
+    return false;
+  }
 };

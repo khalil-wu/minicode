@@ -237,6 +237,9 @@ class GoToDefinitionTool(BaseTool):
     """
 
     name = "go_to_definition"
+    result_kind = "code"
+    activity_kind = "workspaceSearch"
+    display_label = "Go to definition"
     read_only = True
     description = (
         "Locate where a function, class, or variable is defined in the workspace.\n\n"
@@ -255,6 +258,8 @@ class GoToDefinitionTool(BaseTool):
         "Example: go_to_definition(name='run_agent_loop')."
     )
     permission = PermissionLevel.AUTO
+    workspace_path_fields = ("directory",)
+    allow_workspace_root_path = True
 
     def get_spec(self) -> Any | None:
         """Return runtime metadata describing analysis capabilities."""
@@ -348,6 +353,9 @@ class FindReferencesTool(BaseTool):
     """
 
     name = "find_references"
+    result_kind = "code"
+    activity_kind = "workspaceSearch"
+    display_label = "Find references"
     read_only = True
     description = (
         "Find all places where a function, class, or variable name is used in the workspace.\n\n"
@@ -366,6 +374,8 @@ class FindReferencesTool(BaseTool):
         "Example: find_references(name='ReadFileTool')."
     )
     permission = PermissionLevel.AUTO
+    workspace_path_fields = ("directory",)
+    allow_workspace_root_path = True
 
     MAX_REFS = 60
 

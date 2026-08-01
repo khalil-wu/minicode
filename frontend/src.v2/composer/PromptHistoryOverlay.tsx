@@ -78,7 +78,7 @@ export const PromptHistoryOverlay = ({ open, items, placement = "above", onSelec
               onMouseEnter={() => setActiveIndex(index)}
               onClick={() => onSelect(item)}
             >
-              <Clock3 size={13} aria-hidden="true" />
+              <Clock3 size={14} aria-hidden="true" />
               <span>{item}</span>
             </button>
           ))}

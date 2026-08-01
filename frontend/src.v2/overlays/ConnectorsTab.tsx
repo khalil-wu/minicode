@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { RefreshCw, Trash2 } from "lucide-react";
+import { LogIn, RefreshCw, Trash2 } from "lucide-react";
 import { useAppStore } from "../stores";
 import { sendClientCommand } from "../protocol/ws-outbox";
+import { BrandIcon } from "../components/BrandIcon";
 import {
   Section,
   inputStyle,
@@ -29,8 +30,18 @@ import {
 
 const connectorAuthLabel = (auth?: string): string | null => {
   if (!auth || auth === "none") return null;
-  if (auth === "local_app") return "local app";
+  if (auth === "local_app") return "本地应用";
   return auth.replace(/_/g, " ");
+};
+
+const connectorStatusLabel = (status?: string): string => {
+  if (status === "connected") return "已连接";
+  if (status === "connecting") return "连接中";
+  if (status === "auth_required") return "需要登录";
+  if (status === "reconnecting") return "正在重连";
+  if (status === "failed" || status === "error") return "失败";
+  if (status === "disabled") return "已停用";
+  return String(status || "未知").replace(/_/g, " ");
 };
 
 export const ConnectorsTab = () => {
@@ -47,32 +58,33 @@ export const ConnectorsTab = () => {
     <>
       <div style={subTabBarStyle}>
         <button type="button" onClick={() => setMode("servers")} style={subTabStyle(mode === "servers")}>
-          Servers
+          服务
           <span style={subTabCountStyle}>{mcpServers.length}</span>
         </button>
         <button type="button" onClick={() => setMode("marketplace")} style={subTabStyle(mode === "marketplace")}>
-          Marketplace
+          市场
           <span style={subTabCountStyle}>{marketplaceConnectors.length}</span>
         </button>
       </div>
 
       {mode === "servers" && (
         <>
-          <Section title="MCP Servers">
-            {mcpServers.length === 0 && <div style={emptyInlineStyle}>No MCP servers configured.</div>}
+          <Section title="MCP 服务">
+            {mcpServers.length === 0 && <div style={emptyInlineStyle}>尚未配置 MCP 服务。</div>}
             {mcpServers.map((server) => (
               <div key={server.name} style={mcpServerRowStyle}>
+                <BrandIcon value={`${server.name} ${server.url || ""}`} websiteUrl={server.docsUrl || server.url} fallback="web" size={18} />
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 min-w-0">
                     <span style={mcpDotStyle(server.phase ?? server.status)} />
                     <span style={mcpNameStyle}>{server.name}</span>
                     {(server.phase ?? server.status) !== "connected" && (
-                      <span style={statusChipStyle(server.phase ?? server.status)}>{(server.phase ?? server.status).replace(/_/g, " ")}</span>
+                      <span style={statusChipStyle(server.phase ?? server.status)}>{connectorStatusLabel(server.phase ?? server.status)}</span>
                     )}
                     {server.requiresUserAction && (
-                      <span style={{ ...miniMetaStyle, color: "var(--state-warning)" }}>action required</span>
+                      <span style={{ ...miniMetaStyle, color: "var(--state-warning)" }}>需要处理</span>
                     )}
-                    <span style={miniMetaStyle}>{server.tools ?? 0} tools</span>
+                    <span style={miniMetaStyle}>{server.tools ?? 0} 个工具</span>
                   </div>
                   {server.lastError && <div style={mcpErrorStyle}>{server.lastError}</div>}
                   {server.requiresUserAction && server.setupHint && (
@@ -81,21 +93,36 @@ export const ConnectorsTab = () => {
                     </div>
                   )}
                   {server.progress?.status === "running" && (
-                    <div style={miniMetaStyle}>{server.progress.message || `${server.progress.operation}...`}</div>
+                    <div style={miniMetaStyle}>{server.progress.message === "Connecting..." ? "正在连接…" : server.progress.message || `${server.progress.operation}…`}</div>
                   )}
                 </div>
                 <div className="flex gap-1">
-                  <button onClick={() => sendClientCommand({ type: "mcp.restart", name: server.name })} style={mcpActionBtnStyle} title="Restart" aria-label={`Restart ${server.name}`}><RefreshCw size={14} /></button>
-                  <button onClick={() => sendClientCommand({ type: "mcp.remove", name: server.name })} style={mcpActionBtnStyle} title="Remove" aria-label={`Remove ${server.name}`}><Trash2 size={14} /></button>
+                  {(server.phase === "auth_required" || server.phase === "expired") ? (
+                    <button
+                      onClick={() => sendClientCommand({ type: "mcp.oauth.login", name: server.name })}
+                      style={mcpActionBtnStyle}
+                      title="登录"
+                      aria-label={`登录 ${server.name}`}
+                    ><LogIn size={14} /></button>
+                  ) : (
+                    <button
+                      onClick={() => sendClientCommand({ type: "mcp.restart", name: server.name })}
+                      disabled={server.phase === "connecting" || server.phase === "reconnecting"}
+                      style={mcpActionBtnStyle}
+                      title="重启"
+                      aria-label={`重启 ${server.name}`}
+                    ><RefreshCw size={14} /></button>
+                  )}
+                  <button onClick={() => sendClientCommand({ type: "mcp.remove", name: server.name })} style={mcpActionBtnStyle} title="删除" aria-label={`删除 ${server.name}`}><Trash2 size={14} /></button>
                 </div>
               </div>
             ))}
           </Section>
 
-          <Section title="Add Server">
+          <Section title="添加服务">
             <div className="grid gap-2">
               <div className="flex gap-2">
-                <input type="text" value={newServerName} onChange={(e) => setNewServerName(e.target.value)} placeholder="Server name" style={{ ...inputStyle, flex: 1 }} />
+                <input type="text" value={newServerName} onChange={(e) => setNewServerName(e.target.value)} placeholder="服务名称" style={{ ...inputStyle, flex: 1 }} />
                 <select value={newServerTransport} onChange={(e) => setNewServerTransport(e.target.value as "stdio" | "http")} style={{ ...selectInputStyle, width: 90 }}>
                   <option value="stdio">stdio</option>
                   <option value="http">http</option>
@@ -103,14 +130,14 @@ export const ConnectorsTab = () => {
               </div>
               {newServerTransport === "stdio" ? (
                 <>
-                  <input type="text" value={newServerCommand} onChange={(e) => setNewServerCommand(e.target.value)} placeholder="Command (python, npx, uvx...)" style={inputStyle} />
-                  <input type="text" value={newServerArgs} onChange={(e) => setNewServerArgs(e.target.value)} placeholder="Args" style={inputStyle} />
+                  <input type="text" value={newServerCommand} onChange={(e) => setNewServerCommand(e.target.value)} placeholder="命令（python、npx、uvx…）" style={inputStyle} />
+                  <input type="text" value={newServerArgs} onChange={(e) => setNewServerArgs(e.target.value)} placeholder="参数" style={inputStyle} />
                 </>
               ) : (
                 <input type="text" value={newServerUrl} onChange={(e) => setNewServerUrl(e.target.value)} placeholder="http://localhost:8080/mcp" style={inputStyle} />
               )}
               <div className="flex justify-between gap-2">
-                <button onClick={() => sendClientCommand({ type: "mcp.list" })} style={secondaryActionStyle}>Refresh</button>
+                <button onClick={() => sendClientCommand({ type: "mcp.list" })} style={secondaryActionStyle}>刷新</button>
                 <button
                   onClick={() => {
                     if (!newServerName.trim()) return;
@@ -130,7 +157,7 @@ export const ConnectorsTab = () => {
                   disabled={!newServerName.trim()}
                   style={primaryActionStyle}
                 >
-                  Add Server
+                  添加服务
                 </button>
               </div>
             </div>
@@ -139,12 +166,18 @@ export const ConnectorsTab = () => {
       )}
 
       {mode === "marketplace" && (
-        <Section title="Marketplace">
-          {marketplaceConnectors.length === 0 && <div style={emptyInlineStyle}>No marketplace entries loaded yet.</div>}
+        <Section title="连接市场">
+          {marketplaceConnectors.length === 0 && <div style={emptyInlineStyle}>暂未加载市场项目。</div>}
           {marketplaceConnectors.length > 0 && (
             <div style={marketplaceListStyle}>
               {marketplaceConnectors.map((c) => (
                 <div key={c.name} style={marketplaceRowStyle}>
+                  <BrandIcon
+                    value={`${c.title} ${c.name} ${(c.tags ?? []).join(" ")}`}
+                    size={20}
+                    iconUrl={c.iconUrl}
+                    websiteUrl={c.websiteUrl || c.docsUrl || c.url}
+                  />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 min-w-0">
                       <div style={marketplaceTitleStyle}>{c.title}</div>
@@ -153,7 +186,7 @@ export const ConnectorsTab = () => {
                         <span style={miniMetaStyle}>{connectorAuthLabel(c.auth)}</span>
                       )}
                       {c.requiresUserAction && (
-                        <span style={{ ...miniMetaStyle, color: "var(--state-warning)" }}>setup required</span>
+                        <span style={{ ...miniMetaStyle, color: "var(--state-warning)" }}>需要配置</span>
                       )}
                     </div>
                     <div style={marketplaceDescStyle}>{c.description}</div>
@@ -168,24 +201,20 @@ export const ConnectorsTab = () => {
                         className="inline-block mt-0.5"
                         style={{ ...miniMetaStyle, color: "var(--accent-primary)" }}
                       >
-                        Docs
+                        文档
                       </a>
                     )}
                   </div>
                   {c.installed ? (
-                    <span style={installedPillStyle}>Installed</span>
+                    <span style={installedPillStyle}>已安装</span>
                   ) : (
                     <button
                       onClick={() => {
                         sendClientCommand({ type: "connectors.marketplace.install", name: c.name });
-                        setTimeout(() => {
-                          sendClientCommand({ type: "mcp.list" });
-                          sendClientCommand({ type: "connectors.marketplace.list" });
-                        }, 1000);
                       }}
                       style={compactInstallStyle}
                     >
-                      Install
+                      安装
                     </button>
                   )}
                 </div>

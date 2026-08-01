@@ -13,14 +13,55 @@ from dataclasses import dataclass
 from typing import Any, Callable, Coroutine
 
 from backend.runtime_env import sanitized_subprocess_env
+from backend.subprocesses import spawn_exec, terminate_process_tree
 from backend.terminal.shell_commands import windows_powershell_native_tool_alias_prelude
+from backend.tools.output_limits import (
+    CLAUDE_BASH_OUTPUT_DEFAULT_CHARS,
+    CLAUDE_BASH_OUTPUT_MAX_CHARS,
+)
 
 logger = logging.getLogger(__name__)
 
-MAX_OUTPUT_LENGTH = 20_000
-DEFAULT_TIMEOUT_MS = 120_000
-MAX_TIMEOUT_MS = 600_000
+
+class _ExternalProcessHandle:
+    """Popen-like adapter so external desktop PTYs use the shared tree killer."""
+
+    def __init__(self, pid: int) -> None:
+        import psutil
+
+        self.pid = pid
+        self._process = psutil.Process(pid)
+
+    def poll(self) -> int | None:
+        import psutil
+
+        try:
+            return None if self._process.is_running() and self._process.status() != psutil.STATUS_ZOMBIE else 0
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            return 0
+
+    def kill(self) -> None:
+        self._process.kill()
+
+    def wait(self) -> int | None:
+        import psutil
+
+        try:
+            return self._process.wait(timeout=2.0)
+        except (psutil.NoSuchProcess, psutil.TimeoutExpired):
+            return None
+
+MAX_OUTPUT_LENGTH = CLAUDE_BASH_OUTPUT_MAX_CHARS
+DEFAULT_TIMEOUT_MS = 0
+MAX_TIMEOUT_MS = 2_147_483_647
 MAX_SESSIONS = 5
+
+
+def _require_conversation_owner(conversation_id: str) -> str:
+    owner = str(conversation_id or "").strip()
+    if not owner:
+        raise RuntimeError("Terminal conversation owner is required")
+    return owner
 
 
 def _windows_powershell_init_command() -> str:
@@ -43,6 +84,7 @@ class TerminalSessionInfo:
     started_at: float = 0.0
     is_alive: bool = False
     conversation_id: str = ""
+    terminal_mode: str = "pipe"
 
 
 class TerminalSession:
@@ -63,7 +105,7 @@ class TerminalSession:
         self._shell_cmd: list[str] = []
         self._started_at = 0.0
         self._output_buffer: list[str] = []
-        self._MAX_OUTPUT_BUFFER_CHARS = 80_000
+        self._MAX_OUTPUT_BUFFER_CHARS = CLAUDE_BASH_OUTPUT_MAX_CHARS
         self._cmd_lock = asyncio.Lock()
         self._stdout_reader_task: asyncio.Task[None] | None = None
         self._stderr_reader_task: asyncio.Task[None] | None = None
@@ -71,6 +113,7 @@ class TerminalSession:
         self._is_windows = platform.system() == "Windows"
         self._exit_notified = False
         self._external_pid: int | None = None
+        self._external_process_start_time: float | None = None
         self._external_alive: bool | None = None
 
     @property
@@ -88,6 +131,10 @@ class TerminalSession:
         return " ".join(self._shell_cmd) if self._shell_cmd else ""
 
     @property
+    def terminal_mode(self) -> str:
+        return "pty" if self._process is None and self._external_pid is not None else "pipe"
+
+    @property
     def info(self) -> TerminalSessionInfo:
         return TerminalSessionInfo(
             session_id=self.session_id,
@@ -97,20 +144,23 @@ class TerminalSession:
             started_at=self._started_at,
             is_alive=self.is_alive,
             conversation_id=self.conversation_id,
+            terminal_mode=self.terminal_mode,
         )
 
-    def snapshot(self, *, max_chars: int = 20_000) -> dict[str, Any]:
+    def snapshot(self, *, max_chars: int = CLAUDE_BASH_OUTPUT_DEFAULT_CHARS) -> dict[str, Any]:
         limit = max(0, min(int(max_chars or 0), self._MAX_OUTPUT_BUFFER_CHARS))
         output = "".join(self._output_buffer)
         truncated = limit > 0 and len(output) > limit
         bounded_output = output[-limit:] if limit > 0 else ""
         return {
             "session_id": self.session_id,
+            "conversation_id": self.conversation_id,
             "pid": self.pid,
             "cwd": self._initial_cwd,
             "shell": self.shell,
             "started_at": self._started_at,
             "is_alive": self.is_alive,
+            "terminal_mode": self.terminal_mode,
             "output": bounded_output,
             "output_chars": len(bounded_output),
             "total_output_chars": len(output),
@@ -131,6 +181,10 @@ class TerminalSession:
         if shell:
             self._shell_cmd = [shell]
         if pid is not None:
+            if pid != self._external_pid or self._external_process_start_time is None:
+                from backend.terminal.task_persistence import get_process_start_time
+
+                self._external_process_start_time = get_process_start_time(pid)
             self._external_pid = pid
         self._external_alive = is_alive
         if not self._started_at:
@@ -157,14 +211,13 @@ class TerminalSession:
             shell = os.environ.get("SHELL", "/bin/bash")
             self._shell_cmd = [shell, "--norc", "--noprofile", "-i"]
 
-        self._process = await asyncio.create_subprocess_exec(
+        self._process = await spawn_exec(
             *self._shell_cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=self._initial_cwd,
             env=sanitized_subprocess_env({"TERM": "dumb", "NO_COLOR": "1"}),
-            **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if self._is_windows else {}),
         )
         self._started_at = time.time()
         self._output_buffer.clear()
@@ -228,8 +281,13 @@ class TerminalSession:
 
         if self._is_windows:
             full_cmd = (
+                "$global:LASTEXITCODE = $null\n"
                 f"{command}\n"
-                f'Write-Output "{exit_code_marker}$LASTEXITCODE"\n'
+                "$minicodeCommandSucceeded = $?\n"
+                "$minicodeNativeExit = $global:LASTEXITCODE\n"
+                "$minicodeExitCode = if ($null -ne $minicodeNativeExit) { $minicodeNativeExit } "
+                "elseif ($minicodeCommandSucceeded) { 0 } else { 1 }\n"
+                f'Write-Output "{exit_code_marker}$minicodeExitCode"\n'
                 f'Write-Output "{marker}"\n'
             )
         else:
@@ -247,10 +305,10 @@ class TerminalSession:
         except (BrokenPipeError, ConnectionResetError):
             return "Terminal input channel is unavailable", -1
 
-        timeout_sec = min(timeout_ms, MAX_TIMEOUT_MS) / 1000.0
-        deadline = time.monotonic() + timeout_sec
+        timeout_sec = max(0, min(int(timeout_ms or 0), MAX_TIMEOUT_MS)) / 1000.0
+        deadline = time.monotonic() + timeout_sec if timeout_sec > 0 else None
 
-        while time.monotonic() < deadline:
+        while deadline is None or time.monotonic() < deadline:
             await asyncio.sleep(0.05)
 
             new_output = "".join(self._output_buffer[start_index:])
@@ -270,17 +328,30 @@ class TerminalSession:
 
     async def kill(self) -> None:
         if self._process is None:
+            if self._external_pid is None or not self._external_alive:
+                return
+            from backend.terminal.task_persistence import is_process_alive, process_identity_matches
+
+            if not is_process_alive(self._external_pid):
+                self._external_alive = False
+                return
+            if not process_identity_matches(
+                self._external_pid,
+                self._external_process_start_time,
+            ):
+                raise RuntimeError(
+                    f"Refusing to kill unverified external terminal process {self._external_pid}"
+                )
+            await terminate_process_tree(_ExternalProcessHandle(self._external_pid))
+            if is_process_alive(self._external_pid):
+                raise RuntimeError(
+                    f"External terminal process {self._external_pid} did not stop"
+                )
+            self._external_alive = False
             return
 
         try:
-            if self._is_windows:
-                self._process.kill()
-            else:
-                self._process.send_signal(signal.SIGTERM)
-                try:
-                    await asyncio.wait_for(self._process.wait(), timeout=3)
-                except asyncio.TimeoutError:
-                    self._process.kill()
+            await terminate_process_tree(self._process)
         except ProcessLookupError:
             pass
         except Exception as exc:
@@ -434,6 +505,7 @@ class TerminalSessionManager:
         on_exit: Callable[[str, int], Coroutine[Any, Any, None]] | None = None,
         conversation_id: str = "",
     ) -> TerminalSession:
+        owner = _require_conversation_owner(conversation_id)
         dead_ids = [sid for sid, session in self._sessions.items() if not session.is_alive]
         for sid in dead_ids:
             self._sessions.pop(sid, None)
@@ -456,23 +528,31 @@ class TerminalSessionManager:
     def get_session(self, session_id: str) -> TerminalSession | None:
         return self._sessions.get(session_id)
 
-    async def destroy_session(self, session_id: str) -> bool:
-        session = self._sessions.pop(session_id, None)
-        if session is None:
+    async def destroy_session(self, session_id: str, *, conversation_id: str = "") -> bool:
+        session = self._sessions.get(session_id)
+        owner = str(conversation_id or "").strip()
+        if session is None or not owner or session.conversation_id != owner:
             return False
         await session.kill()
+        if self._sessions.get(session_id) is session:
+            self._sessions.pop(session_id, None)
         return True
 
     async def destroy_sessions_for_conversation(self, conversation_id: str) -> int:
         """Kill all terminal sessions belonging to a conversation. Returns count killed."""
+        owner = str(conversation_id or "").strip()
+        if not owner:
+            return 0
         to_kill = [
             sid for sid, session in self._sessions.items()
-            if session.conversation_id == conversation_id
+            if session.conversation_id == owner
         ]
         for sid in to_kill:
-            session = self._sessions.pop(sid, None)
+            session = self._sessions.get(sid)
             if session is not None:
                 await session.kill()
+                if self._sessions.get(sid) is session:
+                    self._sessions.pop(sid, None)
         return len(to_kill)
 
     async def destroy_all(self) -> None:
@@ -481,21 +561,29 @@ class TerminalSessionManager:
         self._sessions.clear()
 
     def list_sessions(self, conversation_id: str = "") -> list[TerminalSessionInfo]:
-        """List terminal sessions, optionally filtered by conversation_id."""
-        if conversation_id:
-            return [
-                session.info for session in self._sessions.values()
-                if session.conversation_id == conversation_id
-            ]
-        return [session.info for session in self._sessions.values()]
+        """List only terminal sessions owned by the requested conversation."""
+        owner = str(conversation_id or "").strip()
+        if not owner:
+            return []
+        return [
+            session.info for session in self._sessions.values()
+            if session.conversation_id == owner
+        ]
 
     def list_sessions_for_conversation(self, conversation_id: str) -> list[TerminalSessionInfo]:
         """List terminal sessions belonging to a specific conversation."""
         return self.list_sessions(conversation_id=conversation_id)
 
-    def snapshot(self, session_id: str, *, max_chars: int = 20_000) -> dict[str, Any] | None:
+    def snapshot(
+        self,
+        session_id: str,
+        *,
+        max_chars: int = CLAUDE_BASH_OUTPUT_DEFAULT_CHARS,
+        conversation_id: str = "",
+    ) -> dict[str, Any] | None:
         session = self.get_session(session_id)
-        if session is None:
+        owner = str(conversation_id or "").strip()
+        if session is None or not owner or session.conversation_id != owner:
             return None
         return session.snapshot(max_chars=max_chars)
 
@@ -507,7 +595,9 @@ class TerminalSessionManager:
         shell: str | None = None,
         pid: int | None = None,
         is_alive: bool = True,
+        conversation_id: str = "",
     ) -> TerminalSession:
+        owner = _require_conversation_owner(conversation_id)
         session = self._sessions.get(session_id)
         if session is None:
             dead_ids = [sid for sid, existing in self._sessions.items() if not existing.is_alive]
@@ -515,8 +605,10 @@ class TerminalSessionManager:
                 self._sessions.pop(sid, None)
             if len(self._sessions) >= self._max_sessions:
                 raise RuntimeError(f"Too many terminal sessions (max {self._max_sessions})")
-            session = TerminalSession(session_id, cwd=cwd)
+            session = TerminalSession(session_id, cwd=cwd, conversation_id=owner)
             self._sessions[session_id] = session
+        elif session.conversation_id != owner:
+            raise RuntimeError("Terminal session is owned by a different conversation")
         session.update_external_metadata(
             cwd=cwd,
             shell=shell,
@@ -533,20 +625,24 @@ class TerminalSessionManager:
         cwd: str | None = None,
         shell: str | None = None,
         pid: int | None = None,
+        conversation_id: str = "",
     ) -> TerminalSession:
+        owner = _require_conversation_owner(conversation_id)
         session = self.upsert_external_session(
             session_id,
             cwd=cwd,
             shell=shell,
             pid=pid,
             is_alive=True,
+            conversation_id=owner,
         )
         session.append_external_output(data)
         return session
 
-    def mark_external_exit(self, session_id: str) -> bool:
+    def mark_external_exit(self, session_id: str, *, conversation_id: str = "") -> bool:
         session = self._sessions.get(session_id)
-        if session is None:
+        owner = str(conversation_id or "").strip()
+        if session is None or not owner or session.conversation_id != owner:
             return False
         session.update_external_metadata(is_alive=False)
         return True

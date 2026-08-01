@@ -2,30 +2,28 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
+import shlex
+import socket
 import subprocess
+import sys
 from collections import deque
-from dataclasses import asdict, dataclass, field
+from contextlib import suppress
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Coroutine
+from urllib.parse import quote, urlparse
 
 from backend.runtime_env import sanitized_subprocess_env
+from backend.subprocesses import spawn_shell, terminate_process_tree
 
 logger = logging.getLogger(__name__)
 
-READY_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"Local:\s*(https?://\S+)", re.IGNORECASE),
-    re.compile(r"ready\s+(?:on|at|in)\s*(https?://\S+)", re.IGNORECASE),
-    re.compile(r"listening\s+(?:on|at)\s*(https?://\S+)", re.IGNORECASE),
-    re.compile(r"started\s+(?:server\s+)?(?:on|at)\s*(https?://\S+)", re.IGNORECASE),
-    re.compile(r"available\s+(?:on|at)\s*(https?://\S+)", re.IGNORECASE),
-    re.compile(r"(https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0):\d+)", re.IGNORECASE),
-]
-
-PORT_RE = re.compile(r":(\d{2,5})(?:[/\s]|$)")
+OUTPUT_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -33,8 +31,8 @@ class PreviewLaunchConfig:
     name: str
     command: str
     cwd: str
-    port: int
-    url: str
+    port: int = 0
+    url: str = ""
     auto_port: bool = False
     source: str = "inferred"
 
@@ -50,11 +48,13 @@ class PreviewLaunchProcess:
     status: str = "starting"
     detected_url: str = ""
     detected_port: int = 0
+    session_id: str = ""
+    conversation_id: str = ""
+    workspace_root: str = ""
     stderr_tail: deque[str] = field(default_factory=lambda: deque(maxlen=20))
     output_tail: deque[dict[str, str]] = field(default_factory=lambda: deque(maxlen=80))
     _monitor_task: asyncio.Task[None] | None = field(default=None, repr=False)
-    _health_task: asyncio.Task[None] | None = field(default=None, repr=False)
-    _health_failures: int = field(default=0, repr=False)
+    ready_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
     @property
     def effective_url(self) -> str:
@@ -76,12 +76,35 @@ class PreviewLaunchProcess:
             "status": self.status,
             "stderr_tail": list(self.stderr_tail),
             "output_tail": list(self.output_tail),
+            "session_id": self.session_id,
+            "conversation_id": self.conversation_id,
+            "workspace_root": self.workspace_root,
+        }
+
+    def owner_dict(self) -> dict[str, str]:
+        return {
+            "session_id": self.session_id,
+            "conversation_id": self.conversation_id,
+            "workspace_root": self.workspace_root,
         }
 
 
 BroadcastFn = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
 
 _RUNNING: dict[str, PreviewLaunchProcess] = {}
+
+
+def _active_preview_processes() -> list[PreviewLaunchProcess]:
+    stopped = [key for key, proc in _RUNNING.items() if proc.process.returncode is not None]
+    for key in stopped:
+        proc = _RUNNING.pop(key)
+        proc.status = "exited"
+    return list(_RUNNING.values())
+
+
+def all_running_preview_processes() -> list[PreviewLaunchProcess]:
+    """Return the process-global snapshot for internal health diagnostics only."""
+    return _active_preview_processes()
 
 
 def _safe_workspace_root(root: str | Path | None) -> Path:
@@ -102,10 +125,20 @@ def _coerce_config(raw: dict[str, Any], workspace_root: Path, source: str) -> Pr
     except ValueError:
         cwd = workspace_root
     port = raw.get("port")
-    if not isinstance(port, int):
-        port = 5173
+    if not isinstance(port, int) or not (1 <= port <= 65535):
+        port = 0
     url = raw.get("url")
-    if not isinstance(url, str) or not url.strip():
+    if not isinstance(url, str):
+        url = ""
+    url = url.strip()
+    if url and not port:
+        try:
+            parsed_port = urlparse(url).port
+        except ValueError:
+            parsed_port = None
+        if parsed_port:
+            port = parsed_port
+    if not url and port:
         url = f"http://127.0.0.1:{port}"
     name = raw.get("name") if isinstance(raw.get("name"), str) else "Dev Server"
     return PreviewLaunchConfig(
@@ -149,14 +182,16 @@ def load_preview_launch_configs(workspace_root: str | Path | None) -> list[Previ
             if isinstance(scripts, dict):
                 for script_name in ("dev", "start", "serve"):
                     if isinstance(scripts.get(script_name), str):
-                        port = 3000 if script_name == "start" else 5173
+                        script = str(scripts[script_name])
+                        is_vite = bool(re.search(r"(?:^|\s|[/\\])vite(?:\s|$)", script))
+                        port = 5173 if is_vite else 0
                         return [
                             PreviewLaunchConfig(
                                 name=f"npm run {script_name}",
                                 command=f"npm run {script_name}",
                                 cwd=str(root),
                                 port=port,
-                                url=f"http://127.0.0.1:{port}",
+                                url=f"http://127.0.0.1:{port}" if port else "",
                                 source="package.json",
                             )
                         ]
@@ -166,12 +201,24 @@ def load_preview_launch_configs(workspace_root: str | Path | None) -> list[Previ
     return []
 
 
-def running_preview_processes() -> list[PreviewLaunchProcess]:
-    stopped = [key for key, proc in _RUNNING.items() if proc.process.returncode is not None]
-    for key in stopped:
-        proc = _RUNNING.pop(key)
-        proc.status = "exited"
-    return list(_RUNNING.values())
+def running_preview_processes(
+    *,
+    session_id: str,
+    conversation_id: str,
+    workspace_root: str | Path | None = None,
+) -> list[PreviewLaunchProcess]:
+    session = str(session_id or "").strip()
+    conversation = str(conversation_id or "").strip()
+    if not session or not conversation:
+        return []
+    workspace = str(Path(workspace_root).resolve()) if workspace_root else ""
+    return [
+        process
+        for process in _active_preview_processes()
+        if process.session_id == session
+        and process.conversation_id == conversation
+        and (not workspace or process.workspace_root == workspace)
+    ]
 
 
 async def _monitor_process(
@@ -204,32 +251,27 @@ async def _monitor_process(
                     "id": launched.id,
                     "stream": stream_name,
                     "line": line,
+                    **launched.owner_dict(),
                 })
 
             if ready_fired:
                 continue
 
-            for pattern in READY_PATTERNS:
-                m = pattern.search(line)
-                if m:
-                    url = m.group(1).replace("0.0.0.0", "localhost")
+            match = OUTPUT_URL_RE.search(line)
+            if match:
+                url = match.group(0).rstrip(".,;)]}").replace("0.0.0.0", "localhost")
+                try:
+                    parsed = urlparse(url)
+                    detected_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+                except ValueError:
+                    continue
+                # ``python -m http.server`` uses an explicit static-file URL;
+                # keep that path while learning only the bound port.
+                if launched.config.source != "static-html":
                     launched.detected_url = url
-                    port_match = PORT_RE.search(url)
-                    if port_match:
-                        launched.detected_port = int(port_match.group(1))
-                    launched.status = "ready"
-                    ready_fired = True
-                    if broadcast:
-                        await broadcast({
-                            "type": "preview.server.ready",
-                            "id": launched.id,
-                            "url": launched.effective_url,
-                            "port": launched.effective_port,
-                        })
-                    launched._health_task = asyncio.create_task(
-                        _health_check_loop(launched, broadcast)
-                    )
-                    break
+                launched.detected_port = detected_port
+                ready_fired = True
+                await mark_preview_ready(launched, broadcast)
 
     try:
         await asyncio.gather(
@@ -240,15 +282,17 @@ async def _monitor_process(
         logger.debug("Preview monitor error: %s", exc)
 
     await launched.process.wait()
-    launched.status = "crashed" if launched.process.returncode != 0 else "exited"
+    was_stopping = launched.status == "stopping"
+    launched.status = "exited" if was_stopping or launched.process.returncode == 0 else "crashed"
     _RUNNING.pop(launched.id, None)
 
-    if broadcast:
+    if broadcast and not was_stopping and launched.process.returncode != 0:
         await broadcast({
             "type": "preview.server.crashed",
             "id": launched.id,
             "exit_code": launched.process.returncode,
             "stderr_tail": list(launched.stderr_tail),
+            **launched.owner_dict(),
         })
 
 
@@ -256,90 +300,183 @@ async def start_preview_launch(
     workspace_root: str | Path | None,
     name: str | None = None,
     broadcast: BroadcastFn | None = None,
+    *,
+    session_id: str,
+    conversation_id: str,
 ) -> PreviewLaunchProcess:
+    session = str(session_id or "").strip()
+    conversation = str(conversation_id or "").strip()
+    if not session or not conversation:
+        raise RuntimeError("Preview launch requires a session and conversation owner")
     configs = load_preview_launch_configs(workspace_root)
     if not configs:
         raise RuntimeError("No preview launch configuration found")
     config = next((item for item in configs if item.name == name), configs[0])
-    existing = _RUNNING.get(config.name)
+    return await _start_preview_config(
+        config,
+        broadcast,
+        session_id=session,
+        conversation_id=conversation,
+        workspace_root=_safe_workspace_root(workspace_root),
+    )
+
+
+async def mark_preview_ready(
+    launched: PreviewLaunchProcess,
+    broadcast: BroadcastFn | None = None,
+) -> None:
+    """Commit readiness after either process output or HTTP verification."""
+    transitioned = launched.status != "ready"
+    launched.status = "ready"
+    launched.ready_event.set()
+    if transitioned and broadcast:
+        await broadcast({
+            "type": "preview.server.ready",
+            "id": launched.id,
+            "url": launched.effective_url,
+            "port": launched.effective_port,
+            **launched.owner_dict(),
+        })
+
+
+async def _start_preview_config(
+    config: PreviewLaunchConfig,
+    broadcast: BroadcastFn | None = None,
+    *,
+    session_id: str,
+    conversation_id: str,
+    workspace_root: str | Path | None = None,
+) -> PreviewLaunchProcess:
+    session = str(session_id or "").strip()
+    conversation = str(conversation_id or "").strip()
+    if not session or not conversation:
+        raise RuntimeError("Preview launch requires a session and conversation owner")
+    preview_id = hashlib.sha256(
+        f"{session}\0{conversation}\0{Path(config.cwd).resolve()}\0{config.name}".encode("utf-8")
+    ).hexdigest()
+    existing = _RUNNING.get(preview_id)
     if existing and existing.process.returncode is None:
         return existing
+    if config.auto_port and not config.port:
+        port = _allocate_loopback_port()
+        config = replace(
+            config,
+            port=port,
+            url=config.url or f"http://127.0.0.1:{port}",
+        )
     env = sanitized_subprocess_env()
-    env.setdefault("PORT", str(config.port))
-    process = await asyncio.create_subprocess_shell(
+    if config.port:
+        env.setdefault("PORT", str(config.port))
+    process = await spawn_shell(
         config.command,
         cwd=config.cwd,
         env=env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        **({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)} if os.name == "nt" else {}),
     )
-    launched = PreviewLaunchProcess(id=config.name, config=config, process=process)
-    _RUNNING[config.name] = launched
+    launched = PreviewLaunchProcess(
+        id=preview_id,
+        config=config,
+        process=process,
+        session_id=session,
+        conversation_id=conversation,
+        workspace_root=str(_safe_workspace_root(workspace_root or config.cwd)),
+    )
+    _RUNNING[preview_id] = launched
     launched._monitor_task = asyncio.create_task(_monitor_process(launched, broadcast))
     return launched
 
 
-async def stop_preview_launch(name: str | None = None) -> list[PreviewLaunchProcess]:
+def _allocate_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
+async def start_static_preview(
+    workspace_root: str | Path | None,
+    file_path: str | Path,
+    broadcast: BroadcastFn | None = None,
+    *,
+    session_id: str,
+    conversation_id: str,
+) -> PreviewLaunchProcess:
+    root = _safe_workspace_root(workspace_root)
+    target = Path(file_path)
+    target = target.resolve() if target.is_absolute() else (root / target).resolve()
+    try:
+        relative = target.relative_to(root)
+    except ValueError as exc:
+        raise RuntimeError("Static preview file must be inside the active workspace") from exc
+    if not target.is_file():
+        raise RuntimeError(f"Static preview file does not exist: {relative.as_posix()}")
+    if target.suffix.lower() not in {".html", ".htm"}:
+        raise RuntimeError("Static preview path must be an HTML file")
+
+    port = _allocate_loopback_port()
+    argv = [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"]
+    command = subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
+    identity = hashlib.sha256(str(target).encode("utf-8")).hexdigest()
+    config = PreviewLaunchConfig(
+        name=f"static-{identity}",
+        command=command,
+        cwd=str(target.parent),
+        port=port,
+        url=f"http://127.0.0.1:{port}/{quote(target.name)}",
+        source="static-html",
+    )
+    return await _start_preview_config(
+        config,
+        broadcast,
+        session_id=session_id,
+        conversation_id=conversation_id,
+        workspace_root=root,
+    )
+
+
+async def stop_preview_launch(
+    name: str | None = None,
+    *,
+    session_id: str,
+    conversation_id: str,
+    workspace_root: str | Path | None = None,
+) -> list[PreviewLaunchProcess]:
     targets = [
-        proc for proc in running_preview_processes()
+        proc for proc in running_preview_processes(
+            session_id=session_id,
+            conversation_id=conversation_id,
+            workspace_root=workspace_root,
+        )
         if name is None or proc.config.name == name or proc.id == name
     ]
+    return await _stop_preview_processes(targets)
+
+
+async def stop_preview_launches_for_session(session_id: str) -> list[PreviewLaunchProcess]:
+    """Stop every preview owned by one websocket session during shutdown."""
+    session = str(session_id or "").strip()
+    if not session:
+        return []
+    return await _stop_preview_processes([
+        process
+        for process in _active_preview_processes()
+        if process.session_id == session
+    ])
+
+
+async def stop_all_preview_launches() -> list[PreviewLaunchProcess]:
+    """Stop all previews during application shutdown."""
+    return await _stop_preview_processes(_active_preview_processes())
+
+
+async def _stop_preview_processes(
+    targets: list[PreviewLaunchProcess],
+) -> list[PreviewLaunchProcess]:
     for proc in targets:
         if proc.process.returncode is None:
-            proc.process.terminate()
-            try:
-                await asyncio.wait_for(proc.process.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                proc.process.kill()
-                await proc.process.wait()
+            proc.status = "stopping"
+            await terminate_process_tree(proc.process)
         if proc._monitor_task and not proc._monitor_task.done():
             proc._monitor_task.cancel()
-        if proc._health_task and not proc._health_task.done():
-            proc._health_task.cancel()
         _RUNNING.pop(proc.id, None)
     return targets
-
-
-HEALTH_CHECK_INTERVAL = 15.0
-HEALTH_FAILURE_THRESHOLD = 3
-
-
-async def _health_check_loop(
-    launched: PreviewLaunchProcess,
-    broadcast: BroadcastFn | None,
-) -> None:
-    """Periodically verify the server is still responding."""
-    from backend.preview.verifier import verify_preview_url
-
-    while launched.process.returncode is None and launched.id in _RUNNING:
-        await asyncio.sleep(HEALTH_CHECK_INTERVAL)
-        if launched.process.returncode is not None:
-            break
-        url = launched.effective_url
-        if not url:
-            continue
-        result = await verify_preview_url(url, timeout=5.0)
-        if result.ok:
-            launched._health_failures = 0
-            if launched.status == "unhealthy":
-                launched.status = "ready"
-                if broadcast:
-                    await broadcast({
-                        "type": "preview.server.ready",
-                        "id": launched.id,
-                        "url": launched.effective_url,
-                        "port": launched.effective_port,
-                    })
-        else:
-            launched._health_failures += 1
-            if launched._health_failures >= HEALTH_FAILURE_THRESHOLD and launched.status != "unhealthy":
-                launched.status = "unhealthy"
-                if broadcast:
-                    await broadcast({
-                        "type": "preview.server.unhealthy",
-                        "id": launched.id,
-                        "url": launched.effective_url,
-                        "consecutive_failures": launched._health_failures,
-                        "last_error": result.error,
-                    })

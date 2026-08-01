@@ -1,0 +1,104 @@
+{
+  "id": "pytest-dev-pytest-5103",
+  "title": "SWE-bench Lite pytest-dev__pytest-5103",
+  "prompt": "Unroll the iterable for all/any calls to get better reports\nSometime I need to assert some predicate on all of an iterable, and for that the builtin functions `all`/`any` are great - but the failure messages aren't useful at all!\r\nFor example - the same test written in three ways:\r\n\r\n- A generator expression\r\n```sh                                                                                                                                                                                                                         \r\n    def test_all_even():\r\n        even_stevens = list(range(1,100,2))\r\n>       assert all(is_even(number) for number in even_stevens)\r\nE       assert False\r\nE        +  where False = all(<generator object test_all_even.<locals>.<genexpr> at 0x101f82ed0>)\r\n```\r\n- A list comprehension\r\n```sh\r\n    def test_all_even():\r\n        even_stevens = list(range(1,100,2))\r\n>       assert all([is_even(number) for number in even_stevens])\r\nE       assert False\r\nE        +  where False = all([False, False, False, False, False, False, ...])\r\n```\r\n- A for loop\r\n```sh\r\n    def test_all_even():\r\n        even_stevens = list(range(1,100,2))\r\n        for number in even_stevens:\r\n>           assert is_even(number)\r\nE           assert False\r\nE            +  where False = is_even(1)\r\n\r\ntest_all_any.py:7: AssertionError\r\n```\r\nThe only one that gives a meaningful report is the for loop - but it's way more wordy, and `all` asserts don't translate to a for loop nicely (I'll have to write a `break` or a helper function - yuck)\r\nI propose the assertion re-writer \"unrolls\" the iterator to the third form, and then uses the already existing reports.\r\n\r\n- [x] Include a detailed description of the bug or suggestion\r\n- [x] `pip list` of the virtual environment you are using\r\n```\r\nPackage        Version\r\n-------------- -------\r\natomicwrites   1.3.0  \r\nattrs          19.1.0 \r\nmore-itertools 7.0.0  \r\npip            19.0.3 \r\npluggy         0.9.0  \r\npy             1.8.0  \r\npytest         4.4.0  \r\nsetuptools     40.8.0 \r\nsix            1.12.0 \r\n```\r\n- [x] pytest and operating system versions\r\n`platform darwin -- Python 3.7.3, pytest-4.4.0, py-1.8.0, pluggy-0.9.0`\r\n- [x] Minimal example if possible",
+  "source": {
+    "git": "https://github.com/pytest-dev/pytest.git",
+    "revision": "10ca84ffc56c2dd2d9dc4bd71b7b898e083500cd"
+  },
+  "python_version": "3.8",
+  "baseline_patch": "diff --git a/testing/test_assertrewrite.py b/testing/test_assertrewrite.py\n--- a/testing/test_assertrewrite.py\n+++ b/testing/test_assertrewrite.py\n@@ -656,6 +656,12 @@ def __repr__(self):\n         else:\n             assert lines == [\"assert 0 == 1\\n +  where 1 = \\\\n{ \\\\n~ \\\\n}.a\"]\n \n+    def test_unroll_expression(self):\n+        def f():\n+            assert all(x == 1 for x in range(10))\n+\n+        assert \"0 == 1\" in getmsg(f)\n+\n     def test_custom_repr_non_ascii(self):\n         def f():\n             class A(object):\n@@ -671,6 +677,53 @@ def __repr__(self):\n         assert \"UnicodeDecodeError\" not in msg\n         assert \"UnicodeEncodeError\" not in msg\n \n+    def test_unroll_generator(self, testdir):\n+        testdir.makepyfile(\n+            \"\"\"\n+            def check_even(num):\n+                if num % 2 == 0:\n+                    return True\n+                return False\n+\n+            def test_generator():\n+                odd_list = list(range(1,9,2))\n+                assert all(check_even(num) for num in odd_list)\"\"\"\n+        )\n+        result = testdir.runpytest()\n+        result.stdout.fnmatch_lines([\"*assert False*\", \"*where False = check_even(1)*\"])\n+\n+    def test_unroll_list_comprehension(self, testdir):\n+        testdir.makepyfile(\n+            \"\"\"\n+            def check_even(num):\n+                if num % 2 == 0:\n+                    return True\n+                return False\n+\n+            def test_list_comprehension():\n+                odd_list = list(range(1,9,2))\n+                assert all([check_even(num) for num in odd_list])\"\"\"\n+        )\n+        result = testdir.runpytest()\n+        result.stdout.fnmatch_lines([\"*assert False*\", \"*where False = check_even(1)*\"])\n+\n+    def test_for_loop(self, testdir):\n+        testdir.makepyfile(\n+            \"\"\"\n+            def check_even(num):\n+                if num % 2 == 0:\n+                    return True\n+                return False\n+\n+            def test_for_loop():\n+                odd_list = list(range(1,9,2))\n+                for num in odd_list:\n+                    assert check_even(num)\n+        \"\"\"\n+        )\n+        result = testdir.runpytest()\n+        result.stdout.fnmatch_lines([\"*assert False*\", \"*where False = check_even(1)*\"])\n+\n \n class TestRewriteOnImport(object):\n     def test_pycache_is_a_file(self, testdir):\n",
+  "env": {
+    "PYTHONUTF8": "1",
+    "PYTHONIOENCODING": "utf-8",
+    "PYTHONDONTWRITEBYTECODE": "1"
+  },
+  "setup": [
+    {
+      "name": "install pinned repository",
+      "argv": [
+        "python",
+        "-m",
+        "pip",
+        "install",
+        "-e",
+        "."
+      ],
+      "timeout_seconds": 1200
+    }
+  ],
+  "baseline": [
+    {
+      "name": "prove SWE-bench regression",
+      "argv": [
+        "python",
+        "-m",
+        "pytest",
+        "-q",
+        "testing/test_assertrewrite.py::TestAssertionRewrite::test_unroll_expression"
+      ],
+      "timeout_seconds": 900
+    }
+  ],
+  "judges": [
+    {
+      "name": "SWE-bench FAIL_TO_PASS",
+      "argv": [
+        "python",
+        "-m",
+        "pytest",
+        "-q",
+        "testing/test_assertrewrite.py::TestAssertionRewrite::test_unroll_expression"
+      ],
+      "timeout_seconds": 900
+    },
+    {
+      "name": "SWE-bench PASS_TO_PASS regression sample",
+      "argv": [
+        "python",
+        "-m",
+        "pytest",
+        "-q",
+        "testing/test_assertrewrite.py::TestAssertionRewrite::test_place_initial_imports",
+        "testing/test_assertrewrite.py::TestAssertionRewrite::test_dont_rewrite",
+        "testing/test_assertrewrite.py::TestAssertionRewrite::test_name",
+        "testing/test_assertrewrite.py::TestAssertionRewrite::test_dont_rewrite_if_hasattr_fails",
+        "testing/test_assertrewrite.py::TestAssertionRewrite::test_assert_already_has_message",
+        "testing/test_assertrewrite.py::TestAssertionRewrite::test_boolop",
+        "testing/test_assertrewrite.py::TestAssertionRewrite::test_short_circuit_evaluation",
+        "testing/test_assertrewrite.py::TestAssertionRewrite::test_unary_op",
+        "testing/test_assertrewrite.py::TestAssertionRewrite::test_binary_op",
+        "testing/test_assertrewrite.py::TestAssertionRewrite::test_boolop_percent",
+        "testing/test_assertrewrite.py::TestAssertionRewrite::test_call",
+        "testing/test_assertrewrite.py::TestAssertionRewrite::test_attribute",
+        "testing/test_assertrewrite.py::TestAssertionRewrite::test_comparisons",
+        "testing/test_assertrewrite.py::TestAssertionRewrite::test_len",
+        "testing/test_assertrewrite.py::TestAssertionRewrite::test_custom_reprcompare",
+        "testing/test_assertrewrite.py::TestAssertionRewrite::test_assert_raising_nonzero_in_comparison",
+        "testing/test_assertrewrite.py::TestAssertionRewrite::test_formatchar",
+        "testing/test_assertrewrite.py::TestAssertionRewrite::test_custom_repr",
+        "testing/test_assertrewrite.py::TestAssertionRewrite::test_custom_repr_non_ascii",
+        "testing/test_assertrewrite.py::TestAssertionRewriteHookDetails::test_read_pyc"
+      ],
+      "timeout_seconds": 1200
+    }
+  ],
+  "forbidden_changes": [
+    "testing/test_assertrewrite.py"
+  ],
+  "agent_verify_command": "python -m pytest -q testing/test_assertrewrite.py::TestAssertionRewrite::test_unroll_expression",
+  "agent_verify_timeout_seconds": 900,
+  "agent_timeout_seconds": 2400,
+  "seeds": [
+    11,
+    29,
+    47
+  ],
+  "minimum_pass_rate": 0.6666666666666666,
+  "tags": [
+    "swe-bench-lite",
+    "real-repository",
+    "pytest-dev/pytest",
+    "fixed-revision"
+  ]
+}

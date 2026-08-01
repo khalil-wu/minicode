@@ -154,5 +154,6 @@
 
 /* Prevent scroll during transitions/animations */
 .no-scroll {
-  overflow: hidden !important;
+  overflow: hidden;
+
 }

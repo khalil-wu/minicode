@@ -11,15 +11,32 @@ const { normalizeWithTrailingSeparator, isSamePath } = require("./utils");
 
 let trustedWorkspaceRoots = new Set();
 let approvedWorkspaceRoots = new Set();
+let appReadOnlyRoots = new Set();
+let userOutputRoots = new Set();
 let appendDesktopLog = () => {};
 let trustedRootsFile = "";
 
-function init({ initialRoots, approvedRoots, logger, trustedRootsFile: rootsFile }) {
+const SAFE_USER_OUTPUT_EXTENSIONS = new Set([
+  ".7z", ".aac", ".avif", ".bmp", ".csv", ".doc", ".docx", ".epub",
+  ".flac", ".gif", ".ico", ".jpeg", ".jpg", ".json", ".m4a", ".md",
+  ".mov", ".mp3", ".mp4", ".odp", ".ods", ".odt", ".ogg", ".pdf",
+  ".png", ".ppt", ".pptx", ".rtf", ".tar", ".tif", ".tiff",
+  ".tsv", ".txt", ".wav", ".webm", ".webp", ".xlsx", ".xls", ".xml",
+  ".yaml", ".yml", ".zip",
+]);
+
+function init({ initialRoots, approvedRoots, readOnlyRoots, userOutputRoots: outputRoots, logger, trustedRootsFile: rootsFile }) {
   trustedWorkspaceRoots = new Set(
     Array.from(initialRoots || [], (root) => canonicalizePath(root)).filter(isSafeWorkspacePath),
   );
   trustedRootsFile = typeof rootsFile === "string" ? rootsFile : "";
   approvedWorkspaceRoots = readApprovedWorkspaceRoots();
+  appReadOnlyRoots = new Set(
+    Array.from(readOnlyRoots || [], (root) => canonicalizePath(root)).filter(isSafeWorkspacePath),
+  );
+  userOutputRoots = new Set(
+    Array.from(outputRoots || [], (root) => canonicalizePath(root)).filter(isSafeWorkspacePath),
+  );
   for (const root of approvedRoots || []) {
     const canonical = canonicalizePath(root);
     if (!isSafeWorkspacePath(canonical)) continue;
@@ -45,6 +62,32 @@ function getTrustedWorkspaceRoots() {
 // Safe workspace path validation
 // ---------------------------------------------------------------------------
 
+function systemProtectedPrefixes(environment = process.env) {
+  const prefixes = new Set([
+    "c:/windows", "c:/program files", "c:/program files (x86)",
+    "c:/programdata", "c:/recovery", "c:/system volume information",
+  ]);
+  const windowsRoots = [
+    environment.SystemRoot,
+    environment.windir,
+    environment.ProgramFiles,
+    environment["ProgramFiles(x86)"],
+    environment.ProgramW6432,
+    environment.ProgramData,
+  ];
+  for (const rawPath of windowsRoots) {
+    if (typeof rawPath !== "string" || !rawPath.trim()) continue;
+    const normalized = rawPath.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+    if (/^[a-z]:\//.test(normalized)) prefixes.add(normalized);
+  }
+  const systemDrive = String(environment.SystemDrive || "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  if (/^[a-z]:$/.test(systemDrive)) {
+    prefixes.add(`${systemDrive}/recovery`);
+    prefixes.add(`${systemDrive}/system volume information`);
+  }
+  return prefixes;
+}
+
 function isSafeWorkspacePath(resolved) {
   const normalized = resolved.replace(/\\/g, "/");
   if (/^[A-Za-z]:\/?$/.test(normalized) || normalized === "/") return false;
@@ -54,12 +97,8 @@ function isSafeWorkspacePath(resolved) {
     "/etc", "/usr", "/bin", "/sbin", "/boot", "/sys", "/proc", "/dev",
     "/var/run", "/var/log", "/root",
   ];
-  const winSystemPrefixes = [
-    "c:/windows", "c:/program files", "c:/program files (x86)",
-    "c:/programdata", "c:/recovery", "c:/system volume information",
-  ];
   const lower = normalized.toLowerCase();
-  for (const prefix of [...systemPrefixes, ...winSystemPrefixes]) {
+  for (const prefix of [...systemPrefixes, ...systemProtectedPrefixes()]) {
     if (lower === prefix || lower.startsWith(prefix + "/")) return false;
   }
   return true;
@@ -146,9 +185,13 @@ function isTrustedWorkspaceRootPath(targetPath) {
 }
 
 function isWithinTrustedWorkspace(targetPath) {
+  return isWithinRootSet(targetPath, trustedWorkspaceRoots);
+}
+
+function isWithinRootSet(targetPath, roots) {
   const resolved = canonicalizePath(targetPath);
   const isWindows = process.platform === "win32";
-  for (const root of trustedWorkspaceRoots) {
+  for (const root of roots) {
     if (isWindows) {
       const resolvedLower = resolved.toLowerCase();
       const rootLower = root.toLowerCase();
@@ -162,6 +205,27 @@ function isWithinTrustedWorkspace(targetPath) {
     }
   }
   return false;
+}
+
+function isWithinAppReadOnlyData(targetPath) {
+  return isWithinRootSet(targetPath, appReadOnlyRoots);
+}
+
+function isReadableUserOutput(targetPath) {
+  const resolved = canonicalizePath(targetPath);
+  if (!isWithinRootSet(resolved, userOutputRoots)) return false;
+  if (!SAFE_USER_OUTPUT_EXTENSIONS.has(path.extname(resolved).toLowerCase())) return false;
+  try {
+    return fs.statSync(resolved).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function isReadablePath(targetPath) {
+  return isWithinTrustedWorkspace(targetPath)
+    || isWithinAppReadOnlyData(targetPath)
+    || isReadableUserOutput(targetPath);
 }
 
 function restoreTrustedWorkspaceRoot(targetPath) {
@@ -198,16 +262,20 @@ function trustedPathCandidates(targetPath) {
 const IPC_CAPABILITIES = new Set([
   "minicode:browser:captureScreenshot", "minicode:browser:click", "minicode:browser:discover",
   "minicode:browser:navigate", "minicode:browser:type", "minicode:deepLink:ack",
+  "minicode:embeddedBrowser:activate", "minicode:embeddedBrowser:clearSiteData", "minicode:embeddedBrowser:close",
+  "minicode:embeddedBrowser:create", "minicode:embeddedBrowser:list", "minicode:embeddedBrowser:navigate",
+  "minicode:embeddedBrowser:getSettings", "minicode:embeddedBrowser:inspect",
+  "minicode:embeddedBrowser:runAction", "minicode:embeddedBrowser:setBounds", "minicode:embeddedBrowser:setSettings",
   "minicode:deepLink:open", "minicode:diagnostics:export", "minicode:env:detect",
   "minicode:fs:compareWriteFile", "minicode:fs:createDirectory", "minicode:fs:deletePath",
   "minicode:fs:listTree", "minicode:fs:readFile", "minicode:fs:renamePath",
   "minicode:fs:searchFiles", "minicode:fs:writeFile", "minicode:notify",
   "minicode:openExternal", "minicode:openPath", "minicode:pickDirectory",
-  "minicode:pty:ackExit", "minicode:pty:kill", "minicode:pty:list",
+  "minicode:pty:ackExit", "minicode:pty:kill", "minicode:pty:killConversation", "minicode:pty:list",
   "minicode:pty:resize", "minicode:pty:snapshot", "minicode:pty:spawn",
   "minicode:pty:write", "minicode:revealPath", "minicode:startup:getState",
   "minicode:startup:openLogs", "minicode:startup:quit", "minicode:startup:retry",
-  "minicode:update:check", "minicode:update:download", "minicode:update:install",
+  "minicode:update:check", "minicode:update:download", "minicode:update:install", "minicode:update:status:get",
   "minicode:window:close", "minicode:window:maximize", "minicode:window:minimize",
   "minicode:workspace:trust",
 ]);
@@ -233,6 +301,23 @@ function assertTrustedPath(targetPath, label = "Path") {
     || path.resolve(targetPath);
   if (!isWithinTrustedWorkspace(resolved)) {
     throw new Error(`${label} is outside the trusted workspace.`);
+  }
+  return resolved;
+}
+
+function assertReadablePath(targetPath, label = "Path") {
+  if (typeof targetPath !== "string" || !targetPath.trim()) {
+    throw new Error(`${label} is required.`);
+  }
+  const rawPath = targetPath.trim();
+  const candidates = trustedPathCandidates(rawPath);
+  const absoluteCandidate = path.isAbsolute(rawPath) ? canonicalizePath(rawPath) : null;
+  const resolved = candidates.find((candidate) => isReadablePath(candidate) && fs.existsSync(candidate))
+    || (absoluteCandidate && isReadablePath(absoluteCandidate) ? absoluteCandidate : null)
+    || candidates.find((candidate) => isReadablePath(candidate))
+    || path.resolve(rawPath);
+  if (!isReadablePath(resolved)) {
+    throw new Error(`${label} is outside the trusted workspace, MiniCode read-only data, and safe user output folders.`);
   }
   return resolved;
 }
@@ -307,11 +392,17 @@ module.exports = {
   restoreTrustedWorkspaceRoot,
   isTrustedWorkspaceRootPath,
   isWithinTrustedWorkspace,
+  isWithinAppReadOnlyData,
+  isReadableUserOutput,
+  isReadablePath,
   assertTrustedPath,
+  assertReadablePath,
   assertMutableTrustedPath,
   isProtectedWritePath,
   assertIpcCapability,
   IPC_CAPABILITIES,
+  systemProtectedPrefixes,
   PROTECTED_WRITE_FILE_NAMES,
   PROTECTED_WRITE_PATH_PARTS,
+  SAFE_USER_OUTPUT_EXTENSIONS,
 };

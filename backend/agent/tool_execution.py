@@ -1,68 +1,45 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import difflib
 import hashlib
+import json
 import logging
-import re
+import os
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass, replace
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
 from backend.agent.context import ContextBuilder
-from backend.agent.coordinator import (
-    coordinator_delegation_block_reason,
-    coordinator_mode_enabled,
-    coordinator_tool_block_reason,
-)
-from backend.tools.contracts import EvidenceRecord, ToolOutcome, ToolOutcomeStatus
+from backend.tools.contracts import EvidenceRecord
 from backend.agent.message import AgentEvent
 from backend.agent.runtime_spans import runtime_span_from_tool_context
-from backend.agent.tool_common import WEB_SEARCH_TOOL_NAMES, WEB_FETCH_TOOL_NAMES, WEB_TOOL_NAMES, _text_arg
-from backend.agent.tool_guardrails import (
-    ToolCallSignature,
-    ToolCallGuardrailController,
-    _search_query_similarity,
-)
 from backend.agent.tool_execution_guardrails import (
-    duplicate_output_write_guard_result,
-    guardrail_after_call_result,
-    guardrail_before_call_result,
     invalid_call_result as _invalid_call_result,
     rejection_result as _rejection_result,
 )
 from backend.agent.state import AgentState
 from backend.agent.tool_events import (
-    describe_tool_call,
-    panel_hint_for_tool_result as _panel_hint_for_tool_result,
-    requires_attention_for_tool_result as _requires_attention_for_tool_result,
     status_for_result,
     tool_call_start_event,
     tool_start_times as _tool_start_times,
 )
 from backend.agent.tool_issues import classify_tool_issue
-from backend.agent.tool_repair import RepairResult, ToolArgRepairEngine, argument_has_value
-from backend.agent.tool_resources import (
-    ResourceResolver,
-    clean_candidate_url,
-    inferred_read_file_path_from_recent_list,
-)
 from backend.tools.catalog import tool_spec_for
 from backend.tools.tool_search import deferred_catalog_scope_allows
 from backend.agent.control_tools import CONTROL_TOOL_NAMES, ControlToolRouter
+from backend.async_cleanup import CANCELLATION_DRAIN_TIMEOUT_SECONDS, cancel_and_drain
 from backend.agent.tool_projection import (
-    DEFAULT_PROJECTION_REGISTRY,
     display_summary_for_result,
+    projection_for_tool,
     result_kind_for_tool,
 )
 from backend.agent.tool_runtime import (
-    CHECKPOINT_WRITE_TOOL_NAMES,
-    TOOL_TIMEOUTS,
-    resolve_max_concurrent_tools as _resolve_max_concurrent_tools,
-    resolve_tool_batch_timeout as _resolve_tool_batch_timeout,
     resolve_tool_timeout as _resolve_tool_timeout,
-    tool_batch_timeout_result as _tool_batch_timeout_result,
     tool_is_idempotent as _tool_is_idempotent,
     tool_mutates as _tool_mutates,
     tool_side_effect_kind as _tool_side_effect_kind,
@@ -72,37 +49,80 @@ from backend.permissions.checker import (
     PermissionChecker,
     evaluate_permission_decision,
 )
-from backend.permissions.context import PermissionContext, ToolExecutionContext
+from backend.permissions.context import PermissionContext, PermissionDecision, ToolExecutionContext
 from backend.permissions.review import generate_edit_diff_payload, generate_file_diff_payload
-from backend.tools.base import PermissionLevel, ToolResult
+from backend.tools.base import PermissionLevel, ToolResult, validate_tool_input
 from backend.tools.registry import ToolRegistry
 from backend.tools.subagent_context import is_subagent_permission_context, subagent_toolset_policy
 
 logger = logging.getLogger(__name__)
 
 SPECIAL_TOOL_NAMES = CONTROL_TOOL_NAMES
-INTERNAL_GUARDED_TOOL_NAMES = {
-    "web_search",
-    "web_fetch",
-    "run_command",
-}
-NON_CRITICAL_TIMEOUT_TOOLS = {
-    "task",
-    "save_memory",
-}
-COMMAND_OUTPUT_STREAM_TOOL_NAMES = {"run_command", "bash", "powershell"}
-CLAUDE_CODE_TOOL_NAME_ALIASES = {
-    "Read": "read_file",
-}
-WORKSPACE_FILE_ARG_ALIAS_TO_CANONICAL = {
-    "read_file": ("file_path", ("path", "target", "filename")),
-    "write_file": ("file_path", ("path", "target", "filename")),
-    "edit_file": ("file_path", ("path", "target", "filename")),
-}
-WORKSPACE_WRITE_TOOL_NAMES = {"write_file", "edit_file", "apply_patch"}
-FORCE_TOOL_RESULT_ARTIFACT_CHARS = 16_000
-FORCE_TOOL_RESULT_ARTIFACT_PREVIEW_LINES = 8
+_DEFAULT_PARALLEL_TOOL_CONCURRENCY = 10
+
+
+def _parallel_tool_concurrency(batch_size: int) -> int:
+    raw = (
+        os.environ.get("MINICODE_MAX_TOOL_CONCURRENCY")
+        or os.environ.get("CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY")
+        or ""
+    ).strip()
+    try:
+        configured = int(raw) if raw else _DEFAULT_PARALLEL_TOOL_CONCURRENCY
+    except ValueError:
+        configured = _DEFAULT_PARALLEL_TOOL_CONCURRENCY
+    return min(batch_size, max(1, configured))
+
+
+def _parallel_tool_batch_timeout() -> float | None:
+    raw = os.environ.get("MINICODE_TOOL_BATCH_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return None
+    try:
+        timeout = float(raw)
+    except ValueError:
+        return None
+    return timeout if timeout > 0 else None
+
+
+def argument_has_value(args: dict[str, Any], field: str) -> bool:
+    if field not in args or args.get(field) is None:
+        return False
+    value = args[field]
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, dict, set)):
+        return bool(value)
+    return True
+
+
+def task_parallel_tasks_have_value(args: dict[str, Any] | None) -> bool:
+    raw_tasks = (args or {}).get("parallel_tasks")
+    if not isinstance(raw_tasks, list) or len(raw_tasks) < 2:
+        return False
+    valid = [
+        item for item in raw_tasks
+        if isinstance(item, dict)
+        and argument_has_value(item, "description")
+        and argument_has_value(item, "prompt")
+    ]
+    return len(valid) >= 2
+
+
+def _tool_supports_diff(tool_name: str, tool_registry: ToolRegistry) -> bool:
+    tool = tool_registry.get_tool(tool_name)
+    return bool(tool is not None and tool.permission == PermissionLevel.DIFF_REVIEW)
+
+
+def _tool_streams_output(tool_name: str, tool_registry: ToolRegistry) -> bool:
+    tool = tool_registry.get_tool(tool_name)
+    return bool(tool is not None and getattr(tool, "streams_output", False))
+
+
+# The inline artifact preview follows Pi's shared tool-result contract below.
+# Do not introduce a second, tool-execution-specific preview threshold here.
 SKIP_FORCED_ARTIFACT_TOOL_NAMES = {"read_artifact"}
+_CREATED_FILE_EDIT_TRACKER_KEY = "_created_file_edit_records"
 
 
 @dataclass(frozen=True)
@@ -113,7 +133,14 @@ class _ToolBatchRuntime:
     tool_ctx: ToolExecutionContext
     iteration_id: str
     turn_id: str = ""
-    guardrail_controller: ToolCallGuardrailController | None = None
+
+
+class StreamingToolStatus(str, Enum):
+    QUEUED = "queued"
+    EXECUTING = "executing"
+    COMPLETED = "completed"
+    YIELDED = "yielded"
+    CANCELLED = "cancelled"
 
 
 @dataclass
@@ -123,48 +150,26 @@ class PrefetchedToolExecution:
     tool_call: ToolCallEvent
     task: asyncio.Task[ToolResult]
     started_epoch: float
+    status: StreamingToolStatus = StreamingToolStatus.EXECUTING
 
 
-_SHELL_FILE_WRITE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    # Any stdout-style redirect (bare or numbered fd). Bit-buckets are masked
-    # first, so `> /dev/null` / `2> nul` never reach these patterns.
-    re.compile(r"(?<![0-9])>{1,2}\s*(?!&)\S+", re.I),
-    re.compile(r"\b\d+>{1,2}\s*(?!&)\S+", re.I),
-    re.compile(r"&>{1,2}\s*\S+", re.I),
-    re.compile(r"\b(?:set-content|add-content|out-file|tee-object)\b", re.I),
-    re.compile(r"\btee\b", re.I),
-    re.compile(r"\bcopy\s+(?:nul|/y\b|con\b).+\S", re.I),
-    re.compile(r"\btype\s+nul\s*>\s*\S+", re.I),
-    re.compile(r"\bcat\s+>{1,2}\s*\S+", re.I),
-)
-
-
-# Language payloads live inside quotes; match them against the original command
-# so quote-masking does not hide real write APIs.
-_SHELL_INLINE_WRITE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\bpython(?:\d+(?:\.\d+)?)?\s+-c\b.*\bopen\s*\([^)]*['\"][wa]\b", re.I | re.S),
-    re.compile(r"\bpython(?:\d+(?:\.\d+)?)?\s+-c\b.*\bwrite_text\s*\(", re.I | re.S),
-    re.compile(r"\bnode\s+-e\b.*\b(?:writeFileSync|appendFileSync)\s*\(", re.I | re.S),
-    re.compile(r"\b(?:powershell|pwsh)\b.*-(?:Command|EncodedCommand)\b.*\b(?:set-content|add-content|out-file|tee-object)\b", re.I | re.S),
-)
-
-# Quoted spans (so '>' inside a JS/Python string literal or a grep/git -S pattern
-# is not mistaken for a shell redirection) and bit-bucket redirections (so
-# `> /dev/null` / `> nul` discards are not mistaken for file writes).
-_QUOTED_SPAN_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
-_BITBUCKET_RE = re.compile(r"\d*>+\s*(?:/dev/null|nul)\b", re.I)
-
-
-def _mask_command_for_write_guard(command: str) -> str:
-    # Mask every quoted span for redirect detection. Real write APIs inside
-    # python/node/powershell payloads are checked separately on the original.
-    masked = _QUOTED_SPAN_RE.sub('""', command)
-    return _BITBUCKET_RE.sub(" ", masked)
+@dataclass
+class StreamingToolRecord:
+    tool_call: ToolCallEvent
+    status: StreamingToolStatus = StreamingToolStatus.QUEUED
+    prefetched: PrefetchedToolExecution | None = None
 
 
 def _tool_turn_id(tool_ctx: ToolExecutionContext) -> str:
     metadata = tool_ctx.metadata if isinstance(tool_ctx.metadata, dict) else {}
-    return str(metadata.get("turn_id") or metadata.get("assistant_message_id") or "").strip()
+    # QueryEngine's run_id is the typed turn identity stamped by
+    # EventEnvelope. assistant_message_id is only the transport target.
+    return str(
+        metadata.get("run_id")
+        or metadata.get("turn_id")
+        or metadata.get("assistant_message_id")
+        or ""
+    ).strip()
 
 
 def _artifact_store_from_tool_context(tool_ctx: ToolExecutionContext | None) -> Any | None:
@@ -181,14 +186,21 @@ def _force_artifact_for_oversized_tool_result(
     tc: ToolCallEvent,
     result: ToolResult,
     tool_ctx: ToolExecutionContext | None,
+    *,
+    inline_limit: int | None = None,
 ) -> ToolResult:
     """Persist very large raw tool output and keep only stable metadata inline."""
+    from backend.tools.base import MAX_TOOL_RESULT_LINES, truncate_text_head, truncate_tool_result
+
     content = result.content or ""
-    if (
-        result.artifact_id
-        or tc.name in SKIP_FORCED_ARTIFACT_TOOL_NAMES
-        or len(content) <= FORCE_TOOL_RESULT_ARTIFACT_CHARS
-    ):
+    if result.artifact_id or tc.name in SKIP_FORCED_ARTIFACT_TOOL_NAMES or inline_limit is None:
+        return result
+    truncation = truncate_text_head(
+        content,
+        max_lines=MAX_TOOL_RESULT_LINES,
+        max_bytes=inline_limit,
+    )
+    if not truncation.truncated:
         return result
 
     artifact_store = _artifact_store_from_tool_context(tool_ctx)
@@ -202,7 +214,8 @@ def _force_artifact_for_oversized_tool_result(
             content=content,
             source=f"{tc.name}({tc.id})",
             type="tool_result",
-            preview_lines=FORCE_TOOL_RESULT_ARTIFACT_PREVIEW_LINES,
+            conversation_id=str(getattr(tool_ctx, "conversation_id", "") or ""),
+            workspace_root=str(getattr(tool_ctx, "workspace_root", "") or ""),
         )
     except Exception as exc:
         logger.warning(
@@ -219,41 +232,21 @@ def _force_artifact_for_oversized_tool_result(
             "Large tool result stored as artifact.",
             f"tool: {tc.name}",
             f"artifact_id: {artifact_id}",
-            f"original_chars: {len(content)}",
+            f"original_bytes: {truncation.total_bytes}",
             f"line_count: {line_count}",
-            f"content_hash: sha256:{content_hash[:16]}",
+            f"content_hash: sha256:{content_hash}",
+            f"Call read_artifact with artifact_id='{artifact_id}' (offset/limit accepted) for the full output.",
         ]
     )
     return replace(
         result,
         content=summary,
         artifact_id=artifact_id,
+        artifact_preview=result.artifact_preview
+        or truncate_tool_result(content),
         display_summary=result.display_summary or f"Stored large result from {tc.name} as artifact",
         limitation=result.limitation or "large result stored as artifact",
     )
-
-
-def run_command_file_write_guard_reason(command: str) -> str:
-    """Return guidance when run_command is being used as a file editing tool."""
-    stripped = command.strip()
-    if not stripped:
-        return ""
-    for pattern in _SHELL_INLINE_WRITE_PATTERNS:
-        if pattern.search(stripped):
-            return (
-                "Blocked run_command because it appears to create or edit files through the shell. "
-                "Use write_file for complete file writes or edit_file for targeted changes so MiniCode can show a diff review. "
-                "Use run_command only for commands such as tests, builds, git inspection, and other shell-only operations."
-            )
-    masked = _mask_command_for_write_guard(stripped)
-    for pattern in _SHELL_FILE_WRITE_PATTERNS:
-        if pattern.search(masked):
-            return (
-                "Blocked run_command because it appears to create or edit files through the shell. "
-                "Use write_file for complete file writes or edit_file for targeted changes so MiniCode can show a diff review. "
-                "Use run_command only for commands such as tests, builds, git inspection, and other shell-only operations."
-            )
-    return ""
 
 
 def _metadata_bool(metadata: dict[str, Any], key: str) -> bool:
@@ -287,7 +280,7 @@ def _tool_call_is_read_only(tc: ToolCallEvent, tool_registry: ToolRegistry) -> b
             return bool(tool.is_read_only(tc.arguments))
         except Exception:
             return bool(getattr(tool, "read_only", False))
-    return not _tool_mutates(tc.name, tool_registry)
+    return not _tool_mutates(tc.name, tool_registry, tc.arguments)
 
 
 def _resolve_workspace_path_for_scope(raw_path: str, tool_ctx: ToolExecutionContext) -> Path:
@@ -347,12 +340,20 @@ def subagent_scope_guard_reason(
             "Return findings without modifying files, running mutating commands, or changing external state."
         )
 
-    if not write_scope or tc.name not in WORKSPACE_WRITE_TOOL_NAMES:
+    if not write_scope:
+        return ""
+
+    tool = tool_registry.get_tool(tc.name)
+    may_mutate_workspace = bool(getattr(tool, "mutates_workspace", False))
+    if not may_mutate_workspace or _tool_call_is_read_only(tc, tool_registry):
         return ""
 
     raw_targets = _workspace_write_targets(tc)
     if raw_targets is None:
-        return ""
+        return (
+            f"Blocked tool '{tc.name}' because this subagent has write_scope={write_scope} "
+            "but the tool may mutate the workspace and its target paths cannot be proven to stay in scope."
+        )
     if not raw_targets:
         return (
             f"Blocked tool '{tc.name}' because this subagent has write_scope={write_scope} "
@@ -384,96 +385,47 @@ def subagent_scope_guard_reason(
     return ""
 
 
-def is_malformed_web_tool_call(reason: str) -> bool:
-    return bool(
-        re.search(
-            r"(?:Invalid web_(?:search|fetch) call|Invalid tool call for 'web_(?:search|fetch)'): "
-            r"missing required",
-            reason,
-            re.I,
-        )
-    )
-
-
 def disabled_tool_guard_reason(state: AgentState, tc: ToolCallEvent) -> str:
     if tc.name not in state.disabled_tools:
         return ""
-    guidance = " ".join(state.loop_guidance[-2:]).strip()
-    if guidance:
-        return f"Tool '{tc.name}' is disabled for this turn. {guidance}"
     return f"Tool '{tc.name}' is disabled for this turn. Continue without calling it."
 
 
-def repeated_similar_web_search_result(state: AgentState, tc: ToolCallEvent) -> ToolResult | None:
-    if tc.name not in WEB_SEARCH_TOOL_NAMES:
-        return None
-    query = _text_arg((tc.arguments or {}).get("query"))
-    if not query:
-        return None
-    similar_records = [
-        record
-        for record in state.tool_calls
-        if record.tool_name in WEB_SEARCH_TOOL_NAMES
-        and _search_query_similarity(query, _text_arg(record.tool_input.get("query"))) >= 0.67
-    ]
-    if len(similar_records) < 2:
-        return None
-
-    guidance = (
-        "相似网页搜索未返回结果或足够新结果。请停止继续调用 web_search，"
-        "基于已有候选来源回答；如果证据不足，请明确说明限制。"
-    )
-    state.disable_tools({"web_search"}, guidance)
-    return ToolResult(
-        content=guidance,
-        is_error=False,
-        status="success",
-        display_summary=guidance,
-        result_kind="search",
-        evidence_type="candidate",
-    )
-
-
-def normalize_tool_arguments(name: str, args: dict[str, Any]) -> dict[str, Any]:
-    normalized = dict(args)
-    if name in {"load_skill", "unload_skill"} and not argument_has_value(normalized, "skill_name"):
-        for alias in ("skillName", "skill", "name"):
-            if argument_has_value(normalized, alias):
-                normalized["skill_name"] = normalized[alias]
-                break
-    canonical_path = WORKSPACE_FILE_ARG_ALIAS_TO_CANONICAL.get(name)
-    if canonical_path is not None:
-        canonical, aliases = canonical_path
-        if not argument_has_value(normalized, canonical):
-            for alias in aliases:
-                if argument_has_value(normalized, alias):
-                    normalized[canonical] = normalized[alias]
-                    break
-    if name in WEB_SEARCH_TOOL_NAMES and not _text_arg(normalized.get("query")):
-        query = (
-            _text_arg(normalized.get("q"))
-            or _text_arg(normalized.get("search_query"))
-            or _text_arg(normalized.get("queries"))
-            or _text_arg(normalized.get("pattern"))
-        )
-        if query:
-            normalized["query"] = query
-    if name in WEB_FETCH_TOOL_NAMES and not _text_arg(normalized.get("url")):
-        url = _text_arg(normalized.get("href")) or _text_arg(normalized.get("link"))
-        if url:
-            normalized["url"] = url
-    return normalized
+def stale_subagent_context_guard_reason(tool_ctx: ToolExecutionContext | None) -> str:
+    """Reject tool work emitted by an obsolete child incarnation."""
+    metadata = getattr(tool_ctx, "metadata", None) if tool_ctx is not None else None
+    if not isinstance(metadata, dict):
+        return ""
+    role = str(metadata.get("agent_role") or "")
+    mode = str(metadata.get("agent_mode") or "")
+    if not role.startswith("subagent:") and mode != "subagent":
+        return ""
+    runtime = metadata.get("agent_runtime")
+    accepts = getattr(runtime, "accepts_subagent_incarnation", None)
+    if not callable(accepts):
+        return "Subagent runtime identity is unavailable; refusing an unfenced tool call."
+    subagent_id = str(metadata.get("run_id") or getattr(tool_ctx, "task_id", "") or "").strip()
+    try:
+        mailbox_epoch = int(metadata.get("mailbox_epoch"))
+    except (TypeError, ValueError):
+        mailbox_epoch = None
+    if not subagent_id or not accepts(
+        subagent_id,
+        agent_path=str(metadata.get("agent_path") or ""),
+        mailbox_epoch=mailbox_epoch,
+        require_running=True,
+    ):
+        return f"Subagent {subagent_id or '<unknown>'} is no longer the current running incarnation."
+    return ""
 
 
 def normalize_tool_call_event(tc: ToolCallEvent, *, fallback_id: str = "") -> ToolCallEvent:
-    raw_name = str(tc.name or "").strip()
-    name = CLAUDE_CODE_TOOL_NAME_ALIASES.get(raw_name, raw_name)
-    args = tc.arguments if isinstance(tc.arguments, dict) else {}
+    args = dict(tc.arguments) if isinstance(tc.arguments, dict) else tc.arguments
     return replace(
         tc,
         id=str(tc.id or "").strip() or fallback_id,
-        name=name,
-        arguments=normalize_tool_arguments(name, args),
+        name=str(tc.name or "").strip(),
+        arguments=args,
     )
 
 
@@ -515,16 +467,12 @@ def unwrap_deferred_tool_call(
     return replace(tc, name=underlying_name, arguments=underlying_args), ""
 
 
-def normalized_tool_arguments(name: str, args: dict[str, Any] | None) -> dict[str, Any]:
-    return normalize_tool_arguments(name, dict(args or {}))
-
-
 def missing_required_tool_argument_names(tc: ToolCallEvent, tool_registry: ToolRegistry) -> list[str]:
     # Compute on a local copy; do NOT mutate the caller's tc. This is a query
     # helper called from history-safety / prefetch paths on tc objects that are
     # also written to history. Reassigning tc.arguments here was a hidden source
     # of prefetch-signature drift (args rewritten under the prefetch's feet).
-    args = normalized_tool_arguments(tc.name, tc.arguments)
+    args = dict(tc.arguments) if isinstance(tc.arguments, dict) else {}
     tool = tool_registry.get_tool(tc.name)
     if tool is None:
         return []
@@ -541,19 +489,24 @@ def missing_required_tool_argument_names(tc: ToolCallEvent, tool_registry: ToolR
 
 
 def missing_required_tool_argument_reason(
-    state: AgentState,
+    state: AgentState | None,
     tc: ToolCallEvent,
     tool_registry: ToolRegistry,
 ) -> str:
-    return ToolArgRepairEngine(state, tool_registry).missing_required_reason(tc)
-
-
-def tool_call_needs_list_context(tc: ToolCallEvent, tool_registry: ToolRegistry) -> bool:
-    spec = tool_spec_for(tc.name, tool_registry)
-    for arg in spec.required_args:
-        if spec.role_for(arg) == "workspace_file" and not argument_has_value(tc.arguments or {}, arg):
-            return True
-    return False
+    del state
+    if tc.name == "task" and task_parallel_tasks_have_value(tc.arguments):
+        return ""
+    missing = [
+        name
+        for name in tool_spec_for(tc.name, tool_registry).required_args
+        if not argument_has_value(tc.arguments or {}, name)
+    ]
+    if not missing:
+        return ""
+    return (
+        f"Invalid tool call for '{tc.name}': missing required argument(s): {missing}. "
+        f"Received keys: {list((tc.arguments or {}).keys())}."
+    )
 
 
 def _dedupe_tool_call_ids(tool_calls: list[ToolCallEvent]) -> list[ToolCallEvent]:
@@ -578,7 +531,8 @@ def _dedupe_tool_call_ids(tool_calls: list[ToolCallEvent]) -> list[ToolCallEvent
                 suffix += 1
             call_id = f"{call_id}:dup{suffix}"
         seen.add(call_id)
-        result.append(tc if tc.id == call_id else replace(tc, id=call_id))
+        duplicate = tc.id != call_id and bool(str(tc.id or "").strip())
+        result.append(tc if tc.id == call_id else replace(tc, id=call_id, duplicate_id=duplicate))
     return result
 
 
@@ -587,97 +541,16 @@ def prepare_tool_call_sequence(
     tool_calls: list[ToolCallEvent],
     tool_registry: ToolRegistry,
     tool_ctx: ToolExecutionContext | None = None,
-) -> list[RepairResult]:
-    """Normalize and repair a model tool-call batch once for history and execution."""
-    reserved_fetch_urls: set[str] = set()
-    repaired: list[RepairResult] = []
-    for index, raw_tc in enumerate(tool_calls, 1):
-        tc = normalize_tool_call_event(raw_tc, fallback_id=f"tool_{index}")
-        repair_result = repair_tool_call_for_execution(
-            state,
-            tc,
-            tool_registry,
-            tool_ctx,
-            reserved_fetch_urls=reserved_fetch_urls,
-        )
-        tc = repair_result.tool_call
-        if tc.name in WEB_FETCH_TOOL_NAMES:
-            url = _text_arg((tc.arguments or {}).get("url"))
-            if url:
-                reserved_fetch_urls.add(clean_candidate_url(url))
-        repaired.append(repair_result)
-    # Final guard: ids must be unique + non-empty across the whole batch before
-    # they reach history (append_assistant_tool_calls) or the parallel executor
-    # (results_by_id keyed by id). Done last so per-call repair can't reintroduce
-    # a collision.
-    deduped = _dedupe_tool_call_ids([result.tool_call for result in repaired])
-    return [
-        result if result.tool_call == tool_call else replace(result, tool_call=tool_call)
-        for result, tool_call in zip(repaired, deduped)
-    ]
-
-
-def repair_tool_call_sequence(
-    state: AgentState,
-    tool_calls: list[ToolCallEvent],
-    tool_registry: ToolRegistry,
-    tool_ctx: ToolExecutionContext | None = None,
 ) -> list[ToolCallEvent]:
-    """Compatibility projection of the prepared batch to repaired tool calls."""
-    return [
-        result.tool_call
-        for result in prepare_tool_call_sequence(state, tool_calls, tool_registry, tool_ctx)
-    ]
-
-
-def repair_tool_call_for_execution(
-    state: AgentState,
-    tc: ToolCallEvent,
-    tool_registry: ToolRegistry,
-    tool_ctx: ToolExecutionContext | None = None,
-    *,
-    reserved_fetch_urls: set[str] | None = None,
-) -> RepairResult:
-    """Run the structured argument-repair path used by tool execution."""
-    resolver = ResourceResolver(state, tool_ctx, reserved_fetch_urls=reserved_fetch_urls)
-    return ToolArgRepairEngine(state, tool_registry, resolver).repair_result(tc)
-
-
-def repair_result_block_reason(
-    state: AgentState,
-    repair_result: RepairResult,
-    tool_registry: ToolRegistry,
-) -> str:
-    """Project a structured repair failure into model-facing guidance."""
-    if repair_result.needs_model_generation or repair_result.routing_correction:
-        return ""
-    if not (repair_result.needs_user_input or repair_result.blocked):
-        return ""
-    tc = repair_result.tool_call
-    required_reason = missing_required_tool_argument_reason(state, tc, tool_registry)
-    details = [
-        text.strip()
-        for text in (
-            repair_result.user_message,
-            repair_result.model_observation,
-            required_reason,
-        )
-        if text and text.strip()
-    ]
-    return " ".join(dict.fromkeys(details))
-
-
-def tool_call_is_safe_for_model_history(tc: ToolCallEvent, tool_registry: ToolRegistry) -> bool:
-    normalized = normalize_tool_call_event(tc)
-    if not normalized.id or not normalized.name:
-        return False
-    if invalid_tool_call_guard_reason(normalized, tool_registry):
-        return False
-    if ToolArgRepairEngine(AgentState(user_message=""), tool_registry).missing_required_reason(normalized):
-        return False
-    if missing_required_tool_argument_names(normalized, tool_registry):
-        return False
-    return True
+    """Normalize a model tool-call batch once for history and execution."""
+    del state, tool_registry, tool_ctx
+    prepared: list[ToolCallEvent] = []
+    for index, raw_tc in enumerate(tool_calls, 1):
+        prepared.append(normalize_tool_call_event(raw_tc, fallback_id=f"tool_{index}"))
+    # Provider call ids must be non-empty and unique before history commit and
+    # execution. Arguments remain exactly model-authored and are validated by
+    # the tool schema; the runtime does not guess or rewrite them.
+    return _dedupe_tool_call_ids(prepared)
 
 
 def _matching_prefetch(
@@ -704,7 +577,25 @@ def _take_matching_prefetch(
     prefetched = _matching_prefetch(prefetched_results, tc)
     if prefetched is None or prefetched_results is None:
         return None
-    return prefetched_results.pop(tc.id, None)
+    taken = prefetched_results.pop(tc.id, None)
+    if taken is not None:
+        taken.status = StreamingToolStatus.YIELDED
+    return taken
+
+
+def _execution_exception_result(exc: BaseException, *, label: str = "Tool execution") -> ToolResult:
+    """Keep raw exception text diagnostic-only, never model-visible."""
+    return ToolResult(
+        content=f"{label} failed ({type(exc).__name__}).",
+        is_error=True,
+        status="failed",
+        error_kind="execution_error",
+        user_summary="工具执行失败。",
+        developer_detail=str(exc),
+        recoverable=True,
+        projection="error",
+        model_observation="The tool execution failed. Check the arguments or try another approach.",
+    )
 
 
 async def _await_prefetched_result(prefetched: PrefetchedToolExecution) -> ToolResult:
@@ -717,7 +608,7 @@ async def _await_prefetched_result(prefetched: PrefetchedToolExecution) -> ToolR
             status="failed",
         )
     except Exception as exc:
-        return ToolResult(content=f"Execution failed: {exc}", is_error=True, status="failed")
+        return _execution_exception_result(exc, label="Prefetched tool execution")
 
 
 def cancel_prefetched_tool_executions(
@@ -728,6 +619,7 @@ def cancel_prefetched_tool_executions(
     for prefetched in prefetched_results.values():
         if not prefetched.task.done():
             prefetched.task.cancel()
+        prefetched.status = StreamingToolStatus.CANCELLED
     prefetched_results.clear()
 
 
@@ -739,123 +631,27 @@ def maybe_start_prefetched_tool_execution(
     permission_checker: PermissionChecker,
     permission_context: PermissionContext | None,
     tool_ctx: ToolExecutionContext,
-    stagnation_limit: int,
     existing: dict[str, PrefetchedToolExecution],
-    guardrail_controller: ToolCallGuardrailController | None = None,
 ) -> PrefetchedToolExecution | None:
-    """Start a safe tool in the background as soon as its block is complete.
+    """Compatibility hook for the retired speculative execution path.
 
-    This intentionally covers a conservative subset: concurrency-safe,
-    auto-permitted, non-mutating tools. Open-world tools are excluded except
-    MiniCode's built-in web read/search tools after permission policy has
-    already classified the exact call as AUTO. Final UI/context projection
-    still happens through execute_tool_batch, preserving ordering.
+    Pi's contract is stricter: a tool call is executable only after the
+    provider response has settled and the complete assistant item has been
+    committed. Starting work from a streaming frame can leak reads, network
+    requests, or other observable effects when the response is retried,
+    cancelled, or truncated. Keep this symbol for older callers, but make the
+    safe behavior an unconditional no-op; ``execute_tool_batch`` is the only
+    execution boundary.
     """
-    from backend.hooks import get_hook_manager
-    from backend.hooks.manager import HookEvent
-
-    hook_mgr = get_hook_manager()
-    if hook_mgr is not None:
-        has_hooks = getattr(hook_mgr, "has_hooks", None)
-        if not callable(has_hooks) or has_hooks(HookEvent.PRE_TOOL_USE):
-            return None
-    tc = normalize_tool_call_event(raw_tc)
-    if not tc.id or tc.id in existing:
-        return None
-    # Prefetch only calls whose arguments are already final. Otherwise the
-    # normal executor may authorize and display repaired args while consuming a
-    # result produced from the original args.
-    if repair_tool_call_for_execution(state, tc, tool_registry, tool_ctx).tool_call != tc:
-        return None
-    if invalid_tool_call_guard_reason(tc, tool_registry):
-        return None
-    if model_toolset_guard(tc.name, tool_registry, getattr(tool_ctx, "metadata", None))[0]:
-        return None
-    if disabled_tool_guard_reason(state, tc):
-        return None
-    if repeated_similar_web_search_result(state, tc) is not None:
-        return None
-    if state.repeated_call_guard_reason(tc.name, tc.arguments, limit=stagnation_limit):
-        return None
-    if guardrail_controller is not None:
-        try:
-            decision = guardrail_controller.before_call(tc.name, tc.arguments)
-        except Exception:
-            decision = None
-        if decision is not None and not decision.allows_execution:
-            return None
-    if missing_required_tool_argument_reason(state, tc, tool_registry):
-        return None
-    if missing_required_tool_argument_names(tc, tool_registry):
-        return None
-
-    tool = tool_registry.get_tool(tc.name)
-    if tool is None or tc.name in SPECIAL_TOOL_NAMES:
-        return None
-    if getattr(tool, "open_world", False) and tc.name not in WEB_TOOL_NAMES:
-        return None
-    if _tool_mutates(tc.name, tool_registry):
-        return None
-    try:
-        if not tool.is_concurrency_safe(tc.arguments):
-            return None
-    except Exception:
-        return None
-    try:
-        validate_msg = tool.validate_input(tc.arguments)
-    except Exception:
-        validate_msg = ""
-    if validate_msg:
-        return None
-
-    permission_decision = evaluate_permission_decision(
-        permission_checker,
-        tc.name,
-        tc.arguments,
-        context=permission_context,
-        tool=tool,
-    )
-    if (
-        permission_decision.decision != "allow"
-        or not permission_decision.capability_allowed
-        or permission_decision.permission_level != PermissionLevel.AUTO
-    ):
-        return None
-
-    started_epoch = time.time()
-    task = asyncio.create_task(
-        run_tool_with_timeout(
-            tc,
-            tool_registry,
-            tool_ctx,
-            iteration_id=f"iter:{max(1, state.iterations)}",
-        )
-    )
-
-    def _consume_unhandled_exception(done_task: asyncio.Task[ToolResult]) -> None:
-        if done_task.cancelled():
-            return
-        try:
-            done_task.exception()
-        except Exception:
-            pass
-
-    task.add_done_callback(_consume_unhandled_exception)
-    prefetched = PrefetchedToolExecution(
-        tool_call=tc,
-        task=task,
-        started_epoch=started_epoch,
-    )
-    existing[tc.id] = prefetched
-    return prefetched
-
+    del raw_tc, state, tool_registry, permission_checker, permission_context, tool_ctx, existing
+    return None
 
 class StreamingToolExecutor:
-    """Starts complete safe tool blocks during model streaming.
+    """Collect tool-call diagnostics without executing provider stream data.
 
-    This mirrors the Claude Code boundary: a complete tool block may begin
-    running before the provider's final message frame, while final projection
-    and context writes remain ordered in ``execute_tool_batch``.
+    Pi executes tools only after the assistant response is settled. This
+    object remains as the stream-side collector used by recovery/control code,
+    but it deliberately has no speculative execution capability.
     """
 
     def __init__(
@@ -866,46 +662,55 @@ class StreamingToolExecutor:
         permission_checker: PermissionChecker,
         permission_context: PermissionContext | None,
         tool_ctx: ToolExecutionContext,
-        stagnation_limit: int,
-        guardrail_controller: ToolCallGuardrailController | None = None,
+        execution_limit: int | None = None,
     ) -> None:
         self.state = state
         self.tool_registry = tool_registry
         self.permission_checker = permission_checker
         self.permission_context = permission_context
         self.tool_ctx = tool_ctx
-        self.stagnation_limit = stagnation_limit
-        self.guardrail_controller = guardrail_controller
+        self.execution_limit = execution_limit
         self.prefetched_results: dict[str, PrefetchedToolExecution] = {}
+        self.tracked_tools: dict[str, StreamingToolRecord] = {}
         self.blocked_by_order = False
 
     def add_tool(self, tool_call: ToolCallEvent) -> PrefetchedToolExecution | None:
-        if self.blocked_by_order:
-            return None
         tc_id = str(tool_call.id or "")
-        if tc_id and tc_id in self.prefetched_results:
-            return self.prefetched_results[tc_id]
-        prefetched = maybe_start_prefetched_tool_execution(
-            tool_call,
-            state=self.state,
-            tool_registry=self.tool_registry,
-            permission_checker=self.permission_checker,
-            permission_context=self.permission_context,
-            tool_ctx=self.tool_ctx,
-            stagnation_limit=self.stagnation_limit,
-            existing=self.prefetched_results,
-            guardrail_controller=self.guardrail_controller,
-        )
-        if prefetched is None:
-            # Preserve model order: once a completed block is not safe to start
-            # during streaming, later blocks wait for the normal executor.
-            self.blocked_by_order = True
-        return prefetched
+        if tc_id and tc_id not in self.tracked_tools:
+            self.tracked_tools[tc_id] = StreamingToolRecord(tool_call=tool_call)
+        record = self.tracked_tools.get(tc_id)
+        # Do not execute from a provider stream. The complete assistant item
+        # is committed first; the transition controller then invokes the
+        # ordinary ordered batch runner. ``prefetched_results`` remains empty
+        # by design and is retained only for compatibility with older callers.
+        if record is not None:
+            record.status = StreamingToolStatus.QUEUED
+        return None
 
     def add_tools(self, tool_calls: list[ToolCallEvent]) -> None:
         for tool_call in tool_calls:
-            if self.add_tool(tool_call) is None:
-                break
+            self.add_tool(tool_call)
+
+    def status_snapshot(self) -> tuple[tuple[str, str], ...]:
+        """Stable diagnostic projection in provider tool-call order."""
+        return tuple(
+            (
+                tool_id,
+                (
+                    record.prefetched.status
+                    if record.prefetched is not None
+                    else record.status
+                ).value,
+            )
+            for tool_id, record in self.tracked_tools.items()
+        )
+
+    def mark_yielded(self, tool_call_id: str) -> None:
+        record = self.tracked_tools.get(str(tool_call_id or ""))
+        if record is not None:
+            record.status = StreamingToolStatus.YIELDED
+            if record.prefetched is not None:
+                record.prefetched.status = StreamingToolStatus.YIELDED
 
     def get_completed_results(self, ordered_tool_calls: list[ToolCallEvent]) -> list[PrefetchedToolExecution]:
         completed: list[PrefetchedToolExecution] = []
@@ -916,6 +721,9 @@ class StreamingToolExecutor:
             )
             if prefetched is None or not prefetched.task.done():
                 break
+            record = self.tracked_tools.get(str(tool_call.id or ""))
+            if record is not None and record.status is StreamingToolStatus.EXECUTING:
+                record.status = StreamingToolStatus.COMPLETED
             completed.append(prefetched)
         return completed
 
@@ -933,6 +741,15 @@ class StreamingToolExecutor:
 
     def cancel_remaining(self) -> None:
         cancel_prefetched_tool_executions(self.prefetched_results)
+        for record in self.tracked_tools.values():
+            if record.status is not StreamingToolStatus.YIELDED:
+                record.status = StreamingToolStatus.CANCELLED
+        self.tracked_tools.clear()
+        # The executor is reused when the provider retries the same model turn
+        # (fallback/max-output recovery). A non-prefetchable block from the
+        # abandoned attempt must not permanently suppress safe prefetch in the
+        # fresh attempt.
+        self.blocked_by_order = False
 
 
 def invalid_tool_call_guard_reason(tc: ToolCallEvent, tool_registry: ToolRegistry) -> str:
@@ -947,39 +764,36 @@ def invalid_tool_call_guard_reason(tc: ToolCallEvent, tool_registry: ToolRegistr
             f"Invalid tool call for '{name}': arguments must be a JSON object. "
             "Retry with arguments that match the tool schema."
         )
+    if tc.arguments_repaired:
+        return (
+            f"Tool '{name}' had malformed provider JSON and was not executed. "
+            "Send the same intended call again with a complete JSON object."
+        )
+    if tc.duplicate_id and _tool_mutates(name, tool_registry, tc.arguments):
+        return (
+            f"Duplicate tool-call id for side-effectful tool '{name}' was not executed. "
+            "Issue one new call with a unique id if the action is still needed."
+        )
     if (
         tool_registry.get_tool(name) is None
         and name not in SPECIAL_TOOL_NAMES
-        and name not in INTERNAL_GUARDED_TOOL_NAMES
     ):
-        available = ", ".join(tool_registry.list_tools()) or "none"
+        available_names = tool_registry.list_tools()
+        suggestions = difflib.get_close_matches(name, available_names, n=5, cutoff=0.25)
+        available = ", ".join(suggestions) or ", ".join(available_names[:5]) or "none"
         return (
-            f"Tool '{name}' does not exist. Available tools: {available}. "
-            "Choose one of the available tools or answer without tools."
+            f"Tool '{name}' does not exist. Closest available tools: {available}. "
+            "Choose an appropriate tool or answer without tools."
         )
     return ""
 
 
-def model_toolset_guard(
-    tool_name: str,
+async def snapshot_before_write(
+    tc: ToolCallEvent,
+    tool_ctx: ToolExecutionContext,
     tool_registry: ToolRegistry,
-    metadata: dict[str, Any] | None,
-) -> tuple[str, str]:
-    coordinator_reason = coordinator_tool_block_reason(tool_name, metadata)
-    if coordinator_reason:
-        return coordinator_reason, "coordinator_allowlist"
-    spec = tool_spec_for(tool_name, tool_registry)
-    if spec.toolset == "coordinator" and not coordinator_mode_enabled(metadata):
-        return (
-            f"Tool '{tool_name}' is only available in coordinator mode. "
-            "Use task, task_status, send_message, or task_stop from the default agent surface.",
-            "coordinator_only",
-        )
-    return "", ""
-
-
-async def snapshot_before_write(tc: ToolCallEvent, tool_ctx: ToolExecutionContext) -> None:
-    if tc.name not in CHECKPOINT_WRITE_TOOL_NAMES:
+) -> None:
+    if not _tool_supports_diff(tc.name, tool_registry):
         return
     manager = getattr(tool_ctx, "checkpoint_manager", None)
     if manager is None:
@@ -1013,21 +827,20 @@ async def run_tool(
 ) -> ToolResult:
     from backend.hooks import get_hook_manager
 
-    if getattr(tc, "_pre_tool_hook_applied", False):
-        delattr(tc, "_pre_tool_hook_applied")
-    else:
-        pre_result = await _apply_pre_tool_hook(tc)
-        if hasattr(tc, "_pre_tool_hook_applied"):
-            delattr(tc, "_pre_tool_hook_applied")
-        if pre_result is not None:
-            return pre_result
-    hook_mgr = get_hook_manager()
+    stale_reason = stale_subagent_context_guard_reason(tool_ctx)
+    if stale_reason:
+        return ToolResult(
+            content=stale_reason,
+            is_error=True,
+            status="blocked",
+            display_summary="Stale subagent tool call rejected",
+        )
 
-    # Validate required arguments against the same helper used by repair/history
-    # safety so empty strings and empty containers are handled consistently.
+    # Validate required arguments before invoking the tool so empty strings and
+    # empty containers are handled consistently with the provider schema.
     missing = missing_required_tool_argument_names(tc, tool_registry)
     if missing:
-        reason = ToolArgRepairEngine(AgentState(user_message=""), tool_registry).missing_required_reason(tc)
+        reason = missing_required_tool_argument_reason(None, tc, tool_registry)
         received = list(tc.arguments.keys())
         return ToolResult(
             content=reason or (
@@ -1037,14 +850,30 @@ async def run_tool(
             is_error=True,
         )
 
-    await snapshot_before_write(tc, tool_ctx)
-    changed_file = changed_file_event_payload(tc, tool_ctx)
+    if getattr(tc, "_pre_tool_hook_applied", False):
+        delattr(tc, "_pre_tool_hook_applied")
+    else:
+        pre_result = await _apply_pre_tool_hook(tc, tool_ctx)
+        if hasattr(tc, "_pre_tool_hook_applied"):
+            delattr(tc, "_pre_tool_hook_applied")
+        if pre_result is not None:
+            return pre_result
+    hook_mgr = get_hook_manager()
+
+    await snapshot_before_write(tc, tool_ctx, tool_registry)
+    changed_file = changed_file_event_payload(tc, tool_ctx, tool_registry)
     metadata_had_tool_id = "_current_tool_call_id" in tool_ctx.metadata
     previous_tool_id = tool_ctx.metadata.get("_current_tool_call_id")
-    if tc.name in CHECKPOINT_WRITE_TOOL_NAMES:
-        tool_ctx.metadata["_current_tool_call_id"] = tc.id
+    tool_ctx.metadata["_current_tool_call_id"] = tc.id
 
     tm = tool_ctx.task_manager
+    artifact_store = getattr(tool_ctx, "artifact_store", None)
+    owner_token = None
+    if artifact_store is not None and hasattr(artifact_store, "bind_owner"):
+        owner_token = artifact_store.bind_owner(
+            tool_ctx.conversation_id or str(tool_ctx.metadata.get("conversation_id") or ""),
+            str(tool_ctx.workspace_root or ""),
+        )
     try:
         if tm:
             try:
@@ -1054,24 +883,54 @@ async def run_tool(
                 )
                 result = await tm.wait(managed.id)
             except Exception as exc:
-                result = ToolResult(content=f"Task execution failed: {exc}", is_error=True)
+                result = _execution_exception_result(exc, label="Managed tool execution")
         else:
             result = await tool_registry.execute(tc.name, tc.arguments, context=tool_ctx)
     finally:
-        if tc.name in CHECKPOINT_WRITE_TOOL_NAMES:
-            if metadata_had_tool_id:
-                tool_ctx.metadata["_current_tool_call_id"] = previous_tool_id
-            else:
-                tool_ctx.metadata.pop("_current_tool_call_id", None)
+        if owner_token is not None:
+            artifact_store.reset_owner(owner_token)
+        if metadata_had_tool_id:
+            tool_ctx.metadata["_current_tool_call_id"] = previous_tool_id
+        else:
+            tool_ctx.metadata.pop("_current_tool_call_id", None)
 
     if hook_mgr and not result.is_error:
         try:
-            await hook_mgr.run_post_tool(tc.name, tc.arguments, result.content or "")
+            post = await hook_mgr.run_post_tool(
+                tc.name,
+                tc.arguments,
+                result.content or "",
+                tool_call_id=tc.id,
+                session_id=tool_ctx.session_id,
+                permission_mode=tool_ctx.permission.mode,
+            )
+            _remember_hook_model_context(tc, post)
+            await _emit_hook_system_message(tool_ctx, post)
+            if tc.name.startswith("mcp__") and post.updated_mcp_tool_output is not None:
+                replacement = post.updated_mcp_tool_output
+                if not isinstance(replacement, str):
+                    replacement = json.dumps(replacement, ensure_ascii=False, default=str)
+                result = replace(result, content=replacement)
+            if post.blocked:
+                result = ToolResult(
+                    content=f"Tool stopped by PostToolUse hook: {post.message}",
+                    is_error=True,
+                    status="blocked",
+                )
         except Exception as exc:
             logger.warning("post_tool hook failed: %s", exc)
     elif hook_mgr and result.is_error:
         try:
-            await hook_mgr.run_post_tool_failure(tc.name, tc.arguments, result.content or "")
+            post = await hook_mgr.run_post_tool_failure(
+                tc.name,
+                tc.arguments,
+                result.content or "",
+                tool_call_id=tc.id,
+                session_id=tool_ctx.session_id,
+                permission_mode=tool_ctx.permission.mode,
+            )
+            _remember_hook_model_context(tc, post)
+            await _emit_hook_system_message(tool_ctx, post)
         except Exception as exc:
             logger.warning("post_tool_failure hook failed: %s", exc)
 
@@ -1096,18 +955,59 @@ async def run_tool(
     return result
 
 
-async def _apply_pre_tool_hook(tc: ToolCallEvent) -> ToolResult | None:
+def _remember_hook_model_context(tc: ToolCallEvent, hook_result: Any) -> None:
+    parts: list[str] = []
+    feedback = str(getattr(hook_result, "feedback", "") or "").strip()
+    additional = str(getattr(hook_result, "additional_context", "") or "").strip()
+    if feedback:
+        parts.append(feedback)
+    if additional:
+        parts.append(additional)
+    if not parts:
+        return
+    existing = getattr(tc, "_hook_model_context", None)
+    values = list(existing) if isinstance(existing, list) else []
+    values.extend(parts)
+    setattr(tc, "_hook_model_context", values)
+
+
+async def _emit_hook_system_message(tool_ctx: ToolExecutionContext, hook_result: Any) -> None:
+    message = str(getattr(hook_result, "system_message", "") or "").strip()
+    emit = getattr(tool_ctx, "emit_event", None)
+    if not message or not callable(emit):
+        return
+    try:
+        await emit("system_notice", {"content": message})
+    except Exception as exc:
+        logger.debug("hook systemMessage emit failed: %s", exc)
+
+
+async def _apply_pre_tool_hook(
+    tc: ToolCallEvent,
+    tool_ctx: ToolExecutionContext,
+) -> ToolResult | None:
     from backend.hooks import get_hook_manager
 
-    tc.arguments = normalized_tool_arguments(tc.name, tc.arguments)
+    tc.arguments = dict(tc.arguments or {})
     hook_mgr = get_hook_manager()
     if hook_mgr is not None:
         try:
-            pre = await hook_mgr.run_pre_tool(tc.name, tc.arguments)
+            pre = await hook_mgr.run_pre_tool(
+                tc.name,
+                tc.arguments,
+                tool_call_id=tc.id,
+                session_id=tool_ctx.session_id,
+                permission_mode=tool_ctx.permission.mode,
+            )
+            _remember_hook_model_context(tc, pre)
+            await _emit_hook_system_message(tool_ctx, pre)
+            if pre.has_permission_decision:
+                setattr(tc, "_pre_tool_hook_permission_decision", pre.permission_decision)
+                setattr(tc, "_pre_tool_hook_permission_reason", pre.permission_decision_reason)
             if pre.blocked:
                 return ToolResult(content=f"Tool blocked by hook: {pre.message}", is_error=True)
             if isinstance(pre.updated_input, dict):
-                tc.arguments = normalized_tool_arguments(tc.name, dict(pre.updated_input))
+                tc.arguments = dict(pre.updated_input)
         except Exception as exc:
             logger.warning("pre_tool hook failed: %s", exc)
     setattr(tc, "_pre_tool_hook_applied", True)
@@ -1130,8 +1030,9 @@ def _display_path_for_tool_arg(raw_path: str, tool_ctx: ToolExecutionContext) ->
 def changed_file_event_payload(
     tc: ToolCallEvent,
     tool_ctx: ToolExecutionContext,
+    tool_registry: ToolRegistry,
 ) -> dict[str, Any] | None:
-    if tc.name not in CHECKPOINT_WRITE_TOOL_NAMES:
+    if not _tool_supports_diff(tc.name, tool_registry):
         return None
     raw_path = str(tc.arguments.get("file_path") or "").strip()
     if not raw_path:
@@ -1152,27 +1053,46 @@ async def run_tool_with_timeout(
     *,
     iteration_id: str = "",
 ) -> ToolResult:
-    timeout = _resolve_tool_timeout(tc.name, tool_registry)
-    execution_tool_ctx = tool_context_with_live_output(tc, tool_ctx, iteration_id=iteration_id)
+    timeout = _resolve_tool_timeout(tc.name, tool_registry, tc.arguments)
+    deadline = getattr(tool_ctx, "deadline_monotonic", None)
+    if deadline is not None:
+        remaining = float(deadline) - time.monotonic()
+        if remaining <= 0:
+            timeout = 0.0
+        elif timeout is None:
+            timeout = remaining
+        else:
+            timeout = min(timeout, remaining)
+    execution_tool_ctx = tool_context_with_live_output(
+        tc,
+        tool_ctx,
+        tool_registry,
+        iteration_id=iteration_id,
+    )
     t0 = time.perf_counter()
+    execution_task = asyncio.create_task(run_tool(tc, tool_registry, execution_tool_ctx))
     try:
-        async with asyncio.timeout(timeout):
-            result = await run_tool(tc, tool_registry, execution_tool_ctx)
+        if timeout is None:
+            result = await execution_task
+        else:
+            done, _ = await asyncio.wait({execution_task}, timeout=max(0.0, timeout))
+            if execution_task not in done:
+                await cancel_and_drain(
+                    [execution_task],
+                    timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                    label=f"timed out tool {tc.name}",
+                )
+                raise asyncio.TimeoutError
+            result = execution_task.result()
+    except asyncio.CancelledError:
+        await cancel_and_drain(
+            [execution_task],
+            timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+            label=f"cancelled tool {tc.name}",
+        )
+        raise
     except asyncio.TimeoutError:
         elapsed = int((time.perf_counter() - t0) * 1000)
-        if is_non_critical_timeout_tool(tc.name):
-            return ToolResult(
-                content=(
-                    f"Optional tool '{tc.name}' timed out after {timeout:.0f}s. "
-                    "Do not retry it in this turn; continue with the user-facing answer."
-                ),
-                is_error=False,
-                duration_ms=elapsed,
-                status="timeout",
-                limitation="non-critical timeout",
-                display_summary=f"Optional tool timed out: {tc.name}",
-                result_kind=result_kind_for_tool(tc.name),
-            )
         return ToolResult(
             content=(
                 f"Tool '{tc.name}' timed out after {timeout:.0f}s. "
@@ -1184,7 +1104,7 @@ async def run_tool_with_timeout(
             status="timeout",
             limitation="timeout",
             display_summary=f"Timed out: {tc.name}",
-            result_kind=result_kind_for_tool(tc.name),
+            result_kind=result_kind_for_tool(tc.name, tool_registry),
         )
     elapsed = int((time.perf_counter() - t0) * 1000)
     if result.duration_ms is None:
@@ -1192,150 +1112,32 @@ async def run_tool_with_timeout(
     return result
 
 
-def is_non_critical_timeout_tool(name: str) -> bool:
-    lower = name.lower()
-    return lower in NON_CRITICAL_TIMEOUT_TOOLS
-
-
 def tool_output_delta_events(
     tc: ToolCallEvent,
     result: ToolResult,
     *,
+    tool_registry: ToolRegistry,
     turn_id: str = "",
     iteration_id: str = "",
 ) -> list[AgentEvent]:
-    if result.is_error or tc.name not in COMMAND_OUTPUT_STREAM_TOOL_NAMES or not result.content:
+    if result.is_error or not _tool_streams_output(tc.name, tool_registry) or not result.content:
         return []
 
-    chunk_size = 2000
-    output_text = result.content
+    # A buffered tool has no genuine provider-side delta boundaries. Emit the
+    # complete normalized result once; live subprocess tools use
+    # ``stream_callback`` above for their real chunks. A local fixed-size
+    # re-chunking layer only invents protocol events and can split UTF-8/text
+    # boundaries without adding information.
     return [
         AgentEvent.tool_output_delta(
             id=tc.id,
-            output=output_text[index:index + chunk_size],
+            output=result.content,
             stream="stdout",
             turn_id=turn_id,
             iteration_id=iteration_id,
             step_id=tc.id,
         )
-        for index in range(0, len(output_text), chunk_size)
     ]
-
-
-def _tool_progress_event(
-    tc: ToolCallEvent,
-    message: str,
-    *,
-    phase: str,
-    status: str = "running",
-    visibility: str = "timeline",
-    detail: str = "",
-    iteration_id: str = "",
-    count: int | None = None,
-    display_scope: str = "activity",
-    panel_hint: str = "inspector",
-    requires_attention: bool = False,
-) -> AgentEvent:
-    return AgentEvent.progress(
-        message,
-        stage="tool" if phase != "approval" else "approval",
-        status=status,
-        id=f"{phase}:{tc.id}",
-        phase=phase,
-        label=tc.name,
-        summary=message,
-        detail=detail,
-        visibility=visibility,
-        tool_call_id=tc.id,
-        tool_name=tc.name,
-        group_id=iteration_id,
-        step_id=tc.id,
-        iteration_id=iteration_id,
-        count=count,
-        display_scope=display_scope,
-        panel_hint=panel_hint,
-        requires_attention=requires_attention,
-    )
-
-
-def _tool_preparing_event(tc: ToolCallEvent, *, iteration_id: str = "") -> AgentEvent:
-    return _tool_progress_event(
-        tc,
-        f"Preparing {tc.name}",
-        phase="tool",
-        visibility="compact",
-        iteration_id=iteration_id,
-    )
-
-
-def _tool_dispatched_event(
-    tc: ToolCallEvent,
-    *,
-    iteration_id: str = "",
-    count: int | None = None,
-    parallel: bool = False,
-) -> AgentEvent:
-    detail = "Queued for parallel execution" if parallel else "Queued for execution"
-    return _tool_progress_event(
-        tc,
-        f"Queued {tc.name}",
-        phase="tool",
-        visibility="compact",
-        detail=detail,
-        iteration_id=iteration_id,
-        count=count,
-    )
-
-
-def _tool_started_event(
-    tc: ToolCallEvent,
-    *,
-    iteration_id: str = "",
-    detail: str = "",
-    count: int | None = None,
-) -> AgentEvent:
-    return _tool_progress_event(
-        tc,
-        f"Running {tc.name}",
-        phase="tool",
-        iteration_id=iteration_id,
-        detail=detail,
-        count=count,
-    )
-
-
-def _tool_first_output_event(
-    tc: ToolCallEvent,
-    *,
-    iteration_id: str = "",
-    detail: str = "",
-) -> AgentEvent:
-    return _tool_progress_event(
-        tc,
-        f"Streaming output from {tc.name}",
-        phase="tool",
-        visibility="compact",
-        detail=detail,
-        iteration_id=iteration_id,
-    )
-
-
-def _tool_waiting_approval_event(
-    tc: ToolCallEvent,
-    *,
-    iteration_id: str = "",
-    detail: str = "",
-) -> AgentEvent:
-    return _tool_progress_event(
-        tc,
-        f"Waiting for approval: {tc.name}",
-        phase="approval",
-        detail=detail or "User approval required before execution",
-        iteration_id=iteration_id,
-        display_scope="activity",
-        panel_hint="diff",
-        requires_attention=True,
-    )
 
 
 def _emit_runtime_event(tool_ctx: ToolExecutionContext, event: AgentEvent) -> Awaitable[None] | None:
@@ -1357,7 +1159,6 @@ def _tool_runtime_span_event(
     detail: str = "",
     waiting_on: str = "",
     blocking_reason: str = "",
-    requires_attention: bool = False,
     ui_visible: bool = True,
     duration_ms: int | None = None,
     data: dict[str, Any] | None = None,
@@ -1378,7 +1179,6 @@ def _tool_runtime_span_event(
         tool_name=tc.name,
         waiting_on=waiting_on,
         blocking_reason=blocking_reason,
-        requires_attention=requires_attention,
         ui_visible=ui_visible,
         duration_ms=duration_ms,
         data=payload_data or None,
@@ -1397,7 +1197,6 @@ async def _emit_tool_runtime_span(
     detail: str = "",
     waiting_on: str = "",
     blocking_reason: str = "",
-    requires_attention: bool = False,
     ui_visible: bool = True,
     duration_ms: int | None = None,
     data: dict[str, Any] | None = None,
@@ -1415,7 +1214,6 @@ async def _emit_tool_runtime_span(
             detail=detail,
             waiting_on=waiting_on,
             blocking_reason=blocking_reason,
-            requires_attention=requires_attention,
             ui_visible=ui_visible,
             duration_ms=duration_ms,
             data=data,
@@ -1452,7 +1250,6 @@ async def _emit_tool_completed_runtime_span(
         status="failed" if failed else "completed",
         summary=summary,
         detail=str(payload.get("limitation") or ""),
-        requires_attention=bool(payload.get("requires_attention")),
         duration_ms=duration_ms,
         data={
             "tool_status": final_status,
@@ -1462,7 +1259,7 @@ async def _emit_tool_completed_runtime_span(
     )
 
 
-async def _emit_tool_first_output_progress(
+async def _emit_tool_first_output_span(
     tc: ToolCallEvent,
     tool_ctx: ToolExecutionContext,
     *,
@@ -1481,12 +1278,6 @@ async def _emit_tool_first_output_progress(
         raw_ids.append(tc.id)
     else:
         tool_ctx.metadata[first_output_key] = {tc.id}
-    pending = _emit_runtime_event(
-        tool_ctx,
-        _tool_first_output_event(tc, iteration_id=iteration_id, detail=detail),
-    )
-    if pending is not None:
-        await pending
     await _emit_tool_runtime_span(
         tc,
         tool_ctx,
@@ -1521,10 +1312,11 @@ def _tool_output_was_streamed(tool_ctx: ToolExecutionContext, tool_call_id: str)
 def tool_context_with_live_output(
     tc: ToolCallEvent,
     tool_ctx: ToolExecutionContext,
+    tool_registry: ToolRegistry,
     *,
     iteration_id: str = "",
 ) -> ToolExecutionContext:
-    if tc.name not in COMMAND_OUTPUT_STREAM_TOOL_NAMES:
+    if not _tool_streams_output(tc.name, tool_registry):
         return tool_ctx
     emit_event = getattr(tool_ctx, "emit_event", None)
     fallback_stream = getattr(tool_ctx, "stream_callback", None)
@@ -1535,7 +1327,7 @@ def tool_context_with_live_output(
         if not output:
             return
         stream_name = stream if stream in {"stdout", "stderr"} else "stdout"
-        await _emit_tool_first_output_progress(
+        await _emit_tool_first_output_span(
             tc,
             tool_ctx,
             iteration_id=iteration_id,
@@ -1560,9 +1352,29 @@ def tool_context_with_live_output(
             return
         if fallback_stream is not None:
             try:
-                await fallback_stream(output, stream_name)
-            except TypeError:
-                await fallback_stream(output)
+                parameters = tuple(inspect.signature(fallback_stream).parameters.values())
+                accepts_varargs = any(
+                    parameter.kind == inspect.Parameter.VAR_POSITIONAL
+                    for parameter in parameters
+                )
+                positional_count = sum(
+                    parameter.kind
+                    in {inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD}
+                    for parameter in parameters
+                )
+            except (TypeError, ValueError):
+                accepts_varargs = False
+                positional_count = 1
+            callback_args = (output, stream_name, tc.id)
+            result = fallback_stream(
+                *(
+                    callback_args
+                    if accepts_varargs
+                    else callback_args[:positional_count]
+                )
+            )
+            if inspect.isawaitable(result):
+                await result
 
     return replace(tool_ctx, stream_callback=_stream_tool_output)
 
@@ -1593,55 +1405,6 @@ def batch_tool_calls(
     return batches
 
 
-def _idempotent_call_signature(
-    tc: ToolCallEvent,
-    tool_registry: ToolRegistry,
-) -> ToolCallSignature | None:
-    if not _tool_is_idempotent(tc.name, tool_registry, tc.arguments):
-        return None
-    return ToolCallSignature.from_call(tc.name, tc.arguments)
-
-
-def _dedupe_idempotent_batch(
-    batch: list[ToolCallEvent],
-    tool_registry: ToolRegistry,
-) -> tuple[list[ToolCallEvent], dict[str, list[ToolCallEvent]]]:
-    """Return executable calls and duplicate calls keyed by source call id."""
-    executable: list[ToolCallEvent] = []
-    seen: dict[ToolCallSignature, ToolCallEvent] = {}
-    duplicates_by_source_id: dict[str, list[ToolCallEvent]] = {}
-    for tc in batch:
-        signature = _idempotent_call_signature(tc, tool_registry)
-        if signature is None:
-            executable.append(tc)
-            continue
-        source = seen.get(signature)
-        if source is None:
-            seen[signature] = tc
-            executable.append(tc)
-            continue
-        duplicates_by_source_id.setdefault(source.id, []).append(tc)
-    return executable, duplicates_by_source_id
-
-
-def _duplicate_idempotent_result(
-    duplicate: ToolCallEvent,
-    source: ToolCallEvent,
-) -> ToolResult:
-    return ToolResult(
-        content=(
-            f"Skipped duplicate tool call '{duplicate.name}' because this batch "
-            f"already executed the same idempotent call as tool_call_id '{source.id}'. "
-            "Use that immediately preceding tool result; do not repeat the same call."
-        ),
-        is_error=False,
-        status="skipped",
-        limitation="duplicate_idempotent_call",
-        display_summary=f"Duplicate tool call skipped: {duplicate.name}",
-        result_kind=result_kind_for_tool(duplicate.name),
-    )
-
-
 async def _finalize_tool_result(
     tc: ToolCallEvent,
     result: ToolResult,
@@ -1653,11 +1416,41 @@ async def _finalize_tool_result(
     turn_id: str,
     status: str | None = None,
     diff: dict[str, Any] | None = None,
-    append_to_context: bool = True,
-    guardrail_controller: ToolCallGuardrailController | None = None,
-    tool_registry: ToolRegistry | None = None,
+    tool_registry: ToolRegistry,
 ) -> AsyncIterator[AgentEvent]:
     """Persist and emit one terminal result for every tool exit path."""
+    if not result.is_error:
+        _refresh_read_file_hashes_after_write(tc, diff, tool_ctx)
+        _track_created_file_edits(tc, diff, tool_ctx)
+    removed_records = _reconcile_removed_created_file_edits(tool_ctx)
+    if removed_records:
+        superseded_ids = list(dict.fromkeys([
+            *result.superseded_tool_call_ids,
+            *(str(item.get("tool_call_id") or "") for item in removed_records),
+        ]))
+        superseded_ids = [value for value in superseded_ids if value]
+        removed_paths = list(dict.fromkeys([
+            *result.removed_file_paths,
+            *(str(item.get("display_path") or item.get("resolved_path") or "") for item in removed_records),
+        ]))
+        removed_paths = [value for value in removed_paths if value]
+        result = replace(
+            result,
+            superseded_tool_call_ids=superseded_ids,
+            removed_file_paths=removed_paths,
+        )
+        emit = getattr(tool_ctx, "emit_event", None)
+        if emit is not None:
+            for item in removed_records:
+                try:
+                    await emit("file.changed", {
+                        "path": str(item.get("display_path") or item.get("resolved_path") or ""),
+                        "event": "deleted",
+                        "temporary": True,
+                        "supersedes_tool_call_id": str(item.get("tool_call_id") or ""),
+                    })
+                except Exception as exc:
+                    logger.debug("temporary file removal emit failed: %s", exc)
     events = store_result_events(
         tc,
         result,
@@ -1667,8 +1460,6 @@ async def _finalize_tool_result(
         diff=diff,
         iteration_id=iteration_id,
         turn_id=turn_id,
-        append_to_context=append_to_context,
-        guardrail_controller=guardrail_controller,
         tool_ctx=tool_ctx,
         tool_registry=tool_registry,
     )
@@ -1691,7 +1482,6 @@ async def _reject_tool_call(
     runtime: _ToolBatchRuntime,
     started_epoch: float | None = None,
     status: str = "blocked",
-    append_to_context: bool = True,
     prefetched_results: dict[str, PrefetchedToolExecution] | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Flush pending auto-queue, emit a blocked tool-call event, and store the result."""
@@ -1702,7 +1492,6 @@ async def _reject_tool_call(
         tool_registry=runtime.tool_registry,
         tool_ctx=runtime.tool_ctx,
         iteration_id=runtime.iteration_id,
-        guardrail_controller=runtime.guardrail_controller,
         prefetched_results=prefetched_results,
     ):
         yield ev
@@ -1724,11 +1513,102 @@ async def _reject_tool_call(
         diff=None,
         iteration_id=runtime.iteration_id,
         turn_id=runtime.turn_id,
-        append_to_context=append_to_context,
-        guardrail_controller=runtime.guardrail_controller,
         tool_ctx=runtime.tool_ctx,
+        tool_registry=runtime.tool_registry,
     ):
         yield event
+
+
+def _track_created_file_edits(
+    tc: ToolCallEvent,
+    diff: dict[str, Any] | None,
+    tool_ctx: ToolExecutionContext,
+) -> None:
+    if not isinstance(diff, dict):
+        return
+    files = diff.get("files")
+    if not isinstance(files, list):
+        return
+    tracker = tool_ctx.metadata.setdefault(_CREATED_FILE_EDIT_TRACKER_KEY, {})
+    if not isinstance(tracker, dict):
+        tracker = {}
+        tool_ctx.metadata[_CREATED_FILE_EDIT_TRACKER_KEY] = tracker
+    for item in files:
+        if not isinstance(item, dict) or str(item.get("status") or "").lower() not in {"added", "created", "new"}:
+            continue
+        raw_path = str(item.get("path") or "").strip()
+        if not raw_path:
+            continue
+        resolved, display_path = _display_path_for_tool_arg(raw_path, tool_ctx)
+        key = str(resolved).replace("\\", "/").casefold()
+        tracker[key] = {
+            "tool_call_id": tc.id,
+            "resolved_path": str(resolved),
+            "display_path": display_path,
+        }
+
+
+def _refresh_read_file_hashes_after_write(
+    tc: ToolCallEvent,
+    diff: dict[str, Any] | None,
+    tool_ctx: ToolExecutionContext,
+) -> None:
+    """Advance optimistic edit guards after a successful in-turn write.
+
+    Read-time hashes intentionally protect against external changes, but they
+    must be replaced after the agent itself writes a file. Otherwise a second
+    edit in the same turn is rejected with its own previous hash and the model
+    can spend the rest of the turn repeating stale edits.
+    """
+    metadata = tool_ctx.metadata if isinstance(tool_ctx.metadata, dict) else {}
+    hashes = metadata.get("_read_file_hashes")
+    if not isinstance(hashes, dict):
+        return
+    raw_paths: list[str] = []
+    if tc.name in {"edit_file", "write_file"}:
+        raw_path = str(tc.arguments.get("file_path") or "").strip()
+        if raw_path:
+            raw_paths.append(raw_path)
+    elif tc.name == "apply_patch" and isinstance(diff, dict):
+        for item in diff.get("files") or []:
+            if isinstance(item, dict):
+                for key in ("path", "old_path"):
+                    raw_path = str(item.get(key) or "").strip()
+                    if raw_path:
+                        raw_paths.append(raw_path)
+    for raw_path in raw_paths:
+        path = _resolve_workspace_path_for_diff(raw_path, tool_ctx.workspace_root)
+        try:
+            content = path.read_text(encoding="utf-8")
+            path_key = str(path)
+            hashes.pop(path_key, None)
+            hashes[path_key] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        except (OSError, UnicodeDecodeError):
+            # A deleted/renamed path must not retain the old hash.
+            hashes.pop(str(path), None)
+
+
+def _reconcile_removed_created_file_edits(
+    tool_ctx: ToolExecutionContext,
+) -> list[dict[str, str]]:
+    tracker = tool_ctx.metadata.get(_CREATED_FILE_EDIT_TRACKER_KEY)
+    if not isinstance(tracker, dict) or not tracker:
+        return []
+    removed: list[dict[str, str]] = []
+    for key, raw_record in list(tracker.items()):
+        if not isinstance(raw_record, dict):
+            tracker.pop(key, None)
+            continue
+        resolved_path = str(raw_record.get("resolved_path") or "").strip()
+        if not resolved_path or Path(resolved_path).exists():
+            continue
+        removed.append({
+            "tool_call_id": str(raw_record.get("tool_call_id") or ""),
+            "resolved_path": resolved_path,
+            "display_path": str(raw_record.get("display_path") or resolved_path),
+        })
+        tracker.pop(key, None)
+    return removed
 
 
 async def execute_tool_batch(
@@ -1742,10 +1622,10 @@ async def execute_tool_batch(
     skill_manager: Any | None,
     permission_context: PermissionContext | None,
     tool_ctx: ToolExecutionContext,
-    stagnation_limit: int,
-    guardrail_controller: ToolCallGuardrailController | None = None,
     prefetched_results: dict[str, PrefetchedToolExecution] | None = None,
-    prepared_repair_results: list[RepairResult] | None = None,
+    prepared_tool_calls: list[ToolCallEvent] | None = None,
+    execution_limit: int | None = None,
+    execution_limit_reason: str = "",
 ) -> AsyncIterator[AgentEvent]:
     auto_queue: list[ToolCallEvent] = []
     iteration_id = f"iter:{max(1, state.iterations)}"
@@ -1756,25 +1636,48 @@ async def execute_tool_batch(
         tool_ctx=tool_ctx,
         iteration_id=iteration_id,
         turn_id=_tool_turn_id(tool_ctx),
-        guardrail_controller=guardrail_controller,
     )
-    prepared_repairs = (
-        list(prepared_repair_results)
-        if prepared_repair_results is not None
+    prepared_calls = (
+        list(prepared_tool_calls)
+        if prepared_tool_calls is not None
         else prepare_tool_call_sequence(state, tool_calls, tool_registry, tool_ctx)
     )
 
-    for index, prepared_repair in enumerate(prepared_repairs, 1):
+    for index, prepared_call in enumerate(prepared_calls, 1):
         tc = normalize_tool_call_event(
-            prepared_repair.tool_call,
+            prepared_call,
             fallback_id=f"tool_{index}",
         )
-        repair_result = (
-            prepared_repair
-            if prepared_repair.tool_call == tc
-            else replace(prepared_repair, tool_call=tc)
-        )
-        wrapped_tc = tc
+        if execution_limit is not None and index > max(0, execution_limit):
+            started_epoch = time.time()
+            _tool_start_times(state)[tc.id] = started_epoch
+            reason = execution_limit_reason.strip() or (
+                "Tool call was not executed because the explicit per-turn tool-call budget was exhausted."
+            )
+            async for ev in _reject_tool_call(
+                tc,
+                auto_queue,
+                _rejection_result(
+                    tc,
+                    reason,
+                    display_summary="Tool-call budget exhausted",
+                    result_kind=result_kind_for_tool(tc.name, tool_registry),
+                    error_kind="execution_limit",
+                    user_summary="本轮工具调用预算已耗尽。",
+                    recoverable=True,
+                    projection="warning",
+                    model_observation=(
+                        f"The {tc.name} call was not executed because the explicit "
+                        "per-turn tool-call budget was exhausted. Finish with available evidence."
+                    ),
+                ),
+                runtime=runtime,
+                started_epoch=started_epoch,
+                status="blocked",
+                prefetched_results=prefetched_results,
+            ):
+                yield ev
+            continue
         tc, bridge_block_reason = unwrap_deferred_tool_call(tc, tool_registry, permission_context)
         if bridge_block_reason:
             started_epoch = time.time()
@@ -1786,65 +1689,62 @@ async def execute_tool_batch(
                     bridge_block_reason,
                     display_summary="Deferred tool call blocked",
                     result_kind="generic",
+                    error_kind="routing_error",
+                    user_summary="延迟工具路由未能解析，本次调用未执行。",
+                    recoverable=True,
+                    projection="error",
+                    model_observation=(
+                        f"The deferred {tc.name} call could not be routed. "
+                        "Use tool_search/tool_describe or call the resolved tool directly."
+                    ),
                 ),
                 runtime=runtime,
                 started_epoch=started_epoch,
-                append_to_context=False,
                 prefetched_results=prefetched_results,
             ):
                 yield ev
             continue
-        if tool_call_needs_list_context(tc, tool_registry) and auto_queue and not inferred_read_file_path_from_recent_list(state):
-            async for ev in _flush_queue(
-                auto_queue,
-                ctx=ctx,
-                state=state,
-                tool_registry=tool_registry,
-                tool_ctx=tool_ctx,
-                iteration_id=iteration_id,
-                guardrail_controller=guardrail_controller,
-                prefetched_results=prefetched_results,
-            ):
-                yield ev
-            auto_queue = []
-            repair_result = repair_tool_call_for_execution(state, tc, tool_registry, tool_ctx)
-        elif tc != wrapped_tc:
-            # Deferred wrappers are prepared as the wrapper schema; repair the
-            # newly unwrapped underlying call once before execution.
-            repair_result = repair_tool_call_for_execution(state, tc, tool_registry, tool_ctx)
-        tc = repair_result.tool_call
-
         prefetched = None
         started_epoch = time.time()
         _tool_start_times(state)[tc.id] = started_epoch
 
-        if repair_result.needs_model_generation or repair_result.routing_correction:
-            started_epoch_local = started_epoch
+        invalid_reason = invalid_tool_call_guard_reason(tc, tool_registry)
+        if invalid_reason:
             async for ev in _reject_tool_call(
                 tc, auto_queue,
                 _rejection_result(
                     tc,
-                    repair_result.model_observation,
-                    is_error=False,
-                    display_summary=(
-                        "Missing generated content"
-                        if repair_result.needs_model_generation
-                        else "Routing correction"
-                    ),
+                    invalid_reason,
+                    display_summary="Invalid tool call",
+                    result_kind="generic",
+                    error_kind="validation_error",
+                    user_summary="工具调用格式无效。",
+                    projection="error",
+                    model_observation=f"The {tc.name} call is invalid and was not executed.",
                 ),
                 runtime=runtime,
-                started_epoch=started_epoch_local,
-                append_to_context=False,
+                started_epoch=started_epoch,
                 prefetched_results=prefetched_results,
             ):
                 yield ev
-            state.add_loop_guidance(repair_result.model_observation)
             continue
 
-        if repair_result.repaired and repair_result.model_observation:
-            state.add_loop_guidance(repair_result.model_observation)
+        required_reason = missing_required_tool_argument_reason(state, tc, tool_registry)
+        if required_reason:
+            async for ev in _reject_tool_call(
+                tc, auto_queue,
+                _invalid_call_result(
+                    tc,
+                    required_reason,
+                ),
+                runtime=runtime,
+                started_epoch=started_epoch,
+                prefetched_results=prefetched_results,
+            ):
+                yield ev
+            continue
 
-        pre_tool_result = await _apply_pre_tool_hook(tc)
+        pre_tool_result = await _apply_pre_tool_hook(tc, tool_ctx)
         if pre_tool_result is not None:
             async for ev in _reject_tool_call(
                 tc,
@@ -1863,176 +1763,19 @@ async def execute_tool_batch(
             started_epoch = prefetched.started_epoch
             _tool_start_times(state)[tc.id] = started_epoch
 
-        invalid_reason = invalid_tool_call_guard_reason(tc, tool_registry)
-
-        repeat_reason = state.repeated_call_guard_reason(tc.name, tc.arguments, limit=stagnation_limit)
-        if repeat_reason:
-            async for ev in _reject_tool_call(
-                tc, auto_queue,
-                _rejection_result(
-                    tc, repeat_reason,
-                    is_error=False,
-                    display_summary="Already attempted",
-                ),
-                runtime=runtime,
-                started_epoch=started_epoch,
-                prefetched_results=prefetched_results,
-            ):
-                yield ev
-            continue
-
-        similar_web_search_result = repeated_similar_web_search_result(state, tc)
-        if similar_web_search_result is not None:
-            async for ev in _reject_tool_call(
-                tc,
-                auto_queue,
-                similar_web_search_result,
-                runtime=runtime,
-                started_epoch=started_epoch,
-                status="success",
-                prefetched_results=prefetched_results,
-            ):
-                yield ev
-            continue
-
-        duplicate_output_result = duplicate_output_write_guard_result(state, tc)
-        if duplicate_output_result is not None:
-            async for ev in _reject_tool_call(
-                tc,
-                auto_queue,
-                duplicate_output_result,
-                runtime=runtime,
-                started_epoch=started_epoch,
-                status="blocked",
-                prefetched_results=prefetched_results,
-            ):
-                yield ev
-            continue
-
-        guardrail_result = guardrail_before_call_result(guardrail_controller, tc)
-        if guardrail_result is not None:
-            async for ev in _reject_tool_call(
-                tc, auto_queue,
-                guardrail_result,
-                runtime=runtime,
-                started_epoch=started_epoch,
-                prefetched_results=prefetched_results,
-            ):
-                yield ev
-            continue
-
-        if invalid_reason:
-            async for ev in _reject_tool_call(
-                tc, auto_queue,
-                _rejection_result(
-                    tc,
-                    invalid_reason,
-                    display_summary="Invalid tool call",
-                    result_kind="generic",
-                ),
-                runtime=runtime,
-                started_epoch=started_epoch,
-                append_to_context=False,
-                prefetched_results=prefetched_results,
-            ):
-                yield ev
-            continue
-
-        repair_block_reason = repair_result_block_reason(state, repair_result, tool_registry)
-        if repair_block_reason:
-            malformed_web_tool_call = is_malformed_web_tool_call(repair_block_reason)
-            async for ev in _reject_tool_call(
-                tc, auto_queue,
-                _invalid_call_result(
-                    tc,
-                    repair_block_reason,
-                    malformed_web_call=malformed_web_tool_call,
-                ),
-                runtime=runtime,
-                started_epoch=started_epoch,
-                append_to_context=False,
-                prefetched_results=prefetched_results,
-            ):
-                yield ev
-            continue
-
         disabled_reason = disabled_tool_guard_reason(state, tc)
         if disabled_reason:
-            history_safe = tool_call_is_safe_for_model_history(tc, tool_registry)
-            malformed_disabled_web_call = tc.name in WEB_TOOL_NAMES and not history_safe
             async for ev in _reject_tool_call(
                 tc, auto_queue,
                 _rejection_result(
                     tc,
                     disabled_reason,
-                    is_error=malformed_disabled_web_call,
-                    display_summary="Invalid web tool call" if malformed_disabled_web_call else "Tool disabled",
-                    result_kind="search" if tc.name in WEB_SEARCH_TOOL_NAMES else result_kind_for_tool(tc.name),
-                ),
-                runtime=runtime,
-                started_epoch=started_epoch,
-                status="blocked" if malformed_disabled_web_call else "success",
-                append_to_context=history_safe,
-                prefetched_results=prefetched_results,
-            ):
-                yield ev
-            continue
-
-        toolset_block_reason, toolset_rule = model_toolset_guard(
-            tc.name,
-            tool_registry,
-            getattr(tool_ctx, "metadata", None),
-        )
-        if toolset_block_reason:
-            yield AgentEvent.permission_decision(
-                tool_call_id=tc.id,
-                tool_name=tc.name,
-                decision="deny",
-                source="policy",
-                permission_level=PermissionLevel.ALWAYS_DENY.value,
-                message=toolset_block_reason,
-                capability={"allowed": False, "reason": toolset_block_reason},
-                approval_policy="deny",
-                matched_rule={"source": "toolset_policy", "rule": toolset_rule},
-                risk="high",
-                scope={
-                    "workspace_scope": tool_ctx.permission.workspace_scope,
-                    "boundary": "agent_mode",
-                },
-                expiry="policy",
-            )
-            async for ev in _reject_tool_call(
-                tc,
-                auto_queue,
-                _rejection_result(
-                    tc,
-                    toolset_block_reason,
-                    display_summary="Coordinator tool blocked",
-                    result_kind="subagent",
-                ),
-                runtime=runtime,
-                started_epoch=started_epoch,
-                status="blocked",
-                prefetched_results=prefetched_results,
-            ):
-                yield ev
-            continue
-
-        coordinator_delegation_reason = coordinator_delegation_block_reason(
-            tc.name,
-            tc.arguments,
-            getattr(tool_ctx, "metadata", None),
-            state=state,
-        )
-        if coordinator_delegation_reason:
-            async for ev in _reject_tool_call(
-                tc,
-                auto_queue,
-                _rejection_result(
-                    tc,
-                    coordinator_delegation_reason,
-                    display_summary="Coordinator delegation blocked",
-                    result_kind="subagent",
+                    display_summary="Tool disabled",
+                    result_kind=result_kind_for_tool(tc.name, tool_registry),
+                    error_kind="tool_disabled",
+                    user_summary="该工具本轮不可用。",
+                    projection="status",
+                    model_observation=f"The {tc.name} tool is disabled for this turn.",
                 ),
                 runtime=runtime,
                 started_epoch=started_epoch,
@@ -2069,7 +1812,11 @@ async def execute_tool_batch(
                     tc,
                     scope_guard_reason,
                     display_summary="Subagent scope blocked",
-                    result_kind=result_kind_for_tool(tc.name),
+                    result_kind=result_kind_for_tool(tc.name, tool_registry),
+                    error_kind="permission_required",
+                    user_summary="该工具调用超出子 Agent 的允许范围。",
+                    projection="approval",
+                    model_observation=f"The {tc.name} call is outside this subagent's allowed scope.",
                 ),
                 runtime=runtime,
                 started_epoch=started_epoch,
@@ -2079,50 +1826,12 @@ async def execute_tool_batch(
                 yield ev
             continue
 
-        required_reason = missing_required_tool_argument_reason(state, tc, tool_registry)
-        if required_reason:
-            malformed_web_tool_call = is_malformed_web_tool_call(required_reason)
-            async for ev in _reject_tool_call(
-                tc, auto_queue,
-                _invalid_call_result(
-                    tc,
-                    required_reason,
-                    malformed_web_call=malformed_web_tool_call,
-                ),
-                runtime=runtime,
-                started_epoch=started_epoch,
-                append_to_context=False,
-                prefetched_results=prefetched_results,
-            ):
-                yield ev
-            continue
-
-        command_file_write_reason = (
-            run_command_file_write_guard_reason(str(tc.arguments.get("command") or ""))
-            if tc.name == "run_command"
-            else ""
-        )
-        if command_file_write_reason:
-            async for ev in _reject_tool_call(
-                tc, auto_queue,
-                _rejection_result(tc, command_file_write_reason),
-                runtime=runtime,
-                started_epoch=started_epoch,
-                prefetched_results=prefetched_results,
-            ):
-                yield ev
-            continue
-
         perm_tool = tool_registry.get_tool(tc.name)
 
-        # Tool-owned input validation (Phase 4.1 / CC validateInput): runs after
-        # schema/guard checks and before permission. A non-empty message blocks
-        # execution and is surfaced as an observation so the model can correct.
+        # Validate the declared schema, then tool-owned semantics, before any
+        # permission prompt or execution (CC validateInput ordering).
         if perm_tool is not None:
-            try:
-                validate_msg = perm_tool.validate_input(tc.arguments)
-            except Exception:
-                validate_msg = ""
+            validate_msg = validate_tool_input(perm_tool, tc.arguments)
             if validate_msg:
                 async for ev in _reject_tool_call(
                     tc, auto_queue,
@@ -2130,10 +1839,13 @@ async def execute_tool_batch(
                         tc, validate_msg,
                         display_summary="Invalid tool input",
                         result_kind="generic",
+                        error_kind="validation_error",
+                        user_summary="工具输入未通过结构化校验。",
+                        projection="error",
+                        model_observation=f"The {tc.name} input failed validation and must be corrected.",
                     ),
                     runtime=runtime,
                     started_epoch=started_epoch,
-                    append_to_context=False,
                     prefetched_results=prefetched_results,
                 ):
                     yield ev
@@ -2147,6 +1859,13 @@ async def execute_tool_batch(
             tool=perm_tool,
         )
         perm = permission_decision.permission_level
+        pre_hook_decision = str(
+            getattr(tc, "_pre_tool_hook_permission_decision", "") or ""
+        ).strip().lower()
+        if pre_hook_decision == "ask" and perm == PermissionLevel.AUTO:
+            # Claude Code treats PreToolUse `ask` as an approval floor. Static
+            # and capability denials below remain authoritative.
+            perm = PermissionLevel.CONFIRM
         denial = (
             permission_decision.capability_reason
             if not permission_decision.capability_allowed
@@ -2154,51 +1873,69 @@ async def execute_tool_batch(
             if permission_decision.decision == "deny"
             else None
         )
-        yield AgentEvent.permission_decision(
-            tool_call_id=tc.id,
-            tool_name=tc.name,
-            decision=permission_decision.decision,
-            source="policy",
-            permission_level=perm.value,
-            message=(
-                permission_decision.capability_reason
-                if not permission_decision.capability_allowed
-                else f"Denied by {permission_decision.matched_rule_source}: {permission_decision.matched_rule}"
-                if permission_decision.decision == "deny"
-                else ""
-            ),
-            capability={
-                "allowed": permission_decision.capability_allowed,
-                "reason": permission_decision.capability_reason,
-            },
-            approval_policy=permission_decision.approval_policy,
-            matched_rule={
-                "source": permission_decision.matched_rule_source,
-                "rule": permission_decision.matched_rule,
-            },
-            risk=permission_decision.risk,
-            scope=permission_decision.scope,
-            expiry=permission_decision.expiry,
-        )
+        if permission_decision.decision != "allow" and getattr(permission_context, "mode", "") != "auto":
+            yield AgentEvent.permission_decision(
+                tool_call_id=tc.id,
+                tool_name=tc.name,
+                decision=permission_decision.decision,
+                source="policy",
+                permission_level=perm.value,
+                message=(
+                    permission_decision.capability_reason
+                    if not permission_decision.capability_allowed
+                    else f"Denied by {permission_decision.matched_rule_source}: {permission_decision.matched_rule}"
+                    if permission_decision.decision == "deny"
+                    else ""
+                ),
+                capability={
+                    "allowed": permission_decision.capability_allowed,
+                    "reason": permission_decision.capability_reason,
+                },
+                approval_policy=permission_decision.approval_policy,
+                matched_rule={
+                    "source": permission_decision.matched_rule_source,
+                    "rule": permission_decision.matched_rule,
+                },
+                risk=permission_decision.risk,
+                scope=permission_decision.scope,
+                expiry=permission_decision.expiry,
+            )
 
         if denial or perm == PermissionLevel.ALWAYS_DENY:
             msg = denial or f"Tool '{tc.name}' is blocked by policy"
             from backend.hooks import get_hook_manager
 
             hook_mgr = get_hook_manager()
+            permission_denied_retry = False
             if hook_mgr:
                 try:
-                    await hook_mgr.run_permission_denied(
+                    denied_hook = await hook_mgr.run_permission_denied(
                         tc.name,
                         tc.arguments,
                         reason=msg,
                         permission_level=perm.value,
+                        tool_call_id=tc.id,
+                        session_id=tool_ctx.session_id,
+                        permission_mode=tool_ctx.permission.mode,
                     )
+                    permission_denied_retry = denied_hook.retry
                 except Exception as exc:
                     logger.warning("permission_denied hook failed: %s", exc)
             async for ev in _reject_tool_call(
                 tc, auto_queue,
-                _rejection_result(tc, msg),
+                _rejection_result(
+                    tc,
+                    msg,
+                    error_kind="permission_required",
+                    user_summary="该工具调用被权限策略阻止。",
+                    projection="approval",
+                    model_observation=(
+                        f"The {tc.name} call was blocked by permission policy. "
+                        "The PermissionDenied hook indicated the call may be retried."
+                        if permission_denied_retry
+                        else f"The {tc.name} call was blocked by permission policy."
+                    ),
+                ),
                 runtime=runtime,
                 started_epoch=started_epoch,
                 prefetched_results=prefetched_results,
@@ -2214,7 +1951,6 @@ async def execute_tool_batch(
             tool_registry=tool_registry,
             turn_id=runtime.turn_id,
         )
-        yield _tool_preparing_event(tc, iteration_id=iteration_id)
         await _emit_tool_runtime_span(
             tc,
             tool_ctx,
@@ -2227,7 +1963,6 @@ async def execute_tool_batch(
         )
 
         if perm == PermissionLevel.AUTO and tc.name not in SPECIAL_TOOL_NAMES:
-            yield _tool_dispatched_event(tc, iteration_id=iteration_id, parallel=True)
             await _emit_tool_runtime_span(
                 tc,
                 tool_ctx,
@@ -2249,15 +1984,15 @@ async def execute_tool_batch(
             tool_registry=tool_registry,
             tool_ctx=tool_ctx,
             iteration_id=iteration_id,
-            guardrail_controller=guardrail_controller,
             prefetched_results=prefetched_results,
         ):
             yield ev
         auto_queue = []
 
-        async for ev in _execute_serial(
+        async for ev in execute_serial(
             tc,
             perm=perm,
+            permission_decision=permission_decision,
             ctx=ctx,
             state=state,
             tool_registry=tool_registry,
@@ -2265,12 +2000,11 @@ async def execute_tool_batch(
             approval_handler=approval_handler,
             skill_manager=skill_manager,
             iteration_id=iteration_id,
-            guardrail_controller=guardrail_controller,
             prefetched=prefetched,
         ):
             yield ev
 
-    async for ev in _flush_queue(auto_queue, ctx=ctx, state=state, tool_registry=tool_registry, tool_ctx=tool_ctx, iteration_id=iteration_id, guardrail_controller=guardrail_controller, prefetched_results=prefetched_results):
+    async for ev in _flush_queue(auto_queue, ctx=ctx, state=state, tool_registry=tool_registry, tool_ctx=tool_ctx, iteration_id=iteration_id, prefetched_results=prefetched_results):
         yield ev
 
 
@@ -2282,7 +2016,6 @@ async def _flush_queue(
     tool_registry: ToolRegistry,
     tool_ctx: ToolExecutionContext,
     iteration_id: str = "",
-    guardrail_controller: ToolCallGuardrailController | None = None,
     prefetched_results: dict[str, PrefetchedToolExecution] | None = None,
 ) -> AsyncIterator[AgentEvent]:
     if not queue:
@@ -2299,9 +2032,8 @@ async def _flush_queue(
                     tool_ctx=tool_ctx,
                 )
                 for tc in batch
-                if tc.name in CHECKPOINT_WRITE_TOOL_NAMES
+                if _tool_supports_diff(tc.name, tool_registry)
             }
-            executable_batch, duplicates_by_source_id = _dedupe_idempotent_batch(batch, tool_registry)
             # Sibling abort (Claude Code pattern): if a bash/command tool
             # fails, cancel all other parallel tools in the same batch.
             cancelled_result = ToolResult(
@@ -2309,53 +2041,44 @@ async def _flush_queue(
                 is_error=True,
                 status="failed",
             )
+            timeout_result = ToolResult(
+                content="Parallel tool batch timed out before all calls completed.",
+                is_error=True,
+                status="timeout",
+            )
 
             async def _run_parallel_tool(tc: ToolCallEvent) -> ToolResult:
-                similar_web_search_result = repeated_similar_web_search_result(state, tc)
-                if similar_web_search_result is not None:
-                    return similar_web_search_result
                 prefetched = _take_matching_prefetch(prefetched_results, tc)
                 if prefetched is not None:
                     return await _await_prefetched_result(prefetched)
                 try:
                     return await run_tool_with_timeout(tc, tool_registry, tool_ctx, iteration_id=iteration_id)
                 except Exception as exc:
-                    return ToolResult(
-                        content=f"Execution failed: {exc}",
-                        is_error=True,
-                        status="failed",
-                    )
+                    return _execution_exception_result(exc)
 
-            max_concurrent_tools = max(1, min(len(executable_batch), _resolve_max_concurrent_tools()))
-            batch_timeout = _resolve_tool_batch_timeout(batch, tool_registry)
-            batch_deadline = time.monotonic() + batch_timeout
+            # Claude Code bounds parallel tool execution to ten calls by
+            # default and exposes one environment override. The legacy
+            # MiniCode override remains accepted for existing deployments.
+            max_concurrent_tools = _parallel_tool_concurrency(len(batch))
+            batch_timeout = _parallel_tool_batch_timeout()
+            batch_deadline = (
+                asyncio.get_running_loop().time() + batch_timeout
+                if batch_timeout is not None
+                else None
+            )
             pending: dict[asyncio.Task[ToolResult], ToolCallEvent] = {}
             results_by_id: dict[str, ToolResult] = {}
             next_executable_index = 0
             next_emit_index = 0
-            batch_timed_out = False
 
             def _record_batch_result(tc: ToolCallEvent, result: ToolResult) -> None:
                 results_by_id[tc.id] = result
-                for duplicate in duplicates_by_source_id.get(tc.id, []):
-                    results_by_id[duplicate.id] = _duplicate_idempotent_result(duplicate, tc)
 
             async def _start_ready_tasks() -> None:
                 nonlocal next_executable_index
-                while next_executable_index < len(executable_batch) and len(pending) < max_concurrent_tools:
-                    tc = executable_batch[next_executable_index]
-                    detail = f"Parallel batch {next_executable_index + 1}/{len(executable_batch)}"
-                    pending_start = _emit_runtime_event(
-                        tool_ctx,
-                        _tool_started_event(
-                            tc,
-                            iteration_id=iteration_id,
-                            detail=detail,
-                            count=next_executable_index + 1,
-                        ),
-                    )
-                    if pending_start is not None:
-                        await pending_start
+                while next_executable_index < len(batch) and len(pending) < max_concurrent_tools:
+                    tc = batch[next_executable_index]
+                    detail = f"Parallel batch {next_executable_index + 1}/{len(batch)}"
                     await _emit_tool_runtime_span(
                         tc,
                         tool_ctx,
@@ -2365,7 +2088,7 @@ async def _flush_queue(
                         status="running",
                         summary=f"Running {tc.name}",
                         detail=detail,
-                        data={"parallel_index": next_executable_index + 1, "parallel_total": len(executable_batch)},
+                        data={"parallel_index": next_executable_index + 1, "parallel_total": len(batch)},
                     )
                     pending[asyncio.create_task(_run_parallel_tool(tc))] = tc
                     next_executable_index += 1
@@ -2385,8 +2108,8 @@ async def _flush_queue(
             async def _emit_ordered_ready_results() -> AsyncIterator[AgentEvent]:
                 for ready_tc, ready_result in _pop_ready_ordered_results():
                     if not _tool_output_was_streamed(tool_ctx, ready_tc.id):
-                        if ready_tc.name in COMMAND_OUTPUT_STREAM_TOOL_NAMES and ready_result.content and not ready_result.is_error:
-                            await _emit_tool_first_output_progress(
+                        if _tool_streams_output(ready_tc.name, tool_registry) and ready_result.content and not ready_result.is_error:
+                            await _emit_tool_first_output_span(
                                 ready_tc,
                                 tool_ctx,
                                 iteration_id=iteration_id,
@@ -2395,6 +2118,7 @@ async def _flush_queue(
                         for event in tool_output_delta_events(
                             ready_tc,
                             ready_result,
+                            tool_registry=tool_registry,
                             turn_id=turn_id,
                             iteration_id=iteration_id,
                         ):
@@ -2407,7 +2131,6 @@ async def _flush_queue(
                         diff=None if ready_result.is_error else diffs_by_id.get(ready_tc.id),
                         iteration_id=iteration_id,
                         turn_id=turn_id,
-                        guardrail_controller=guardrail_controller,
                         tool_ctx=tool_ctx,
                         tool_registry=tool_registry,
                     ):
@@ -2415,15 +2138,18 @@ async def _flush_queue(
 
             try:
                 await _start_ready_tasks()
+                batch_timed_out = False
                 while pending:
-                    remaining = batch_deadline - time.monotonic()
-                    if remaining <= 0:
-                        batch_timed_out = True
-                        break
+                    wait_timeout = None
+                    if batch_deadline is not None:
+                        wait_timeout = max(0.0, batch_deadline - asyncio.get_running_loop().time())
+                        if wait_timeout <= 0:
+                            batch_timed_out = True
+                            break
                     done, _ = await asyncio.wait(
                         pending.keys(),
+                        timeout=wait_timeout,
                         return_when=asyncio.FIRST_COMPLETED,
-                        timeout=remaining,
                     )
                     if not done:
                         batch_timed_out = True
@@ -2437,13 +2163,12 @@ async def _flush_queue(
                         except asyncio.CancelledError:
                             result = cancelled_result
                         except Exception as exc:
-                            result = ToolResult(
-                                content=f"Execution failed: {exc}",
-                                is_error=True,
-                                status="failed",
-                            )
+                            result = _execution_exception_result(exc)
                         _record_batch_result(tc, result)
-                        if result.is_error and tc.name in COMMAND_OUTPUT_STREAM_TOOL_NAMES:
+                        if result.is_error and (
+                            _tool_streams_output(tc.name, tool_registry)
+                            or _tool_mutates(tc.name, tool_registry, tc.arguments)
+                        ):
                             should_cancel_siblings = True
                     async for event in _emit_ordered_ready_results():
                         yield event
@@ -2455,13 +2180,17 @@ async def _flush_queue(
                         # Use gather for parallel cancellation — consistent with
                         # the finally block. Sequential await delays sibling cleanup
                         # behind the slowest-to-cancel task (e.g. subprocess teardown).
-                        await asyncio.gather(*(task for task, _ in remaining), return_exceptions=True)
+                        await cancel_and_drain(
+                            (task for task, _ in remaining),
+                            timeout=0.5,
+                            label="tool batch siblings",
+                        )
                         for task, tc in remaining:
                             _record_batch_result(tc, cancelled_result)
                             pending.pop(task, None)
-                        for tc in executable_batch[next_executable_index:]:
+                        for tc in batch[next_executable_index:]:
                             _record_batch_result(tc, cancelled_result)
-                        next_executable_index = len(executable_batch)
+                        next_executable_index = len(batch)
                         async for event in _emit_ordered_ready_results():
                             yield event
                         break
@@ -2469,21 +2198,23 @@ async def _flush_queue(
                     await _start_ready_tasks()
 
                 if batch_timed_out:
-                    remaining = list(pending.items())
-                    for task, _tc in remaining:
+                    unfinished = list(pending.items())
+                    for task, _tc in unfinished:
                         task.cancel()
-                    # Use gather for parallel cancellation — consistent with
-                    # the finally block. Sequential await delays timeout cleanup
-                    # behind the slowest-to-cancel task.
-                    await asyncio.gather(*(task for task, _ in remaining), return_exceptions=True)
-                    for task, tc in remaining:
-                        _record_batch_result(tc, _tool_batch_timeout_result(tc, batch_timeout))
+                    await cancel_and_drain(
+                        (task for task, _ in unfinished),
+                        timeout=0.5,
+                        label="timed out tool batch",
+                    )
+                    for task, tc in unfinished:
+                        _record_batch_result(tc, timeout_result)
                         pending.pop(task, None)
-                    for tc in executable_batch[next_executable_index:]:
-                        _record_batch_result(tc, _tool_batch_timeout_result(tc, batch_timeout))
-                    next_executable_index = len(executable_batch)
+                    for tc in batch[next_executable_index:]:
+                        _record_batch_result(tc, timeout_result)
+                    next_executable_index = len(batch)
                     async for event in _emit_ordered_ready_results():
                         yield event
+
             finally:
                 # Cancel + await any still-pending tasks. Reached when the
                 # generator is closed early (consumer stops iterating / interrupt
@@ -2495,7 +2226,11 @@ async def _flush_queue(
                 if pending:
                     for task in pending:
                         task.cancel()
-                    await asyncio.gather(*pending, return_exceptions=True)
+                    await cancel_and_drain(
+                        pending,
+                        timeout=0.5,
+                        label="tool batch cleanup",
+                    )
 
             while next_emit_index < len(batch):
                 tc = batch[next_emit_index]
@@ -2504,7 +2239,6 @@ async def _flush_queue(
                     yield event
         else:
             for tc in batch:
-                yield _tool_started_event(tc, iteration_id=iteration_id)
                 await _emit_tool_runtime_span(
                     tc,
                     tool_ctx,
@@ -2514,33 +2248,9 @@ async def _flush_queue(
                     status="running",
                     summary=f"Running {tc.name}",
                 )
-                duplicate_output_result = duplicate_output_write_guard_result(state, tc)
-                if duplicate_output_result is not None:
-                    if not _tool_output_was_streamed(tool_ctx, tc.id):
-                        for event in tool_output_delta_events(
-                            tc,
-                            duplicate_output_result,
-                            turn_id=turn_id,
-                            iteration_id=iteration_id,
-                        ):
-                            yield event
-                    async for event in _finalize_tool_result(
-                        tc,
-                        duplicate_output_result,
-                        ctx=ctx,
-                        state=state,
-                        status="blocked",
-                        iteration_id=iteration_id,
-                        turn_id=turn_id,
-                        guardrail_controller=guardrail_controller,
-                        tool_ctx=tool_ctx,
-                        tool_registry=tool_registry,
-                    ):
-                        yield event
-                    continue
                 diff = (
                     generate_diff(tc.name, tc.arguments, workspace_root=tool_ctx.workspace_root, tool_ctx=tool_ctx)
-                    if tc.name in CHECKPOINT_WRITE_TOOL_NAMES
+                    if _tool_supports_diff(tc.name, tool_registry)
                     else None
                 )
                 prefetched = _take_matching_prefetch(prefetched_results, tc)
@@ -2549,8 +2259,8 @@ async def _flush_queue(
                 else:
                     result = await run_tool_with_timeout(tc, tool_registry, tool_ctx, iteration_id=iteration_id)
                 if not _tool_output_was_streamed(tool_ctx, tc.id):
-                    if tc.name in COMMAND_OUTPUT_STREAM_TOOL_NAMES and result.content and not result.is_error:
-                        await _emit_tool_first_output_progress(
+                    if _tool_streams_output(tc.name, tool_registry) and result.content and not result.is_error:
+                        await _emit_tool_first_output_span(
                             tc,
                             tool_ctx,
                             iteration_id=iteration_id,
@@ -2559,6 +2269,7 @@ async def _flush_queue(
                     for event in tool_output_delta_events(
                         tc,
                         result,
+                        tool_registry=tool_registry,
                         turn_id=turn_id,
                         iteration_id=iteration_id,
                     ):
@@ -2571,17 +2282,60 @@ async def _flush_queue(
                     diff=None if result.is_error else diff,
                     iteration_id=iteration_id,
                     turn_id=turn_id,
-                    guardrail_controller=guardrail_controller,
                     tool_ctx=tool_ctx,
                     tool_registry=tool_registry,
                 ):
                     yield event
 
 
-async def _execute_serial(
+async def _await_approval_within_turn_deadline(
+    approval_handler: Callable,
+    tc: ToolCallEvent,
+    tool_ctx: ToolExecutionContext,
+) -> dict[str, Any]:
+    """Wait for an approval decision without outliving the turn's deadline.
+
+    An approval wait is unbounded work performed on behalf of the turn, so it
+    must respect the same wall-clock boundary as tool execution. Without this
+    a turn whose user stepped away stays pinned on the handler's own timeout,
+    long past ``max_turn_seconds``.
+    """
+    deadline = getattr(tool_ctx, "deadline_monotonic", None)
+    if deadline is None:
+        return await approval_handler(tc.id)
+
+    remaining = float(deadline) - time.monotonic()
+    if remaining <= 0:
+        return {
+            "action": "reject",
+            "guidance": (
+                "The turn's time budget was exhausted before this approval was answered. "
+                "The action was not performed."
+            ),
+        }
+    approval_task = asyncio.create_task(approval_handler(tc.id))
+    done, _ = await asyncio.wait({approval_task}, timeout=remaining)
+    if approval_task not in done:
+        await cancel_and_drain(
+            [approval_task],
+            timeout=0.1,
+            label=f"approval wait for {tc.name}",
+        )
+        return {
+            "action": "reject",
+            "guidance": (
+                "The turn's time budget was exhausted while waiting for approval. "
+                "The action was not performed."
+            ),
+        }
+    return approval_task.result()
+
+
+async def execute_serial(
     tc: ToolCallEvent,
     *,
     perm: PermissionLevel,
+    permission_decision: PermissionDecision,
     ctx: ContextBuilder,
     state: AgentState,
     tool_registry: ToolRegistry,
@@ -2589,7 +2343,6 @@ async def _execute_serial(
     approval_handler: Callable | None,
     skill_manager: Any | None,
     iteration_id: str = "",
-    guardrail_controller: ToolCallGuardrailController | None = None,
     prefetched: PrefetchedToolExecution | None = None,
 ) -> AsyncIterator[AgentEvent]:
     diff: dict[str, Any] | None = None
@@ -2597,25 +2350,34 @@ async def _execute_serial(
     declared_permission = getattr(tool_registry.get_tool(tc.name), "permission", None)
     needs_diff_review = perm == PermissionLevel.DIFF_REVIEW or declared_permission == PermissionLevel.DIFF_REVIEW
 
-    auto_diff_without_handler = (
-        needs_diff_review
-        and approval_handler is None
-        and getattr(tool_ctx.permission, "mode", "") == "auto"
-    )
-    if perm in (PermissionLevel.CONFIRM, PermissionLevel.DIFF_REVIEW) and not auto_diff_without_handler:
+    if perm in (PermissionLevel.CONFIRM, PermissionLevel.DIFF_REVIEW):
         diff = generate_diff(tc.name, tc.arguments, workspace_root=tool_ctx.workspace_root, tool_ctx=tool_ctx) if needs_diff_review else None
         from backend.hooks import get_hook_manager
 
         hook_mgr = get_hook_manager()
-        permission_allowed_by_hook = False
-        if hook_mgr:
+        hook_requested_allow = (
+            str(getattr(tc, "_pre_tool_hook_permission_decision", "") or "").strip().lower()
+            == "allow"
+        )
+        # CC lets a PreToolUse allow skip the tool's ordinary interactive
+        # prompt, but settings ask rules and capability floors still win.
+        hook_overridable_sources = {"tool", "mode", "default", "external_checker"}
+        permission_allowed_by_hook = (
+            hook_requested_allow
+            and permission_decision.matched_rule_source in hook_overridable_sources
+        )
+        if hook_mgr and not permission_allowed_by_hook:
             try:
                 permission_hook = await hook_mgr.run_permission_request(
                     tc.name,
                     tc.arguments,
                     reason="tool requires user approval",
                     permission_level=perm.value,
+                    tool_call_id=tc.id,
+                    session_id=tool_ctx.session_id,
+                    permission_mode=tool_ctx.permission.mode,
                 )
+                _remember_hook_model_context(tc, permission_hook)
                 if permission_hook.blocked:
                     message = permission_hook.message or permission_hook.feedback or "permission request blocked by hook"
                     yield AgentEvent.permission_decision(
@@ -2639,11 +2401,40 @@ async def _execute_serial(
                         diff=diff,
                         iteration_id=iteration_id,
                         turn_id=turn_id,
-                        guardrail_controller=guardrail_controller,
                         tool_ctx=tool_ctx,
+                        tool_registry=tool_registry,
                     ):
                         yield event
                     return
+                if isinstance(permission_hook.updated_input, dict):
+                    tc.arguments = dict(permission_hook.updated_input)
+                    tool = tool_registry.get_tool(tc.name)
+                    validation_error = validate_tool_input(tool, tc.arguments) if tool is not None else ""
+                    if validation_error:
+                        result = _invalid_call_result(tc, validation_error)
+                        async for event in _finalize_tool_result(
+                            tc,
+                            result,
+                            ctx=ctx,
+                            state=state,
+                            diff=None,
+                            iteration_id=iteration_id,
+                            turn_id=turn_id,
+                            tool_ctx=tool_ctx,
+                            tool_registry=tool_registry,
+                        ):
+                            yield event
+                        return
+                    diff = (
+                        generate_diff(
+                            tc.name,
+                            tc.arguments,
+                            workspace_root=tool_ctx.workspace_root,
+                            tool_ctx=tool_ctx,
+                        )
+                        if needs_diff_review
+                        else None
+                    )
                 if permission_hook.has_permission_decision:
                     yield AgentEvent.permission_decision(
                         tool_call_id=tc.id,
@@ -2662,11 +2453,6 @@ async def _execute_serial(
             except Exception as exc:
                 logger.warning("permission_request hook failed: %s", exc)
         if not permission_allowed_by_hook:
-            yield _tool_waiting_approval_event(
-                tc,
-                iteration_id=iteration_id,
-                detail="Awaiting explicit approval before this tool can run",
-            )
             await _emit_tool_runtime_span(
                 tc,
                 tool_ctx,
@@ -2678,7 +2464,6 @@ async def _execute_serial(
                 detail="Awaiting explicit approval before this tool can run",
                 waiting_on="user",
                 blocking_reason="approval_required",
-                requires_attention=True,
             )
             yield AgentEvent.approval_request(
                 tool_call_id=tc.id,
@@ -2690,7 +2475,11 @@ async def _execute_serial(
                 source_tool=tc.name,
             )
             if approval_handler:
-                approval = await approval_handler(tc.id)
+                approval = await _await_approval_within_turn_deadline(
+                    approval_handler,
+                    tc,
+                    tool_ctx,
+                )
                 if approval.get("action") == "reject":
                     guidance = approval.get("guidance", "user rejected this action")
                     result = ToolResult(content=f"Operation rejected: {guidance}", is_error=True)
@@ -2699,7 +2488,8 @@ async def _execute_serial(
                     async for event in _finalize_tool_result(
                         tc, result, ctx=ctx, state=state, diff=diff,
                         iteration_id=iteration_id, turn_id=turn_id,
-                        guardrail_controller=guardrail_controller, tool_ctx=tool_ctx,
+                        tool_ctx=tool_ctx,
+                        tool_registry=tool_registry,
                     ):
                         yield event
                     return
@@ -2712,7 +2502,8 @@ async def _execute_serial(
                         async for event in _finalize_tool_result(
                             tc, result, ctx=ctx, state=state, diff=diff,
                             iteration_id=iteration_id, turn_id=turn_id,
-                            guardrail_controller=guardrail_controller, tool_ctx=tool_ctx,
+                            tool_ctx=tool_ctx,
+                            tool_registry=tool_registry,
                         ):
                             yield event
                         return
@@ -2721,15 +2512,47 @@ async def _execute_serial(
                         async for event in _finalize_tool_result(
                             tc, result, ctx=ctx, state=state, diff=diff,
                             iteration_id=iteration_id, turn_id=turn_id,
-                            guardrail_controller=guardrail_controller, tool_ctx=tool_ctx,
+                            tool_ctx=tool_ctx,
+                            tool_registry=tool_registry,
                         ):
                             yield event
                         return
+            else:
+                # The centralized policy asked for approval and this entry
+                # point has nobody to ask. Fail closed for every such call,
+                # including unknown/open-world MCP tools whose side effects
+                # cannot be classified reliably. Unattended callers opt out
+                # explicitly with permission mode "bypass".
+                result = _rejection_result(
+                    tc,
+                    (
+                        f"Tool '{tc.name}' requires approval, "
+                        "but this run has no approval channel. Configure permission mode "
+                        "'bypass' for unattended runs, or run it from a session that can "
+                        "prompt the user."
+                    ),
+                    display_summary="Approval unavailable",
+                    result_kind=result_kind_for_tool(tc.name, tool_registry),
+                    error_kind="permission_required",
+                    user_summary="该操作需要审批，但当前运行没有审批入口。",
+                    projection="approval",
+                    model_observation=(
+                        f"The {tc.name} call was not executed: it requires approval and this "
+                        "run cannot prompt anyone. Continue with actions that do not need approval."
+                    ),
+                )
+                async for event in _finalize_tool_result(
+                    tc, result, ctx=ctx, state=state, diff=diff,
+                    iteration_id=iteration_id, turn_id=turn_id,
+                    tool_ctx=tool_ctx,
+                    tool_registry=tool_registry,
+                ):
+                    yield event
+                return
 
-    if diff is None and tc.name in CHECKPOINT_WRITE_TOOL_NAMES:
+    if diff is None and _tool_supports_diff(tc.name, tool_registry):
         diff = generate_diff(tc.name, tc.arguments, workspace_root=tool_ctx.workspace_root, tool_ctx=tool_ctx)
 
-    yield _tool_started_event(tc, iteration_id=iteration_id)
     await _emit_tool_runtime_span(
         tc,
         tool_ctx,
@@ -2744,6 +2567,17 @@ async def _execute_serial(
         state=state,
         approval_handler=approval_handler,
         skill_manager=skill_manager,
+        await_response=(
+            (
+                lambda control_tc: _await_approval_within_turn_deadline(
+                    approval_handler,
+                    control_tc,
+                    tool_ctx,
+                )
+            )
+            if approval_handler is not None
+            else None
+        ),
     )
     for event in control_router.pre_wait_events(tc):
         yield event
@@ -2765,7 +2599,6 @@ async def _execute_serial(
         diff=None if result.is_error else diff,
         iteration_id=iteration_id,
         turn_id=turn_id,
-        guardrail_controller=guardrail_controller,
         tool_ctx=tool_ctx,
         tool_registry=tool_registry,
     ):
@@ -2781,34 +2614,18 @@ def store_result(
     diff: dict[str, Any] | None = None,
     iteration_id: str = "",
     turn_id: str = "",
-    append_to_context: bool = True,
-    guardrail_controller: ToolCallGuardrailController | None = None,
     tool_ctx: ToolExecutionContext | None = None,
     tool_registry: ToolRegistry | None = None,
 ) -> AgentEvent:
     from backend.tools.base import MAX_TOOL_RESULT_CHARS, truncate_tool_result
 
     final_status = status_for_result(result, status)
-    result_kind = result.result_kind or result_kind_for_tool(tc.name)
-    limitation = result.limitation or (
-        "unsandboxed background command"
-        if tc.name == "run_command" and bool(tc.arguments.get("run_in_background"))
-        else ""
-    )
+    result_kind = result.result_kind or result_kind_for_tool(tc.name, tool_registry)
+    limitation = result.limitation or ""
     started_at = _tool_start_times(state).get(tc.id)
     duration_ms = result.duration_ms
     if duration_ms is None and isinstance(started_at, (int, float)):
         duration_ms = int(max(0.0, time.time() - started_at) * 1000)
-
-    result = guardrail_after_call_result(
-        guardrail_controller,
-        tc,
-        result,
-        status=status,
-        final_status=final_status,
-        append_to_context=append_to_context,
-    )
-    result = _force_artifact_for_oversized_tool_result(tc, result, tool_ctx)
 
     # Per-tool result budget. Tools that self-bound and artifact their overflow
     # (read_file, web_fetch, run_command) set max_result_chars=None to opt out of
@@ -2818,22 +2635,27 @@ def store_result(
         tool_obj = tool_registry.get_tool(tc.name)
         if tool_obj is not None:
             cap = getattr(tool_obj, "max_result_chars", MAX_TOOL_RESULT_CHARS)
+    result_for_issue = result
+    result = _force_artifact_for_oversized_tool_result(
+        tc,
+        result,
+        tool_ctx,
+        inline_limit=cap,
+    )
     if cap is None:
         truncated = result
     else:
         truncated = replace(result, content=truncate_tool_result(result.content, cap))
-    display_summary = display_summary_for_result(tc, truncated, status=final_status, diff=diff)
-    issue = classify_tool_issue(tc, truncated, final_status)
-    issue_projection = issue.projection if issue else ""
-    tool_projection = DEFAULT_PROJECTION_REGISTRY.project_tool_call(tc.name, tc.arguments or {})
-    display_scope = truncated.display_scope or tool_projection.display_scope or "activity"
-    panel_hint = "" if display_scope == "silent" else _panel_hint_for_tool_result(tc.name, result_kind, diff)
-    requires_attention = _requires_attention_for_tool_result(
-        final_status=final_status,
-        projection=issue_projection,
-        result_kind=result_kind,
+    display_summary = display_summary_for_result(
+        tc,
+        truncated,
+        status=final_status,
         diff=diff,
+        tool_registry=tool_registry,
     )
+    issue = classify_tool_issue(tc, result_for_issue, final_status)
+    issue_projection = issue.projection if issue else ""
+    tool_projection = projection_for_tool(tc.name, tool_registry)
     side_effect_kind = _tool_side_effect_kind(tc.name, tool_registry, tc.arguments)
     idempotent = _tool_is_idempotent(tc.name, tool_registry, tc.arguments) if tool_registry is not None else False
     idempotency_key = ""
@@ -2852,25 +2674,27 @@ def store_result(
         display_summary=display_summary,
         result_kind=result_kind,
         limitation=limitation or truncated.limitation,
-        display_scope=display_scope,
     )
-    if truncated.status == "timeout" and truncated.limitation == "non-critical timeout":
-        state.add_loop_guidance(
-            f"Optional tool {tc.name} timed out. Do not retry it this turn; continue with the user-facing answer."
-        )
-    if issue and issue.model_observation:
-        state.add_loop_guidance(issue.model_observation)
-    if append_to_context:
-        ctx.append_tool_result(tc.id, tc.name, truncated)
-    elif truncated.content:
-        state.add_loop_guidance(truncated.content)
+    context_result = truncated
+    hook_context = getattr(tc, "_hook_model_context", None)
+    if isinstance(hook_context, list):
+        context_parts = [str(value).strip() for value in hook_context if str(value).strip()]
+        if context_parts:
+            context_result = replace(
+                truncated,
+                content=(
+                    f"{truncated.content}\n\nHook context:\n"
+                    + "\n\n".join(context_parts)
+                ),
+            )
+    ctx.append_tool_result(tc.id, tc.name, context_result)
     state.record_tool_call(
         tc.name,
         tc.arguments,
-        truncated.to_context_string(),
+        context_result.to_context_string(),
         artifact_id=truncated.artifact_id,
         is_error=truncated.is_error,
-        mutates=_tool_mutates(tc.name, tool_registry),
+        mutates=_tool_mutates(tc.name, tool_registry, tc.arguments),
         status=final_status,
         source_url=truncated.source_url,
         extraction_status=truncated.extraction_status,
@@ -2881,7 +2705,9 @@ def store_result(
         error_kind=issue.error_kind if issue else None,
         user_summary=issue.user_summary if issue else None,
         developer_detail=issue.developer_detail if issue else None,
+        recoverable=issue.recoverable if issue else True,
         projection=issue.projection if issue else None,
+        model_observation=issue.model_observation if issue else None,
         turn_id=turn_id or None,
         iteration_id=iteration_id or f"iter:{max(1, state.iterations)}",
     )
@@ -2892,45 +2718,10 @@ def store_result(
                 source_name=truncated.provider or "",
                 retrieved_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                 evidence_type=truncated.evidence_type,
-                confidence=0.7 if truncated.evidence_type == "fetched" else 0.35,
                 tool_call_id=tc.id,
                 tool_name=tc.name,
             )
         )
-    # Build the unified ToolOutcome so downstream consumers (Inspector,
-    # context ledger, event aggregation) can read from a single typed record
-    # instead of probing individual event.data fields.
-    _outcome_status_map = {
-        "success": ToolOutcomeStatus.COMPLETED,
-        "completed": ToolOutcomeStatus.COMPLETED,
-        "failed": ToolOutcomeStatus.FAILED,
-        "blocked": ToolOutcomeStatus.BLOCKED,
-        "timeout": ToolOutcomeStatus.TIMEOUT,
-        "partial": ToolOutcomeStatus.TIMEOUT,
-    }
-    _outcome = ToolOutcome(
-        call_id=tc.id,
-        tool_name=tc.name,
-        status=_outcome_status_map.get(final_status, ToolOutcomeStatus.COMPLETED),
-        content=truncated.content,
-        error=truncated.content if final_status in {"failed", "blocked", "timeout"} else "",
-        result_kind=result_kind,
-        activity_kind=tool_projection.activity_kind,
-        panel_hint=panel_hint or "inspector",
-        side_effect_kind=side_effect_kind,
-        idempotent=idempotent,
-        started_at=int(started_at * 1000) if isinstance(started_at, (int, float)) else 0,
-        completed_at=int(time.time() * 1000),
-        artifact_id=truncated.artifact_id,
-        artifact_preview=truncated.artifact_preview,
-        display_summary=display_summary,
-        source_url=truncated.source_url,
-        evidence_type=truncated.evidence_type,
-        provider=truncated.provider,
-        provider_error_type=truncated.provider_error_type,
-        duration_ms=duration_ms,
-        requires_attention=requires_attention,
-    )
     return AgentEvent.tool_result(
         id=tc.id,
         summary=truncated.content,
@@ -2945,6 +2736,7 @@ def store_result(
         duration_ms=duration_ms,
         display_summary=display_summary,
         result_kind=result_kind,
+        activity_kind=tool_projection.activity_kind,
         limitation=limitation or truncated.limitation or "",
         provider=truncated.provider or "",
         provider_error_type=truncated.provider_error_type or "",
@@ -2959,44 +2751,12 @@ def store_result(
         step_id=tc.id,
         iteration_id=iteration_id,
         phase="tool",
-        display_scope=display_scope,
-        panel_hint=panel_hint,
-        requires_attention=requires_attention,
         side_effect_kind=side_effect_kind,
         idempotent=idempotent,
         idempotency_key=idempotency_key,
-        outcome=_outcome.to_dict(),
-    )
-
-
-def tool_result_progress_event(
-    tc: ToolCallEvent,
-    result: ToolResult,
-    *,
-    final_status: str,
-    display_summary: str,
-    iteration_id: str = "",
-    diff: dict[str, Any] | None = None,
-    issue_projection: str = "",
-) -> AgentEvent:
-    status = "completed"
-    if final_status in {"failed", "blocked", "timeout"}:
-        status = "failed"
-    requires_attention = final_status in {"failed", "blocked", "timeout"} and issue_projection not in {"silent", "status", "warning"}
-    panel_hint = _panel_hint_for_tool_result(tc.name, result.result_kind or result_kind_for_tool(tc.name), diff)
-    message = display_summary or (f"Completed {tc.name}" if status == "completed" else f"Failed {tc.name}")
-    detail = result.limitation or result.content or ""
-    return _tool_progress_event(
-        tc,
-        message,
-        phase="tool",
-        status=status,
-        visibility="compact",
-        detail=detail,
-        iteration_id=iteration_id,
-        display_scope=result.display_scope or "activity",
-        panel_hint=panel_hint,
-        requires_attention=requires_attention,
+        output_files=truncated.output_files,
+        superseded_tool_call_ids=truncated.superseded_tool_call_ids,
+        removed_file_paths=truncated.removed_file_paths,
     )
 
 
@@ -3010,8 +2770,6 @@ def store_result_events(
     diff: dict[str, Any] | None = None,
     iteration_id: str = "",
     turn_id: str = "",
-    append_to_context: bool = True,
-    guardrail_controller: ToolCallGuardrailController | None = None,
     tool_ctx: ToolExecutionContext | None = None,
     tool_registry: ToolRegistry | None = None,
 ) -> list[AgentEvent]:
@@ -3024,30 +2782,23 @@ def store_result_events(
         diff=diff,
         iteration_id=iteration_id,
         turn_id=turn_id,
-        append_to_context=append_to_context,
-        guardrail_controller=guardrail_controller,
         tool_ctx=tool_ctx,
         tool_registry=tool_registry,
     )
-    progress_event = tool_result_progress_event(
-        tc,
-        result,
-        final_status=str(event.data.get("status") or "success"),
-        display_summary=str(event.data.get("display_summary") or event.data.get("summary") or ""),
-        iteration_id=iteration_id,
-        diff=diff,
-        issue_projection=str(event.data.get("projection") or ""),
-    )
-    return [progress_event, event]
+    return [event]
 
 
 def _resolve_workspace_path_for_diff(file_path: str, workspace_root: Path | str | None) -> Path:
     path = Path(str(file_path))
     if path.is_absolute():
-        return path
+        return path.resolve()
     if workspace_root:
-        return Path(workspace_root).resolve() / path
-    return path
+        # Resolve so "sub/../sub/a.txt" and "./sub/a.txt" collapse to the same
+        # key read_file recorded (which always .resolve()s, like Claude Code's
+        # expandPath). Without this a legitimately-read file could be rejected
+        # on a spelling variation with a "re-read the file" error that won't fix it.
+        return (Path(workspace_root).resolve() / path).resolve()
+    return path.resolve()
 
 
 def generate_diff(
@@ -3105,19 +2856,22 @@ def inject_expected_hash(
     path = Path(str(file_path))
     path_key = str(path)
     # Prefer the READ-TIME content hash (recorded by read_file) so the
-    # "file changed since read" guard actually spans the read->write window,
-    # not just the sub-second diff->write window. Falls back to the current
-    # on-disk hash only when the file was never read in this conversation,
-    # preserving existing behavior there.
+    # "file changed since read" guard spans the read->write window. Existing
+    # files without a recorded read deliberately keep an empty expected_hash:
+    # edit_file/write_file will reject them with the same read-before-edit
+    # contract as Claude Code instead of blessing a blind edit with a hash read
+    # immediately before execution.
     if isinstance(read_time_hashes, dict) and read_time_hashes.get(path_key):
-        args["expected_hash"] = read_time_hashes[path_key]
+        expected_hash = read_time_hashes.pop(path_key)
+        read_time_hashes[path_key] = expected_hash
+        args["expected_hash"] = expected_hash
         return
     if not path.exists():
         args["expected_hash"] = ""
         return
-    try:
-        content = path.read_text(encoding="utf-8")
-    except (UnicodeDecodeError, OSError):
-        args["expected_hash"] = "__minicode_unreadable_existing_file__"
-        return
-    args["expected_hash"] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    args["expected_hash"] = ""
+
+
+# Public compatibility name retained for callers that predate the internal
+# helper split. Keeping the alias here preserves one implementation path.
+flush_queue = _flush_queue

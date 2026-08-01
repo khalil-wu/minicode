@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import subprocess
 import uuid
 from pathlib import Path
 from typing import Any
@@ -66,11 +65,6 @@ class CheckpointManager:
             workspace_root=str(root),
             paths=[item.path for item in files],
             files=files,
-            git_head=await asyncio.to_thread(self._git_rev_parse, root, "HEAD"),
-            # Rewind is intentionally file-scoped. Applying a repository-wide
-            # stash here could overwrite unrelated user edits made after this
-            # tool call, so the compatibility field remains empty.
-            git_stash_ref=None,
             metadata={"args": {key: value for key, value in args.items() if key not in {"content", "patch"}}},
         )
         return self._store.save(record)
@@ -139,17 +133,3 @@ class CheckpointManager:
         resolved = target.resolve()
         resolved.relative_to(root)
         return resolved
-
-    @staticmethod
-    def _git_rev_parse(root: Path, ref: str) -> str | None:
-        try:
-            result = subprocess.run(
-                ["git", "-C", str(root), "rev-parse", "--verify", ref],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None

@@ -14,12 +14,29 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import secrets
 import time
+import asyncio
+import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlsplit
+
+import keyring
+from keyring.errors import KeyringError, PasswordDeleteError
+
+
+class MCPAuthenticationRequired(ConnectionError):
+    """A remote MCP server requires an explicit user-initiated OAuth login."""
+
+    mcp_auth_required = True
+    mcp_auth_expired = False
+
+    def __init__(self, authorization_url: str = "") -> None:
+        super().__init__("Authentication required; sign in from the Connectors settings.")
+        self.authorization_url = authorization_url
 
 
 @dataclass
@@ -101,10 +118,11 @@ def parse_token_response(data: dict[str, Any]) -> OAuthTokens:
 
 
 class TokenStore:
-    """Per-server OAuth token persistence (JSON file)."""
+    """Per-server OAuth persistence in the OS credential store."""
 
     def __init__(self, path: Path) -> None:
         self._path = path
+        self._service = f"minicode-mcp:{hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:20]}"
 
     def _load(self) -> dict[str, dict[str, Any]]:
         try:
@@ -114,40 +132,202 @@ class TokenStore:
 
     def _save(self, data: dict[str, dict[str, Any]]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        # Restrict the token file to the owner. These are live bearer + refresh
+        # credentials; a world-readable JSON is a standing exfiltration target.
+        # chmod is a no-op / best-effort on Windows (POSIX perms don't apply),
+        # so guard it and never let a perms failure lose the token write.
+        try:
+            os.chmod(self._path.parent, 0o700)
+        except OSError:
+            pass
         self._path.write_text(
             json.dumps(data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        try:
+            os.chmod(self._path, 0o600)
+        except OSError:
+            pass
 
     def get(self, server: str) -> OAuthTokens | None:
-        row = self._load().get(server)
+        try:
+            secret = keyring.get_password(self._service, f"{server}:legacy")
+        except KeyringError:
+            secret = None
+        legacy_data = self._load() if not secret else {}
+        try:
+            row = json.loads(secret) if secret else legacy_data.get(server)
+        except (TypeError, ValueError):
+            row = None
         if not row or not row.get("access_token"):
             return None
         try:
-            return OAuthTokens(
+            tokens = OAuthTokens(
                 access_token=str(row["access_token"]),
                 refresh_token=str(row.get("refresh_token", "")),
                 expires_at=float(row.get("expires_at", 0.0) or 0.0),
                 token_type=str(row.get("token_type", "Bearer") or "Bearer"),
             )
+            if not secret:
+                self.set(server, tokens)
+                legacy_data.pop(server, None)
+                self._save(legacy_data)
+            return tokens
         except (KeyError, TypeError, ValueError):
             return None
 
     def set(self, server: str, tokens: OAuthTokens) -> None:
-        data = self._load()
-        data[server] = {
+        payload = {
             "access_token": tokens.access_token,
             "refresh_token": tokens.refresh_token,
             "expires_at": tokens.expires_at,
             "token_type": tokens.token_type,
         }
-        self._save(data)
+        keyring.set_password(self._service, f"{server}:legacy", json.dumps(payload))
 
     def clear(self, server: str) -> None:
-        data = self._load()
-        if server in data:
-            data.pop(server, None)
-            self._save(data)
+        for suffix in ("legacy", "tokens", "client"):
+            try:
+                keyring.delete_password(self._service, f"{server}:{suffix}")
+            except PasswordDeleteError:
+                pass
+
+    def sdk_storage(self, server: str) -> "SDKTokenStorage":
+        return SDKTokenStorage(self._service, server)
+
+
+class SDKTokenStorage:
+    """Adapter for the official MCP SDK TokenStorage protocol."""
+
+    def __init__(self, service: str, server: str) -> None:
+        self._service = service
+        self._server = server
+
+    async def _get(self, suffix: str) -> str | None:
+        return await asyncio.to_thread(
+            keyring.get_password,
+            self._service,
+            f"{self._server}:{suffix}",
+        )
+
+    async def _set(self, suffix: str, value: str) -> None:
+        await asyncio.to_thread(
+            keyring.set_password,
+            self._service,
+            f"{self._server}:{suffix}",
+            value,
+        )
+
+    async def get_tokens(self) -> Any | None:
+        from mcp.shared.auth import OAuthToken
+
+        raw = await self._get("tokens")
+        return OAuthToken.model_validate_json(raw) if raw else None
+
+    async def set_tokens(self, tokens: Any) -> None:
+        await self._set("tokens", tokens.model_dump_json())
+
+    async def get_client_info(self) -> Any | None:
+        from mcp.shared.auth import OAuthClientInformationFull
+
+        raw = await self._get("client")
+        return OAuthClientInformationFull.model_validate_json(raw) if raw else None
+
+    async def set_client_info(self, client_info: Any) -> None:
+        await self._set("client", client_info.model_dump_json())
+
+
+class LoopbackOAuthCallback:
+    def __init__(
+        self,
+        server: asyncio.AbstractServer,
+        future: asyncio.Future[tuple[str, str | None]],
+        *,
+        interactive: bool,
+    ) -> None:
+        self.server = server
+        self.future = future
+        self.interactive = interactive
+        socket = server.sockets[0]
+        self.redirect_uri = f"http://127.0.0.1:{socket.getsockname()[1]}/callback"
+
+    async def redirect(self, url: str) -> None:
+        # Startup/status discovery may learn that auth is required, but only an
+        # explicit login command is allowed to launch the browser.
+        if not self.interactive:
+            raise MCPAuthenticationRequired(url)
+        opened = await asyncio.to_thread(webbrowser.open, url, 1, True)
+        if not opened:
+            raise RuntimeError(f"Unable to open the OAuth authorization URL: {url}")
+
+    async def callback(self) -> tuple[str, str | None]:
+        try:
+            return await asyncio.wait_for(self.future, timeout=300.0)
+        finally:
+            await self.close()
+
+    async def close(self) -> None:
+        self.server.close()
+        await self.server.wait_closed()
+        if not self.future.done():
+            self.future.cancel()
+
+
+async def create_loopback_callback(*, interactive: bool = True) -> LoopbackOAuthCallback:
+    loop = asyncio.get_running_loop()
+    result: asyncio.Future[tuple[str, str | None]] = loop.create_future()
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            header = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=10.0)
+            first_line = header.split(b"\r\n", 1)[0].decode("ascii", errors="replace")
+            target = first_line.split(" ", 2)[1] if " " in first_line else "/"
+            query = parse_qs(urlsplit(target).query)
+            code = str((query.get("code") or [""])[0])
+            state = str((query.get("state") or [""])[0]) or None
+            error = str((query.get("error") or [""])[0])
+            if error and not result.done():
+                result.set_exception(RuntimeError(f"OAuth authorization failed: {error}"))
+            elif code and not result.done():
+                result.set_result((code, state))
+            body = b"MiniCode authorization completed. You can close this window."
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n"
+                + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode("ascii")
+                + body
+            )
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    return LoopbackOAuthCallback(server, result, interactive=interactive)
+
+
+async def create_sdk_oauth_provider(
+    server_url: str,
+    server_name: str,
+    store: TokenStore,
+    *,
+    interactive: bool = False,
+) -> tuple[Any, LoopbackOAuthCallback]:
+    from mcp.client.auth import OAuthClientProvider
+    from mcp.shared.auth import OAuthClientMetadata
+
+    callback = await create_loopback_callback(interactive=interactive)
+    metadata = OAuthClientMetadata(
+        redirect_uris=[callback.redirect_uri],
+        token_endpoint_auth_method="none",
+        client_name="MiniCode Desktop",
+    )
+    return OAuthClientProvider(
+        server_url,
+        metadata,
+        store.sdk_storage(server_name),
+        redirect_handler=callback.redirect,
+        callback_handler=callback.callback,
+    ), callback
 
 
 def build_refresh_request_body(

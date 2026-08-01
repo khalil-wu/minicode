@@ -74,7 +74,7 @@ export const DiagnosticsTab = () => {
 
   return (
     <div style={{ display: 'grid', gap: 10 }}>
-      <PanelHeader title="运行诊断" meta={loading ? '检查中' : '正常'} action={<SmallButton icon={<RefreshCw size={12} />} label="刷新" onClick={refresh} />} />
+      <PanelHeader title="运行诊断" meta={loading ? '检查中' : '正常'} action={<SmallButton icon={<RefreshCw size={14} />} label="刷新" onClick={refresh} />} />
 
       {doctor?.error && <div style={errorStyle}>{doctor.error}</div>}
 
@@ -103,7 +103,7 @@ export const DiagnosticsTab = () => {
         <InfoRow label="工具" value={formatAgentToolCounts(capabilities)} tone={capabilities ? 'accent' : 'muted'} />
         <InfoRow label="MCP resources" value={capabilityFlagLabel(capabilities?.mcp_resource_bridge)} tone={capabilityFlagTone(capabilities?.mcp_resource_bridge)} />
         <InfoRow label="Deferred" value={formatDeferredCapability(capabilities)} tone={capabilityFlagTone(capabilities?.deferred_bridge)} />
-        <InfoRow label="技能" value={formatSkillCapability(capabilities)} tone={capabilityFlagTone(capabilities?.skill_bridge)} />
+        <InfoRow label="技能" value={formatSkillCapability(capabilities)} tone={capabilityFlagTone(capabilities?.skill_catalog)} />
         <InfoRow label="MCP proxies" value={formatMcpProxyCount(capabilities)} tone={capabilities ? 'muted' : 'warning'} />
       </InfoCard>
 

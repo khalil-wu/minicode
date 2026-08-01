@@ -15,6 +15,7 @@ import "./styles/scroll.css";       // 🆕 Scroll optimizations
 import "./agent-loop/styles/agent-loop.css";  // Agent-loop owner
 import "./composer/composer.css";               // Composer owner
 import "./shell/shell.css";                     // Shell/header/sidebar/layout owner
+import "./styles/ui-polish.css";                // 🎨 统一视觉规范最终层（图标/输入栏/侧边栏/聊天区）
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

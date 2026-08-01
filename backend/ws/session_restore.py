@@ -109,37 +109,17 @@ class SessionRestoreManager:
     async def sync_session(
         self,
         session_id: str,
-        client_version: int = 0,
         *,
         session_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """
-        Sync session state after reconnection.
+        """Return the authoritative session snapshot after reconnection.
 
-        Returns incremental changes since client_version.
+        Event replay uses the WebSocket sequence cursor. Message count is not a
+        valid version because edits can change content without changing length.
         """
-        if client_version > 0 and session_snapshot:
-            # Incremental sync: client has a snapshot at client_version,
-            # only return what changed. For now we track message count as version.
-            messages = (session_snapshot.get("messages") or [])
-            new_messages = messages[client_version:] if client_version < len(messages) else []
-            if new_messages:
-                return {
-                    "session_id": session_id,
-                    "synced": True,
-                    "incremental": True,
-                    "from_version": client_version,
-                    "to_version": len(messages),
-                    "changes": [{"type": "messages_append", "messages": new_messages}],
-                    "session": None,
-                }
-
-        # Full snapshot (initial connect or client has no version)
         return {
             "session_id": session_id,
             "synced": True,
-            "incremental": False,
-            "changes": [],
             "session": session_snapshot
             or {
                 "session_id": session_id,

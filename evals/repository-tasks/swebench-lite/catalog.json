@@ -1,0 +1,131 @@
+{
+  "dataset": "princeton-nlp/SWE-bench Lite",
+  "task_count": 20,
+  "seeds": [
+    11,
+    29,
+    47
+  ],
+  "tasks": [
+    {
+      "id": "pytest-dev-pytest-11143",
+      "manifest": "pytest-dev-pytest-11143.json",
+      "repository": "pytest-dev/pytest",
+      "revision": "6995257cf470d2143ad1683824962de4071c0eb7"
+    },
+    {
+      "id": "pytest-dev-pytest-11148",
+      "manifest": "pytest-dev-pytest-11148.json",
+      "repository": "pytest-dev/pytest",
+      "revision": "2f7415cfbc4b6ca62f9013f1abd27136f46b9653"
+    },
+    {
+      "id": "pytest-dev-pytest-5103",
+      "manifest": "pytest-dev-pytest-5103.json",
+      "repository": "pytest-dev/pytest",
+      "revision": "10ca84ffc56c2dd2d9dc4bd71b7b898e083500cd"
+    },
+    {
+      "id": "pytest-dev-pytest-5221",
+      "manifest": "pytest-dev-pytest-5221.json",
+      "repository": "pytest-dev/pytest",
+      "revision": "4a2fdce62b73944030cff9b3e52862868ca9584d"
+    },
+    {
+      "id": "pytest-dev-pytest-5227",
+      "manifest": "pytest-dev-pytest-5227.json",
+      "repository": "pytest-dev/pytest",
+      "revision": "2051e30b9b596e944524ccb787ed20f9f5be93e3"
+    },
+    {
+      "id": "pytest-dev-pytest-5413",
+      "manifest": "pytest-dev-pytest-5413.json",
+      "repository": "pytest-dev/pytest",
+      "revision": "450d2646233c670654744d3d24330b69895bb9d2"
+    },
+    {
+      "id": "pytest-dev-pytest-5495",
+      "manifest": "pytest-dev-pytest-5495.json",
+      "repository": "pytest-dev/pytest",
+      "revision": "1aefb24b37c30fba8fd79a744829ca16e252f340"
+    },
+    {
+      "id": "pytest-dev-pytest-5692",
+      "manifest": "pytest-dev-pytest-5692.json",
+      "repository": "pytest-dev/pytest",
+      "revision": "29e336bd9bf87eaef8e2683196ee1975f1ad4088"
+    },
+    {
+      "id": "pytest-dev-pytest-6116",
+      "manifest": "pytest-dev-pytest-6116.json",
+      "repository": "pytest-dev/pytest",
+      "revision": "e670ff76cbad80108bde9bab616b66771b8653cf"
+    },
+    {
+      "id": "pytest-dev-pytest-7168",
+      "manifest": "pytest-dev-pytest-7168.json",
+      "repository": "pytest-dev/pytest",
+      "revision": "4787fd64a4ca0dba5528b5651bddd254102fe9f3"
+    },
+    {
+      "id": "pytest-dev-pytest-7220",
+      "manifest": "pytest-dev-pytest-7220.json",
+      "repository": "pytest-dev/pytest",
+      "revision": "56bf819c2f4eaf8b36bd8c42c06bb59d5a3bfc0f"
+    },
+    {
+      "id": "pytest-dev-pytest-7373",
+      "manifest": "pytest-dev-pytest-7373.json",
+      "repository": "pytest-dev/pytest",
+      "revision": "7b77fc086aab8b3a8ebc890200371884555eea1e"
+    },
+    {
+      "id": "pytest-dev-pytest-7432",
+      "manifest": "pytest-dev-pytest-7432.json",
+      "repository": "pytest-dev/pytest",
+      "revision": "e6e300e729dd33956e5448d8be9a0b1540b4e53a"
+    },
+    {
+      "id": "pytest-dev-pytest-7490",
+      "manifest": "pytest-dev-pytest-7490.json",
+      "repository": "pytest-dev/pytest",
+      "revision": "7f7a36478abe7dd1fa993b115d22606aa0e35e88"
+    },
+    {
+      "id": "pytest-dev-pytest-8365",
+      "manifest": "pytest-dev-pytest-8365.json",
+      "repository": "pytest-dev/pytest",
+      "revision": "4964b468c83c06971eb743fbc57cc404f760c573"
+    },
+    {
+      "id": "pytest-dev-pytest-8906",
+      "manifest": "pytest-dev-pytest-8906.json",
+      "repository": "pytest-dev/pytest",
+      "revision": "69356d20cfee9a81972dcbf93d8caf9eabe113e8"
+    },
+    {
+      "id": "pytest-dev-pytest-9359",
+      "manifest": "pytest-dev-pytest-9359.json",
+      "repository": "pytest-dev/pytest",
+      "revision": "e2ee3144ed6e241dea8d96215fcdca18b3892551"
+    },
+    {
+      "id": "pallets-flask-4045",
+      "manifest": "pallets-flask-4045.json",
+      "repository": "pallets/flask",
+      "revision": "d8c37f43724cd9fb0870f77877b7c4c7e38a19e0"
+    },
+    {
+      "id": "pallets-flask-4992",
+      "manifest": "pallets-flask-4992.json",
+      "repository": "pallets/flask",
+      "revision": "4c288bc97ea371817199908d0d9b12de9dae327e"
+    },
+    {
+      "id": "pallets-flask-5063",
+      "manifest": "pallets-flask-5063.json",
+      "repository": "pallets/flask",
+      "revision": "182ce3dd15dfa3537391c3efaf9c3ff407d134d4"
+    }
+  ]
+}

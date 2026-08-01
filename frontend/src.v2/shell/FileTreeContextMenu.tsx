@@ -71,7 +71,10 @@ export const FileContextMenu = ({
       content: "",
       name,
       mediaType: mediaTypeForPath(menu.path),
-      url: previewUrlForPath(isDesktop() ? joinWorkspacePath(workingDirectory, menu.path) : menu.path),
+      url: previewUrlForPath(
+        isDesktop() ? joinWorkspacePath(workingDirectory, menu.path) : menu.path,
+        workingDirectory,
+      ),
       loadedAt: Date.now(),
     });
     useAppStore.getState().setRightStackTab("preview");
@@ -80,14 +83,14 @@ export const FileContextMenu = ({
 
   const createChildFile = async () => {
     const { showPrompt } = await import("../overlays/DialogService");
-    const name = await showPrompt({ title: "New file", message: "File name:", placeholder: "example.ts" });
+    const name = await showPrompt({ title: "新建文件", message: "文件名：", placeholder: "example.ts" });
     if (!name) { onClose(); return; }
     const base = menu.path === "." ? "" : menu.path.replace(/[\\/]+$/, "");
     const path = base ? `${base}/${name}` : name;
     const targetPath = isDesktop() ? joinWorkspacePath(workingDirectory, path) : path;
     try {
       if (isDesktop()) await desktop()?.fs.writeFile(targetPath, "");
-      else await writeWorkspaceFile(targetPath, "");
+      else await writeWorkspaceFile(targetPath, "", workingDirectory);
       onRefresh();
     } finally {
       onClose();
@@ -96,14 +99,14 @@ export const FileContextMenu = ({
 
   const createChildFolder = async () => {
     const { showPrompt } = await import("../overlays/DialogService");
-    const name = await showPrompt({ title: "New folder", message: "Folder name:", placeholder: "components" });
+    const name = await showPrompt({ title: "新建文件夹", message: "文件夹名：", placeholder: "components" });
     if (!name) { onClose(); return; }
     const base = menu.path === "." ? "" : menu.path.replace(/[\\/]+$/, "");
     const path = base ? `${base}/${name}` : name;
     const targetPath = isDesktop() ? joinWorkspacePath(workingDirectory, path) : path;
     try {
       if (isDesktop()) await desktop()?.fs.createDirectory(targetPath);
-      else await createWorkspaceDirectory(targetPath);
+      else await createWorkspaceDirectory(targetPath, workingDirectory);
       onRefresh();
     } finally {
       onClose();
@@ -113,16 +116,33 @@ export const FileContextMenu = ({
   const deleteFile = async () => {
     const { showConfirm } = await import("../overlays/DialogService");
     const ok = await showConfirm({
-      title: "Delete",
-      message: `Delete ${menu.path}?`,
+      title: "删除",
+      message: `删除 ${menu.path}？`,
       confirmLabel: "Delete",
       danger: true,
     });
     if (!ok) { onClose(); return; }
     if (isDesktop()) {
-      await desktop()?.fs.deletePath(menu.path, menu.isDir);
+      const result = await desktop()?.fs.deletePath(menu.path, menu.isDir, false);
+      if (result && "needsConfirmation" in result && result.needsConfirmation) {
+        const confirmed = await showConfirm({
+          title: "确认删除大型目录",
+          message: `${menu.path} 包含 ${result.entryCount}+ 个项目。将其移到回收站？`,
+          confirmLabel: "移到回收站",
+          danger: true,
+        });
+        if (!confirmed) { onClose(); return; }
+        const finalResult = await desktop()?.fs.deletePath(menu.path, menu.isDir, true);
+        if (!finalResult || !("deleted" in finalResult) || !finalResult.deleted) {
+          onClose();
+          return;
+        }
+      } else if (!result || !("deleted" in result) || !result.deleted) {
+        onClose();
+        return;
+      }
     } else {
-      await deleteWorkspacePath(menu.path, menu.isDir);
+      await deleteWorkspacePath(menu.path, workingDirectory, menu.isDir);
     }
     onRefresh();
     onClose();
@@ -131,13 +151,13 @@ export const FileContextMenu = ({
   const renameFile = async () => {
     const { showPrompt, showAlert } = await import("../overlays/DialogService");
     const newName = await showPrompt({
-      title: "Rename",
-      message: "New name:",
+      title: "重命名",
+      message: "新名称：",
       defaultValue: menu.path.split(/[/\\]/).pop() ?? "",
     });
     if (!newName) { onClose(); return; }
     if (/[/\\]/.test(newName) || newName === ".." || newName.startsWith("../") || newName.startsWith("..\\")) {
-      await showAlert({ title: "Invalid name", message: "File names cannot contain path separators or traversal patterns." });
+      await showAlert({ title: "名称无效", message: "文件名不能包含路径分隔符或遍历模式。" });
       onClose();
       return;
     }
@@ -146,7 +166,7 @@ export const FileContextMenu = ({
     if (isDesktop()) {
       await desktop()?.fs.renamePath(menu.path, newPath);
     } else {
-      await renameWorkspacePath(menu.path, newPath);
+      await renameWorkspacePath(menu.path, newPath, workingDirectory);
     }
     onRefresh();
     onClose();
@@ -158,16 +178,16 @@ export const FileContextMenu = ({
   };
 
   const items = [
-    ...(!menu.isDir ? [{ label: "Open in Editor", action: openInEditor, icon: <FilePenLine size={14} /> }] : []),
-    ...(!menu.isDir && isPreviewableFile(menu.path) ? [{ label: "Open in Preview Pane", action: openPreview, icon: <Eye size={14} /> }] : []),
+    ...(!menu.isDir ? [{ label: "在编辑器中打开", action: openInEditor, icon: <FilePenLine size={14} /> }] : []),
+    ...(!menu.isDir && isPreviewableFile(menu.path) ? [{ label: "在预览面板中打开", action: openPreview, icon: <Eye size={14} /> }] : []),
     ...(menu.isDir ? [
-      { label: "New File...", action: createChildFile, icon: <FilePlus2 size={14} /> },
-      { label: "New Folder...", action: createChildFolder, icon: <FolderPlus size={14} /> },
+      { label: "新建文件…", action: createChildFile, icon: <FilePlus2 size={14} /> },
+      { label: "新建文件夹…", action: createChildFolder, icon: <FolderPlus size={14} /> },
     ] : []),
-    ...(isDesktop() ? [{ label: "Reveal in Explorer", action: revealInExplorer, icon: <FolderOpen size={14} /> }] : []),
-    { label: "Copy Path", action: copyPath, icon: <Copy size={14} /> },
-    { label: "Rename...", action: renameFile, icon: <Pencil size={14} /> },
-    { label: "Delete", action: deleteFile, icon: <Trash2 size={14} />, danger: true },
+    ...(isDesktop() ? [{ label: "在文件资源管理器中显示", action: revealInExplorer, icon: <FolderOpen size={14} /> }] : []),
+    { label: "复制路径", action: copyPath, icon: <Copy size={14} /> },
+    { label: "重命名…", action: renameFile, icon: <Pencil size={14} /> },
+    { label: "删除", action: deleteFile, icon: <Trash2 size={14} />, danger: true },
   ];
 
   return (

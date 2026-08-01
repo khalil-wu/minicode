@@ -4,7 +4,6 @@ State objects for WebSocketSession to reduce god-object complexity.
 Each state object manages a specific concern:
 - ConnectionState: WebSocket connection lifecycle
 - ConversationState: Active conversation and run tasks
-- StreamState: Streaming response state per conversation
 - WorkspaceState: Workspace root and git integration
 """
 
@@ -71,43 +70,6 @@ class ConversationState:
         """Clear the run task for a conversation."""
         self.run_tasks.pop(conversation_id, None)
         self.run_task_ids.pop(conversation_id, None)
-
-
-@dataclass
-class ConversationStream:
-    """Stream state for a single conversation."""
-
-    message_id: str | None = None
-    accumulated_text: str = ""
-    tool_calls: dict = field(default_factory=dict)  # index -> tool_call
-
-    def clear(self) -> None:
-        """Clear all stream state."""
-        self.message_id = None
-        self.accumulated_text = ""
-        self.tool_calls.clear()
-
-
-@dataclass
-class StreamState:
-    """Manages streaming response state per conversation."""
-
-    streams: dict[str, ConversationStream] = field(default_factory=dict)  # conversation_id -> stream
-
-    def get_stream(self, conversation_id: str) -> ConversationStream:
-        """Get stream for a conversation, creating if needed."""
-        if conversation_id not in self.streams:
-            self.streams[conversation_id] = ConversationStream()
-        return self.streams[conversation_id]
-
-    def clear_stream(self, conversation_id: str) -> None:
-        """Clear stream state for a conversation."""
-        if conversation_id in self.streams:
-            self.streams[conversation_id].clear()
-
-    def remove_stream(self, conversation_id: str) -> None:
-        """Remove stream for a conversation."""
-        self.streams.pop(conversation_id, None)
 
 
 @dataclass

@@ -14,20 +14,16 @@ from backend.config import (
 from backend.hooks.runtime import run_config_change_hook
 
 from backend.services.llm_provider_helpers import (
-    _LATEST_PROVIDER_MODELS,
+    _check_anthropic_generation,
     _check_openai_compatible_generation,
     _fetch_anthropic_models,
     _fetch_openai_compatible_models,
     _http_error_message,
     _http_error_status,
-    _is_anthropic_model_id,
     _manual_models_from_payload,
-    _merge_model_sources,
     _merge_models,
     _normalize_provider_value,
-    _deepseek_model_candidates_only,
     _persist_refreshed_models,
-    _resolve_openai_provider_id,
     _select_refreshed_model,
     _status_hint_for_provider,
 )
@@ -36,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 FetchModels = Callable[[str, str], Awaitable[list[str]]]
 CheckGeneration = Callable[[str, str, str, str], Awaitable[None]]
+CheckAnthropicGeneration = Callable[[str, str, str], Awaitable[None]]
 ConfigChangeHook = Callable[..., Awaitable[Any]]
 
 
@@ -53,10 +50,11 @@ async def refresh_llm_models(
         api_key = request.anthropic.api_key.strip() or current["api_key"]
         base_url = request.anthropic.base_url.strip() or current["base_url"]
         current_model = request.anthropic.model.strip() or current["model"]
-        provider_id = "anthropic_off"
+        provider_id = "anthropic"
         models: list[str] = []
-        source = "preset"
+        source = "manual"
         source_message = ""
+        manual_models = _manual_models_from_payload(request.anthropic)
         try:
             models = await fetch_anthropic_models(base_url, api_key)
         except Exception as exc:
@@ -65,12 +63,8 @@ async def refresh_llm_models(
             source = "live"
             source_message = "Fetched available models from Anthropic /models."
         else:
-            models = list(_LATEST_PROVIDER_MODELS[provider_id])
-            source_message = (
-                "No API key configured. Showing the built-in fallback models."
-                if not api_key.strip()
-                else "Live fetch failed or returned no models. Showing the built-in fallback models."
-            )
+            models = manual_models
+            source_message = "Live model discovery unavailable; keeping the configured model list."
         selected_model = _select_refreshed_model(provider_id, models, current_model)
         final_models = _merge_models(models, selected_model)
         return {
@@ -90,43 +84,30 @@ async def refresh_llm_models(
     current_model = incoming.model.strip() or str(current.get("model", "")).strip()
     raw_wire_api = str(getattr(incoming, "wire_api", "") or current.get("wire_api", "") or "").strip().lower()
     wire_api = normalize_custom_wire_api(base_url, raw_wire_api, str(current.get("wire_api", "chat")))
-    provider_id = "custom_anthropic" if provider == "custom" and wire_api == "anthropic" else _resolve_openai_provider_id(base_url)
+    custom_anthropic = provider == "custom" and wire_api == "anthropic"
+    provider_id = "custom_anthropic" if custom_anthropic else provider
     models: list[str] = []
     discovered_reasoning_efforts: dict[str, list[str]] = {}
-    source = "preset"
+    source = "manual"
     source_message = ""
     manual_models = _manual_models_from_payload(incoming)
-    if provider_id == "custom_anthropic":
-        manual_models = [model for model in manual_models if _is_anthropic_model_id(model)]
-    preset_models = list(_LATEST_PROVIDER_MODELS.get(provider_id, _LATEST_PROVIDER_MODELS.get("anthropic_off", []) if provider_id == "custom_anthropic" else []))
+    # A wire protocol is not a model-vendor assertion. Custom Messages
+    # gateways may expose arbitrary model ids, so never inject/filter Claude
+    # models merely because wire_api=anthropic.
     try:
-        if provider_id == "custom_anthropic":
+        if custom_anthropic:
             models = await fetch_anthropic_models(base_url, api_key)
         else:
             models = await fetch_openai_models(base_url, api_key)
             discovered_reasoning_efforts = dict(getattr(models, "reasoning_efforts", {}))
     except Exception as exc:
         logger.warning("Failed to refresh %s model list: %s", provider_id, exc)
-    if provider_id == "deepseek":
-        models = _deepseek_model_candidates_only(models)
-        manual_models = _deepseek_model_candidates_only(manual_models)
-        preset_models = _deepseek_model_candidates_only(preset_models)
     if models:
         source = "live"
-        models = _merge_model_sources(models, manual_models)
-        source_message = "Fetched models from the current provider /models endpoint and prioritized the latest releases."
+        source_message = "Fetched models from the current provider /models endpoint."
     else:
-        models = _merge_model_sources(preset_models, manual_models)
-        if not api_key.strip():
-            source_message = (
-                "No API key is configured, keeping manual model list."
-                if not preset_models
-                else "No API key is configured, showing built-in model list."
-            )
-        elif preset_models:
-            source_message = "Live model refresh failed or returned no models, showing built-in model list."
-        else:
-            source_message = "Live model refresh failed or returned no models, keeping manual model list."
+        models = manual_models
+        source_message = "Live model discovery unavailable; keeping the configured model list."
     selected_model = _select_refreshed_model(provider_id, models, current_model)
     final_models = _merge_models(models, selected_model)
     discovered_effort_levels = discovered_reasoning_efforts.get(selected_model, [])
@@ -153,6 +134,7 @@ async def check_llm_connection(
     fetch_anthropic_models: FetchModels = _fetch_anthropic_models,
     fetch_openai_models: FetchModels = _fetch_openai_compatible_models,
     check_openai_generation: CheckGeneration = _check_openai_compatible_generation,
+    check_anthropic_generation: CheckAnthropicGeneration = _check_anthropic_generation,
 ) -> dict[str, Any]:
     provider = _normalize_provider_value(request.provider)
 
@@ -165,20 +147,25 @@ async def check_llm_connection(
             return {
                 "ok": False,
                 "provider": provider,
-                "provider_id": "anthropic_off",
+                "provider_id": "anthropic",
                 "base_url": base_url,
                 "model": model,
                 "wire_api": "anthropic",
                 "has_api_key": False,
                 "message": "Missing Anthropic API key.",
-                "hint": _status_hint_for_provider("anthropic_off", None, False),
+                "hint": _status_hint_for_provider("anthropic", None, False),
             }
         try:
-            models = await fetch_anthropic_models(base_url, api_key)
+            try:
+                models = await fetch_anthropic_models(base_url, api_key)
+            except Exception as discovery_exc:
+                logger.info("Anthropic model discovery unavailable: %s", discovery_exc)
+                models = []
+            await check_anthropic_generation(base_url, api_key, model)
             return {
                 "ok": True,
                 "provider": provider,
-                "provider_id": "anthropic_off",
+                "provider_id": "anthropic",
                 "base_url": base_url,
                 "model": model,
                 "wire_api": "anthropic",
@@ -191,14 +178,14 @@ async def check_llm_connection(
             return {
                 "ok": False,
                 "provider": provider,
-                "provider_id": "anthropic_off",
+                "provider_id": "anthropic",
                 "base_url": base_url,
                 "model": model,
                 "wire_api": "anthropic",
                 "has_api_key": True,
                 "status_code": status_code,
                 "message": _http_error_message(exc),
-                "hint": _status_hint_for_provider("anthropic_off", status_code, True),
+                "hint": _status_hint_for_provider("anthropic", status_code, True),
             }
 
     current = get_custom_settings() if provider == "custom" else get_openai_settings()
@@ -208,7 +195,8 @@ async def check_llm_connection(
     model = incoming.model.strip() or str(current.get("model", "")).strip()
     raw_wire_api = str(getattr(incoming, "wire_api", "") or current.get("wire_api", "") or "").strip().lower()
     wire_api = normalize_custom_wire_api(base_url, raw_wire_api, str(current.get("wire_api", "chat")))
-    provider_id = "custom_anthropic" if provider == "custom" and wire_api == "anthropic" else _resolve_openai_provider_id(base_url)
+    custom_anthropic = provider == "custom" and wire_api == "anthropic"
+    provider_id = "custom_anthropic" if custom_anthropic else provider
 
     if not api_key.strip():
         return {
@@ -224,8 +212,15 @@ async def check_llm_connection(
         }
 
     try:
-        if provider_id == "custom_anthropic":
-            models = await fetch_anthropic_models(base_url, api_key)
+        if custom_anthropic:
+            # Model discovery is optional for third-party Messages gateways;
+            # generation is the authoritative connectivity check.
+            try:
+                models = await fetch_anthropic_models(base_url, api_key)
+            except Exception as discovery_exc:
+                logger.info("Custom Anthropic model discovery unavailable: %s", discovery_exc)
+                models = []
+            await check_anthropic_generation(base_url, api_key, model)
         else:
             models = await fetch_openai_models(base_url, api_key)
             await check_openai_generation(base_url, api_key, model, wire_api or "chat")

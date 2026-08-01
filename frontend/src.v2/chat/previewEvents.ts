@@ -3,7 +3,15 @@ import type { ServerEvent } from "../protocol/events";
 import { pushToast } from "../overlays/ToastContainer";
 
 export const handlePreviewEvent = (e: ServerEvent): boolean => {
+  if (!e.type.startsWith("preview.")) return false;
   const s = useAppStore.getState();
+  const eventConversationId = String(
+    (e as unknown as { conversation_id?: unknown }).conversation_id ?? "",
+  ).trim();
+  const activeConversationId = String(s.conversationId ?? "").trim();
+  if (!eventConversationId || !activeConversationId || eventConversationId !== activeConversationId) {
+    return true;
+  }
   switch (e.type) {
     case "preview.servers.updated": {
       const ev = e as unknown as {

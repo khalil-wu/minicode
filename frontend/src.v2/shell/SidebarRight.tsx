@@ -1,35 +1,26 @@
 import {
-  Activity,
+  Bot,
   FileDiff,
   FileSearch,
-  FolderOpen,
-  Globe,
+  Globe2,
   HeartPulse,
   Layers,
-  MessageCircle,
   MonitorPlay,
   Plus,
+  PanelRightOpen,
   PanelRightClose,
-  TerminalSquare,
-  Users,
   X,
 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAppStore } from "../stores";
+import { RIGHT_SIDEBAR_DEFAULT_WIDTH } from "../stores/shared-helpers";
 import { PanelSkeleton } from "./PanelSkeleton";
 import { ChunkErrorBoundary, SafeBoundary } from "./ChunkErrorBoundary";
 import { PanelErrorFallback } from "../components/PanelErrorFallback";
-import { BrowserPanel } from "../panels/BrowserPanel";
-import { PreviewPanel } from "../panels/PreviewPanel";
-import { DiffPanel } from "../panels/DiffPanel";
-import { requestNewTerminalSession } from "../panels/terminalRequests";
 import { ScrollablePanel } from "./SidebarShared";
 import { ActivityTab } from "./tabs/ActivityTab";
 
 type StackTab = "preview" | "browser" | "terminal" | "tasks" | "diff" | "plan" | "subagents" | "artifacts" | "inspector" | "diagnostics";
-type LauncherItem =
-  | { type: "separator"; key: string; label: string }
-  | { type: "item"; key: string; label: string; badge?: string; icon: React.ReactNode; shortcut?: string; onSelect: () => void };
 
 interface SidebarRightProps {
   embedded?: boolean;
@@ -37,20 +28,28 @@ interface SidebarRightProps {
 }
 
 const normalizeInitialTab = (tab: SidebarRightProps["initialTab"]): StackTab => {
-  if (tab === "details" || tab === "context") return "inspector";
-  if (tab === "plan") return "tasks";
+  if (tab === "details") return "inspector";
+  if (tab === "context") return "tasks";
+  if (tab === "plan" || tab === "terminal") return "tasks";
   return tab ?? "tasks";
 };
 
 const defaultOpenTabs: StackTab[] = ["tasks"];
+const sidebarIconProps = { size: 16, strokeWidth: 1.85 } as const;
 
 const shouldAllowAutomaticTabSwitch = (activeTab: StackTab, rightPanelOpen: boolean): boolean => {
   if (!rightPanelOpen) return true;
   return activeTab === "preview" || activeTab === "tasks";
 };
 
-const LazyTerminalPanel = lazy(() =>
-  import("../panels/TerminalPanel").then((module) => ({ default: module.TerminalPanel })),
+const LazyPreviewPanel = lazy(() =>
+  import("../panels/PreviewPanel").then((module) => ({ default: module.PreviewPanel })),
+);
+const LazyBrowserPanel = lazy(() =>
+  import("../panels/BrowserPanel").then((module) => ({ default: module.BrowserPanel })),
+);
+const LazyDiffPanel = lazy(() =>
+  import("../panels/DiffPanel").then((module) => ({ default: module.DiffPanel })),
 );
 const LazySubagentsTab = lazy(() =>
   import("./tabs/SubagentsTab").then((module) => ({ default: module.SubagentsTab })),
@@ -68,7 +67,6 @@ const LazyDiagnosticsTab = lazy(() =>
 const preferredManualSidebarWidth = (tab: StackTab): number => {
   switch (tab) {
     case "browser":
-    case "terminal":
       return 720;
     case "diff":
       return 640;
@@ -81,26 +79,8 @@ const preferredManualSidebarWidth = (tab: StackTab): number => {
     case "diagnostics":
     case "tasks":
     default:
-      return 360;
+      return RIGHT_SIDEBAR_DEFAULT_WIDTH;
   }
-};
-
-let terminalPreloadPromise: Promise<unknown> | null = null;
-
-const preloadTerminal = () => {
-  terminalPreloadPromise ??= Promise.all([
-    import("@xterm/xterm"),
-    import("@xterm/addon-fit"),
-    import("../panels/TerminalPanel"),
-  ]).catch((error) => {
-    terminalPreloadPromise = null;
-    throw error;
-  });
-  return terminalPreloadPromise;
-};
-
-const requestTerminalPreload = () => {
-  void preloadTerminal().catch(() => {});
 };
 
 export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: SidebarRightProps) => {
@@ -113,16 +93,12 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
   const setRightSidebarWidth = useAppStore((s) => s.setRightSidebarWidth);
   const setRightStackTab = useAppStore((s) => s.setRightStackTab);
   const toggleRightPanel = useAppStore((s) => s.toggleRightPanel);
-  const quickOpenVisible = useAppStore((s) => s.quickOpenVisible);
-  const toggleQuickOpen = useAppStore((s) => s.toggleQuickOpen);
-  const sideChatOpen = useAppStore((s) => s.sideChatOpen);
-  const toggleSideChat = useAppStore((s) => s.toggleSideChat);
   const [localTab, setLocalTab] = useState<StackTab>(normalizeInitialTab(initialTab));
   const [openTabIds, setOpenTabIds] = useState<StackTab[]>(() => Array.from(new Set([...defaultOpenTabs, normalizeInitialTab(initialTab)])));
-  const [launcherMenuOpen, setLauncherMenuOpen] = useState(false);
-  const launcherMenuRef = useRef<HTMLDivElement | null>(null);
+  const [launcherOpen, setLauncherOpen] = useState(false);
+  const tabListRef = useRef<HTMLDivElement | null>(null);
   const requestedActiveTab = embedded ? localTab : rightStackTab;
-  const normalizedRequestedTab = requestedActiveTab === "plan" ? "tasks" : requestedActiveTab;
+  const normalizedRequestedTab = requestedActiveTab === "plan" || requestedActiveTab === "terminal" ? "tasks" : requestedActiveTab;
   const activeTab = normalizedRequestedTab;
   const setActiveTab = embedded ? setLocalTab : setRightStackTab;
 
@@ -142,15 +118,14 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
   const previewArtifact = useAppStore((s) => s.previewArtifact);
   const diffReview = useAppStore((s) => s.diffReview);
   const gitChanges = useAppStore((s) => s.gitChanges);
-  const terminalSessions = useAppStore((s) => s.terminalSessions);
   const mcpServers = useAppStore((s) => s.mcpServers);
   const [userTabLocked, setUserTabLocked] = useState(false);
   const allowAutoSwitch = !embedded && !rightStackTabLocked && !userTabLocked && shouldAllowAutomaticTabSwitch(activeTab, rightPanelOpen);
 
-  // 切换会话时释放tab锁
+  // Switching conversations must not rebuild or reorder the user's open panel
+  // tabs. Only release the automatic-switch lock for the new conversation.
   useEffect(() => {
     setUserTabLocked(false);
-    setOpenTabIds(Array.from(new Set([...defaultOpenTabs, activeTab])));
   }, [conversationId]);
 
   useEffect(() => {
@@ -161,25 +136,18 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
   }, [allowAutoSwitch, livePreviewUrl, setRightStackTab]);
 
   const runningSubagents = subagents.filter((subagent) => subagent.status === "running").length;
-  const runningTerminals = terminalSessions.filter((t) => t.status !== "exited").length;
   const mcpErrors = mcpServers.filter((s) => s.status === "error").length;
   const gitChangeCount = gitChanges.workingTree.length + gitChanges.staged.length + gitChanges.untracked.length;
 
-  useEffect(() => {
-    if (activeTab === "terminal" || runningTerminals > 0) requestTerminalPreload();
-  }, [activeTab, runningTerminals]);
-
-  const hasHealthIssues = mcpErrors > 0;
   const tabs: { id: StackTab; label: string; badge?: string; icon: React.ReactNode }[] = [
-    { id: "tasks", label: "Activity", icon: <Activity size={15} /> },
-    { id: "subagents", label: "Agents", badge: runningSubagents ? String(runningSubagents) : undefined, icon: <Users size={15} /> },
-    { id: "artifacts", label: "Artifacts", badge: previewArtifact ? "1" : undefined, icon: <Layers size={15} /> },
-    { id: "inspector", label: "Inspector", icon: <FileSearch size={15} /> },
-    { id: "diff", label: "Review", badge: diffReview ? "1" : gitChangeCount ? String(gitChangeCount) : undefined, icon: <FileDiff size={15} /> },
-    { id: "preview", label: "Preview", badge: livePreviewUrl || previewArtifact ? "on" : undefined, icon: <MonitorPlay size={15} /> },
-    { id: "terminal", label: "Terminal", badge: runningTerminals ? String(runningTerminals) : undefined, icon: <TerminalSquare size={15} /> },
-    { id: "browser", label: "Browser Control", icon: <Globe size={15} /> },
-    { id: "diagnostics", label: "Health", badge: mcpErrors ? String(mcpErrors) : undefined, icon: <HeartPulse size={15} /> },
+    { id: "tasks", label: "上下文", icon: <PanelRightOpen {...sidebarIconProps} /> },
+    { id: "subagents", label: "子智能体", badge: runningSubagents ? String(runningSubagents) : undefined, icon: <Bot {...sidebarIconProps} /> },
+    { id: "artifacts", label: "产物", badge: previewArtifact ? "1" : undefined, icon: <Layers {...sidebarIconProps} /> },
+    { id: "inspector", label: "检查器", icon: <FileSearch {...sidebarIconProps} /> },
+    { id: "diff", label: "审阅", badge: diffReview ? "1" : gitChangeCount ? String(gitChangeCount) : undefined, icon: <FileDiff {...sidebarIconProps} /> },
+    { id: "preview", label: "预览", badge: livePreviewUrl || previewArtifact ? "开" : undefined, icon: <MonitorPlay {...sidebarIconProps} /> },
+    { id: "browser", label: "浏览器", icon: <Globe2 {...sidebarIconProps} /> },
+    { id: "diagnostics", label: "运行状态", badge: mcpErrors ? String(mcpErrors) : undefined, icon: <HeartPulse {...sidebarIconProps} /> },
   ];
   const activeItem = tabs.find((tab) => tab.id === activeTab) ?? tabs[0];
   const tabById = useMemo(() => new Map(tabs.map((tab) => [tab.id, tab])), [tabs]);
@@ -203,63 +171,15 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
     lockAndSetTab(fallbackTab);
     setRightSidebarWidth(preferredManualSidebarWidth(fallbackTab));
   }, [activeTab, lockAndSetTab, openTabIds, setRightSidebarWidth]);
-  const launcherItems: LauncherItem[] = [
-    {
-      type: "item",
-      key: "terminal",
-      label: "New Terminal",
-      badge: runningTerminals ? String(runningTerminals) : undefined,
-      icon: <TerminalSquare size={15} />,
-      onSelect: () => {
-        openRightTab("terminal");
-        requestTerminalPreload();
-        requestNewTerminalSession();
-      },
-    },
-    {
-      type: "item",
-      key: "preview",
-      label: "Open Preview",
-      badge: livePreviewUrl || previewArtifact ? "on" : undefined,
-      icon: <MonitorPlay size={15} />,
-      shortcut: "Ctrl+Shift+B",
-      onSelect: () => openRightTab("preview"),
-    },
-    {
-      type: "item",
-      key: "files",
-      label: "Open File",
-      icon: <FolderOpen size={15} />,
-      shortcut: "Ctrl+P",
-      onSelect: () => {
-        setLauncherMenuOpen(false);
-        if (!quickOpenVisible) toggleQuickOpen();
-      },
-    },
-    {
-      type: "item",
-      key: "side-chat",
-      label: "Side Chat",
-      icon: <MessageCircle size={15} />,
-      shortcut: "Ctrl+;",
-      onSelect: () => {
-        setLauncherMenuOpen(false);
-        if (!sideChatOpen) toggleSideChat();
-      },
-    },
-    { type: "item", key: "review", label: "Show Review", badge: diffReview ? "1" : gitChangeCount ? String(gitChangeCount) : undefined, icon: <FileDiff size={15} />, onSelect: () => openRightTab("diff") },
-    { type: "item", key: "activity", label: "Show Activity", icon: <Activity size={15} />, onSelect: () => openRightTab("tasks") },
-    { type: "item", key: "artifacts", label: "Show Artifacts", badge: previewArtifact ? "1" : undefined, icon: <Layers size={15} />, onSelect: () => openRightTab("artifacts") },
-    { type: "separator", key: "advanced", label: "Advanced" },
-    { type: "item", key: "browser", label: "Browser Control", icon: <Globe size={15} />, onSelect: () => openRightTab("browser") },
-    { type: "item", key: "agents", label: "Show Agents", badge: runningSubagents ? String(runningSubagents) : undefined, icon: <Users size={15} />, onSelect: () => openRightTab("subagents") },
-    ...(hasHealthIssues
-      ? [{ type: "item" as const, key: "health", label: "Show Health", badge: String(mcpErrors), icon: <HeartPulse size={15} />, onSelect: () => openRightTab("diagnostics") }]
-      : []),
-  ];
   useEffect(() => {
     addOpenTab(activeTab);
   }, [activeTab, addOpenTab]);
+
+  useEffect(() => {
+    tabListRef.current
+      ?.querySelector<HTMLElement>(`[data-sidebar-tab="${activeTab}"]`)
+      ?.scrollIntoView?.({ inline: "nearest", block: "nearest" });
+  }, [activeTab, openTabIds]);
 
   useEffect(() => {
     if (diffReview || gitChangeCount > 0) addOpenTab("diff");
@@ -271,43 +191,25 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
 
   const activePrimaryTab = openedTabs.some((tab) => tab.id === activeTab);
   const compactPanel = ["tasks", "inspector", "subagents", "artifacts", "diagnostics"].includes(activeTab);
-  const minSidebarWidth = embedded ? 0 : compactPanel ? 292 : 332;
-  const effectiveResizeMin = embedded ? 0 : Math.max(320, minSidebarWidth);
-  const sidebarWidth = Math.max(minSidebarWidth, rightSidebarWidth);
-  const sidebarWidthStyle = embedded ? "100%" : `${sidebarWidth}px`;
-  const sidebarMaxWidth = embedded ? "none" : "min(1040px, calc(100vw - 360px))";
+  const minSidebarWidth = embedded ? 0 : compactPanel ? 360 : 420;
+  const effectiveResizeMin = embedded ? 0 : minSidebarWidth;
+  const sidebarWidth = compactPanel
+    ? Math.min(420, Math.max(minSidebarWidth, rightSidebarWidth))
+    : Math.max(minSidebarWidth, rightSidebarWidth);
+  const sidebarWidthStyle = embedded ? "100%" : rightPanelOpen ? `${sidebarWidth}px` : "0px";
+  const sidebarMinWidth = embedded ? 0 : rightPanelOpen ? minSidebarWidth : 0;
+  const sidebarMaxWidth = embedded ? "none" : rightPanelOpen ? "min(1040px, calc(100vw - 720px))" : "0px";
   const activateTab = (tab: StackTab) => {
     addOpenTab(tab);
     lockAndSetTab(tab);
-    setLauncherMenuOpen(false);
+    setLauncherOpen(false);
   };
-
-  useEffect(() => {
-    if (!launcherMenuOpen) return;
-    const closeOnOutsidePointer = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (!launcherMenuRef.current?.contains(target)) {
-        setLauncherMenuOpen(false);
-      }
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setLauncherMenuOpen(false);
-      }
-    };
-    document.addEventListener("pointerdown", closeOnOutsidePointer);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", closeOnOutsidePointer);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [launcherMenuOpen]);
 
   const moveTabFocus = (index: number) => {
     window.setTimeout(() => {
       const id = openedTabs[index]?.id;
       if (!id) return;
-      document.querySelector<HTMLButtonElement>(`[data-sidebar-tab="${id}"]`)?.focus();
+      tabListRef.current?.querySelector<HTMLButtonElement>(`[data-sidebar-tab="${id}"]`)?.focus();
     }, 0);
   };
   const handlePrimaryTabKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
@@ -328,7 +230,7 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
     const handle = event.currentTarget;
     const pointerId = event.pointerId;
     const startX = event.clientX;
-    const startWidth = rightSidebarWidth;
+    const startWidth = sidebarWidth;
     const onMove = (moveEvent: PointerEvent) => {
       if (moveEvent.pointerId !== pointerId) return;
       setRightSidebarWidth(startWidth + startX - moveEvent.clientX);
@@ -364,8 +266,8 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
   const handleResizeKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     const step = event.shiftKey ? 48 : 16;
     let nextWidth: number | null = null;
-    if (event.key === "ArrowLeft") nextWidth = rightSidebarWidth + step;
-    else if (event.key === "ArrowRight") nextWidth = rightSidebarWidth - step;
+    if (event.key === "ArrowLeft") nextWidth = sidebarWidth + step;
+    else if (event.key === "ArrowRight") nextWidth = sidebarWidth - step;
     else if (event.key === "Home") nextWidth = effectiveResizeMin;
     else if (event.key === "End") nextWidth = 1040;
     else if (event.key === "Enter") nextWidth = preferredManualSidebarWidth(activeTab);
@@ -376,20 +278,34 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
 
   return (
     <aside
-      className={`mc-sidebar-right relative flex flex-col overflow-hidden ${!embedded ? "anim-slide-right" : ""}`}
+      className="mc-sidebar-right relative flex flex-col overflow-hidden"
       data-embedded={embedded ? "true" : "false"}
+      data-open={embedded || rightPanelOpen ? "true" : "false"}
+      aria-hidden={!embedded && !rightPanelOpen}
       style={{
         "--right-sidebar-width": `${sidebarWidth}px`,
         position: "relative",
+        alignSelf: "stretch",
+        margin: embedded || !rightPanelOpen ? 0 : "8px 8px 8px 0",
+        zIndex: embedded ? undefined : 2,
         display: "flex",
         flexDirection: "column",
         overflow: "hidden",
         width: sidebarWidthStyle,
-        minWidth: minSidebarWidth,
+        minWidth: sidebarMinWidth,
         maxWidth: sidebarMaxWidth,
-        flex: embedded ? "1 1 auto" : `0 0 ${sidebarWidthStyle}`,
+        flex: embedded ? "1 1 auto" : `0 0 ${rightPanelOpen ? sidebarWidth : 0}px`,
         background: "var(--surface-base)",
-        borderLeft: embedded ? 0 : "1px solid color-mix(in oklch, var(--border-subtle) 55%, transparent)",
+        border: embedded || !rightPanelOpen ? 0 : "1px solid var(--border-subtle)",
+        borderRadius: embedded ? 0 : 14,
+        boxShadow: embedded || !rightPanelOpen
+          ? "none"
+          : "0 8px 24px color-mix(in oklch, black 12%, transparent)",
+        opacity: embedded || rightPanelOpen ? 1 : 0,
+        transform: embedded || rightPanelOpen ? "translateX(0)" : "translateX(8px)",
+        visibility: embedded || rightPanelOpen ? "visible" : "hidden",
+        pointerEvents: embedded || rightPanelOpen ? "auto" : "none",
+        transition: `width 220ms var(--easing-standard), min-width 220ms var(--easing-standard), max-width 220ms var(--easing-standard), flex-basis 220ms var(--easing-standard), margin 220ms var(--easing-standard), opacity 180ms var(--easing-standard), transform 220ms var(--easing-enter), border-color 180ms var(--easing-standard), box-shadow 220ms var(--easing-standard), visibility 0s linear ${embedded || rightPanelOpen ? 0 : 220}ms`,
       } as React.CSSProperties}
     >
       {!embedded && (
@@ -397,25 +313,26 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
           className="mc-sidebar-right-resize-handle"
           role="separator"
           aria-orientation="vertical"
-          aria-label="Resize right sidebar"
+          aria-label="调整右侧栏宽度"
            aria-valuemin={effectiveResizeMin}
           aria-valuemax={1040}
-           aria-valuenow={Math.round(rightSidebarWidth)}
-           aria-valuetext={`${Math.round(rightSidebarWidth)} pixels`}
+           aria-valuenow={Math.round(sidebarWidth)}
+           aria-valuetext={`${Math.round(sidebarWidth)} pixels`}
            tabIndex={0}
-          title="Resize side panel"
+          title="调整侧栏宽度"
           onPointerDown={startResize}
            onDoubleClick={resetSidebarWidth}
            onKeyDown={handleResizeKeyDown}
           style={resizeHandleStyle}
         />
       )}
-      <div className="mc-sidebar-right-header flex items-center gap-1.5 px-2.5 py-2 min-h-[42px]" style={{ background: "var(--surface-sidebar)", borderBottom: "1px solid var(--border-subtle)" }}>
-        <div className="flex-1 min-w-0 overflow-x-auto overflow-y-hidden flex items-center gap-1" role="tablist" aria-label="Right sidebar panels" style={{ scrollbarWidth: "none" }}>
+      <div className="mc-sidebar-right-header">
+        <div ref={tabListRef} className="mc-sidebar-right-tabs" role="tablist" aria-label="右侧栏面板">
         {openedTabs.map((t, index) => (
           <div
             key={t.id}
-            className="inline-flex items-center border relative"
+            className="mc-sidebar-right-tab-frame"
+            data-active={activeTab === t.id ? "true" : "false"}
             style={sidebarTabFrameStyle(activeTab === t.id)}
           >
             <button
@@ -426,137 +343,124 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
               aria-controls={`right-panel-${t.id}`}
               data-sidebar-tab={t.id}
               onClick={() => activateTab(t.id)}
-              onFocus={t.id === "terminal" ? requestTerminalPreload : undefined}
-              onMouseEnter={t.id === "terminal" ? requestTerminalPreload : undefined}
               onKeyDown={(event) => handlePrimaryTabKeyDown(event, index)}
               title={t.label}
-              aria-label={`Open ${t.label}`}
-              className="min-w-0 inline-flex items-center gap-1.5 border-0 cursor-pointer"
+              aria-label={`打开${t.label}`}
+              className="mc-sidebar-right-tab"
               style={sidebarTabButtonStyle(activeTab === t.id)}
             >
-              <span className="mc-sidebar-tab-icon" style={{ color: activeTab === t.id ? "var(--text-secondary)" : "var(--text-muted)" }}>{t.icon}</span>
-              <span className="truncate">{t.label}</span>
-              {t.badge && <span className="text-[10px] min-w-4 h-4 px-1 inline-flex items-center justify-center rounded-full" style={{ fontFamily: "var(--font-mono)", color: "var(--accent-primary)", background: "color-mix(in oklch, var(--accent-primary) 12%, transparent)", border: "1px solid color-mix(in oklch, var(--accent-primary) 28%, transparent)" }}>{t.badge}</span>}
+              <span className="mc-sidebar-tab-icon">{t.icon}</span>
+              <span className="mc-sidebar-tab-label">{t.label}</span>
+              {t.badge && <span className="mc-sidebar-tab-badge">{t.badge}</span>}
             </button>
             {openedTabs.length > 1 && (
               <button
                 type="button"
-                title={`Close ${t.label} tab`}
-                aria-label={`Close ${t.label} tab`}
+                title={`关闭${t.label}标签页`}
+                aria-label={`关闭${t.label}标签页`}
                 onClick={(event) => {
                   event.stopPropagation();
                   closeOpenTab(t.id);
                 }}
-                className="mc-icon-button mc-icon-button-compact"
+                className="mc-sidebar-right-tab-close mc-icon-button mc-icon-button-compact"
                 style={sidebarTabCloseStyle(activeTab === t.id)}
               >
-                <X size={12} />
+                <X size={14} />
               </button>
             )}
           </div>
         ))}
         </div>
-        <div ref={launcherMenuRef} className="relative">
+        <div className="mc-sidebar-right-actions" data-testid="right-sidebar-actions">
           <button
             type="button"
-            onClick={() => {
-              setLauncherMenuOpen((open) => !open);
-            }}
-            title="Add panel"
-            aria-label="Add panel"
-            aria-haspopup="menu"
-            aria-expanded={launcherMenuOpen}
-            className="mc-icon-button"
-            data-active={launcherMenuOpen ? "true" : "false"}
+            onClick={() => setLauncherOpen((open) => !open)}
+            title="添加面板"
+            aria-label="添加面板"
+            aria-pressed={launcherOpen}
+            className="mc-sidebar-right-action mc-sidebar-right-action-add mc-icon-button"
+            data-active={launcherOpen ? "true" : "false"}
           >
-            <Plus size={17} />
+            <Plus size={18} strokeWidth={1.8} />
           </button>
-          {launcherMenuOpen && (
-            <div role="menu" className="absolute top-[calc(100%+6px)] right-0 z-20 w-[214px] p-[6px] rounded-[var(--radius-md,8px)]" style={{ background: "var(--surface-raised)", border: "1px solid var(--border-subtle)", boxShadow: "var(--shadow-strong, var(--shadow-md))" }}>
-              {launcherItems.map((tab) => (
-                tab.type === "separator" ? (
-                  <div key={tab.key} role="separator" className="px-2 pb-1 pt-2 text-[10px] uppercase font-bold tracking-wide" style={{ color: "var(--text-muted)", borderTop: "1px solid var(--border-subtle)", marginTop: 4 }}>
-                    {tab.label}
-                  </div>
-                ) : (
-                  <button
-                    key={tab.key}
-                    type="button"
-                    role="menuitem"
-                    onClick={tab.onSelect}
-                    className="w-full flex items-center gap-2 min-h-[34px] px-2 border-0 rounded-[var(--radius-sm,5px)] cursor-pointer text-sm text-left"
-                    style={{
-                      background: "transparent",
-                      color: "var(--text-primary)",
-                    }}
-                  >
-                    <span className="inline-flex" style={{ color: "var(--text-muted)" }}>{tab.icon}</span>
-                    <span className="flex-1 min-w-0 truncate">{tab.label}</span>
-                    {tab.badge && <span className="text-[10px] min-w-4 h-4 px-1 inline-flex items-center justify-center rounded-full" style={{ fontFamily: "var(--font-mono)", color: "var(--accent-primary)", background: "color-mix(in oklch, var(--accent-primary) 12%, transparent)", border: "1px solid color-mix(in oklch, var(--accent-primary) 28%, transparent)" }}>{tab.badge}</span>}
-                    {tab.shortcut && <span style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)", fontFamily: "var(--font-ui)" }}>{tab.shortcut}</span>}
-                  </button>
-                )
-              ))}
-            </div>
-          )}
-        </div>
-        {!embedded && (
-          <button
+          {!embedded && (
+            <button
             type="button"
             onClick={toggleRightPanel}
-            title="Close panel"
-            aria-label="Close right panel"
-            className="mc-icon-button"
+            title="关闭面板"
+            aria-label="关闭右侧栏"
+            className="mc-sidebar-right-action mc-icon-button"
           >
-            <PanelRightClose size={15} />
-          </button>
-        )}
+              <PanelRightClose size={16} strokeWidth={1.8} />
+            </button>
+          )}
+        </div>
       </div>
       <div
-        key={activeTab}
-        className="anim-fade-in flex-1 overflow-hidden text-sm flex flex-col"
+        key={launcherOpen ? "launcher" : activeTab}
+        className="mc-sidebar-panel-view flex-1 overflow-hidden text-sm flex flex-col"
         id={`right-panel-${activeTab}`}
         role="tabpanel"
-        aria-labelledby={activePrimaryTab ? `right-tab-${activeTab}` : undefined}
-        aria-label={activePrimaryTab ? undefined : `${activeItem.label} panel`}
+        aria-labelledby={!launcherOpen && activePrimaryTab ? `right-tab-${activeTab}` : undefined}
+        aria-label={launcherOpen ? "面板选择" : activePrimaryTab ? undefined : `${activeItem.label}面板`}
         style={{ background: "var(--surface-base)", minHeight: 0, minWidth: 0 }}
       >
         <div className="panel-content-wrapper" style={{ minHeight: 0, minWidth: 0, overflow: "hidden" }}>
-          {activeTab === "preview" && (
-            <SafeBoundary fallback={<PanelErrorFallback panelName="Preview" />}>
-              <PreviewPanel />
-            </SafeBoundary>
+          {launcherOpen && (
+            <nav className="mc-sidebar-launcher" aria-label="面板选择">
+              {tabs.map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  aria-label={tab.label}
+                  data-active={activeTab === tab.id ? "true" : undefined}
+                  onClick={() => openRightTab(tab.id)}
+                >
+                  {tab.icon}
+                  <span>{tab.label}</span>
+                  {tab.badge && <small>{tab.badge}</small>}
+                </button>
+              ))}
+            </nav>
           )}
-          {activeTab === "browser" && (
-            <SafeBoundary fallback={<PanelErrorFallback panelName="Browser Control" />}>
-              <BrowserPanel />
-            </SafeBoundary>
-          )}
-          {activeTab === "terminal" && (
+          {!launcherOpen && activeTab === "preview" && (
             <ChunkErrorBoundary>
-              <Suspense fallback={<PanelSkeleton kind="terminal" />}>
-                <SafeBoundary fallback={<PanelErrorFallback panelName="Terminal" />}>
-                  <LazyTerminalPanel />
+              <Suspense fallback={<PanelSkeleton kind="preview" />}>
+                <SafeBoundary fallback={<PanelErrorFallback panelName="预览" />}>
+                  <LazyPreviewPanel />
                 </SafeBoundary>
               </Suspense>
             </ChunkErrorBoundary>
           )}
-          {activeTab === "tasks" && <ScrollablePanel><ActivityTab /></ScrollablePanel>}
-          {activeTab === "diff" && (
-            <SafeBoundary fallback={<PanelErrorFallback panelName="Diff" />}>
-              <DiffPanel />
-            </SafeBoundary>
+          {!launcherOpen && activeTab === "browser" && (
+            <ChunkErrorBoundary>
+              <Suspense fallback={<PanelSkeleton kind="preview" />}>
+                <SafeBoundary fallback={<PanelErrorFallback panelName="浏览器" />}>
+                  <LazyBrowserPanel />
+                </SafeBoundary>
+              </Suspense>
+            </ChunkErrorBoundary>
           )}
-          {activeTab === "subagents" && (
+          {!launcherOpen && activeTab === "tasks" && <ScrollablePanel><ActivityTab /></ScrollablePanel>}
+          {!launcherOpen && activeTab === "diff" && (
+            <ChunkErrorBoundary>
+              <Suspense fallback={<PanelSkeleton kind="diff" />}>
+                <SafeBoundary fallback={<PanelErrorFallback panelName="审阅" />}>
+                  <LazyDiffPanel />
+                </SafeBoundary>
+              </Suspense>
+            </ChunkErrorBoundary>
+          )}
+          {!launcherOpen && activeTab === "subagents" && (
             <ChunkErrorBoundary>
               <Suspense fallback={<PanelSkeleton kind="subagents" />}>
                 <ScrollablePanel><LazySubagentsTab /></ScrollablePanel>
               </Suspense>
             </ChunkErrorBoundary>
           )}
-          {activeTab === "artifacts" && <Suspense fallback={<PanelSkeleton kind="artifacts" />}><ScrollablePanel><LazyArtifactsTab /></ScrollablePanel></Suspense>}
-          {activeTab === "inspector" && <Suspense fallback={<PanelSkeleton kind="inspector" />}><ScrollablePanel><LazyInspectorTab /></ScrollablePanel></Suspense>}
-          {activeTab === "diagnostics" && <Suspense fallback={<PanelSkeleton kind="inspector" />}><ScrollablePanel><LazyDiagnosticsTab /></ScrollablePanel></Suspense>}
+          {!launcherOpen && activeTab === "artifacts" && <Suspense fallback={<PanelSkeleton kind="artifacts" />}><ScrollablePanel><LazyArtifactsTab /></ScrollablePanel></Suspense>}
+          {!launcherOpen && activeTab === "inspector" && <Suspense fallback={<PanelSkeleton kind="inspector" />}><ScrollablePanel><LazyInspectorTab /></ScrollablePanel></Suspense>}
+          {!launcherOpen && activeTab === "diagnostics" && <Suspense fallback={<PanelSkeleton kind="inspector" />}><ScrollablePanel><LazyDiagnosticsTab /></ScrollablePanel></Suspense>}
         </div>
       </div>
     </aside>
@@ -580,7 +484,7 @@ const resizeHandleStyle: React.CSSProperties = {
 
 const sidebarTabFrameStyle = (active: boolean): React.CSSProperties => ({
   height: "var(--mc-sidebar-tab-height, 32px)",
-  maxWidth: 168,
+  maxWidth: 152,
   minWidth: 0,
   flex: "0 0 auto",
   borderRadius: "var(--radius-md, 8px)",
@@ -593,11 +497,11 @@ const sidebarTabFrameStyle = (active: boolean): React.CSSProperties => ({
 const sidebarTabButtonStyle = (active: boolean): React.CSSProperties => ({
   height: "100%",
   minWidth: 0,
-  padding: "0 4px 0 10px",
+  padding: "0 3px 0 9px",
   background: "transparent",
   color: active ? "var(--text-primary)" : "var(--text-secondary)",
   fontSize: "var(--text-sm)",
-  fontWeight: active ? 700 : 600,
+  fontWeight: active ? 620 : 520,
   whiteSpace: "nowrap",
 });
 

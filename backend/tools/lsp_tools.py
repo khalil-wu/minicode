@@ -52,11 +52,10 @@ class LSPGoToDefinitionTool(BaseTool):
     )
     permission = PermissionLevel.AUTO
     read_only = True
+    workspace_path_fields = ("file_path", "workspace_root")
     open_world = False
-    timeout_seconds = 30.0
     result_kind = "code"
     activity_kind = "genericTool"
-    panel_hint = "editor"
     display_label = "LSP Go to Definition"
     max_result_chars = 8_000
 
@@ -67,10 +66,6 @@ class LSPGoToDefinitionTool(BaseTool):
             toolset="code",
             exposure="deferred",
             required_args=("file_path", "line", "character"),
-            arg_roles={"file_path": "resource", "line": "control", "character": "control", "line_base": "control"},
-            repair_policy={"file_path": "resource_resolver"},
-            empty_args_policy="block",
-            blocked_guidance="Missing file_path, line, or character.",
         )
 
     def get_schema(self) -> ToolSchema:
@@ -170,11 +165,10 @@ class LSPFindReferencesTool(BaseTool):
     )
     permission = PermissionLevel.AUTO
     read_only = True
+    workspace_path_fields = ("file_path", "workspace_root")
     open_world = False
-    timeout_seconds = 30.0
     result_kind = "code"
     activity_kind = "genericTool"
-    panel_hint = "editor"
     display_label = "LSP Find References"
     max_result_chars = 12_000
 
@@ -185,10 +179,6 @@ class LSPFindReferencesTool(BaseTool):
             toolset="code",
             exposure="deferred",
             required_args=("file_path", "line", "character"),
-            arg_roles={"file_path": "resource", "line": "control", "character": "control", "line_base": "control"},
-            repair_policy={"file_path": "resource_resolver"},
-            empty_args_policy="block",
-            blocked_guidance="Missing file_path, line, or character.",
         )
 
     def get_schema(self) -> ToolSchema:
@@ -271,11 +261,10 @@ class LSPHoverTool(BaseTool):
     )
     permission = PermissionLevel.AUTO
     read_only = True
+    workspace_path_fields = ("file_path", "workspace_root")
     open_world = False
-    timeout_seconds = 20.0
     result_kind = "code"
     activity_kind = "genericTool"
-    panel_hint = "editor"
     display_label = "LSP Hover"
     max_result_chars = 6_000
 
@@ -286,9 +275,6 @@ class LSPHoverTool(BaseTool):
             toolset="code",
             exposure="deferred",
             required_args=("file_path", "line", "character"),
-            arg_roles={"file_path": "resource", "line": "control", "character": "control", "line_base": "control"},
-            repair_policy={"file_path": "resource_resolver"},
-            empty_args_policy="block",
         )
 
     def get_schema(self) -> ToolSchema:
@@ -372,11 +358,10 @@ class LSPDocumentSymbolsTool(BaseTool):
     )
     permission = PermissionLevel.AUTO
     read_only = True
+    workspace_path_fields = ("file_path", "workspace_root")
     open_world = False
-    timeout_seconds = 20.0
     result_kind = "code"
     activity_kind = "genericTool"
-    panel_hint = "editor"
     display_label = "LSP Document Symbols"
     max_result_chars = 10_000
 
@@ -387,9 +372,6 @@ class LSPDocumentSymbolsTool(BaseTool):
             toolset="code",
             exposure="deferred",
             required_args=("file_path",),
-            arg_roles={"file_path": "resource"},
-            repair_policy={"file_path": "resource_resolver"},
-            empty_args_policy="block",
         )
 
     def get_schema(self) -> ToolSchema:

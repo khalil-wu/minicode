@@ -68,8 +68,6 @@ def cache_metric_event(**kwargs: Any) -> AgentEvent:
         "cache",
         target,
         payload,
-        display_scope="silent",
-        panel_hint="inspector",
     )
 
 

@@ -1,43 +1,7 @@
-"""
-SKILL.md 三层加载器（DESIGN.md §五.1）。
+"""Codex-compatible progressive-disclosure Skill loader.
 
-Skills 是 cinstr 层的扩展 — 改变 Agent 的「思维方式」，零代码，纯 Prompt 注入。
-
-三层加载模型：
-  Layer 1: name + description（~20 tokens/skill，始终加载到 context）
-            用于 LLM 知道有哪些 Skill 可用
-  Layer 2: SKILL.md 完整正文（触发时加载，1-4K tokens）
-            包含详细指令、工作流、工具使用指导
-  Layer 3: linked_resources（Agent 按需读取，不预装）
-            外部文档、代码范例等
-
-发现目录优先级（高→低）：
-  1. 项目级: ./.mini-code/skills/<skill-name>/SKILL.md
-  2. 插件级: ~/.minicode/plugins/<plugin>/skills/<skill-name>/SKILL.md
-  3. 全局级: ~/.mini-code/skills/<skill-name>/SKILL.md
-  4. 内置级: ./skills/<skill-name>/SKILL.md
-
-SKILL.md 格式：
-  ---
-  name: frontend-dev
-  description: React 18 + TypeScript + Tailwind CSS 专家模式
-  display_name: Frontend Dev
-  icon: code
-  version: 1.0.0
-  when_to_use: Use when building React UI components or frontend flows.
-  triggers: [react, frontend, css, tailwind, component]
-  conflicts: [backend-dev]
-  tools_required: [write_file, edit_file, run_command]
-  # aliases also accepted: tools, allowed-tools, allowed_tools
-  mcp_required: []
-  mcp_dependencies: []
-  allow_implicit_invocation: true
-  default_prompt: Use this skill for frontend implementation work.
-  linked_resources: [./examples/component-template.tsx]
-  # aliases also accepted: paths, resources
-  ---
-  
-  （下面是 Layer 2 正文内容）
+SKILL.md owns the agent-visible name, description, and instructions.
+Product metadata and MCP dependencies come from agents/openai.yaml.
 """
 
 from __future__ import annotations
@@ -46,6 +10,7 @@ import logging
 import os
 import re
 import json
+import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -56,56 +21,28 @@ from backend.feature_flags import feature_enabled
 logger = logging.getLogger(__name__)
 
 
-_BUILTIN_SKILL_FALLBACKS: dict[str, tuple[str, str]] = {
-    "api-design": ("Design stable, minimal APIs.", "Design the smallest clear API contract, including validation, errors, compatibility, and tests."),
-    "backend-dev": ("Implement reliable backend changes.", "Trace the backend flow end to end, make the smallest root-cause change, and verify it with focused tests."),
-    "code-review": ("Review code for release risks.", "Review correctness, security, regressions, performance, and missing tests. Report findings by severity with file references."),
-    "commit-message": ("Summarize changes for a commit.", "Inspect the current diff and produce a concise commit title and body that explain the behavior change and verification."),
-    "data-analysis": ("Analyze structured data carefully.", "Validate the input, compute only the requested analysis, and state assumptions and uncertainty clearly."),
-    "debug-mode": ("Diagnose bugs with a reproducible loop.", "Reproduce the exact symptom, isolate the root cause, apply the smallest fix, and rerun the regression check."),
-    "docs-writer": ("Write project documentation.", "Read the relevant code before documenting architecture, behavior, setup, and operational constraints with concrete file references."),
-    "frontend-dev": ("Build polished frontend flows.", "Implement accessible, responsive UI using the existing design system and verify keyboard, dark mode, and loading states."),
-    "git-workflow": ("Use safe Git workflows.", "Inspect repository state, preserve user changes, avoid destructive commands, and keep commits focused and explainable."),
-    "init": ("Initialize project guidance.", "Inspect the repository and create concise project guidance covering architecture, commands, conventions, and verification."),
-    "mcp-integration": ("Integrate MCP tools safely.", "Define the smallest MCP contract, validate tool schemas and errors, and verify discovery and execution end to end."),
-    "performance": ("Optimize measured bottlenecks.", "Measure first, fix the dominant bottleneck, and verify the improvement without speculative complexity."),
-    "refactor": ("Refactor in safe increments.", "Preserve behavior, reduce coupling or duplication with the smallest coherent change, and keep tests green."),
-    "security-audit": ("Audit security boundaries.", "Review trust boundaries, authentication, authorization, input handling, secrets, and command execution; prioritize exploitable findings."),
-    "simplify": ("Remove unnecessary complexity.", "Delete duplication and speculative abstractions, reuse existing helpers, and keep only behavior the product currently needs."),
-    "test-writer": ("Add focused regression coverage.", "Write the smallest deterministic test that reproduces the real behavior at the correct seam, then verify the relevant suite."),
-    "verify": ("Verify work before completion.", "Run the narrow regression first, then the relevant broader tests and build; report any remaining warning or unverified surface."),
-}
-
-
 @dataclass
 class SkillMeta:
     """Skill 元数据（Layer 1）。"""
     name: str
     description: str
-    when_to_use: str = ""
     display_name: str = ""
+    short_description: str = ""
     icon: str = ""
-    version: str = "1.0.0"
-    triggers: list[str] = field(default_factory=list)
-    conflicts: list[str] = field(default_factory=list)
-    tools_required: list[str] = field(default_factory=list)
-    mcp_required: list[str] = field(default_factory=list)
+    icon_large: str = ""
+    brand_color: str = ""
     mcp_dependencies: list[str] = field(default_factory=list)
-    hooks_required: list[str] = field(default_factory=list)
-    temporary_hooks: list[dict[str, Any]] = field(default_factory=list)
-    shell_commands: list[str] = field(default_factory=list)
     allow_implicit_invocation: bool = True
     default_prompt: str = ""
-    linked_resources: list[str] = field(default_factory=list)
     source_path: Path = field(default_factory=lambda: Path("."))
     source_level: str = "builtin"  # project / global / builtin
 
     def to_layer1_summary(self) -> str:
-        """Layer 1 摘要（~20 tokens）。"""
+        """Render the Codex absolute-path catalog line."""
         title = f"{self.name} ({self.display_name})" if self.display_name else self.name
         policy = "" if self.allow_implicit_invocation else " [explicit only]"
-        when = f" When to use: {self.when_to_use}" if self.when_to_use else ""
-        return f"- {title}: {self.description}{when}{policy}"
+        path = str(self.source_path).replace("\\", "/")
+        return f"- {title}: {self.description}{policy} (file: {path})"
 
 
 @dataclass
@@ -113,6 +50,7 @@ class SkillFull:
     """完整 Skill 数据（Layer 1 + Layer 2）。"""
     meta: SkillMeta
     content: str  # Layer 2: SKILL.md 正文（去掉 frontmatter）
+    raw_content: str = ""  # 完整 SKILL.md；显式调用时按 Codex 方式注入
 
     @property
     def token_estimate(self) -> int:
@@ -130,25 +68,44 @@ class SkillLoader:
         full = loader.load_full("frontend-dev")       # Layer 2
     """
 
-    # 发现目录（按优先级排序）
-    SEARCH_DIRS = [
-        ("project", PROJECT_ROOT / ".codex" / "skills"),
-        ("project-legacy", PROJECT_ROOT / ".mini-code" / "skills"),
-        ("global", Path.home() / ".codex" / "skills"),
-        ("global-legacy", Path.home() / ".mini-code" / "skills"),
-        ("builtin", PROJECT_ROOT / "skills"),
-    ]
-
-    def __init__(self) -> None:
+    def __init__(self, project_root: Path | str | None = None) -> None:
+        self._project_root = self._normalize_project_root(project_root)
         self._cache: dict[str, SkillMeta] = {}
+        self._catalog: list[SkillMeta] = []
+        self._path_cache: dict[str, SkillMeta] = {}
         self._full_cache: dict[str, SkillFull] = {}
 
+    def set_project_root(self, project_root: Path | str | None) -> None:
+        """Rebind discovery to the active session workspace."""
+        normalized = self._normalize_project_root(project_root)
+        if normalized == self._project_root:
+            return
+        self._project_root = normalized
+        self._cache.clear()
+        self._catalog.clear()
+        self._path_cache.clear()
+        self._full_cache.clear()
+
+    @staticmethod
+    def _normalize_project_root(project_root: Path | str | None) -> Path | None:
+        if project_root is None or not str(project_root).strip():
+            return None
+        path = Path(project_root).expanduser()
+        try:
+            return path.resolve()
+        except OSError:
+            return path.absolute()
+
     def _search_dirs(self) -> list[tuple[str, Path]]:
-        dirs = list(self.SEARCH_DIRS)
-        codex_home = str(os.environ.get("CODEX_HOME") or "").strip()
-        if codex_home:
-            dirs.insert(2, ("global", Path(codex_home).expanduser() / "skills"))
-        dirs[2:2] = self._plugin_search_dirs()
+        dirs: list[tuple[str, Path]] = []
+        dirs.extend(("workspace", path / ".agents" / "skills") for path in self._workspace_ancestors())
+        if self._project_root is not None:
+            dirs.append(("project-legacy", self._project_root / ".codex" / "skills"))
+        dirs.extend(self._plugin_search_dirs())
+        dirs.append(("user", Path.home() / ".agents" / "skills"))
+        codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")).expanduser()
+        dirs.append(("user-legacy", codex_home / "skills"))
+        dirs.append(("builtin", PROJECT_ROOT / "skills"))
 
         deduped: list[tuple[str, Path]] = []
         seen: set[Path] = set()
@@ -160,6 +117,22 @@ class SkillLoader:
             seen.add(key)
             deduped.append((level, expanded))
         return deduped
+
+    def _workspace_ancestors(self) -> list[Path]:
+        current = self._project_root
+        if current is None:
+            return []
+        repository_root = current
+        for candidate in (current, *current.parents):
+            repository_root = candidate
+            if any((candidate / marker).exists() for marker in (".git", ".hg", ".svn")):
+                break
+        ancestors: list[Path] = []
+        for candidate in (current, *current.parents):
+            ancestors.append(candidate)
+            if candidate == repository_root:
+                break
+        return ancestors
 
     def _plugin_search_dirs(self) -> list[tuple[str, Path]]:
         if not feature_enabled("plugin_skills", True):
@@ -178,11 +151,30 @@ class SkillLoader:
                 continue
             plugin_dirs = self._candidate_plugin_dirs(root)
             for plugin_dir in plugin_dirs:
-                if plugin_name_from_directory(plugin_dir).strip().casefold() in disabled:
+                plugin_name = plugin_name_from_directory(plugin_dir).strip()
+                if not plugin_name or plugin_name.casefold() in disabled:
                     continue
-                for skills_dir in (plugin_dir / "skills", plugin_dir / ".codex-plugin" / "skills"):
+                manifest_path = plugin_dir / ".codex-plugin" / "plugin.json"
+                if not manifest_path.is_file():
+                    continue
+                skills_dirs: list[Path] = []
+                try:
+                    raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    configured = raw.get("skills") if isinstance(raw, dict) else None
+                    configured_paths = [configured] if isinstance(configured, str) else configured if isinstance(configured, list) else []
+                    for configured_path in configured_paths:
+                        if not isinstance(configured_path, str) or not configured_path.strip():
+                            continue
+                        candidate = (plugin_dir / configured_path).resolve()
+                        candidate.relative_to(plugin_dir.resolve())
+                        skills_dirs.append(candidate)
+                except (OSError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
+                    pass
+                if not skills_dirs:
+                    skills_dirs.append(plugin_dir / "skills")
+                for skills_dir in skills_dirs:
                     if skills_dir.is_dir():
-                        dirs.append(("plugin", skills_dir))
+                        dirs.append((f"plugin:{plugin_name}", skills_dir))
         return dirs
 
     @staticmethod
@@ -207,10 +199,14 @@ class SkillLoader:
         Returns:
             SkillMeta 列表（已去重，高优先级优先）
         """
-        seen: dict[str, SkillMeta] = {}
+        catalog: list[SkillMeta] = []
+        primary_by_name: dict[str, SkillMeta] = {}
+        seen_paths: set[str] = set()
 
-        # 从最低优先级开始扫描，高优先级覆盖低优先级
-        for level, base_dir in reversed(self._search_dirs()):
+        # Search roots are already ordered from nearest workspace scope to
+        # user/system fallbacks. Keep same-name skills as distinct catalog
+        # entries so an exact structured path can select either one.
+        for level, base_dir in self._search_dirs():
             if not base_dir.exists():
                 continue
 
@@ -224,24 +220,21 @@ class SkillLoader:
 
                 meta = self._parse_frontmatter(skill_file, level)
                 if meta:
-                    seen[meta.name] = meta
+                    path_key = self._path_key(meta.source_path)
+                    if path_key in seen_paths:
+                        continue
+                    seen_paths.add(path_key)
+                    catalog.append(meta)
+                    primary_by_name.setdefault(meta.name, meta)
 
-        for name, (description, _content) in _BUILTIN_SKILL_FALLBACKS.items():
-            seen.setdefault(
-                name,
-                SkillMeta(
-                    name=name,
-                    description=description,
-                    source_path=PROJECT_ROOT / "skills" / name / "SKILL.md",
-                    source_level="builtin",
-                ),
-            )
+        self._catalog = catalog
+        self._cache = primary_by_name
+        self._path_cache = {self._path_key(meta.source_path): meta for meta in catalog}
+        self._full_cache.clear()
+        logger.info("发现 %d 个 Skills: %s", len(catalog), ", ".join(meta.name for meta in catalog))
+        return list(catalog)
 
-        self._cache = seen
-        logger.info("发现 %d 个 Skills: %s", len(seen), ", ".join(seen.keys()))
-        return list(seen.values())
-
-    def load_full(self, skill_name: str) -> SkillFull | None:
+    def load_full(self, skill_name: str, source_path: str | Path | None = None) -> SkillFull | None:
         """
         加载 Skill 的 Layer 2 内容。
 
@@ -252,17 +245,17 @@ class SkillLoader:
             SkillFull（含完整正文）或 None
         """
         # 检查缓存
-        if skill_name in self._full_cache:
-            return self._full_cache[skill_name]
-
         # 需要先 discover
-        if not self._cache:
+        if not self._catalog:
             self.discover()
 
-        meta = self._cache.get(skill_name)
+        meta = self.get_meta_by_path(source_path) if source_path else self.get_unambiguous_meta(skill_name)
         if not meta:
-            logger.warning("Skill '%s' 不存在", skill_name)
+            logger.warning("Skill '%s' 不存在或名称不唯一", skill_name)
             return None
+        cache_key = self._path_key(meta.source_path)
+        if cache_key in self._full_cache:
+            return self._full_cache[cache_key]
 
         # 读取完整文件
         skill_file = meta.source_path
@@ -270,14 +263,11 @@ class SkillLoader:
             raw = skill_file.read_text(encoding="utf-8")
             content = self._extract_body(raw)
         except (OSError, UnicodeDecodeError) as exc:
-            fallback = _BUILTIN_SKILL_FALLBACKS.get(skill_name)
-            if fallback is None:
-                logger.error("读取 %s 失败: %s", skill_file, exc)
-                return None
-            content = fallback[1]
+            logger.error("读取 %s 失败: %s", skill_file, exc)
+            return None
 
-        full = SkillFull(meta=meta, content=content)
-        self._full_cache[skill_name] = full
+        full = SkillFull(meta=meta, content=content, raw_content=raw)
+        self._full_cache[cache_key] = full
 
         logger.info(
             "加载 Skill '%s' Layer 2: ~%d tokens",
@@ -294,28 +284,59 @@ class SkillLoader:
         Returns:
             格式化的 Skill 列表（每个 ~20 tokens）
         """
-        if not self._cache:
+        if not self._catalog:
             self.discover()
 
-        if not self._cache:
+        if not self._catalog:
             return ""
 
         lines = []
-        for meta in self._cache.values():
+        for meta in self._catalog:
+            if not meta.allow_implicit_invocation:
+                continue
             lines.append(meta.to_layer1_summary())
         return "\n".join(lines)
 
     def list_skill_names(self) -> list[str]:
         """列出所有 Skill 名称。"""
-        if not self._cache:
+        if not self._catalog:
             self.discover()
-        return list(self._cache.keys())
+        return list(dict.fromkeys(meta.name for meta in self._catalog))
+
+    def list_metas(self) -> list[SkillMeta]:
+        if not self._catalog:
+            self.discover()
+        return list(self._catalog)
+
+    def get_metas(self, skill_name: str) -> list[SkillMeta]:
+        if not self._catalog:
+            self.discover()
+        return [meta for meta in self._catalog if meta.name == skill_name]
+
+    def get_unambiguous_meta(self, skill_name: str) -> SkillMeta | None:
+        matches = self.get_metas(skill_name)
+        return matches[0] if len(matches) == 1 else None
+
+    def get_meta_by_path(self, source_path: str | Path | None) -> SkillMeta | None:
+        if source_path is None:
+            return None
+        if not self._catalog:
+            self.discover()
+        return self._path_cache.get(self._path_key(Path(source_path)))
 
     def get_meta(self, skill_name: str) -> SkillMeta | None:
         """获取 Skill 元数据。"""
         if not self._cache:
             self.discover()
         return self._cache.get(skill_name)
+
+    @staticmethod
+    def _path_key(path: Path) -> str:
+        try:
+            resolved = path.expanduser().resolve()
+        except OSError:
+            resolved = path.expanduser().absolute()
+        return os.path.normcase(str(resolved))
 
     # ── 解析辅助 ──────────────────────────────────────
 
@@ -333,52 +354,93 @@ class SkillLoader:
         # 提取 frontmatter
         fm_match = re.match(r"^---\s*\n(.*?)\n---", raw, re.DOTALL)
         if not fm_match:
-            # 没有 frontmatter，使用目录名作为 skill name
-            return SkillMeta(
-                name=skill_file.parent.name,
-                description="（无描述）",
-                source_path=skill_file,
-                source_level=level,
-            )
+            logger.warning("Ignoring skill without YAML frontmatter: %s", skill_file)
+            return None
 
         fm_text = fm_match.group(1)
-        fm = self._parse_simple_yaml(fm_text)
+        try:
+            fm_payload = yaml.safe_load(fm_text)
+        except yaml.YAMLError as exc:
+            logger.warning("Ignoring skill with invalid YAML frontmatter %s: %s", skill_file, exc)
+            return None
+        if not isinstance(fm_payload, dict):
+            logger.warning("Ignoring skill with non-object YAML frontmatter: %s", skill_file)
+            return None
+        fm = fm_payload
 
-        tools_required = self._first_list(
-            fm,
-            "tools_required",
-            "tools",
-            "allowed-tools",
-            "allowed_tools",
-        )
-        linked_resources = self._first_list(
-            fm,
-            "linked_resources",
-            "paths",
-            "resources",
-        )
+        name = self._metadata_text(fm.get("name"), skill_file.parent.name)
+        if not name:
+            logger.warning("Ignoring skill with invalid name metadata: %s", skill_file)
+            return None
+        description = self._metadata_text(fm.get("description"))
+        if not description:
+            logger.warning("Ignoring skill without description metadata: %s", skill_file)
+            return None
+        if len(name) > 64 or len(description) > 1024:
+            logger.warning("Ignoring skill with oversized metadata: %s", skill_file)
+            return None
+
+        plugin_namespace = level.split(":", 1)[1] if level.startswith("plugin:") else ""
+        qualified_name = f"{plugin_namespace}:{name}" if plugin_namespace else name
+        agent_meta = self._load_openai_metadata(skill_file.parent)
+        interface = agent_meta.get("interface") if isinstance(agent_meta.get("interface"), dict) else {}
+        policy = agent_meta.get("policy") if isinstance(agent_meta.get("policy"), dict) else {}
+        dependencies = agent_meta.get("dependencies") if isinstance(agent_meta.get("dependencies"), dict) else {}
+        dependency_tools = dependencies.get("tools") if isinstance(dependencies.get("tools"), list) else []
+        mcp_dependencies = [
+            str(item.get("value") or "").strip()
+            for item in dependency_tools
+            if isinstance(item, dict)
+            and str(item.get("type") or "").strip().lower() == "mcp"
+            and str(item.get("value") or "").strip()
+        ]
 
         return SkillMeta(
-            name=fm.get("name", skill_file.parent.name),
-            description=fm.get("description", ""),
-            when_to_use=fm.get("when_to_use", fm.get("whenToUse", "")),
-            display_name=fm.get("display_name", fm.get("displayName", "")),
-            icon=fm.get("icon", ""),
-            version=fm.get("version", "1.0.0"),
-            triggers=self._to_list(fm.get("triggers", [])),
-            conflicts=self._to_list(fm.get("conflicts", [])),
-            tools_required=tools_required,
-            mcp_required=self._to_list(fm.get("mcp_required", [])),
-            mcp_dependencies=self._to_list(fm.get("mcp_dependencies", [])),
-            hooks_required=self._first_list(fm, "hooks", "hooks_required", "hook_dependencies"),
-            temporary_hooks=self._first_hook_specs(fm, "temporary_hooks", "skill_hooks", "hooks"),
-            shell_commands=self._first_list(fm, "shell", "shell_commands", "commands", "allowed_commands"),
-            allow_implicit_invocation=self._to_bool(fm.get("allow_implicit_invocation", True), default=True),
-            default_prompt=fm.get("default_prompt", ""),
-            linked_resources=linked_resources,
+            name=qualified_name,
+            description=description,
+            display_name=self._metadata_text(interface.get("display_name")),
+            short_description=self._metadata_text(interface.get("short_description")),
+            icon=self._safe_skill_asset(skill_file.parent, interface.get("icon_small")),
+            icon_large=self._safe_skill_asset(skill_file.parent, interface.get("icon_large")),
+            brand_color=self._metadata_text(interface.get("brand_color")),
+            mcp_dependencies=mcp_dependencies,
+            allow_implicit_invocation=self._to_bool(policy.get("allow_implicit_invocation", True), default=True),
+            default_prompt=self._metadata_text(interface.get("default_prompt")),
             source_path=skill_file,
-            source_level=level,
+            source_level="plugin" if plugin_namespace else level,
         )
+
+    @staticmethod
+    def _load_openai_metadata(skill_dir: Path) -> dict[str, Any]:
+        path = skill_dir / "agents" / "openai.yaml"
+        if not path.is_file():
+            return {}
+        try:
+            payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+            logger.warning("Ignoring invalid skill metadata %s: %s", path, exc)
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _safe_skill_asset(skill_dir: Path, value: Any) -> str:
+        if not isinstance(value, str) or not value.strip():
+            return ""
+        candidate = (skill_dir / value).resolve()
+        try:
+            candidate.relative_to(skill_dir.resolve())
+        except ValueError:
+            return ""
+        return str(candidate) if candidate.is_file() else ""
+
+    @staticmethod
+    def _metadata_text(value: Any, fallback: str = "") -> str:
+        """Return scalar frontmatter text without letting malformed YAML escape."""
+        if value is None:
+            return fallback
+        if isinstance(value, (str, int, float, bool)):
+            return str(value).strip()
+        return ""
 
     @staticmethod
     def _extract_body(raw: str) -> str:
@@ -386,165 +448,6 @@ class SkillLoader:
         # 去掉 frontmatter
         body = re.sub(r"^---\s*\n.*?\n---\s*\n?", "", raw, count=1, flags=re.DOTALL)
         return body.strip()
-
-    @staticmethod
-    def _parse_simple_yaml(text: str) -> dict[str, Any]:
-        """
-        简单 YAML 解析器（避免引入 pyyaml 依赖）。
-
-        支持 key: value、key: [item1, item2]，以及用于 Skill hooks
-        的简单双层列表：
-
-          temporary_hooks:
-            - event: PreToolUse
-              matcher: write_file
-              command: python scripts/check.py
-        """
-        result: dict[str, Any] = {}
-        lines = text.splitlines()
-        index = 0
-        while index < len(lines):
-            raw_line = lines[index]
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                index += 1
-                continue
-
-            if ":" not in line:
-                index += 1
-                continue
-
-            key, _, value = line.partition(":")
-            key = key.strip()
-            value = value.strip()
-            if value in {">", "|", ">-", "|-", ">+", "|+"}:
-                base_indent = len(raw_line) - len(raw_line.lstrip())
-                block: list[str] = []
-                index += 1
-                while index < len(lines):
-                    child = lines[index]
-                    stripped = child.strip()
-                    if not stripped:
-                        block.append("")
-                        index += 1
-                        continue
-                    if stripped.startswith("#"):
-                        index += 1
-                        continue
-                    indent = len(child) - len(child.lstrip())
-                    if indent <= base_indent:
-                        break
-                    block.append(child)
-                    index += 1
-                result[key] = SkillLoader._parse_yaml_text_block(block, folded=value.startswith(">"))
-                continue
-            if value:
-                result[key] = SkillLoader._parse_yaml_scalar(value)
-                index += 1
-                continue
-
-            base_indent = len(raw_line) - len(raw_line.lstrip())
-            block: list[str] = []
-            index += 1
-            while index < len(lines):
-                child = lines[index]
-                stripped = child.strip()
-                if not stripped or stripped.startswith("#"):
-                    index += 1
-                    continue
-                indent = len(child) - len(child.lstrip())
-                if indent <= base_indent:
-                    break
-                block.append(child)
-                index += 1
-            result[key] = SkillLoader._parse_yaml_block(block)
-        return result
-
-    @staticmethod
-    def _parse_yaml_scalar(value: str) -> Any:
-        value = value.strip()
-        if not value:
-            return ""
-        if value[0] in "[{":
-            try:
-                return json.loads(value)
-            except (TypeError, ValueError):
-                pass
-
-        # 数组格式：[item1, item2]
-        if value.startswith("[") and value.endswith("]"):
-            items = value[1:-1].split(",")
-            return [item.strip().strip("'\"") for item in items if item.strip()]
-
-        return value.strip("'\"")
-
-    @staticmethod
-    def _parse_yaml_block(block: list[str]) -> Any:
-        if not block:
-            return ""
-        items: list[Any] = []
-        current: Any | None = None
-        for raw in block:
-            stripped = raw.strip()
-            if not stripped:
-                continue
-            if stripped.startswith("-"):
-                if current is not None:
-                    items.append(current)
-                body = stripped[1:].strip()
-                if not body:
-                    current = {}
-                elif ":" in body:
-                    key, _, value = body.partition(":")
-                    current = {key.strip(): SkillLoader._parse_yaml_scalar(value.strip())}
-                else:
-                    current = SkillLoader._parse_yaml_scalar(body)
-                continue
-            if isinstance(current, dict) and ":" in stripped:
-                key, _, value = stripped.partition(":")
-                current[key.strip()] = SkillLoader._parse_yaml_scalar(value.strip())
-        if current is not None:
-            items.append(current)
-        if items:
-            return items
-        return "\n".join(line.strip() for line in block if line.strip())
-
-    @staticmethod
-    def _parse_yaml_text_block(block: list[str], *, folded: bool) -> str:
-        lines = [line.strip() for line in block]
-        if folded:
-            return " ".join(line for line in lines if line).strip()
-        return "\n".join(lines).strip()
-
-    @staticmethod
-    def _to_list(val: Any) -> list[str]:
-        """确保值为列表。"""
-        if isinstance(val, list):
-            return [str(item).strip() for item in val if isinstance(item, str) and str(item).strip()]
-        if isinstance(val, str):
-            if not val:
-                return []
-            return [item.strip() for item in val.split(",") if item.strip()]
-        return []
-
-    @classmethod
-    def _first_list(cls, mapping: dict[str, Any], *keys: str) -> list[str]:
-        for key in keys:
-            if key in mapping:
-                return cls._to_list(mapping.get(key))
-        return []
-
-    @classmethod
-    def _first_hook_specs(cls, mapping: dict[str, Any], *keys: str) -> list[dict[str, Any]]:
-        for key in keys:
-            value = mapping.get(key)
-            if isinstance(value, list):
-                specs = [item for item in value if isinstance(item, dict)]
-                if specs:
-                    return specs
-            elif isinstance(value, dict):
-                return [value]
-        return []
 
     @staticmethod
     def _to_bool(val: Any, *, default: bool) -> bool:

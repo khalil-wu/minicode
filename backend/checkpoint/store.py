@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.config import DATA_ROOT
+from backend.atomic_io import atomic_write_text
 
 CHECKPOINT_DATA_DIR = DATA_ROOT / "checkpoints"
 
@@ -29,8 +30,6 @@ class CheckpointRecord:
     workspace_root: str
     paths: list[str]
     files: list[CheckpointFileSnapshot]
-    git_head: str | None = None
-    git_stash_ref: str | None = None
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -60,8 +59,6 @@ class CheckpointRecord:
             workspace_root=str(payload.get("workspace_root", "")),
             paths=[str(item) for item in payload.get("paths", [])],
             files=files,
-            git_head=payload.get("git_head") or None,
-            git_stash_ref=payload.get("git_stash_ref") or None,
             created_at=str(payload.get("created_at", "")),
             metadata=dict(payload.get("metadata") or {}),
         )
@@ -74,9 +71,10 @@ class CheckpointStore:
 
     def save(self, record: CheckpointRecord) -> CheckpointRecord:
         path = self._path_for(record.id)
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(record.to_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        tmp_path.replace(path)
+        atomic_write_text(
+            path,
+            json.dumps(record.to_dict(), ensure_ascii=False, indent=2) + "\n",
+        )
         return record
 
     def get(self, checkpoint_id: str) -> CheckpointRecord | None:

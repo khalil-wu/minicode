@@ -20,6 +20,7 @@ export type TerminalServerEventType =
   | "terminal.list"
   | "terminal.snapshot"
   | "terminal.resized"
+  | "background.started"
   | "background.completed";
 
 // ──────────────────────────────────────────────────────────────────
@@ -44,6 +45,7 @@ export type TerminalClientCommandType =
 
 export interface TerminalOutputEvent {
   type: "terminal.output";
+  conversation_id: string;
   session_id?: string;
   data?: string;
   command?: string;
@@ -53,25 +55,30 @@ export interface TerminalOutputEvent {
 
 export interface TerminalExitEvent {
   type: "terminal.exit";
+  conversation_id: string;
   session_id: string;
   exit_code: number;
 }
 
 export interface TerminalCreatedEvent {
   type: "terminal.created";
+  conversation_id: string;
   session_id: string;
   pid?: number;
   shell?: string;
   cwd?: string;
+  terminal_mode?: "pty" | "pipe";
 }
 
 export interface TerminalKilledEvent {
   type: "terminal.killed";
+  conversation_id: string;
   session_id: string;
 }
 
 export interface TerminalListEvent {
   type: "terminal.list";
+  conversation_id: string;
   sessions: {
     session_id?: string;
     pid?: number;
@@ -79,17 +86,21 @@ export interface TerminalListEvent {
     cwd?: string;
     is_alive?: boolean;
     started_at?: number;
+    terminal_mode?: "pty" | "pipe";
+    conversation_id: string;
   }[];
 }
 
 export interface TerminalSnapshotEvent {
   type: "terminal.snapshot";
+  conversation_id: string;
   session_id: string;
   pid?: number | null;
   shell?: string;
   cwd?: string;
   started_at?: number;
   is_alive?: boolean;
+  terminal_mode?: "pty" | "pipe";
   output: string;
   output_chars?: number;
   total_output_chars?: number;
@@ -99,6 +110,7 @@ export interface TerminalSnapshotEvent {
 
 export interface TerminalResizedEvent {
   type: "terminal.resized";
+  conversation_id: string;
   session_id: string;
   cols: number;
   rows: number;
@@ -108,8 +120,49 @@ export interface TerminalResizedEvent {
 export interface BackgroundCompletedEvent {
   type: "background.completed";
   command_id: string;
-  exit_code: number;
+  command?: string;
+  description?: string;
+  exit_code?: number;
   status: string;
+  duration?: number;
+  started_at?: number;
+  completed_at?: number;
+  conversation_id: string;
+  run_id?: string;
+  task_id?: string;
+  parent_run_id?: string;
+  incarnation?: string;
+  seq?: number;
+  kind?: "background_command" | string;
+  phase?: string;
+  updated_at?: number;
+  started_at_ms?: number;
+  completed_at_ms?: number | null;
+  result?: Record<string, unknown>;
+  error?: Record<string, unknown>;
+}
+
+export interface BackgroundStartedEvent {
+  type: "background.started";
+  command_id: string;
+  command?: string;
+  description?: string;
+  cwd?: string;
+  status: "running";
+  started_at?: number;
+  conversation_id: string;
+  run_id?: string;
+  task_id?: string;
+  parent_run_id?: string;
+  incarnation?: string;
+  seq?: number;
+  kind?: "background_command" | string;
+  phase?: string;
+  updated_at?: number;
+  started_at_ms?: number;
+  completed_at_ms?: number | null;
+  result?: Record<string, unknown>;
+  error?: Record<string, unknown>;
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -147,14 +200,17 @@ export interface TerminalSnapshotRequestCommand {
 
 export interface TerminalMirrorCreatedCommand {
   type: "terminal.mirror.created";
+  conversation_id: string;
   session_id: string;
   pid?: number;
   shell?: string;
   cwd?: string;
+  is_alive?: boolean;
 }
 
 export interface TerminalMirrorOutputCommand {
   type: "terminal.mirror.output";
+  conversation_id: string;
   session_id: string;
   data: string;
   pid?: number;
@@ -164,6 +220,7 @@ export interface TerminalMirrorOutputCommand {
 
 export interface TerminalMirrorExitCommand {
   type: "terminal.mirror.exit";
+  conversation_id: string;
   session_id: string;
   exit_code?: number;
 }

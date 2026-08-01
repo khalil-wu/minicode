@@ -1,12 +1,16 @@
 import type { ToolCallEvent, ToolErrorInfo, ToolResultEvent } from "../protocol/events";
 
-export type ToolCallStatus = "pending" | "running" | "success" | "failed" | "blocked" | "partial" | "timeout";
+export type ToolCallStatus = "pending" | "running" | "success" | "failed" | "blocked" | "partial" | "timeout" | "cancelled";
 
 export interface ToolCallRecord {
   id: string;
   name: string;
   args: Record<string, unknown>;
   status: ToolCallStatus;
+  /** Backend-owned lifecycle phase; status remains the stable UI terminal/running state. */
+  transition?: string;
+  waitingOn?: string;
+  blockingReason?: string;
   summary?: string;
   artifactId?: string;
   sourceUrl?: string;
@@ -35,19 +39,33 @@ export interface ToolCallRecord {
   seq?: number;
   iterationId?: string;
   phase?: string;
-  displayScope?: string;
-  panelHint?: string;
-  requiresAttention?: boolean;
   startedAt: number;
   finishedAt?: number;
   outputPreview?: string;
   stdoutPreview?: string;
   stderrPreview?: string;
-  diff?: { plus: number; minus: number; patch?: string };
+  diff?: {
+    plus: number;
+    minus: number;
+    patch?: string;
+    files?: Array<{
+      path: string;
+      plus: number;
+      minus: number;
+      patch?: string;
+      status?: string;
+    }>;
+  };
+  outputFiles?: Array<{
+    path: string;
+    name?: string;
+    size: number;
+    mimeType?: string;
+    isImage?: boolean;
+  }>;
+  /** True when a file created by this call was later removed in the same turn. */
+  temporaryRemoved?: boolean;
 }
-
-export const isAgentControlToolName = (name: string): boolean =>
-  /^(?:task(?:_.*)?|workflow(?:_.*)?|team_.*|send_message|message_list)$/i.test(name.trim());
 
 const normalizedProjectionValue = (value: string | undefined): string => String(value || "").trim().toLowerCase();
 
@@ -56,9 +74,9 @@ export const isCommandToolRecord = (record: ToolCallRecord): boolean =>
   || normalizedProjectionValue(record.resultKind) === "command";
 
 export const isFileChangeToolRecord = (record: ToolCallRecord): boolean =>
+  !record.temporaryRemoved && (
   normalizedProjectionValue(record.activityKind) === "filechange"
-  || normalizedProjectionValue(record.resultKind) === "edit"
-  || Boolean(record.diff);
+  || normalizedProjectionValue(record.resultKind) === "edit");
 
 export const isWorkspaceSearchToolRecord = (record: ToolCallRecord): boolean =>
   normalizedProjectionValue(record.activityKind) === "workspacesearch";
@@ -76,8 +94,7 @@ export const isWebSearchToolRecord = (record: ToolCallRecord): boolean =>
 
 export const isBrowserToolRecord = (record: ToolCallRecord): boolean => {
   const resultKind = normalizedProjectionValue(record.resultKind);
-  const panelHint = normalizedProjectionValue(record.panelHint);
-  return resultKind === "browser" || resultKind === "preview" || panelHint === "browser" || panelHint === "preview";
+  return resultKind === "browser" || resultKind === "preview";
 };
 
 const toFiniteNumber = (value: unknown): number => {
@@ -158,6 +175,26 @@ export const normalizeToolDiff = (value: unknown): ToolCallRecord["diff"] | unde
     Boolean(item && typeof item === "object")
   ) : [];
 
+  const normalizedFiles = files.flatMap((file) => {
+    const path = typeof file.path === "string" ? file.path.trim() : "";
+    if (!path) return [];
+    const filePatch = typeof file.patch === "string" ? file.patch : undefined;
+    let filePlus = toFiniteNumber(file.plus ?? file.additions);
+    let fileMinus = toFiniteNumber(file.minus ?? file.deletions);
+    if (filePlus === 0 && fileMinus === 0 && filePatch) {
+      const patchStats = countUnifiedDiffLines(filePatch);
+      filePlus = patchStats.plus;
+      fileMinus = patchStats.minus;
+    }
+    return [{
+      path,
+      plus: filePlus,
+      minus: fileMinus,
+      patch: filePatch,
+      status: typeof file.status === "string" ? file.status : undefined,
+    }];
+  });
+
   if (files.length) {
     const filePlus = files.reduce((sum, file) => sum + toFiniteNumber(file.additions), 0);
     const fileMinus = files.reduce((sum, file) => sum + toFiniteNumber(file.deletions), 0);
@@ -180,7 +217,9 @@ export const normalizeToolDiff = (value: unknown): ToolCallRecord["diff"] | unde
     minus = patchStats.minus;
   }
 
-  return plus || minus || patch ? { plus, minus, patch } : undefined;
+  return plus || minus || patch || normalizedFiles.length
+    ? { plus, minus, patch, files: normalizedFiles.length ? normalizedFiles : undefined }
+    : undefined;
 };
 
 export const reduceToolCallStart = (
@@ -189,26 +228,31 @@ export const reduceToolCallStart = (
   now: number = Date.now(),
 ): Map<string, ToolCallRecord> => {
   const next = new Map(prev);
+  const existing = prev.get(e.id);
+  const terminal = existing
+    && ["success", "failed", "blocked", "partial", "timeout", "cancelled"].includes(existing.status);
   next.set(e.id, {
+    ...existing,
     id: e.id,
     name: e.name,
     args: e.args ?? {},
-    status: e.status === "pending" ? "pending" : "running",
-    startedAt: e.started_at ?? now,
-    displayHint: e.display_hint,
-    inputSummary: e.input_summary,
-    resultKind: e.result_kind,
-    activityKind: e.activity_kind,
-    groupId: e.group_id,
-    stepId: e.step_id,
-    taskId: e.task_id,
-    turnId: e.turn_id,
-    seq: e.seq,
-    iterationId: e.iteration_id,
-    phase: e.phase,
-    displayScope: e.display_scope,
-    panelHint: e.panel_hint,
-    requiresAttention: e.requires_attention,
+    status: terminal
+      ? existing.status
+      : e.status === "pending"
+        ? "pending"
+        : "running",
+    startedAt: existing?.startedAt ?? e.started_at ?? now,
+    displayHint: e.display_hint ?? existing?.displayHint,
+    inputSummary: e.input_summary ?? existing?.inputSummary,
+    resultKind: e.result_kind ?? existing?.resultKind,
+    activityKind: e.activity_kind ?? existing?.activityKind,
+    groupId: e.group_id ?? existing?.groupId,
+    stepId: e.step_id ?? existing?.stepId,
+    taskId: e.task_id ?? existing?.taskId,
+    turnId: e.turn_id ?? existing?.turnId,
+    seq: e.seq ?? existing?.seq,
+    iterationId: e.iteration_id ?? existing?.iterationId,
+    phase: e.phase ?? existing?.phase,
   });
   return next;
 };
@@ -231,6 +275,8 @@ export const reduceToolCallResult = (
           ? "timeout"
           : e.status === "partial"
             ? "partial"
+            : e.status === "cancelled"
+              ? "cancelled"
             : e.is_error
               ? "failed"
               : "success",
@@ -241,7 +287,8 @@ export const reduceToolCallResult = (
     contentPreview: e.content_preview,
     evidenceType: e.evidence_type,
     displaySummary: e.display_summary,
-    resultKind: e.result_kind,
+    resultKind: e.result_kind ?? existing.resultKind,
+    activityKind: e.activity_kind ?? existing.activityKind,
     groupId: e.group_id ?? existing.groupId,
     stepId: e.step_id ?? existing.stepId,
     taskId: e.task_id ?? existing.taskId,
@@ -259,35 +306,29 @@ export const reduceToolCallResult = (
     durationMs: e.duration_ms,
     iterationId: e.iteration_id ?? existing.iterationId,
     phase: e.phase ?? existing.phase,
-    displayScope: e.display_scope ?? existing.displayScope,
-    panelHint: e.panel_hint ?? existing.panelHint,
-    requiresAttention: e.requires_attention ?? existing.requiresAttention,
     diff: normalizeToolDiff(e.diff) ?? existing.diff,
+    outputFiles: e.output_files?.map((file) => ({
+      path: file.path,
+      name: file.name,
+      size: file.size,
+      mimeType: file.mime_type,
+      isImage: file.is_image,
+    })) ?? existing.outputFiles,
     finishedAt: now,
   });
   return next;
 };
 
-const DIFF_RE = /([+-])(\d+)/g;
-
 export const aggregateDiffBadge = (records: Iterable<ToolCallRecord>): DiffBadge => {
   let plus = 0;
   let minus = 0;
   for (const r of records) {
-    if (r.diff) {
-      const diffStats = getToolDiffStats(r.diff);
-      plus += diffStats.plus;
-      minus += diffStats.minus;
-      continue;
-    }
-    if (!r.summary) continue;
-    let m: RegExpExecArray | null;
-    DIFF_RE.lastIndex = 0;
-    while ((m = DIFF_RE.exec(r.summary)) !== null) {
-      const n = parseInt(m[2], 10);
-      if (m[1] === "+") plus += n;
-      else minus += n;
-    }
+    // Diff statistics are backend-owned structured data. Do not infer file
+    // changes from a human summary, which may contain unrelated +N/-N text.
+    if (!r.diff) continue;
+    const diffStats = getToolDiffStats(r.diff);
+    plus += diffStats.plus;
+    minus += diffStats.minus;
   }
   return { plus, minus };
 };

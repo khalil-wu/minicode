@@ -16,6 +16,7 @@ from typing import Any
 from backend.agent.message import AgentEvent
 from backend.permissions.context import PermissionContext
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
+from backend.tools.file_tools_common import _atomic_write_text
 
 MAX_PLAN_STEPS = 30
 
@@ -46,6 +47,9 @@ class UpdatePlanTool(BaseTool):
     """Create or update the session's visible execution plan."""
 
     name = "update_plan"
+    result_kind = "plan"
+    activity_kind = "status"
+    display_label = "Update plan"
     mutates_workspace = False
     read_only = False  # mutates session plan state
     permission = PermissionLevel.AUTO
@@ -55,7 +59,7 @@ class UpdatePlanTool(BaseTool):
         "When to use: the user explicitly asks for a plan, the task is ambiguous enough that a visible approach "
         "helps alignment, or the work has larger phases that should remain visible while you execute.\n\n"
         "When not to use: Do not use for routine task tracking, a simple checklist, a single-step fix, or merely "
-        "because todo_write is available. Do not mirror the same todo list into both tools.\n\n"
+        "because todo_write is available. Do not mirror the same routine todo list into both tools.\n\n"
         "State rules: every call sends the full ordered plan snapshot; at most one step may be in_progress; "
         "advance status as phases actually progress; mark completed only after the phase is genuinely done. "
         "Optional explanation should describe why the plan changed, not narrate every tool call."
@@ -200,13 +204,13 @@ class UpdatePlanTool(BaseTool):
             return
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
+            _atomic_write_text(
+                path,
                 json.dumps(
                     {"plan_id": plan_id, "status": status, "current_step": current_step, "steps": steps},
                     ensure_ascii=False,
                     indent=2,
                 ),
-                encoding="utf-8",
             )
         except Exception:
             pass
@@ -216,6 +220,9 @@ class ExitPlanModeTool(BaseTool):
     """Submit a draft plan and wait for user approval before implementation."""
 
     name = "exit_plan_mode"
+    result_kind = "plan"
+    activity_kind = "status"
+    display_label = "Submit plan"
     mutates_workspace = False
     read_only = False
     always_load = True
@@ -333,13 +340,13 @@ class ExitPlanModeTool(BaseTool):
             return
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
+            _atomic_write_text(
+                path,
                 json.dumps(
                     {"plan_id": plan_id, "status": status, "current_step": current_step, "steps": steps},
                     ensure_ascii=False,
                     indent=2,
                 ),
-                encoding="utf-8",
             )
         except Exception:
             pass
@@ -349,6 +356,9 @@ class EnterPlanModeTool(BaseTool):
     """Request a read-only planning turn."""
 
     name = "enter_plan_mode"
+    result_kind = "plan"
+    activity_kind = "status"
+    display_label = "Enter plan mode"
     mutates_workspace = False
     read_only = False
     always_load = True
@@ -401,7 +411,7 @@ class EnterPlanModeTool(BaseTool):
                 for part in (
                     "Plan mode is active.",
                     f"Reason: {reason}." if reason else "",
-                    "Continue with read-only discovery and call exit_plan_mode with a concise draft plan when ready.",
+                    "Workspace-changing tools remain unavailable until exit_plan_mode submits a draft plan.",
                 )
                 if part
             ),

@@ -20,7 +20,15 @@ function ensureRunning(): void {
   if (intervalId !== null) return;
   intervalId = setInterval(() => {
     const now = Date.now();
-    for (const fn of listeners) fn(now);
+    for (const fn of [...listeners]) {
+      try {
+        fn(now);
+      } catch (error) {
+        // One unmounted or faulty consumer must not stop the shared clock for
+        // every running tool. Report it without changing subscription state.
+        console.error("[shared-tick] subscriber failed", error);
+      }
+    }
   }, 1000);
 }
 

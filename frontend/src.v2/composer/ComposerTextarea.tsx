@@ -18,6 +18,12 @@ interface Props {
   onRemoveLastSkill?: () => void;
   placeholder?: string;
   onHistorySearch?: () => void;
+  // ArrowUp/ArrowDown prompt-history recall (cc useArrowKeyHistory). Given the
+  // current caret/direction, returns the prompt to fill, or null to do nothing.
+  onRecallHistory?: (direction: "up" | "down") => string | null;
+  // Escape while focused in the composer: interrupt the running turn (cc makes
+  // Escape a global interrupt even while typing). Returns true if it acted.
+  onEscape?: () => boolean;
 }
 
 const MIN_HEIGHT = 44;
@@ -39,12 +45,12 @@ export const ComposerTextarea = ({
   onRemoveLastSkill,
   placeholder,
   onHistorySearch,
+  onRecallHistory,
+  onEscape,
 }: Props) => {
   const ref = useRef<HTMLTextAreaElement>(null);
   const lastValRef = useRef(value);
-  // Single-row base height: minimal (Cowork home) is tightest, then compact
-  // (code mode), then the default chat composer.
-  const baseHeight = minimal ? 40 : compact ? 36 : MIN_HEIGHT;
+  const baseHeight = minimal ? 40 : MIN_HEIGHT;
   const lastHeightRef = useRef(baseHeight);
 
   useEffect(() => {
@@ -148,6 +154,37 @@ export const ComposerTextarea = ({
           return;
         }
         if (menuOpen) return;
+        // Escape interrupts the running turn even while the composer is focused
+        // (cc: Escape is a global interrupt). Only acts when the turn is live;
+        // otherwise fall through so normal Escape handling still applies.
+        if (e.key === "Escape" && onEscape) {
+          if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+          if (onEscape()) {
+            e.preventDefault();
+            return;
+          }
+        }
+        // ArrowUp/ArrowDown prompt-history recall (cc useArrowKeyHistory). Only
+        // when the caret is on the first/last line so arrows still navigate
+        // multi-line text; skipped during IME composition.
+        if ((e.key === "ArrowUp" || e.key === "ArrowDown") && onRecallHistory) {
+          if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+          const el = e.currentTarget;
+          const caret = el.selectionStart ?? 0;
+          const collapsed = caret === (el.selectionEnd ?? caret);
+          const firstNewline = value.indexOf("\n");
+          const onFirstLine = firstNewline === -1 || caret <= firstNewline;
+          const onLastLine = caret >= value.lastIndexOf("\n") + 1;
+          const eligible = e.key === "ArrowUp" ? onFirstLine : onLastLine;
+          if (collapsed && eligible) {
+            const recalled = onRecallHistory(e.key === "ArrowUp" ? "up" : "down");
+            if (recalled !== null) {
+              e.preventDefault();
+              onChange(recalled);
+              return;
+            }
+          }
+        }
         if ((e.key === "Backspace" || e.key === "Delete") && !value) {
           if (skillTokens.length > 0) {
             e.preventDefault();
@@ -169,7 +206,7 @@ export const ComposerTextarea = ({
           onSubmit();
         }
       }}
-      placeholder={placeholder ?? "Write a message..."}
+      placeholder={placeholder ?? "随心输入"}
       autoFocus
       className="composer-textarea bg-transparent border-0 outline-0 resize-none overflow-y-auto tracking-normal transition-colors duration-[140ms]"
       style={{
@@ -178,12 +215,17 @@ export const ComposerTextarea = ({
         minHeight: baseHeight,
         maxHeight: MAX_HEIGHT,
         color: "var(--text-primary)",
-        fontFamily: "var(--font-ui)",
-        fontSize: compact ? 14 : 15,
-        lineHeight: compact ? 1.4 : 1.55,
+        // Use one CJK-capable face for both Latin and Chinese glyphs. Switching
+        // from Manrope to a fallback font only after the first Chinese
+        // character made the input look as if it zoomed while typing.
+        fontFamily: "var(--font-prose)",
+        fontSize: "var(--text-md)",
+        lineHeight: "var(--leading-relaxed)",
+        fontWeight: 400,
+        letterSpacing: 0,
         padding: commandLabel || skillTokens.length > 0
-          ? (compact ? "5px 14px 7px" : "6px 14px 8px")
-          : minimal ? "9px 16px" : compact ? "10px 14px 6px" : "8px 12px 6px",
+          ? (compact ? "7px 12px 6px" : "6px 14px 8px")
+          : minimal ? "9px 16px" : "8px 12px 6px",
       }}
     />
   );
@@ -203,7 +245,7 @@ export const ComposerTextarea = ({
           >
             <span style={prefixGlyphStyle}>/</span>
             <span style={prefixNameStyle}>{commandLabel}</span>
-            <X size={12} className="shrink-0 opacity-[0.62]" />
+            <X size={14} className="shrink-0 opacity-[0.62]" />
           </button>
         )}
         {skillTokens.map((skill) => (
@@ -215,9 +257,9 @@ export const ComposerTextarea = ({
             className="composer-prefix-token"
             style={skillPrefixStyle}
           >
-            <Sparkles size={12} />
+            <Sparkles size={14} />
             <span style={prefixNameStyle}>{skill.name}</span>
-            <X size={12} className="shrink-0 opacity-[0.62]" />
+            <X size={14} className="shrink-0 opacity-[0.62]" />
           </button>
         ))}
       </div>

@@ -7,6 +7,7 @@ import { Copy, Database, Download, FolderOpen, GitBranch, TerminalSquare, Upload
 import { isDesktop, revealPath } from '../../desktop/runtime'
 import { fetchWorkspaceGitStatus, type WorkspaceGitStatusResponse } from '../../protocol/workspace'
 import { useAppStore } from '../../stores'
+import { focusInspectorEntry } from '../../chat/inspectorEntries'
 import type { AgentProgressEntry, ChatMessage, InspectorEntry, ProviderRawMetadata } from '../../stores/types'
 import { branchDisplayName, workspaceDisplayName } from '../../lib/workspace-display'
 import { providerCacheDiagnosis, providerCacheHitRate, providerContinuationDetail, providerContinuationLabel, providerCurlSkeleton, providerDuplicateInputSummary, providerInstructionsTransportSummary, providerLargestInputItemsSummary, providerLargestToolsSummary, providerLoopMetricsSummary, providerOutputPhaseCounts, providerOutputSequence, providerPromptCacheDiagnosticSummary, providerPromptLargestSections, providerPromptSectionDeltaSummary, providerPromptSectionSummary, providerRequestDiff, providerRequestDiffSummary, providerRequestModeSummary, providerResponseLifecycle, providerSafeRequestJson, providerTimelineEventCounts, providerTimelineRows, providerTimelineSequence, providerTraceDiagnostics, providerTraceExportJson, providerTraceExportJsonl, providerTracePayloadFromExport, providerUsageSummary } from '../../chat/providerTrace'
@@ -17,7 +18,6 @@ import { getWebSocket } from '../../hooks/useWebSocket'
 import { InfoCard, InfoRow, SectionLabel, SmallButton } from '../SidebarShared'
 import { ToolCallTimeline, buildRunReplayEvents, buildRunReplaySummary, runTimelineExportJsonl, runTimelineReplayJsonl, type RunReplayEvent, type RunReplaySummary } from '../../chat/tool-calls/ToolCallTimeline'
 import { getToolCallsFromMessage } from '../../lib/content-blocks'
-import { projectMessagesToActivityItems } from '../../agent-loop/projection/project-activity-items'
 
 export const InspectorTab = () => (
   <InspectorTabContent />
@@ -44,8 +44,6 @@ const RunTimelineSection = ({ traceExportEnabled }: { traceExportEnabled: boolea
   const [sessionReplayStatus, setSessionReplayStatus] = useState('')
   const replayEvents = useMemo(() => buildRunReplayEvents(messages, agentProgress), [messages, agentProgress])
   const replaySummary = useMemo(() => buildRunReplaySummary(replayEvents), [replayEvents])
-  const activityItems = useMemo(() => projectMessagesToActivityItems(messages), [messages])
-  const activityAttention = activityItems.filter((item) => item.hasFailure || item.hasPendingUserAction).length
   const exportJsonl = () => runTimelineExportJsonl(messages, agentProgress)
   const replayJsonl = () => runTimelineReplayJsonl(messages, agentProgress)
   const copySessionReplay = async () => {
@@ -69,17 +67,17 @@ const RunTimelineSection = ({ traceExportEnabled }: { traceExportEnabled: boolea
         <SectionLabel label="Run Timeline" />
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           <SmallButton
-            icon={<TerminalSquare size={12} />}
+            icon={<TerminalSquare size={14} />}
             label={expanded ? 'Hide events' : 'Show recent events'}
             onClick={() => setExpanded((value) => !value)}
           />
         {traceExportEnabled && (
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-            <SmallButton icon={<Copy size={12} />} label="Copy JSONL" onClick={() => void navigator.clipboard?.writeText(exportJsonl())} />
-            <SmallButton icon={<Download size={12} />} label="Download JSONL" onClick={() => downloadText('minicode-run-timeline.jsonl', exportJsonl(), 'application/x-ndjson')} />
-            <SmallButton icon={<Copy size={12} />} label="Copy Replay" onClick={() => void navigator.clipboard?.writeText(replayJsonl())} />
-            <SmallButton icon={<Download size={12} />} label="Download Replay" onClick={() => downloadText('minicode-run-replay.jsonl', replayJsonl(), 'application/x-ndjson')} />
-            <SmallButton icon={<Copy size={12} />} label="Copy Session Replay" onClick={() => void copySessionReplay()} />
+            <SmallButton icon={<Copy size={14} />} label="Copy JSONL" onClick={() => void navigator.clipboard?.writeText(exportJsonl())} />
+            <SmallButton icon={<Download size={14} />} label="Download JSONL" onClick={() => downloadText('minicode-run-timeline.jsonl', exportJsonl(), 'application/x-ndjson')} />
+            <SmallButton icon={<Copy size={14} />} label="Copy Replay" onClick={() => void navigator.clipboard?.writeText(replayJsonl())} />
+            <SmallButton icon={<Download size={14} />} label="Download Replay" onClick={() => downloadText('minicode-run-replay.jsonl', replayJsonl(), 'application/x-ndjson')} />
+            <SmallButton icon={<Copy size={14} />} label="Copy Session Replay" onClick={() => void copySessionReplay()} />
           </div>
         )}
         </div>
@@ -87,7 +85,6 @@ const RunTimelineSection = ({ traceExportEnabled }: { traceExportEnabled: boolea
       {traceExportEnabled && sessionReplayStatus && <div style={sessionReplayStatusStyle}>{sessionReplayStatus}</div>}
       <InfoCard>
         <InfoRow label="Events" value={replayEvents.length === 0 ? 'No runtime events' : `${replayEvents.length} events`} mono />
-        <InfoRow label="Activity items" value={activityItems.length === 0 ? 'No canonical items' : `${activityItems.length} canonical`} tone={activityAttention > 0 ? 'warning' : 'muted'} mono />
         <InfoRow label="Status" value={replaySummary.outcome === 'needs_attention' ? `${replaySummary.failedOrBlocked} need attention` : replaySummary.outcome === 'running' ? `${replaySummary.running} running` : replaySummary.outcome === 'completed' ? 'Completed' : 'Idle'} tone={replaySummary.outcome === 'needs_attention' ? 'warning' : replaySummary.outcome === 'running' ? 'accent' : 'muted'} />
         <InfoRow label="Span" value={replaySummary.spanMs == null ? 'n/a' : `${(replaySummary.spanMs / 1000).toFixed(1)}s`} mono />
       </InfoCard>
@@ -170,7 +167,7 @@ const ContextTab = () => {
   const refreshGitStatus = () => {
     setGitLoading(true)
     setGitError(null)
-    fetchWorkspaceGitStatus()
+    fetchWorkspaceGitStatus(workspacePath)
       .then((result) => setGitStatus(result))
       .catch((error) => {
         setGitStatus(null)
@@ -225,9 +222,9 @@ const ContextTab = () => {
               </div>
             )}
             <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
-              <SmallButton icon={<FolderOpen size={12} />} label="Reveal" disabled={!isDesktop()} onClick={() => void revealPath(workspacePath)} />
-              <SmallButton icon={<Copy size={12} />} label="Copy" onClick={() => void navigator.clipboard?.writeText(workspacePath)} />
-              <SmallButton icon={<GitBranch size={12} />} label="Refresh" onClick={refreshGitStatus} />
+              <SmallButton icon={<FolderOpen size={14} />} label="Reveal" disabled={!isDesktop()} onClick={() => void revealPath(workspacePath)} />
+              <SmallButton icon={<Copy size={14} />} label="Copy" onClick={() => void navigator.clipboard?.writeText(workspacePath)} />
+              <SmallButton icon={<GitBranch size={14} />} label="Refresh" onClick={refreshGitStatus} />
             </div>
           </InfoCard>
         </>
@@ -249,7 +246,7 @@ const ContextTab = () => {
             {terminalSessions.length > 0 && <InfoRow label="Terminals" value={String(terminalSessions.length)} />}
             {activeEditorPath && <InfoRow label="Editor" value={activeEditorPath} mono />}
             {terminalSessions.length > 0 && (
-              <SmallButton icon={<TerminalSquare size={12} />} label="Open Terminal" onClick={() => setRightStackTab('terminal')} />
+              <SmallButton icon={<TerminalSquare size={14} />} label="Open Terminal" onClick={() => setRightStackTab('terminal')} />
             )}
           </InfoCard>
         </>
@@ -304,7 +301,7 @@ const RuntimeMetricsSection = () => {
         <InfoRow label="Tool Exec" value={formatMaybeMs(summary.avgToolExecMs)} mono />
         <InfoRow label="Cache Saved" value={`${formatNumber(summary.cacheSavedMs)} ms${summary.cacheHitRate == null ? '' : ` · ${summary.cacheHitRate}% hit`}`} mono tone={summary.cacheSavedMs > 0 ? 'accent' : 'muted'} />
         <InfoRow label="Batching" value={summary.batchedGroups > 0 ? `${summary.batchedTools} tools in ${summary.batchedGroups} groups` : 'No grouped dispatch'} tone={summary.batchedGroups > 0 ? 'accent' : 'muted'} />
-        <InfoRow label="Coordination" value={coordinationMetricLabel(summary)} tone={summary.workflowSignals > 0 || summary.subagentSignals > 0 ? 'accent' : 'muted'} />
+        <InfoRow label="Coordination" value={coordinationMetricLabel(summary)} tone={summary.subagentSignals > 0 ? 'accent' : 'muted'} />
         <InfoRow label="Prefetch" value={summary.prefetchSignals > 0 ? `${summary.prefetchSignals} warm cache signals` : 'No warm cache signal'} tone={summary.prefetchSignals > 0 ? 'accent' : 'muted'} />
         <InfoRow label="Stalls" value={summary.stallSignals > 0 ? `${summary.stallSignals} signals` : 'None'} tone={summary.stallSignals > 0 ? 'warning' : 'muted'} />
         <InfoRow label="Recovery" value={summary.recoveryTotal > 0 ? `${summary.recoverySucceeded}/${summary.recoveryTotal} succeeded` : 'No recovery'} tone={summary.recoveryTotal > summary.recoverySucceeded ? 'warning' : summary.recoveryTotal > 0 ? 'accent' : 'muted'} />
@@ -342,11 +339,12 @@ const DetailsTab = ({ traceExportEnabled }: { traceExportEnabled: boolean }) => 
       acc.output += usage.output
       acc.cacheRead += usage.cacheRead
       acc.cacheWrite += usage.cacheWrite
+      acc.cacheDeleted += usage.cacheDeleted ?? 0
       acc.promptCacheTotal += promptCacheEffectivePromptTokens(usage)
       acc.reasoning += usage.reasoning
       return acc
     },
-    { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, promptCacheTotal: 0, reasoning: 0 },
+    { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheDeleted: 0, promptCacheTotal: 0, reasoning: 0 },
   ), [providerEntries])
   const sessionCacheHit = useMemo(() => providerCacheHitRate(usageTotals), [usageTotals])
 
@@ -390,7 +388,7 @@ const DetailsTab = ({ traceExportEnabled }: { traceExportEnabled: boolean }) => 
       {!focusedEntry && inspectorEntries.length === 0 && (
         <InfoCard>
           <InfoRow label="Entries" value="No inspector entries" />
-          <SmallButton icon={<Upload size={12} />} label="Import JSONL" onClick={() => importRef.current?.click()} />
+          <SmallButton icon={<Upload size={14} />} label="Import JSONL" onClick={() => importRef.current?.click()} />
         </InfoCard>
       )}
       {(focusedEntry || inspectorEntries.length > 0) && (
@@ -400,22 +398,23 @@ const DetailsTab = ({ traceExportEnabled }: { traceExportEnabled: boolean }) => 
               <InfoRow label="Provider" value={`${providerEntries.length} calls`} />
               <InfoRow label="Tokens" value={`${formatNumber(usageTotals.input)} in / ${formatNumber(usageTotals.output)} out`} mono />
               <InfoRow label="Cache" value={`${sessionCacheHit == null ? 'n/a' : `${sessionCacheHit}%`} hit · ${formatNumber(usageTotals.cacheRead)} read`} tone={sessionCacheHit ? 'accent' : 'muted'} />
+              {usageTotals.cacheDeleted > 0 && <InfoRow label="Cache Deleted" value={formatNumber(usageTotals.cacheDeleted)} mono />}
               <InfoRow label="Reasoning" value={formatNumber(usageTotals.reasoning)} mono />
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 7 }}>
                 {traceExportEnabled && (
                   <>
-                    <SmallButton icon={<Copy size={12} />} label="Copy JSONL" onClick={() => void navigator.clipboard?.writeText(providerTraceExportJsonl(providerRaws))} />
-                    <SmallButton icon={<Download size={12} />} label="Download JSONL" onClick={() => downloadText('minicode-provider-traces.jsonl', providerTraceExportJsonl(providerRaws), 'application/x-ndjson')} />
+                    <SmallButton icon={<Copy size={14} />} label="Copy JSONL" onClick={() => void navigator.clipboard?.writeText(providerTraceExportJsonl(providerRaws))} />
+                    <SmallButton icon={<Download size={14} />} label="Download JSONL" onClick={() => downloadText('minicode-provider-traces.jsonl', providerTraceExportJsonl(providerRaws), 'application/x-ndjson')} />
                   </>
                 )}
-                <SmallButton icon={<Upload size={12} />} label="Import JSONL" onClick={() => importRef.current?.click()} />
+                <SmallButton icon={<Upload size={14} />} label="Import JSONL" onClick={() => importRef.current?.click()} />
               </div>
             </InfoCard>
           )}
           {providerEntries.length === 0 && (
             <InfoCard>
               <InfoRow label="Provider" value="No provider traces yet" />
-              <SmallButton icon={<Upload size={12} />} label="Import JSONL" onClick={() => importRef.current?.click()} />
+              <SmallButton icon={<Upload size={14} />} label="Import JSONL" onClick={() => importRef.current?.click()} />
             </InfoCard>
           )}
           {cacheEntries.length > 0 && <CacheDiagnosisCard entries={cacheEntries} />}
@@ -447,7 +446,7 @@ const DetailsTab = ({ traceExportEnabled }: { traceExportEnabled: boolean }) => 
           {visibleEntries.slice(-10).reverse().map((entry, i) => (
             <button
               key={`${entry.targetId}-${i}`}
-              onClick={() => useAppStore.getState().setInspectorFocus({ kind: entry.targetKind, id: entry.targetId })}
+              onClick={() => focusInspectorEntry(entry)}
               style={eventButtonStyle(entry.targetId === inspectorFocus?.id)}
             >
               <span style={{ color: 'var(--text-muted)' }}>{entry.targetKind}</span>
@@ -504,7 +503,7 @@ const CacheDiagnosisCard = ({ entries }: { entries: InspectorEntry[] }) => {
       <InfoRow label="Cache" value={`${summary.hits}/${summary.total} hits (${summary.hitRate}%)`} tone={summary.hits > 0 ? 'accent' : 'muted'} />
       <InfoRow label="Saved" value={`${formatNumber(summary.savedMs)} ms estimated`} mono />
       <InfoRow label="Layers" value={summary.layers.join(', ') || 'none'} mono />
-      <SmallButton icon={<Database size={12} />} label="Show Cache" onClick={() => useAppStore.getState().setInspectorFocus({ kind: 'cache', id: entries[entries.length - 1]?.targetId || '' })} />
+      <SmallButton icon={<Database size={14} />} label="Show Cache" onClick={() => useAppStore.getState().setInspectorFocus({ kind: 'cache', id: entries[entries.length - 1]?.targetId || '' })} />
     </InfoCard>
   )
 }
@@ -549,7 +548,6 @@ type RuntimeMetricSummary = {
   recoverySucceeded: number
   approvalSignals: number
   subagentSignals: number
-  workflowSignals: number
   cacheSpanSignals: number
   traceCompleteness: number | null
 }
@@ -614,7 +612,6 @@ function buildRuntimeMetricSummary(
   const recoverySucceeded = recoveryEntries.filter((entry) => entry.status === 'completed' || /succeeded|recovered|已恢复/i.test(runtimeText(entry))).length
   const approvalSignals = progress.filter((entry) => entry.phase === 'approval' || entry.stage === 'approval' || /approval|permission|审批|批准/i.test(runtimeText(entry))).length
   const subagentSignals = progress.filter((entry) => entry.phase === 'subagent').length
-  const workflowSignals = progress.filter((entry) => entry.phase === 'workflow').length
   const cacheSpanSignals = progress.filter((entry) => entry.phase === 'cache').length
 
   return {
@@ -632,7 +629,6 @@ function buildRuntimeMetricSummary(
     recoverySucceeded,
     approvalSignals,
     subagentSignals,
-    workflowSignals,
     cacheSpanSignals,
     traceCompleteness,
   }
@@ -658,7 +654,6 @@ const metricTone = (value: number | null, warningAt: number): 'warning' | 'muted
 const coordinationMetricLabel = (summary: RuntimeMetricSummary): string => {
   const parts = [
     summary.subagentSignals > 0 ? `${summary.subagentSignals} agent spans` : '',
-    summary.workflowSignals > 0 ? `${summary.workflowSignals} workflow spans` : '',
     summary.cacheSpanSignals > 0 ? `${summary.cacheSpanSignals} cache spans` : '',
   ].filter(Boolean)
   return parts.length > 0 ? parts.join(' · ') : 'No coordination spans'
@@ -749,10 +744,10 @@ const ProviderTraceDetails = ({ entry, previous, traceExportEnabled }: { entry: 
         {raw.prompt_cache_diagnostic?.reason && <InfoRow label="Cache Break" value={promptCacheDiagnostic} tone="warning" mono />}
         {traceExportEnabled && (
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 7 }}>
-            <SmallButton icon={<Copy size={12} />} label="Copy Trace" onClick={() => void navigator.clipboard?.writeText(exportJson())} />
-            <SmallButton icon={<Copy size={12} />} label="Request JSON" onClick={() => void navigator.clipboard?.writeText(safeRequestJson())} />
-            <SmallButton icon={<Copy size={12} />} label="cURL Skeleton" onClick={() => void navigator.clipboard?.writeText(curlSkeleton())} />
-            <SmallButton icon={<Download size={12} />} label="Download" onClick={() => downloadText(`minicode-provider-trace-${safeFilePart(entry.targetId)}.json`, exportJson(), 'application/json')} />
+            <SmallButton icon={<Copy size={14} />} label="Copy Trace" onClick={() => void navigator.clipboard?.writeText(exportJson())} />
+            <SmallButton icon={<Copy size={14} />} label="Request JSON" onClick={() => void navigator.clipboard?.writeText(safeRequestJson())} />
+            <SmallButton icon={<Copy size={14} />} label="cURL Skeleton" onClick={() => void navigator.clipboard?.writeText(curlSkeleton())} />
+            <SmallButton icon={<Download size={14} />} label="Download" onClick={() => downloadText(`minicode-provider-trace-${safeFilePart(entry.targetId)}.json`, exportJson(), 'application/json')} />
           </div>
         )}
       </InfoCard>

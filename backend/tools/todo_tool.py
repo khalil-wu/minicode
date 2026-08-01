@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
+from backend.tools.file_tools_common import _atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -40,19 +41,13 @@ class TodoWriteTool(BaseTool):
     """
     创建和管理会话级任务清单。
 
-    使用场景（参考 Claude Code TodoWriteTool.prompt）：
-    - 复杂多步骤任务（≥ 3 步）
-    - 用户提供多个待办事项
-    - 需要跟踪进度的非平凡任务
-    - 开始工作前先规划步骤
-
-    不适用场景：
-    - 单个简单任务
-    - 纯对话/信息性问答
-    - 3 步以内的简单操作
+    用于模型需要向用户展示并维护任务进度的场景。
     """
 
     name = "todo_write"
+    result_kind = "status"
+    activity_kind = "status"
+    display_label = "Update tasks"
     should_defer = True
     search_hint = "task checklist progress tracking multi-step work verification plan"
     # Mutates internal session state, not user workspace files. Keep
@@ -61,19 +56,15 @@ class TodoWriteTool(BaseTool):
     mutates_workspace = False
     read_only = False  # 会修改会话状态
     description = (
-        "Create or replace the current session todo checklist for complex work. "
-        "When to use: before the first substantive work/tool call when the task has 3+ meaningful steps, multiple files, verification work, or user-provided task lists. "
-        "When not to use: single trivial tasks or purely informational chat. "
-        "Pass the complete list each time, keep at most one in_progress item, remove obsolete tasks, and do not batch several completions. "
-        "Never mark completed while tests fail, verification is incomplete, or implementation is partial. "
-        "Use the same language as the user's request for content and activeForm. "
-        "This is the compact live checklist, not the larger visible update_plan."
+        "Create or replace the current session todo checklist when task progress should be visible. "
+        "Pass the complete list each time, keep at most one in_progress item, and remove obsolete tasks. "
+        "Use the same language as the user's request for content and activeForm."
     )
     permission = PermissionLevel.AUTO
 
     def model_description(self) -> str:
         return (
-            "Update the current session todo checklist; keep one in_progress item, remove obsolete tasks, and do not mark work done early."
+            "Update the current session todo checklist; keep at most one in_progress item and remove obsolete tasks."
         )
 
     def model_schema(self) -> ToolSchema:
@@ -126,7 +117,7 @@ class TodoWriteTool(BaseTool):
         path = self._persist_path(session_id)
         if path:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(todos, ensure_ascii=False, indent=2), encoding="utf-8")
+            _atomic_write_text(path, json.dumps(todos, ensure_ascii=False, indent=2))
 
     def get_session_todos(self, session_id: str = "default") -> list[dict[str, str]]:
         if session_id not in self._todos:
@@ -149,14 +140,15 @@ class TodoWriteTool(BaseTool):
                         "type": "array",
                         "description": (
                             "Complete updated todo list, not a patch. Keep exactly one in_progress item for active work. "
-                            "Each item needs id, content, activeForm, status, and priority, and these are user-visible UI text."
+                            "Each item needs content, activeForm, and status (matching Claude Code's schema); "
+                            "id and priority are optional and default to a generated id / 'medium'."
                         ),
                         "items": {
                             "type": "object",
                             "properties": {
                                 "id": {
                                     "type": "string",
-                                    "description": "Stable task id.",
+                                    "description": "Optional stable task id; auto-generated when omitted.",
                                 },
                                 "content": {
                                     "type": "string",
@@ -174,10 +166,10 @@ class TodoWriteTool(BaseTool):
                                 "priority": {
                                     "type": "string",
                                     "enum": ["high", "medium", "low"],
-                                    "description": "Priority.",
+                                    "description": "Optional priority; defaults to 'medium'.",
                                 },
                         },
-                            "required": ["id", "content", "activeForm", "status", "priority"],
+                            "required": ["content", "activeForm", "status"],
                         },
                         "maxItems": MAX_TODO_ITEMS,
                     },
@@ -294,10 +286,7 @@ class TodoWriteTool(BaseTool):
     ) -> str:
         """构建任务清单变更摘要。"""
         if all_done:
-            return (
-                f"所有 {len(new_todos)} 个任务已完成！任务清单已清空。"
-                "请继续处理后续任务（如果有的话）。"
-            )
+            return f"所有 {len(new_todos)} 个任务已完成，任务清单已清空。"
 
         if not old_todos:
             # 新建清单
@@ -341,6 +330,9 @@ class TodoReadTool(BaseTool):
     """读取当前会话的任务清单。"""
 
     name = "todo_read"
+    result_kind = "status"
+    activity_kind = "status"
+    display_label = "Read tasks"
     read_only = True
     description = (
         "Read the current session's task checklist without modifying it. "

@@ -51,12 +51,24 @@ interface WorkspaceTreePayload {
   entries?: WorkspaceTreeEntry[];
 }
 
-const ws = (path: string): string =>
-  `${apiBase()}/api/workspace${path.startsWith("/") ? path : `/${path}`}`;
+const ws = (
+  path: string,
+  workspaceRoot: string,
+  params: Record<string, string | number | boolean | undefined> = {},
+): string => {
+  const root = workspaceRoot.trim();
+  if (!root) throw new Error("Workspace folder is missing.");
+  const url = new URL(`${apiBase()}/api/workspace${path.startsWith("/") ? path : `/${path}`}`);
+  url.searchParams.set("workspace_root", root);
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined) url.searchParams.set(key, String(value));
+  }
+  return url.toString();
+};
 
-export const readWorkspaceFile = async (path: string): Promise<WorkspaceFileResponse | null> => {
+export const readWorkspaceFile = async (path: string, workspaceRoot: string): Promise<WorkspaceFileResponse | null> => {
   try {
-    const r = await fetch(`${ws("/file")}?path=${encodeURIComponent(path)}`, { headers: authHeaders() });
+    const r = await fetch(ws("/file", workspaceRoot, { path }), { headers: authHeaders() });
     if (!r.ok) {
       const detail = await errorMessageFromWorkspaceResponse(r);
       throw new Error(detail || `Workspace file request failed (${r.status} ${r.statusText || "error"}).`);
@@ -73,9 +85,10 @@ export const readWorkspaceFile = async (path: string): Promise<WorkspaceFileResp
 export const writeWorkspaceFile = async (
   path: string,
   content: string,
+  workspaceRoot: string,
 ): Promise<boolean> => {
   try {
-    const r = await fetch(ws("/file"), {
+    const r = await fetch(ws("/file", workspaceRoot), {
       method: "PUT",
       headers: authHeaders({ "content-type": "application/json" }),
       body: JSON.stringify({ path, content }),
@@ -112,9 +125,10 @@ export const compareWriteWorkspaceFile = async (
   path: string,
   expectedHash: string,
   content: string,
+  workspaceRoot: string,
 ): Promise<WorkspaceCompareWriteResult> => {
   try {
-    const r = await fetch(ws("/file/compare-write"), {
+    const r = await fetch(ws("/file/compare-write", workspaceRoot), {
       method: "PUT",
       headers: authHeaders({ "content-type": "application/json" }),
       body: JSON.stringify({ path, expected_hash: expectedHash, content }),
@@ -131,9 +145,9 @@ export const compareWriteWorkspaceFile = async (
   }
 };
 
-export const createWorkspaceDirectory = async (path: string): Promise<boolean> => {
+export const createWorkspaceDirectory = async (path: string, workspaceRoot: string): Promise<boolean> => {
   try {
-    const r = await fetch(ws("/directory"), {
+    const r = await fetch(ws("/directory", workspaceRoot), {
       method: "POST",
       headers: authHeaders({ "content-type": "application/json" }),
       body: JSON.stringify({ path }),
@@ -147,9 +161,10 @@ export const createWorkspaceDirectory = async (path: string): Promise<boolean> =
 export const renameWorkspacePath = async (
   path: string,
   newPath: string,
+  workspaceRoot: string,
 ): Promise<boolean> => {
   try {
-    const r = await fetch(ws("/rename"), {
+    const r = await fetch(ws("/rename", workspaceRoot), {
       method: "POST",
       headers: authHeaders({ "content-type": "application/json" }),
       body: JSON.stringify({ path, new_path: newPath }),
@@ -162,11 +177,12 @@ export const renameWorkspacePath = async (
 
 export const deleteWorkspacePath = async (
   path: string,
+  workspaceRoot: string,
   recursive = false,
 ): Promise<boolean> => {
   try {
     const r = await fetch(
-      `${ws("/path")}?path=${encodeURIComponent(path)}&recursive=${recursive ? "true" : "false"}`,
+      ws("/path", workspaceRoot, { path, recursive }),
       { method: "DELETE", headers: authHeaders() },
     );
     return r.ok;
@@ -176,10 +192,11 @@ export const deleteWorkspacePath = async (
 };
 
 export const listWorkspaceTree = async (
+  workspaceRoot: string,
   path: string = ".",
 ): Promise<WorkspaceTreeNode | null> => {
   try {
-    const r = await fetch(`${ws("/tree")}?path=${encodeURIComponent(path)}`, { headers: authHeaders() });
+    const r = await fetch(ws("/tree", workspaceRoot, { path }), { headers: authHeaders() });
     if (!r.ok) {
       const detail = await errorMessageFromWorkspaceResponse(r);
       throw new Error(detail || `Workspace tree request failed (${r.status} ${r.statusText || "error"}).`);
@@ -273,13 +290,14 @@ export interface WorkspaceSearchResult {
 }
 
 export const searchWorkspaceFiles = async (
+  workspaceRoot: string,
   query: string,
   limit: number = 20,
   kind: "file" | "folder" | "all" = "file",
 ): Promise<WorkspaceSearchResult[]> => {
   try {
     const r = await fetch(
-      `${ws("/search")}?query=${encodeURIComponent(query)}&limit=${limit}&kind=${encodeURIComponent(kind)}`,
+      ws("/search", workspaceRoot, { query, limit, kind }),
       { headers: authHeaders() },
     );
     if (!r.ok) return [];
@@ -310,9 +328,9 @@ export interface WorkspaceGitWorktreeResponse {
   error?: string;
 }
 
-export const fetchWorkspaceGitWorktree = async (path = ""): Promise<WorkspaceGitWorktreeResponse | null> => {
+export const fetchWorkspaceGitWorktree = async (workspaceRoot: string, path = ""): Promise<WorkspaceGitWorktreeResponse | null> => {
   try {
-    const r = await fetch(`${ws("/git/worktree")}?path=${encodeURIComponent(path)}`, { headers: authHeaders() });
+    const r = await fetch(ws("/git/worktree", workspaceRoot, { path }), { headers: authHeaders() });
     if (!r.ok) return null;
     return (await r.json()) as WorkspaceGitWorktreeResponse;
   } catch {
@@ -328,9 +346,9 @@ export interface WorkspaceGitStatusResponse {
   error?: string;
 }
 
-export const fetchWorkspaceGitStatus = async (path = ""): Promise<WorkspaceGitStatusResponse | null> => {
+export const fetchWorkspaceGitStatus = async (workspaceRoot: string, path = ""): Promise<WorkspaceGitStatusResponse | null> => {
   try {
-    const r = await fetch(`${ws("/git/status")}?path=${encodeURIComponent(path)}`, { headers: authHeaders() });
+    const r = await fetch(ws("/git/status", workspaceRoot, { path }), { headers: authHeaders() });
     if (!r.ok) return null;
     return (await r.json()) as WorkspaceGitStatusResponse;
   } catch {
@@ -338,10 +356,10 @@ export const fetchWorkspaceGitStatus = async (path = ""): Promise<WorkspaceGitSt
   }
 };
 
-export const fetchWorkspaceGitDiff = async (file = "", path = ""): Promise<{ diff: string; error?: string } | null> => {
+export const fetchWorkspaceGitDiff = async (workspaceRoot: string, file = "", path = ""): Promise<{ diff: string; error?: string } | null> => {
   try {
     const r = await fetch(
-      `${ws("/git/diff")}?file=${encodeURIComponent(file)}&path=${encodeURIComponent(path)}`,
+      ws("/git/diff", workspaceRoot, { file, path }),
       { headers: authHeaders() },
     );
     if (!r.ok) return null;
@@ -352,10 +370,11 @@ export const fetchWorkspaceGitDiff = async (file = "", path = ""): Promise<{ dif
 };
 
 export const switchWorkspaceGitWorktree = async (
+  workspaceRoot: string,
   path: string,
 ): Promise<{ success: boolean; project?: { root_path?: string; name?: string }; error?: string } | null> => {
   try {
-    const r = await fetch(`${ws("/git/worktree/switch")}`, {
+    const r = await fetch(ws("/git/worktree/switch", workspaceRoot), {
       method: "POST",
       headers: authHeaders({ "content-type": "application/json" }),
       body: JSON.stringify({ path }),
@@ -368,12 +387,13 @@ export const switchWorkspaceGitWorktree = async (
 };
 
 export const removeWorkspaceGitWorktree = async (
+  workspaceRoot: string,
   path: string,
   force = false,
 ): Promise<{ removed: boolean; path: string; branch?: string; error?: string } | null> => {
   try {
     const r = await fetch(
-      `${ws("/git/worktree")}?path=${encodeURIComponent(path)}&force=${force ? "true" : "false"}`,
+      ws("/git/worktree", workspaceRoot, { path, force }),
       { method: "DELETE", headers: authHeaders() },
     );
     if (!r.ok) return null;

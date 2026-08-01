@@ -42,6 +42,7 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
           largeFile: false,
           loadWarning: null,
           sizeBytes: undefined,
+          readOnly: false,
         };
         const next = [...s.editorTabs, tab];
         persistEditorTabs(next, s.workingDirectory);
@@ -97,7 +98,9 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
       set((s) => {
         const normalizedPath = normalizeEditorPath(path, s.workingDirectory);
         return {
-          editorTabs: s.editorTabs.map((t) => (t.path === normalizedPath ? { ...t, content } : t)),
+          editorTabs: s.editorTabs.map((t) =>
+            t.path === normalizedPath && !t.readOnly ? { ...t, content } : t
+          ),
         };
       }),
     markTabLoaded: (path, content, error, contentHash, meta) =>
@@ -115,19 +118,20 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
                 largeFile: Boolean(meta?.largeFile),
                 loadWarning: meta?.loadWarning ?? null,
                 sizeBytes: meta?.sizeBytes,
+                readOnly: Boolean(meta?.readOnly),
               }
             : t,
         );
         persistEditorTabs(loadedTabs, s.workingDirectory);
         return { editorTabs: loadedTabs };
       }),
-    markTabSaved: (path, contentHash) =>
+    markTabSaved: (path, savedContent, contentHash) =>
       set((s) => {
         const normalizedPath = normalizeEditorPath(path, s.workingDirectory);
         return {
           editorTabs: s.editorTabs.map((t) =>
             t.path === normalizedPath
-              ? { ...t, original: t.content, contentHash, externalChanged: false, error: null }
+              ? { ...t, original: savedContent, contentHash, externalChanged: false, error: null }
               : t,
           ),
         };
@@ -160,7 +164,7 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
       const path = state.activeTabPath;
       if (!path) return false;
       const tab = state.editorTabs.find((t) => t.path === path);
-      if (!tab || tab.loading || tab.error || tab.largeFile) return false;
+      if (!tab || tab.loading || tab.error || tab.largeFile || tab.readOnly) return false;
       set((s) => ({
         editorTabs: s.editorTabs.map((t) =>
           t.path === path

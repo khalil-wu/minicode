@@ -1,38 +1,61 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Archive, CheckCircle2, FolderArchive, FolderOpen, RefreshCw } from "lucide-react";
+import {
+  Archive,
+  CheckCircle2,
+  FolderArchive,
+  FolderOpen,
+  RefreshCw,
+  Trash2,
+} from "lucide-react";
+import { BrandIcon } from "../components/BrandIcon";
 import { pushToast } from "./ToastContainer";
-import { apiBase, authHeaders } from "../protocol/api";
+import { apiBase, authHeaders, pluginAssetResourceUrlWithToken } from "../protocol/api";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { isDesktop, pickDirectory } from "../desktop/runtime";
-import {
-  Section,
-  inputStyle,
-  primaryActionStyle,
-  secondaryActionStyle,
-  monoTextStyle,
-  emptyInlineStyle,
-  miniMetaStyle,
-} from "./settingsShared";
+import { Section } from "./settingsShared";
 import { fetchJsonWithStartupRetry, formatSettingsLoadError } from "./settingsLoad";
+import "./PluginsTab.css";
 
 type PluginEntry = {
   name: string;
+  displayName?: string;
   description?: string;
+  shortDescription?: string;
+  longDescription?: string;
+  developerName?: string;
+  category?: string;
+  capabilities?: string[];
   version?: string;
+  websiteUrl?: string;
+  iconUrl?: string;
+  iconVariant?: "composer" | "logo" | "logo-dark";
+  brandColor?: string;
+  defaultPrompt?: string[];
   path: string;
   manifest_path?: string;
-  command_count?: number;
   skill_count?: number;
+  mcp_server_count?: number;
+  app_count?: number;
+  hook_count?: number;
+  runtime_support?: {
+    skills?: boolean;
+    mcpServers?: boolean;
+    apps?: boolean;
+    hooks?: boolean;
+  };
   enabled: boolean;
   disabled?: boolean;
+  managed?: boolean;
 };
 
 type PluginValidation = {
   ok: boolean;
   plugin?: {
     name?: string;
-    command_count?: number;
     skill_count?: number;
+    mcp_server_count?: number;
+    app_count?: number;
+    hook_count?: number;
     file_count?: number;
     total_bytes?: number;
   };
@@ -53,6 +76,26 @@ type PluginPackageResult = {
 
 type PluginSettingsPayload = {
   plugins?: PluginEntry[];
+  runtime_refresh?: { ok?: boolean; warnings?: string[]; refreshed?: string[] };
+};
+
+const normalizePlugins = (plugins: PluginEntry[] | undefined): PluginEntry[] => (
+  (Array.isArray(plugins) ? plugins : []).map((plugin) => ({
+    ...plugin,
+    iconUrl: plugin.iconUrl || (plugin.iconVariant
+      ? pluginAssetResourceUrlWithToken(plugin.path, plugin.iconVariant)
+      : undefined),
+  }))
+);
+
+const reportRuntimeRefresh = (payload: PluginSettingsPayload): boolean => {
+  const refresh = payload.runtime_refresh;
+  if (!refresh || refresh.ok !== false) return true;
+  const detail = Array.isArray(refresh.warnings) && refresh.warnings.length > 0
+    ? refresh.warnings.join("；")
+    : "运行时能力刷新失败，请重试或重启 MiniCode";
+  pushToast(`插件配置已保存，但尚未完全加载：${detail}`, "warning");
+  return false;
 };
 
 const jsonHeaders = (): HeadersInit => {
@@ -86,12 +129,12 @@ export const PluginsTab = () => {
         headers: authHeaders(),
       }, { cacheKey: "settings.plugins" });
       if (loadSeqRef.current !== seq) return;
-      setPlugins(Array.isArray(payload.plugins) ? payload.plugins : []);
+      setPlugins(normalizePlugins(payload.plugins));
     } catch (error) {
       if (loadSeqRef.current !== seq) return;
       const message = formatSettingsLoadError(error);
       setLoadError(message);
-      if (options.showToast) pushToast(`Plugin settings load failed: ${message}`, "error");
+      if (options.showToast) pushToast(`插件设置加载失败：${message}`, "error");
     } finally {
       if (loadSeqRef.current === seq) setLoading(false);
     }
@@ -103,28 +146,51 @@ export const PluginsTab = () => {
 
   const counts = useMemo(() => {
     const enabled = plugins.filter((plugin) => plugin.enabled).length;
-    const commands = plugins.reduce((sum, plugin) => sum + Number(plugin.command_count || 0), 0);
     const skills = plugins.reduce((sum, plugin) => sum + Number(plugin.skill_count || 0), 0);
-    return { enabled, commands, skills };
+    const mcpServers = plugins.reduce((sum, plugin) => sum + Number(plugin.mcp_server_count || 0), 0);
+    return { enabled, skills, mcpServers };
   }, [plugins]);
 
   const setPluginEnabled = async (plugin: PluginEntry, enabled: boolean) => {
     setSavingName(plugin.name);
     try {
-      const res = await fetch(`${apiBase()}/api/plugins/${encodeURIComponent(plugin.name)}/state`, {
+      const response = await fetch(`${apiBase()}/api/plugins/${encodeURIComponent(plugin.name)}/state`, {
         method: "PUT",
         headers: jsonHeaders(),
         body: JSON.stringify({ enabled }),
       });
-      if (!res.ok) throw new Error(await res.text());
-      const payload = await res.json() as PluginSettingsPayload;
-      setPlugins(Array.isArray(payload.plugins) ? payload.plugins : []);
-      sendClientCommand({ type: "commands.list" }, { silent: true });
+      if (!response.ok) throw new Error(await response.text());
+      const payload = await response.json() as PluginSettingsPayload;
+      setPlugins(normalizePlugins(payload.plugins));
+      const runtimeReady = reportRuntimeRefresh(payload);
       sendClientCommand({ type: "skills.list" }, { silent: true });
+      sendClientCommand({ type: "mcp.list" }, { silent: true });
       sendClientCommand({ type: "runtime.capabilities.inspect", source: "settings.plugins" }, { silent: true });
-      pushToast(`${enabled ? "Enabled" : "Disabled"} plugin: ${plugin.name}`, "success");
+      if (runtimeReady) pushToast(`${enabled ? "已启用" : "已停用"}插件：${plugin.name}`, "success");
     } catch (error) {
-      pushToast(`Plugin update failed: ${String(error)}`, "error");
+      pushToast(`插件更新失败：${String(error)}`, "error");
+    } finally {
+      setSavingName("");
+    }
+  };
+
+  const removePlugin = async (plugin: PluginEntry) => {
+    if (!plugin.managed || !window.confirm(`卸载插件“${plugin.name}”？`)) return;
+    setSavingName(plugin.name);
+    try {
+      const response = await fetch(`${apiBase()}/api/plugins/${encodeURIComponent(plugin.name)}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const payload = await response.json() as PluginSettingsPayload;
+      setPlugins(normalizePlugins(payload.plugins));
+      const runtimeReady = reportRuntimeRefresh(payload);
+      sendClientCommand({ type: "skills.list" }, { silent: true });
+      sendClientCommand({ type: "mcp.list" }, { silent: true });
+      if (runtimeReady) pushToast(`已卸载插件：${plugin.name}`, "success");
+    } catch (error) {
+      pushToast(`插件卸载失败：${String(error)}`, "error");
     } finally {
       setSavingName("");
     }
@@ -135,23 +201,26 @@ export const PluginsTab = () => {
     if (!sourcePath) return;
     setImporting(true);
     try {
-      const res = await fetch(`${apiBase()}/api/plugins/import`, {
+      const response = await fetch(`${apiBase()}/api/plugins/import`, {
         method: "POST",
         headers: jsonHeaders(),
         body: JSON.stringify({ source_path: sourcePath }),
       });
-      if (!res.ok) throw new Error(await res.text());
-      const payload = await res.json() as PluginSettingsPayload & { imported?: { name?: string } };
-      setPlugins(Array.isArray(payload.plugins) ? payload.plugins : []);
+      if (!response.ok) throw new Error(await response.text());
+      const payload = await response.json() as PluginSettingsPayload & { imported?: { name?: string } };
+      setPlugins(normalizePlugins(payload.plugins));
+      const runtimeReady = reportRuntimeRefresh(payload);
       setImportPath("");
       setValidation(null);
       setPackageResult(null);
-      sendClientCommand({ type: "commands.list" }, { silent: true });
       sendClientCommand({ type: "skills.list" }, { silent: true });
+      sendClientCommand({ type: "mcp.list" }, { silent: true });
       sendClientCommand({ type: "runtime.capabilities.inspect", source: `settings.plugins.import.${kind}` }, { silent: true });
-      pushToast(`Imported plugin ${kind === "package" ? "package" : "folder"}: ${payload.imported?.name || sourcePath}`, "success");
+      if (runtimeReady) {
+        pushToast(`已导入插件${kind === "package" ? "包" : "文件夹"}：${payload.imported?.name || sourcePath}`, "success");
+      }
     } catch (error) {
-      pushToast(`Plugin import failed: ${String(error)}`, "error");
+      pushToast(`插件导入失败：${String(error)}`, "error");
     } finally {
       setImporting(false);
     }
@@ -168,17 +237,17 @@ export const PluginsTab = () => {
     setCheckingPath("validate");
     setPackageResult(null);
     try {
-      const res = await fetch(`${apiBase()}/api/plugins/validate`, {
+      const response = await fetch(`${apiBase()}/api/plugins/validate`, {
         method: "POST",
         headers: jsonHeaders(),
         body: JSON.stringify({ source_path: sourcePath }),
       });
-      if (!res.ok) throw new Error(await res.text());
-      const payload = await res.json() as PluginValidation;
+      if (!response.ok) throw new Error(await response.text());
+      const payload = await response.json() as PluginValidation;
       setValidation(payload);
-      pushToast(payload.ok ? "Plugin validation passed." : "Plugin validation found issues.", payload.ok ? "success" : "warning");
+      pushToast(payload.ok ? "插件验证通过。" : "插件验证发现问题。", payload.ok ? "success" : "warning");
     } catch (error) {
-      pushToast(`Plugin validation failed: ${String(error)}`, "error");
+      pushToast(`插件验证失败：${String(error)}`, "error");
     } finally {
       setCheckingPath("");
     }
@@ -189,18 +258,18 @@ export const PluginsTab = () => {
     if (!sourcePath) return;
     setCheckingPath("package");
     try {
-      const res = await fetch(`${apiBase()}/api/plugins/package`, {
+      const response = await fetch(`${apiBase()}/api/plugins/package`, {
         method: "POST",
         headers: jsonHeaders(),
         body: JSON.stringify({ source_path: sourcePath }),
       });
-      if (!res.ok) throw new Error(await res.text());
-      const payload = await res.json() as PluginPackageResult;
+      if (!response.ok) throw new Error(await response.text());
+      const payload = await response.json() as PluginPackageResult;
       setPackageResult(payload);
       setValidation(payload.validation ?? null);
-      pushToast(`Packaged plugin: ${payload.package?.name || sourcePath}`, "success");
+      pushToast(`插件已打包：${payload.package?.name || sourcePath}`, "success");
     } catch (error) {
-      pushToast(`Plugin package failed: ${String(error)}`, "error");
+      pushToast(`插件打包失败：${String(error)}`, "error");
     } finally {
       setCheckingPath("");
     }
@@ -208,338 +277,116 @@ export const PluginsTab = () => {
 
   return (
     <>
-      <Section title="Local Plugins">
-        <div style={summaryBarStyle}>
-          <span style={summaryItemStyle}>{counts.enabled}/{plugins.length} enabled</span>
-          <span style={summaryItemStyle}>{counts.commands} commands</span>
-          <span style={summaryItemStyle}>{counts.skills} skills</span>
-          {loading && <span style={loadingPillStyle}>Loading...</span>}
-          <button type="button" onClick={() => void refresh({ showToast: true })} disabled={loading} style={iconButtonStyle} title="Refresh plugins" aria-label="Refresh plugins">
-            <RefreshCw size={14} />
-          </button>
+      <Section title="本地插件">
+        <div className="plugin-summary">
+          <div className="plugin-summary-item"><strong>{counts.enabled}</strong><span>已启用</span></div>
+          <div className="plugin-summary-item"><strong>{plugins.length}</strong><span>已安装</span></div>
+          <div className="plugin-summary-item"><strong>{counts.skills}</strong><span>技能</span></div>
+          <div className="plugin-summary-item"><strong>{counts.mcpServers}</strong><span>MCP</span></div>
+          <button type="button" onClick={() => void refresh({ showToast: true })} disabled={loading} className="plugin-icon-button" title="刷新插件" aria-label="刷新插件"><RefreshCw /></button>
+        </div>
+
+        {loadError && (
+          <div className="plugin-load-error" role="alert">
+            <div><strong>插件设置加载失败。</strong><code>{loadError}</code></div>
+            <button type="button" onClick={() => void refresh({ showToast: true })} disabled={loading}>重试</button>
+          </div>
+        )}
+
+        <div className="plugin-local-list">
+          {plugins.map((plugin) => {
+            const saving = savingName === plugin.name;
+            const displayName = plugin.displayName || plugin.name;
+            const description = plugin.shortDescription || plugin.description || "本地 MiniCode 插件";
+            return (
+              <article key={`${plugin.name}:${plugin.path}`} className="plugin-local-row" data-enabled={plugin.enabled}>
+                <span className="plugin-local-icon">
+                  <BrandIcon
+                    value={`${displayName} ${description}`}
+                    size={21}
+                    iconUrl={plugin.iconUrl}
+                    websiteUrl={plugin.websiteUrl}
+                  />
+                </span>
+                <div className="plugin-local-copy">
+                  <div className="plugin-local-title">
+                    <strong>{displayName}</strong>
+                    <span className="plugin-local-state">{plugin.enabled ? "已启用" : "已停用"}</span>
+                    {plugin.version && <span>v{plugin.version}</span>}
+                    {Number(plugin.skill_count || 0) > 0 && <span>{Number(plugin.skill_count)} 个技能</span>}
+                    {Number(plugin.mcp_server_count || 0) > 0 && <span>{Number(plugin.mcp_server_count)} 个 MCP</span>}
+                    {Number(plugin.app_count || 0) > 0 && <span>{Number(plugin.app_count)} 个 App{plugin.runtime_support?.apps === false ? "（仅清单）" : ""}</span>}
+                    {Number(plugin.hook_count || 0) > 0 && <span>{Number(plugin.hook_count)} 个 Hook{plugin.runtime_support?.hooks === false ? "（未执行）" : ""}</span>}
+                    {plugin.category && <span>{plugin.category}</span>}
+                  </div>
+                  <p title={plugin.longDescription || description}>{description}</p>
+                  {(plugin.developerName || (plugin.capabilities?.length ?? 0) > 0) && (
+                    <small>{[
+                      plugin.developerName ? `开发者：${plugin.developerName}` : "",
+                      ...(plugin.capabilities ?? []).slice(0, 3),
+                    ].filter(Boolean).join(" · ")}</small>
+                  )}
+                  <code title={plugin.path}>{plugin.path}</code>
+                </div>
+                <label className="plugin-switch">
+                  <input
+                    type="checkbox"
+                    aria-label={`${plugin.enabled ? "停用" : "启用"}插件 ${plugin.name}`}
+                    checked={plugin.enabled}
+                    disabled={saving}
+                    onChange={(event) => void setPluginEnabled(plugin, event.currentTarget.checked)}
+                  />
+                  <span><i /></span>
+                </label>
+                {plugin.managed && (
+                  <button
+                    type="button"
+                    className="plugin-icon-button"
+                    aria-label={`卸载插件 ${plugin.name}`}
+                    title="卸载插件"
+                    disabled={saving}
+                    onClick={() => void removePlugin(plugin)}
+                  >
+                    <Trash2 />
+                  </button>
+                )}
+              </article>
+            );
+          })}
+          {loading && plugins.length === 0 && <div className="plugin-empty">正在加载插件…</div>}
+          {!loading && plugins.length === 0 && !loadError && <div className="plugin-empty">配置的插件目录中没有本地插件。</div>}
         </div>
       </Section>
 
-      {loadError && (
-        <div style={loadErrorStyle}>
-          <span>Plugin settings failed to load.</span>
-          <code style={loadErrorCodeStyle}>{loadError}</code>
-          <button type="button" onClick={() => void refresh({ showToast: true })} disabled={loading} style={retryButtonStyle}>Retry</button>
+      <Section title="插件开发">
+        <p className="plugin-section-description">导入本地插件文件夹或安装包，并在发布前检查清单和资源。</p>
+        <div className="plugin-import-row">
+          <input
+            value={importPath}
+            onChange={(event) => setImportPath(event.currentTarget.value)}
+            onKeyDown={(event) => { if (event.key === "Enter") void importPlugin(); }}
+            placeholder="插件文件夹或 .zip 路径"
+            aria-label="插件文件夹或安装包路径"
+          />
+          {isDesktop() && <button type="button" onClick={choosePluginDirectory} className="plugin-icon-button" title="选择插件文件夹" aria-label="选择插件文件夹"><FolderOpen /></button>}
+          <button type="button" onClick={() => void importPlugin("directory")} disabled={!importPath.trim() || importing} className="plugin-primary-button">{importing ? "正在导入…" : "导入"}</button>
         </div>
-      )}
-
-      <div style={importRowStyle}>
-        <input
-          value={importPath}
-          onChange={(event) => setImportPath(event.currentTarget.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") void importPlugin();
-          }}
-          placeholder="Plugin folder or .minicode-plugin.zip path"
-          aria-label="Plugin folder or package path"
-          style={{ ...inputStyle, minWidth: 0, fontFamily: "var(--font-mono)" }}
-        />
-        {isDesktop() && (
-          <button type="button" onClick={choosePluginDirectory} style={iconButtonStyle} title="Choose plugin folder" aria-label="Choose plugin folder">
-            <FolderOpen size={14} />
-          </button>
-        )}
-        <button type="button" onClick={() => void importPlugin("directory")} disabled={!importPath.trim() || importing} style={primaryActionStyle}>
-          {importing ? "Importing..." : "Import"}
-        </button>
-      </div>
-
-      <div style={packageBarStyle}>
-        <button type="button" onClick={() => void importPlugin("package")} disabled={!importPath.trim() || importing} style={compactActionStyle}>
-          <FolderArchive size={14} />
-          <span>Import Zip</span>
-        </button>
-        <button type="button" onClick={validatePlugin} disabled={!importPath.trim() || Boolean(checkingPath)} style={compactActionStyle}>
-          <CheckCircle2 size={14} />
-          <span>{checkingPath === "validate" ? "Checking..." : "Validate"}</span>
-        </button>
-        <button type="button" onClick={packagePlugin} disabled={!importPath.trim() || Boolean(checkingPath)} style={compactActionStyle}>
-          <Archive size={14} />
-          <span>{checkingPath === "package" ? "Packaging..." : "Package"}</span>
-        </button>
-        {packageResult?.package?.path && (
-          <span title={packageResult.package.path} style={{ ...monoTextStyle, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {packageResult.package.path}
-          </span>
-        )}
-      </div>
-
-      {validation && (
-        <div style={validationPanelStyle(validation.ok)}>
-          <div style={validationTitleStyle}>
-            {validation.ok ? "Validation passed" : "Validation needs attention"}
-            {validation.plugin && (
-              <span style={miniMetaStyle}>
-                {Number(validation.plugin.command_count || 0)} cmd · {Number(validation.plugin.skill_count || 0)} skills · {Number(validation.plugin.file_count || 0)} files
-              </span>
-            )}
-          </div>
-          {[...(validation.errors || []), ...(validation.warnings || [])].slice(0, 4).map((item) => (
-            <div key={item} style={validationLineStyle}>{item}</div>
-          ))}
+        <div className="plugin-dev-actions">
+          <button type="button" onClick={() => void importPlugin("package")} disabled={!importPath.trim() || importing}><FolderArchive /><span>导入 Zip</span></button>
+          <button type="button" onClick={validatePlugin} disabled={!importPath.trim() || Boolean(checkingPath)}><CheckCircle2 /><span>{checkingPath === "validate" ? "正在检查…" : "验证"}</span></button>
+          <button type="button" onClick={packagePlugin} disabled={!importPath.trim() || Boolean(checkingPath)}><Archive /><span>{checkingPath === "package" ? "正在打包…" : "打包"}</span></button>
+          {packageResult?.package?.path && <code title={packageResult.package.path}>{packageResult.package.path}</code>}
         </div>
-      )}
-
-      <div style={pluginListStyle}>
-        {plugins.map((plugin) => {
-          const saving = savingName === plugin.name;
-          return (
-            <div key={`${plugin.name}:${plugin.path}`} style={pluginRowStyle(plugin.enabled)}>
-              <span style={statusDotStyle(plugin.enabled)} />
-              <div style={{ minWidth: 0, display: "grid", gap: 4 }}>
-                <div style={pluginTitleLineStyle}>
-                  <span style={pluginNameStyle}>{plugin.name}</span>
-                  <span style={stateBadgeStyle(plugin.enabled)}>{plugin.enabled ? "enabled" : "disabled"}</span>
-                  {plugin.version && <span style={miniMetaStyle}>v{plugin.version}</span>}
-                  <span style={miniMetaStyle}>{Number(plugin.command_count || 0)} cmd</span>
-                  <span style={miniMetaStyle}>{Number(plugin.skill_count || 0)} skills</span>
-                </div>
-                {plugin.description && <div style={descriptionStyle}>{plugin.description}</div>}
-                <div title={plugin.path} style={{ ...monoTextStyle, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {plugin.path}
-                </div>
-              </div>
-              <label style={toggleLabelStyle}>
-                <input
-                  type="checkbox"
-                  aria-label={`${plugin.enabled ? "Disable" : "Enable"} plugin ${plugin.name}`}
-                  checked={plugin.enabled}
-                  disabled={saving}
-                  onChange={(event) => void setPluginEnabled(plugin, event.currentTarget.checked)}
-                  style={toggleInputStyle}
-                />
-                <span style={toggleTrackStyle(plugin.enabled, saving)}>
-                  <span style={toggleThumbStyle(plugin.enabled)} />
-                </span>
-              </label>
+        {validation && (
+          <div className="plugin-validation" data-valid={validation.ok}>
+            <div>
+              <strong>{validation.ok ? "验证通过" : "验证需要处理"}</strong>
+              {validation.plugin && <span>{Number(validation.plugin.skill_count || 0)} 个技能 · {Number(validation.plugin.mcp_server_count || 0)} 个 MCP · {Number(validation.plugin.app_count || 0)} 个 App · {Number(validation.plugin.hook_count || 0)} 个 Hook · {Number(validation.plugin.file_count || 0)} 个文件</span>}
             </div>
-          );
-        })}
-        {loading && plugins.length === 0 && (
-          <div style={emptyInlineStyle}>Loading plugins...</div>
+            {[...(validation.errors || []), ...(validation.warnings || [])].slice(0, 4).map((item) => <p key={item}>{item}</p>)}
+          </div>
         )}
-        {!loading && plugins.length === 0 && !loadError && (
-          <div style={emptyInlineStyle}>No local plugins found in the configured plugin roots.</div>
-        )}
-      </div>
+      </Section>
     </>
   );
 };
-
-const summaryBarStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-  flexWrap: "wrap",
-};
-
-const summaryItemStyle: React.CSSProperties = {
-  height: 28,
-  display: "inline-flex",
-  alignItems: "center",
-  padding: "0 9px",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 7px)",
-  background: "var(--surface-soft)",
-  color: "var(--text-secondary)",
-  fontSize: "var(--text-xs)",
-  fontWeight: 650,
-};
-
-const loadingPillStyle: React.CSSProperties = {
-  ...summaryItemStyle,
-  color: "var(--accent-primary)",
-};
-
-const loadErrorStyle: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "minmax(0, 1fr) auto",
-  alignItems: "center",
-  gap: "6px 10px",
-  padding: "10px 12px",
-  border: "1px solid color-mix(in oklch, var(--state-danger) 35%, var(--border-subtle))",
-  borderRadius: "var(--radius-sm, 7px)",
-  background: "var(--state-danger-soft)",
-  color: "var(--state-danger)",
-  fontSize: "var(--text-xs)",
-};
-
-const loadErrorCodeStyle: React.CSSProperties = {
-  minWidth: 0,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  color: "var(--text-secondary)",
-  fontFamily: "var(--font-mono)",
-};
-
-const retryButtonStyle: React.CSSProperties = {
-  ...secondaryActionStyle,
-  gridColumn: "2",
-  gridRow: "1 / span 2",
-  height: 30,
-};
-
-const iconButtonStyle: React.CSSProperties = {
-  ...secondaryActionStyle,
-  width: 32,
-  padding: 0,
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-};
-
-const compactActionStyle: React.CSSProperties = {
-  ...secondaryActionStyle,
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  gap: 6,
-};
-
-const pluginListStyle: React.CSSProperties = {
-  display: "grid",
-  gap: 8,
-};
-
-const importRowStyle: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "minmax(0, 1fr) auto auto",
-  alignItems: "center",
-  gap: 8,
-  padding: "10px 12px",
-  background: "var(--surface-soft)",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 7px)",
-};
-
-const packageBarStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-  minWidth: 0,
-};
-
-const validationPanelStyle = (ok: boolean): React.CSSProperties => ({
-  display: "grid",
-  gap: 5,
-  padding: "10px 12px",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 7px)",
-  background: ok ? "var(--state-success-soft)" : "var(--state-warning-soft)",
-  color: ok ? "var(--state-success)" : "var(--state-warning)",
-});
-
-const validationTitleStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  gap: 10,
-  fontSize: "var(--text-sm)",
-  fontWeight: 700,
-};
-
-const validationLineStyle: React.CSSProperties = {
-  color: "var(--text-secondary)",
-  fontSize: "var(--text-xs)",
-  lineHeight: 1.4,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
-
-const pluginRowStyle = (enabled: boolean): React.CSSProperties => ({
-  display: "grid",
-  gridTemplateColumns: "8px minmax(0, 1fr) auto",
-  alignItems: "center",
-  gap: 12,
-  minHeight: 76,
-  padding: "11px 12px",
-  background: enabled ? "var(--surface-soft)" : "var(--surface-base)",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 7px)",
-  opacity: enabled ? 1 : 0.72,
-});
-
-const statusDotStyle = (enabled: boolean): React.CSSProperties => ({
-  width: 8,
-  height: 8,
-  borderRadius: "50%",
-  background: enabled ? "var(--state-success)" : "var(--text-muted)",
-});
-
-const pluginTitleLineStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-  minWidth: 0,
-};
-
-const pluginNameStyle: React.CSSProperties = {
-  minWidth: 0,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-  color: "var(--text-primary)",
-  fontSize: "var(--text-sm)",
-  fontWeight: 700,
-};
-
-const descriptionStyle: React.CSSProperties = {
-  color: "var(--text-muted)",
-  fontSize: "var(--text-xs)",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
-
-const stateBadgeStyle = (enabled: boolean): React.CSSProperties => ({
-  flexShrink: 0,
-  padding: "2px 7px",
-  borderRadius: "999px",
-  color: enabled ? "var(--state-success)" : "var(--text-muted)",
-  border: "1px solid var(--border-subtle)",
-  fontSize: 10,
-  fontWeight: 750,
-  textTransform: "uppercase",
-});
-
-const toggleLabelStyle: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  cursor: "pointer",
-};
-
-const toggleInputStyle: React.CSSProperties = {
-  position: "absolute",
-  opacity: 0,
-  pointerEvents: "none",
-};
-
-const toggleTrackStyle = (enabled: boolean, saving: boolean): React.CSSProperties => ({
-  width: 38,
-  height: 22,
-  padding: 2,
-  borderRadius: 999,
-  background: enabled ? "var(--accent-primary)" : "var(--surface-soft)",
-  border: "1px solid var(--border-subtle)",
-  opacity: saving ? 0.55 : 1,
-  boxSizing: "border-box",
-  transition: "background 120ms, opacity 120ms",
-});
-
-const toggleThumbStyle = (enabled: boolean): React.CSSProperties => ({
-  display: "block",
-  width: 16,
-  height: 16,
-  borderRadius: "50%",
-  background: "var(--surface-base)",
-  boxShadow: "var(--shadow-sm)",
-  transform: enabled ? "translateX(16px)" : "translateX(0)",
-  transition: "transform 120ms",
-});

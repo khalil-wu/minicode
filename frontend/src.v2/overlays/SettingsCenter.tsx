@@ -1,32 +1,26 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Blocks,
+  ArrowLeft,
+  Blend,
+  Bot,
   CalendarClock,
   FlaskConical,
   Plug,
-  SlidersHorizontal,
+  Search,
+  Settings,
   Wrench,
-  X,
 } from "lucide-react";
 import { useAppStore } from "../stores";
 import { fetchLLMSettings } from "../protocol/api";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import "./SettingsCenter.css";
 import {
   type Tab,
   type ProviderId,
   type LLMSettingsPayload,
   toUiProvider,
-  backendProvider,
   runtimeCapabilityEffortLevels,
-  backdropStyle,
-  modalStyle,
-  headerStyle,
-  settingsBodyStyle,
-  tabsStyle,
-  contentStyle,
-  closeBtn,
-  tabButtonStyle,
 } from "./settingsShared";
 import { GeneralTab } from "./GeneralTab";
 import { ProviderTab } from "./ProviderTab";
@@ -36,7 +30,6 @@ import { AdvancedTab } from "./AdvancedTab";
 import { FeatureFlagsTab } from "./FeatureFlagsTab";
 import { PluginsTab } from "./PluginsTab";
 import { formatSettingsLoadError } from "./settingsLoad";
-import { ModelProviderIcon } from "../components/ModelProviderIcon";
 
 export const SettingsCenter = () => {
   const settingsOpen = useAppStore((s) => s.settingsOpen);
@@ -49,15 +42,16 @@ export const SettingsCenter = () => {
   const setEffortLevel = useAppStore((s) => s.setEffortLevel);
   const remoteImagePolicy = useAppStore((s) => s.remoteImagePolicy);
   const setRemoteImagePolicy = useAppStore((s) => s.setRemoteImagePolicy);
-  const dialogRef = useFocusTrap(settingsOpen);
+  const pageRef = useFocusTrap(settingsOpen);
 
   const [activeTab, setActiveTab] = useState<Tab>("general");
-  const [provider, setProvider] = useState<ProviderId>("deepseek");
+  const [provider, setProvider] = useState<ProviderId>("custom");
   const [settingsPayload, setSettingsPayload] = useState<LLMSettingsPayload | null>(null);
   const settingsPayloadRef = useRef<LLMSettingsPayload | null>(null);
   const settingsLoadEpochRef = useRef(0);
   const [settingsLoadState, setSettingsLoadState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [settingsLoadError, setSettingsLoadError] = useState("");
+  const [settingsQuery, setSettingsQuery] = useState("");
 
   const loadSettings = () => {
     const epoch = ++settingsLoadEpochRef.current;
@@ -139,15 +133,19 @@ export const SettingsCenter = () => {
   if (!settingsOpen) return null;
 
   const tabs = [
-    { id: "general" as const, label: "General", icon: <SlidersHorizontal /> },
-    { id: "provider" as const, label: "Models", icon: <ModelProviderIcon model={currentModel} size={17} /> },
-    { id: "connectors" as const, label: "Connectors", icon: <Plug /> },
-    { id: "scheduler" as const, label: "Automations", icon: <CalendarClock /> },
-    { id: "features" as const, label: "Feature Flags", icon: <FlaskConical /> },
-    { id: "plugins" as const, label: "Plugins", icon: <Blocks /> },
-    { id: "advanced" as const, label: "Advanced", icon: <Wrench /> },
+    { id: "general" as const, group: "个人", label: "常规", description: "管理权限、内容显示和桌面更新。", icon: <Settings /> },
+    { id: "provider" as const, group: "个人", label: "模型", description: "配置模型提供商、接口、凭据和推理强度。", icon: <Bot /> },
+    { id: "connectors" as const, group: "集成", label: "连接", description: "将 MiniCode 连接到 MCP 服务和外部工具。", icon: <Plug /> },
+    { id: "scheduler" as const, group: "集成", label: "已安排", description: "创建定时任务并查看最近运行结果。", icon: <CalendarClock /> },
+    { id: "plugins" as const, group: "集成", label: "插件", description: "管理本地插件和插件开发工具。", icon: <Blend /> },
+    { id: "features" as const, group: "编码", label: "实验功能", description: "预览开发中的功能并覆盖功能开关。", icon: <FlaskConical /> },
+    { id: "advanced" as const, group: "编码", label: "高级", description: "管理环境变量和运行时诊断。", icon: <Wrench /> },
   ];
-  const activeTabLabel = tabs.find((tab) => tab.id === activeTab)?.label ?? "Settings";
+  const activeTabMeta = tabs.find((tab) => tab.id === activeTab) ?? tabs[0];
+  const normalizedSettingsQuery = settingsQuery.trim().toLowerCase();
+  const visibleTabs = normalizedSettingsQuery
+    ? tabs.filter((tab) => `${tab.label} ${tab.group} ${tab.description}`.toLowerCase().includes(normalizedSettingsQuery))
+    : tabs;
   const switchPermissionMode = (mode: typeof permissionMode) => {
     setPermissionMode(mode);
   };
@@ -165,30 +163,56 @@ export const SettingsCenter = () => {
   const showReasoningEffort = runtimeSupportsReasoningEffort;
 
   return (
-    <div className="overlay-backdrop" onClick={toggleSettings} style={backdropStyle}>
-      <div ref={dialogRef} className="modal-content settings-center" role="dialog" aria-modal="true" aria-label="Settings" tabIndex={-1} onClick={(e) => e.stopPropagation()} onKeyDown={(e) => {
+    <main
+      ref={pageRef}
+      className="settings-workspace settings-center"
+      aria-label="设置"
+      tabIndex={-1}
+      onKeyDown={(e) => {
         if (e.key === "Escape") {
           e.preventDefault();
           e.stopPropagation();
           toggleSettings();
         }
-      }} style={modalStyle}>
-        <div style={headerStyle}>
-          <h2 style={{ margin: 0, fontSize: 16, color: "var(--text-primary)", fontWeight: 700 }}>{activeTabLabel}</h2>
-          <button type="button" className="mc-icon-button settings-center-close" onClick={toggleSettings} style={closeBtn} title="Close settings" aria-label="Close settings"><X size={16} /></button>
-        </div>
-
-        <div className="settings-center-body" style={settingsBodyStyle}>
-        <nav className="settings-center-tabs" style={tabsStyle} aria-label="Settings sections">
-          {tabs.map((tab) => (
-            <button className="settings-center-tab" key={tab.id} aria-label={tab.label} title={tab.label} aria-current={activeTab === tab.id ? "page" : undefined} onClick={() => setActiveTab(tab.id)} style={tabButtonStyle(activeTab === tab.id)}>
-              <span className="settings-center-tab-icon" aria-hidden="true">{tab.icon}</span>
-              <span className="settings-center-tab-label">{tab.label}</span>
-            </button>
-          ))}
+      }}
+    >
+      <aside className="settings-workspace-sidebar">
+        <button type="button" className="settings-back-button" onClick={toggleSettings} title="返回应用" aria-label="返回应用">
+          <ArrowLeft size={17} />
+          <span>返回应用</span>
+        </button>
+        <label className="settings-search">
+          <Search size={15} aria-hidden="true" />
+          <input value={settingsQuery} onChange={(event) => setSettingsQuery(event.target.value)} placeholder="搜索设置…" aria-label="搜索设置" />
+        </label>
+        <nav className="settings-center-tabs" aria-label="设置分类">
+          {["个人", "集成", "编码"].map((group) => {
+            const groupTabs = visibleTabs.filter((tab) => tab.group === group);
+            if (groupTabs.length === 0) return null;
+            return (
+              <div className="settings-nav-group" key={group}>
+                <div className="settings-nav-group-label">{group}</div>
+                {groupTabs.map((tab) => (
+                  <button className="settings-center-tab" key={tab.id} aria-label={tab.label} title={tab.description} aria-current={activeTab === tab.id ? "page" : undefined} onClick={() => setActiveTab(tab.id)}>
+                    <span className="settings-center-tab-icon" aria-hidden="true">{tab.icon}</span>
+                    <span className="settings-center-tab-label">{tab.label}</span>
+                  </button>
+                ))}
+              </div>
+            );
+          })}
+          {visibleTabs.length === 0 && <div className="settings-nav-empty">没有匹配的设置</div>}
         </nav>
+      </aside>
 
-        <div className="settings-center-content" style={contentStyle}>
+      <header className="settings-workspace-header" aria-hidden="true" />
+
+      <section className="settings-center-main" aria-labelledby="settings-page-title">
+          <div className="settings-center-content">
+            <header className="settings-page-heading">
+              <h2 id="settings-page-title">{activeTabMeta.label}</h2>
+            </header>
+            <div className="settings-page-body" key={activeTab}>
           {activeTab === "general" && (
             <GeneralTab
               permissionMode={permissionMode}
@@ -206,10 +230,10 @@ export const SettingsCenter = () => {
             settingsLoadState === "error" ? (
               <div role="alert" style={{ padding: 24, color: "var(--state-danger)" }}>
                 <div>{settingsLoadError}</div>
-                <button type="button" className="mc-button" onClick={loadSettings} style={{ marginTop: 12 }}>Retry</button>
+                <button type="button" className="btn" onClick={loadSettings} style={{ marginTop: 12 }}>重试</button>
               </div>
             ) : settingsLoadState !== "ready" ? (
-              <div style={{ padding: 24, color: "var(--text-muted)" }}>Loading model settings…</div>
+              <div style={{ padding: 24, color: "var(--text-muted)" }}>正在加载模型设置…</div>
             ) : <ProviderTab
               selectedProvider={provider}
               settingsPayload={settingsPayload}
@@ -219,13 +243,13 @@ export const SettingsCenter = () => {
             />
           )}
           {activeTab === "connectors" && <ConnectorsTab />}
-          {activeTab === "scheduler" && <SchedulerTab title="Schedules" />}
+          {activeTab === "scheduler" && <SchedulerTab title="已安排" />}
           {activeTab === "features" && <FeatureFlagsTab />}
           {activeTab === "plugins" && <PluginsTab />}
           {activeTab === "advanced" && <AdvancedTab />}
-        </div>
-        </div>
-      </div>
-    </div>
+            </div>
+          </div>
+      </section>
+    </main>
   );
 };

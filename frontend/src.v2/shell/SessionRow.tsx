@@ -1,7 +1,7 @@
+import { useRef } from "react";
 import { Clock3, GitBranch, LoaderCircle, MoreHorizontal } from "lucide-react";
 import { useAppStore } from "../stores";
 import { isDesktop } from "../desktop/runtime";
-import { branchDisplayName } from "../lib/workspace-display";
 import type { ConversationMeta } from "../stores/types";
 import { IconAction, ConversationMenu } from "./sidebarComponents";
 import {
@@ -9,9 +9,6 @@ import {
   sessionMainButtonStyle,
   sessionCheckboxStyle,
   sessionTitleStyle,
-  sessionMetaLineStyle,
-  branchMetaStyle,
-  waitingReasonMetaStyle,
   renameInputStyle,
 } from "./sidebarStyles";
 
@@ -24,7 +21,6 @@ export const SessionRow = ({
   renaming,
   renameValue,
   waitingLabelForConversation,
-  relativeTime,
   onSwitch,
   onToggleSelected,
   onSetMenuFor,
@@ -33,11 +29,15 @@ export const SessionRow = ({
   onCancelRename,
   onSetRenameValue,
   onArchive,
+  onClone,
+  onMerge,
+  onExport,
   onDelete,
   onCleanup,
   onHandoff,
   onReveal,
   onCopy,
+  treeDepth = 0,
 }: {
   conversation: ConversationMeta & { sessionStatus: "running" | "waiting" | "idle" };
   conversationId: string;
@@ -47,7 +47,6 @@ export const SessionRow = ({
   renaming: string | null;
   renameValue: string;
   waitingLabelForConversation: (id: string) => string | null;
-  relativeTime: (iso: string) => string;
   onSwitch: (id: string) => void;
   onToggleSelected: (id: string) => void;
   onSetMenuFor: (id: string | null) => void;
@@ -56,20 +55,29 @@ export const SessionRow = ({
   onCancelRename: () => void;
   onSetRenameValue: (value: string) => void;
   onArchive: (id: string, archived: boolean) => void;
+  onClone: (id: string) => void;
+  onMerge: (id: string) => void;
+  onExport: (id: string) => void;
   onDelete: (id: string) => void;
   onCleanup: (id: string) => void;
   onHandoff: (id: string, target: "local" | "worktree") => void;
   onReveal: (path?: string) => void;
   onCopy: (path?: string) => void;
+  treeDepth?: number;
 }) => {
   const c = conversation;
+  const menuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const menuId = `conversation-actions-${c.id}`;
   return (
     <div
       className="session-row-hover"
+      data-session-row="true"
       data-active={c.id === conversationId || undefined}
       style={{
         ...sessionRowStyle,
-        borderColor: c.id === conversationId ? "var(--border-subtle)" : "transparent",
+        paddingLeft: 40 + Math.min(treeDepth, 6) * 16,
+        borderColor: "transparent",
+        background: c.id === conversationId ? "var(--surface-active)" : "transparent",
         opacity: c.archived ? 0.6 : 1,
       }}
     >
@@ -86,6 +94,7 @@ export const SessionRow = ({
       )}
       <button
         type="button"
+        aria-current={c.id === conversationId ? "page" : undefined}
         onClick={(e) => {
           if (selectionMode) { onToggleSelected(c.id); return; }
           if (c.archived) return;
@@ -101,12 +110,6 @@ export const SessionRow = ({
         }}
         style={sessionMainButtonStyle}
       >
-        {c.sessionStatus === "running" && (
-          <LoaderCircle size={13} className="session-status-spinner" aria-label="Task running" style={{ color: "var(--state-info)", flexShrink: 0 }} />
-        )}
-        {c.sessionStatus === "waiting" && (
-          <Clock3 size={13} aria-label="Task waiting" style={{ color: "var(--state-warning)", flexShrink: 0 }} />
-        )}
         <div style={{ flex: 1, minWidth: 0 }}>
           {renaming === c.id ? (
             <input
@@ -124,43 +127,49 @@ export const SessionRow = ({
           ) : (
             <div
               onDoubleClick={(e) => { e.stopPropagation(); onStartRename(c.id, c.title); }}
-              style={{ ...sessionTitleStyle, fontWeight: c.id === conversationId ? 500 : 400 }}
+              style={{ ...sessionTitleStyle, fontWeight: c.id === conversationId ? 550 : 430 }}
             >
               {c.title}
+              {c.branchKind === "context_fork" && (
+                <span
+                  title="上下文分支"
+                  aria-label="上下文分支"
+                  style={{ display: "inline-flex", marginLeft: 6, color: "var(--text-muted)", verticalAlign: "-2px" }}
+                >
+                  <GitBranch size={14} />
+                </span>
+              )}
+              {c.branchKind === "clone" && (
+                <span title="会话副本" aria-label="会话副本" style={{ marginLeft: 6, color: "var(--text-muted)", fontSize: "var(--text-3xs)" }}>
+                  副本
+                </span>
+              )}
+              {c.mergedIntoConversationId && (
+                <span title="已合并" aria-label="已合并" style={{ marginLeft: 6, color: "var(--state-success)", fontSize: "var(--text-3xs)" }}>
+                  已合并
+                </span>
+              )}
             </div>
           )}
-          <div style={sessionMetaLineStyle}>
-            <span>{relativeTime(c.updatedAt)}</span>
-            {c.sessionStatus === "waiting" && waitingLabelForConversation(c.id) && (
-              <>
-                <span style={{ opacity: 0.4 }}>/</span>
-                <span title={waitingLabelForConversation(c.id) ?? undefined} style={waitingReasonMetaStyle}>
-                  {waitingLabelForConversation(c.id)}
-                </span>
-              </>
-            )}
-            {branchDisplayName(c.gitBranch) && (
-              <>
-                <span style={{ opacity: 0.4 }}>/</span>
-                <span
-                  title={c.worktreePath || c.gitBranch}
-                  style={{
-                    ...branchMetaStyle,
-                    color: c.gitIsolated ? "var(--accent-primary)" : "var(--text-muted)",
-                  }}
-                >
-                  {c.gitIsolated && <GitBranch size={10} />}
-                  {branchDisplayName(c.gitBranch)}
-                </span>
-              </>
-            )}
-          </div>
         </div>
       </button>
 
+      {c.sessionStatus === "running" && (
+        <LoaderCircle size={14} className="session-status-spinner mc-session-status-icon" aria-label="任务运行中" />
+      )}
+      {c.sessionStatus === "waiting" && (
+        <>
+          <Clock3 size={14} className="mc-session-status-icon" aria-label={waitingLabelForConversation(c.id) || "任务等待中"} />
+          {waitingLabelForConversation(c.id) && <span className="sr-only">{waitingLabelForConversation(c.id)}</span>}
+        </>
+      )}
+
       <span className="session-row-actions" data-open={menuFor === c.id || undefined}>
         <IconAction
-          label="Session actions"
+          label="会话操作"
+          buttonRef={menuButtonRef}
+          expanded={menuFor === c.id}
+          controls={menuFor === c.id ? menuId : undefined}
           onClick={(e) => { e.stopPropagation(); onSetMenuFor(menuFor === c.id ? null : c.id); }}
         >
           <MoreHorizontal size={14} />
@@ -168,13 +177,19 @@ export const SessionRow = ({
       </span>
       {menuFor === c.id && (
         <ConversationMenu
+          anchor={menuButtonRef.current}
+          menuId={menuId}
           archived={Boolean(c.archived)}
           isIsolated={Boolean(c.gitIsolated)}
           canDelete
           canReveal={Boolean((c.worktreePath || c.workspaceRoot) && isDesktop())}
           canCopy={Boolean(c.worktreePath || c.workspaceRoot)}
           canSwitch={!c.archived}
+          canMerge={Boolean(c.parentConversationId && !c.mergedIntoConversationId && !c.archived)}
           onSwitch={() => onSwitch(c.id)}
+          onClone={() => { onSetMenuFor(null); onClone(c.id); }}
+          onMerge={() => { onSetMenuFor(null); onMerge(c.id); }}
+          onExport={() => { onSetMenuFor(null); onExport(c.id); }}
           onReveal={() => onReveal(c.worktreePath || c.workspaceRoot)}
           onCopy={() => onCopy(c.worktreePath || c.workspaceRoot)}
           onCleanup={() => { onSetMenuFor(null); onCleanup(c.id); }}

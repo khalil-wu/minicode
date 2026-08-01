@@ -1,11 +1,11 @@
 import { shortToolPath } from "../../toolUtils";
-import type { ToolRendererProps } from "../toolRendererRegistry";
+import type { ToolCallRecord } from "../../../lib/tool-call-reducer";
 
 function stringArg(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function filePathForRecord(record: ToolRendererProps["record"], inputSummary?: string | null): string {
+function filePathForRecord(record: ToolCallRecord, inputSummary?: string | null): string {
   const args = record.args ?? {};
   return (
     stringArg(args.file_path) ||
@@ -15,14 +15,6 @@ function filePathForRecord(record: ToolRendererProps["record"], inputSummary?: s
     stringArg(inputSummary) ||
     ""
   );
-}
-
-function changeVerb(name: string): string {
-  if (/delete|remove/i.test(name)) return "Deleted";
-  if (/create/i.test(name)) return "Created";
-  if (/write/i.test(name)) return "Wrote";
-  if (/patch|apply/i.test(name)) return "Patched";
-  return "Edited";
 }
 
 function compactText(value: string): string {
@@ -35,7 +27,11 @@ export const FileChangeToolRenderer = ({
   record,
   inputSummary,
   resultSummary = "",
-}: ToolRendererProps) => {
+}: {
+  record: ToolCallRecord;
+  inputSummary?: string | null;
+  resultSummary?: string;
+}) => {
   const filePath = filePathForRecord(record, inputSummary);
   const diff = record.diff;
   const preview = compactText(record.contentPreview || record.displaySummary || resultSummary);
@@ -45,7 +41,7 @@ export const FileChangeToolRenderer = ({
       <div className="grid gap-1.5 px-2 py-1.5 border border-[var(--border-subtle)] rounded bg-[var(--surface-soft)] text-[var(--text-secondary)]">
         <div className="flex items-center gap-2 min-w-0">
           <span className="text-[var(--text-muted)] text-[11px] font-semibold tracking-normal">FILE CHANGE</span>
-          <span className="text-[var(--accent-primary)] font-semibold">{changeVerb(record.name)}</span>
+          <span className="text-[var(--accent-primary)] font-semibold">{record.displayHint || "Changed"}</span>
           {filePath && (
             <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono" title={filePath}>
               {shortToolPath(filePath)}
