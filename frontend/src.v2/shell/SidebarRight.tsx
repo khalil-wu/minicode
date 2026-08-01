@@ -297,7 +297,7 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
         flex: embedded ? "1 1 auto" : `0 0 ${rightPanelOpen ? sidebarWidth : 0}px`,
         background: "var(--surface-base)",
         border: embedded || !rightPanelOpen ? 0 : "1px solid var(--border-subtle)",
-        borderRadius: embedded ? 0 : 14,
+        borderRadius: embedded ? 0 : 20,
         boxShadow: embedded || !rightPanelOpen
           ? "none"
           : "0 8px 24px color-mix(in oklch, black 12%, transparent)",

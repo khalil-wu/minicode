@@ -162,16 +162,16 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
           }
           if (isCurrent()) setTree(nextTree);
         } else {
-          if (isCurrent()) setError("Could not load file tree");
+          if (isCurrent()) setError("无法加载文件列表");
         }
       }
     } catch (err) {
       if (!isCurrent()) return;
       if (workingDirectory && isMissingWorkspaceError(err)) {
         setTree(null);
-        setError(`Workspace folder is missing: ${workingDirectory}`);
+        setError(`工作区文件夹不存在：${workingDirectory}`);
       } else {
-        setError(err instanceof Error ? err.message : "Could not load file tree");
+        setError(err instanceof Error ? err.message : "无法加载文件列表");
       }
     } finally {
       if (isCurrent()) setLoading(false);
@@ -195,7 +195,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
         : visibleChildren(await listWorkspaceTree(workingDirectory, path) ?? { name: path, path, is_dir: true, children: [] });
       setTree((current) => current ? replaceNodeChildren(current, path, sortNodes(children)) : current);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load file tree");
+      setError(err instanceof Error ? err.message : "无法加载文件列表");
     } finally {
       setLoadingPaths((current) => {
         const next = new Set(current);
@@ -393,32 +393,32 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
 
   const createFile = async () => {
     const { showPrompt, showAlert } = await import("../overlays/DialogService");
-    const path = await showPrompt({ title: "New file", message: "File path:", placeholder: "src/example.ts" });
+    const path = await showPrompt({ title: "新建文件", message: "输入相对工作区的文件路径", placeholder: "src/example.ts" });
     if (!path) return;
     const targetPath = isDesktop() ? joinWorkspacePath(workingDirectory, path) : path;
     try {
       if (isDesktop()) await desktop()?.fs.writeFile(targetPath, "");
       else if (!(await writeWorkspaceFile(targetPath, "", workingDirectory))) {
-        await showAlert({ title: "Error", message: `Could not create ${path}` });
+        await showAlert({ title: "创建失败", message: `无法创建文件：${path}` });
         return;
       }
       void refresh();
-    } catch { await showAlert({ title: "Error", message: `Could not create ${path}` }); }
+    } catch { await showAlert({ title: "创建失败", message: `无法创建文件：${path}` }); }
   };
 
   const createFolder = async () => {
     const { showPrompt, showAlert } = await import("../overlays/DialogService");
-    const path = await showPrompt({ title: "New folder", message: "Folder path:", placeholder: "src/components" });
+    const path = await showPrompt({ title: "新建文件夹", message: "输入相对工作区的文件夹路径", placeholder: "src/components" });
     if (!path) return;
     const targetPath = isDesktop() ? joinWorkspacePath(workingDirectory, path) : path;
     try {
       if (isDesktop()) await desktop()?.fs.createDirectory(targetPath);
       else if (!(await createWorkspaceDirectory(targetPath, workingDirectory))) {
-        await showAlert({ title: "Error", message: `Could not create ${path}` });
+        await showAlert({ title: "创建失败", message: `无法创建文件夹：${path}` });
         return;
       }
       void refresh();
-    } catch { await showAlert({ title: "Error", message: `Could not create ${path}` }); }
+    } catch { await showAlert({ title: "创建失败", message: `无法创建文件夹：${path}` }); }
   };
 
   if (loading && !tree) {
@@ -441,7 +441,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   }
 
   if (error && !tree) {
-    const isMissingWorkspace = /workspace folder is missing/i.test(error);
+    const isMissingWorkspace = /workspace folder is missing|工作区文件夹不存在/i.test(error);
     return (
       <div style={{ padding: 12, fontSize: "var(--text-sm)" }}>
         <div style={{ color: "var(--text-muted)", marginBottom: 8 }}>{error}</div>

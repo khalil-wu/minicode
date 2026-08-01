@@ -467,7 +467,7 @@ const ActivityRunsSection = ({ items }: { items: ActivityRunItem[] }) => {
     : kinds.has('terminal')
       ? '终端'
       : kinds.has('background-command')
-        ? '后台任务'
+        ? '后台进程'
         : kinds.has('agent')
           ? '子智能体'
           : kinds.has('automation')

@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Monitor, Moon, Sun } from "lucide-react";
+import { Check, Monitor, Moon, Sun } from "lucide-react";
 import type { EffortLevel, PermissionMode, RemoteImagePolicy } from "../stores/types";
 import { useAppStore } from "../stores";
 import { EFFORT_LEVELS } from "./settingsShared";
@@ -75,16 +75,18 @@ export const GeneralTab = ({
       </SettingsGroup>
 
       <SettingsGroup title="权限">
-        {PERMISSION_CHOICES.map((mode) => (
-          <SettingsRow key={mode.id} title={mode.label} description={mode.description}>
-            <ChoiceToggle
-              active={permissionMode === mode.id}
-              label={`使用${mode.label}`}
-              warning={mode.id === "bypass"}
-              onClick={() => switchPermissionMode(mode.id)}
-            />
-          </SettingsRow>
-        ))}
+        <div role="radiogroup" aria-label="默认运行权限">
+          {PERMISSION_CHOICES.map((mode) => (
+            <SettingsRow key={mode.id} title={mode.label} description={mode.description}>
+              <PermissionChoice
+                active={permissionMode === mode.id}
+                label={`使用${mode.label}`}
+                warning={mode.id === "bypass"}
+                onClick={() => switchPermissionMode(mode.id)}
+              />
+            </SettingsRow>
+          ))}
+        </div>
       </SettingsGroup>
 
       <SettingsGroup title="常规">
@@ -156,18 +158,18 @@ const SettingsRow = ({ title, description, children }: { title: string; descript
   </div>
 );
 
-const ChoiceToggle = ({ active, label, warning = false, onClick }: { active: boolean; label: string; warning?: boolean; onClick: () => void }) => (
+const PermissionChoice = ({ active, label, warning = false, onClick }: { active: boolean; label: string; warning?: boolean; onClick: () => void }) => (
   <button
     type="button"
-    className="settings-toggle"
-    role="switch"
+    className="settings-choice"
+    role="radio"
     aria-checked={active}
     aria-label={label}
     data-active={active ? "true" : "false"}
     data-tone={warning ? "warning" : undefined}
     onClick={onClick}
   >
-    <span />
+    <span aria-hidden="true">{active && <Check size={13} strokeWidth={2.4} />}</span>
   </button>
 );
 

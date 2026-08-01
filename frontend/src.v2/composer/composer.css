@@ -414,11 +414,11 @@
 .composer-container {
   width: var(--chat-composer-axis-width, min(var(--input-max-width, 960px), calc(100% - 48px)));
   margin: 0 auto 12px !important;
-  padding: 8px 10px 9px !important;
+  padding: 10px 12px 11px !important;
   background: var(--surface-base) !important;
   border: 1px solid var(--border-soft) !important;
-  border-radius: 14px !important;
-  box-shadow: 0 1px 2px rgb(15 23 42 / 0.06) !important;
+  border-radius: 19px !important;
+  box-shadow: 0 8px 28px rgb(15 23 42 / 0.055) !important;
   isolation: isolate;
 
 }

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
+  Blocks,
   CheckCircle2,
   FolderArchive,
   FolderOpen,
@@ -117,6 +118,7 @@ export const PluginsTab = () => {
   const [validation, setValidation] = useState<PluginValidation | null>(null);
   const [packageResult, setPackageResult] = useState<PluginPackageResult | null>(null);
   const loadSeqRef = useRef(0);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const refresh = useCallback(async (options: { showToast?: boolean } = {}) => {
     const seq = loadSeqRef.current + 1;
@@ -277,7 +279,7 @@ export const PluginsTab = () => {
 
   return (
     <>
-      <Section title="本地插件">
+      <Section title="已安装插件" description="插件由本地插件目录发现；开关会同步刷新技能、MCP 和运行时能力。">
         <div className="plugin-summary">
           <div className="plugin-summary-item"><strong>{counts.enabled}</strong><span>已启用</span></div>
           <div className="plugin-summary-item"><strong>{plugins.length}</strong><span>已安装</span></div>
@@ -354,38 +356,48 @@ export const PluginsTab = () => {
             );
           })}
           {loading && plugins.length === 0 && <div className="plugin-empty">正在加载插件…</div>}
-          {!loading && plugins.length === 0 && !loadError && <div className="plugin-empty">配置的插件目录中没有本地插件。</div>}
+          {!loading && plugins.length === 0 && !loadError && (
+            <div className="plugin-empty">
+              <span className="plugin-empty-icon"><Blocks aria-hidden="true" /></span>
+              <strong>还没有本地插件</strong>
+              <p>导入一个插件文件夹或 Zip，MiniCode 会读取清单并加载其中的能力。</p>
+              <button type="button" onClick={() => importInputRef.current?.focus()}>导入插件</button>
+            </div>
+          )}
         </div>
       </Section>
 
-      <Section title="插件开发">
-        <p className="plugin-section-description">导入本地插件文件夹或安装包，并在发布前检查清单和资源。</p>
-        <div className="plugin-import-row">
-          <input
-            value={importPath}
-            onChange={(event) => setImportPath(event.currentTarget.value)}
-            onKeyDown={(event) => { if (event.key === "Enter") void importPlugin(); }}
-            placeholder="插件文件夹或 .zip 路径"
-            aria-label="插件文件夹或安装包路径"
-          />
-          {isDesktop() && <button type="button" onClick={choosePluginDirectory} className="plugin-icon-button" title="选择插件文件夹" aria-label="选择插件文件夹"><FolderOpen /></button>}
-          <button type="button" onClick={() => void importPlugin("directory")} disabled={!importPath.trim() || importing} className="plugin-primary-button">{importing ? "正在导入…" : "导入"}</button>
-        </div>
-        <div className="plugin-dev-actions">
-          <button type="button" onClick={() => void importPlugin("package")} disabled={!importPath.trim() || importing}><FolderArchive /><span>导入 Zip</span></button>
-          <button type="button" onClick={validatePlugin} disabled={!importPath.trim() || Boolean(checkingPath)}><CheckCircle2 /><span>{checkingPath === "validate" ? "正在检查…" : "验证"}</span></button>
-          <button type="button" onClick={packagePlugin} disabled={!importPath.trim() || Boolean(checkingPath)}><Archive /><span>{checkingPath === "package" ? "正在打包…" : "打包"}</span></button>
-          {packageResult?.package?.path && <code title={packageResult.package.path}>{packageResult.package.path}</code>}
-        </div>
-        {validation && (
-          <div className="plugin-validation" data-valid={validation.ok}>
-            <div>
-              <strong>{validation.ok ? "验证通过" : "验证需要处理"}</strong>
-              {validation.plugin && <span>{Number(validation.plugin.skill_count || 0)} 个技能 · {Number(validation.plugin.mcp_server_count || 0)} 个 MCP · {Number(validation.plugin.app_count || 0)} 个 App · {Number(validation.plugin.hook_count || 0)} 个 Hook · {Number(validation.plugin.file_count || 0)} 个文件</span>}
-            </div>
-            {[...(validation.errors || []), ...(validation.warnings || [])].slice(0, 4).map((item) => <p key={item}>{item}</p>)}
+      <Section title="插件开发" description="这些操作直接调用插件验证、导入和打包接口，不会创建新的运行时类型。">
+        <div className="plugin-dev-card">
+          <p className="plugin-section-description">先选择来源；验证和打包只对当前路径生效。</p>
+          <div className="plugin-import-row">
+            <input
+              ref={importInputRef}
+              value={importPath}
+              onChange={(event) => setImportPath(event.currentTarget.value)}
+              onKeyDown={(event) => { if (event.key === "Enter") void importPlugin(); }}
+              placeholder="插件文件夹或 .zip 路径"
+              aria-label="插件文件夹或安装包路径"
+            />
+            {isDesktop() && <button type="button" onClick={choosePluginDirectory} className="plugin-icon-button" title="选择插件文件夹" aria-label="选择插件文件夹"><FolderOpen /></button>}
+            <button type="button" onClick={() => void importPlugin("directory")} disabled={!importPath.trim() || importing} className="plugin-primary-button">{importing ? "正在导入…" : "导入"}</button>
           </div>
-        )}
+          <div className="plugin-dev-actions">
+            <button type="button" onClick={() => void importPlugin("package")} disabled={!importPath.trim() || importing}><FolderArchive /><span>导入 Zip</span></button>
+            <button type="button" onClick={validatePlugin} disabled={!importPath.trim() || Boolean(checkingPath)}><CheckCircle2 /><span>{checkingPath === "validate" ? "正在检查…" : "验证"}</span></button>
+            <button type="button" onClick={packagePlugin} disabled={!importPath.trim() || Boolean(checkingPath)}><Archive /><span>{checkingPath === "package" ? "正在打包…" : "打包"}</span></button>
+            {packageResult?.package?.path && <code title={packageResult.package.path}>{packageResult.package.path}</code>}
+          </div>
+          {validation && (
+            <div className="plugin-validation" data-valid={validation.ok}>
+              <div>
+                <strong>{validation.ok ? "验证通过" : "验证需要处理"}</strong>
+                {validation.plugin && <span>{Number(validation.plugin.skill_count || 0)} 个技能 · {Number(validation.plugin.mcp_server_count || 0)} 个 MCP · {Number(validation.plugin.app_count || 0)} 个 App · {Number(validation.plugin.hook_count || 0)} 个 Hook · {Number(validation.plugin.file_count || 0)} 个文件</span>}
+              </div>
+              {[...(validation.errors || []), ...(validation.warnings || [])].slice(0, 4).map((item) => <p key={item}>{item}</p>)}
+            </div>
+          )}
+        </div>
       </Section>
     </>
   );

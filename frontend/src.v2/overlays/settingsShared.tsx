@@ -234,13 +234,13 @@ export const formatProviderCheckSummary = (result: LLMCheckResult): string => {
 // ── Shared small components ────────────────────────────────────────────
 
 export const Section = ({ title, description, children }: { title: string; description?: string; children?: React.ReactNode }) => (
-  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-    <div>
-      <div style={{ fontSize: "var(--text-sm)", fontWeight: 600, color: "var(--text-primary)" }}>{title}</div>
-      {description && <div style={{ fontSize: "var(--text-2xs)", color: "var(--text-muted)", marginTop: 2 }}>{description}</div>}
+  <section className="settings-section">
+    <div className="settings-section-heading">
+      <div className="settings-section-title">{title}</div>
+      {description && <p className="settings-section-description">{description}</p>}
     </div>
     {children}
-  </div>
+  </section>
 );
 
 export const SettingRow = ({ label, children }: { label: string; children: React.ReactNode }) => (
@@ -277,11 +277,11 @@ export const contentStyle: React.CSSProperties = { padding: "18px 22px", overflo
 export const contentHeaderStyle: React.CSSProperties = { paddingBottom: 10, borderBottom: "1px solid var(--border-subtle)" };
 export const closeBtn: React.CSSProperties = { backgroundColor: "var(--surface-soft)", border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm, 6px)", color: "var(--text-muted)", width: 30, height: 30, cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0 };
 export const monoTextStyle: React.CSSProperties = { fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)", color: "var(--text-secondary)" };
-export const inputStyle: React.CSSProperties = { width: "100%", backgroundColor: "var(--surface-soft)", border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm, 6px)", padding: "9px 10px", color: "var(--text-primary)", fontSize: "var(--text-sm)", fontFamily: "var(--font-mono)", outline: "none", boxSizing: "border-box", transition: "border-color 150ms" };
+export const inputStyle: React.CSSProperties = { width: "100%", minHeight: 38, backgroundColor: "var(--surface-base)", border: "1px solid var(--border-subtle)", borderRadius: 10, padding: "8px 11px", color: "var(--text-primary)", fontSize: 13, fontFamily: "var(--font-mono)", outline: "none", boxSizing: "border-box", transition: "border-color 150ms, box-shadow 150ms" };
 export const selectInputStyle: React.CSSProperties = { ...inputStyle, cursor: "pointer", fontFamily: "var(--font-ui)", colorScheme: "light dark" };
 export const hintLineStyle: React.CSSProperties = { marginTop: 6, color: "var(--text-muted)", fontSize: "var(--text-xs)", lineHeight: 1.4 };
-export const primaryActionStyle: React.CSSProperties = { padding: "0 16px", height: 34, borderRadius: "var(--radius-sm, 8px)", fontWeight: 600, cursor: "pointer", fontSize: "var(--text-sm)", backgroundColor: "var(--accent-primary)", color: "var(--text-on-accent, var(--text-primary))", border: 0, transition: "opacity 150ms" };
-export const secondaryActionStyle: React.CSSProperties = { padding: "0 16px", height: 34, borderRadius: "var(--radius-sm, 8px)", fontWeight: 600, cursor: "pointer", fontSize: "var(--text-sm)", backgroundColor: "var(--surface-soft)", color: "var(--text-secondary)", border: "1px solid var(--border-subtle)", transition: "background 150ms" };
+export const primaryActionStyle: React.CSSProperties = { padding: "0 16px", height: 36, borderRadius: 10, fontWeight: 620, cursor: "pointer", fontSize: 13, backgroundColor: "var(--accent-primary)", color: "var(--text-on-accent, var(--text-primary))", border: 0, transition: "opacity 150ms" };
+export const secondaryActionStyle: React.CSSProperties = { padding: "0 16px", height: 36, borderRadius: 10, fontWeight: 600, cursor: "pointer", fontSize: 13, backgroundColor: "var(--surface-base)", color: "var(--text-secondary)", border: "1px solid var(--border-subtle)", transition: "background 150ms" };
 export const preStyle: React.CSSProperties = { margin: 0, padding: 12, backgroundColor: "var(--surface-soft)", border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm, 4px)", fontSize: "var(--text-xs)", fontFamily: "var(--font-mono)", color: "var(--text-secondary)", overflow: "auto", maxHeight: 200 };
 
 export const tabButtonStyle = (active: boolean): React.CSSProperties => ({ width: 42, minHeight: 40, display: "flex", alignItems: "center", justifyContent: "center", padding: 0, backgroundColor: active ? "var(--surface-base)" : "transparent", border: `1px solid ${active ? "var(--border-subtle)" : "transparent"}`, borderRadius: "var(--radius-sm, 7px)", color: active ? "var(--text-primary)" : "var(--text-secondary)", cursor: "pointer", fontSize: "var(--text-sm)", boxShadow: active ? "inset 3px 0 0 var(--accent-primary)" : "none", transition: "background var(--transition-micro), color var(--transition-micro), border-color var(--transition-micro)" });
@@ -295,11 +295,11 @@ export const providerCheckTitleStyle: React.CSSProperties = { fontWeight: 700, c
 export const providerCheckGridStyle: React.CSSProperties = { display: "grid", gridTemplateColumns: "72px minmax(0, 1fr)", gap: "4px 10px", color: "var(--text-muted)" };
 export const providerCheckHintStyle: React.CSSProperties = { color: "var(--state-danger)", lineHeight: 1.45 };
 
-export const subTabBarStyle: React.CSSProperties = { display: "inline-flex", alignSelf: "flex-start", gap: 2, padding: 3, backgroundColor: "var(--surface-soft)", border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm, 8px)" };
-export const subTabStyle = (active: boolean): React.CSSProperties => ({ display: "inline-flex", alignItems: "center", gap: 7, height: 30, padding: "0 10px", border: 0, borderRadius: "var(--radius-sm, 6px)", backgroundColor: active ? "var(--surface-base)" : "transparent", color: active ? "var(--text-primary)" : "var(--text-secondary)", cursor: "pointer", fontSize: "var(--text-sm)", fontWeight: 650 });
+export const subTabBarStyle: React.CSSProperties = { width: "fit-content", display: "inline-flex", alignSelf: "start", gap: 2, padding: 3, backgroundColor: "var(--surface-soft)", border: "1px solid var(--border-subtle)", borderRadius: 12 };
+export const subTabStyle = (active: boolean): React.CSSProperties => ({ display: "inline-flex", alignItems: "center", gap: 7, height: 32, padding: "0 12px", border: 0, borderRadius: 9, backgroundColor: active ? "var(--surface-base)" : "transparent", color: active ? "var(--text-primary)" : "var(--text-secondary)", cursor: "pointer", fontSize: 13, fontWeight: 620, boxShadow: active ? "0 1px 3px color-mix(in oklch, black 7%, transparent)" : "none" });
 export const subTabCountStyle: React.CSSProperties = { color: "var(--text-muted)", fontSize: "var(--text-2xs)", fontFamily: "var(--font-mono)" };
 export const emptyInlineStyle: React.CSSProperties = { padding: "12px 0", color: "var(--text-muted)", fontSize: "var(--text-sm)" };
-export const mcpServerRowStyle: React.CSSProperties = { display: "flex", alignItems: "center", gap: 10, minHeight: 44, padding: "8px 10px", backgroundColor: "var(--surface-soft)", border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm, 7px)" };
+export const mcpServerRowStyle: React.CSSProperties = { display: "flex", alignItems: "center", gap: 12, minHeight: 62, padding: "9px 12px", backgroundColor: "var(--surface-base)", border: "1px solid var(--border-subtle)", borderRadius: 13 };
 export const mcpNameStyle: React.CSSProperties = { flexShrink: 1, minWidth: 0, fontWeight: 650, fontSize: "var(--text-sm)", color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 export const mcpErrorStyle: React.CSSProperties = { fontSize: "var(--text-2xs)", color: "var(--state-danger)", marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 const mcpTone = (state: string): string => {
@@ -311,10 +311,10 @@ const mcpTone = (state: string): string => {
 export const mcpDotStyle = (status: string): React.CSSProperties => ({ width: 8, height: 8, borderRadius: "50%", flexShrink: 0, backgroundColor: mcpTone(status) });
 export const statusChipStyle = (status: string): React.CSSProperties => ({ flexShrink: 0, padding: "1px 6px", borderRadius: "999px", border: "1px solid var(--border-subtle)", color: mcpTone(status), fontSize: "var(--text-3xs)", fontWeight: 700, textTransform: "uppercase" });
 export const miniMetaStyle: React.CSSProperties = { flexShrink: 0, color: "var(--text-muted)", fontSize: "var(--text-2xs)", fontFamily: "var(--font-mono)" };
-export const mcpActionBtnStyle: React.CSSProperties = { backgroundColor: "transparent", border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm, 5px)", width: 28, height: 28, cursor: "pointer", color: "var(--text-muted)", display: "flex", alignItems: "center", justifyContent: "center", padding: 0 };
-export const marketplaceListStyle: React.CSSProperties = { display: "grid", gap: 1, border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-sm, 8px)", overflow: "hidden" };
-export const marketplaceRowStyle: React.CSSProperties = { display: "flex", alignItems: "center", gap: 10, minHeight: 54, padding: "9px 11px", backgroundColor: "var(--surface-soft)", borderBottom: "1px solid var(--border-subtle)" };
+export const mcpActionBtnStyle: React.CSSProperties = { backgroundColor: "var(--surface-base)", border: "1px solid var(--border-subtle)", borderRadius: 9, width: 32, height: 32, cursor: "pointer", color: "var(--text-muted)", display: "flex", alignItems: "center", justifyContent: "center", padding: 0 };
+export const marketplaceListStyle: React.CSSProperties = { display: "grid", gap: 0, border: "1px solid var(--border-subtle)", borderRadius: 16, overflow: "hidden", backgroundColor: "var(--surface-base)" };
+export const marketplaceRowStyle: React.CSSProperties = { display: "flex", alignItems: "center", gap: 12, minHeight: 70, padding: "11px 14px", backgroundColor: "var(--surface-base)", borderBottom: "1px solid var(--border-subtle)" };
 export const marketplaceTitleStyle: React.CSSProperties = { fontSize: "var(--text-sm)", fontWeight: 650, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 export const marketplaceDescStyle: React.CSSProperties = { fontSize: "var(--text-xxs)", color: "var(--text-muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 export const installedPillStyle: React.CSSProperties = { flexShrink: 0, padding: "3px 8px", borderRadius: "999px", color: "var(--state-success)", border: "1px solid color-mix(in oklch, var(--state-success) 35%, var(--border-subtle))", fontSize: "var(--text-2xs)", fontWeight: 650 };
-export const compactInstallStyle: React.CSSProperties = { flexShrink: 0, height: 30, padding: "0 12px", borderRadius: "var(--radius-sm, 6px)", border: "1px solid var(--border-subtle)", backgroundColor: "var(--surface-base)", color: "var(--text-secondary)", fontSize: "var(--text-xs)", fontWeight: 650, cursor: "pointer" };
+export const compactInstallStyle: React.CSSProperties = { flexShrink: 0, height: 34, padding: "0 13px", borderRadius: 10, border: "1px solid var(--border-subtle)", backgroundColor: "var(--surface-base)", color: "var(--text-secondary)", fontSize: 13, fontWeight: 620, cursor: "pointer" };

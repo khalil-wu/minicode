@@ -987,30 +987,34 @@ const providerListHeaderStyle: CSSProperties = {
 
 const providerListTitleStyle: CSSProperties = {
   color: "var(--text-primary)",
-  fontSize: "var(--text-sm)",
-  fontWeight: 700,
+  fontSize: 17,
+  fontWeight: 640,
 };
 
 const addProviderButtonStyle: CSSProperties = {
-  height: 32,
+  height: 36,
   display: "inline-flex",
   alignItems: "center",
   justifyContent: "center",
   gap: 7,
   padding: "0 12px",
-  borderRadius: "var(--radius-sm, 6px)",
+  borderRadius: 10,
   border: 0,
   backgroundColor: "var(--accent-primary)",
   color: "var(--text-on-accent, var(--text-primary))",
   cursor: "pointer",
-  fontSize: "var(--text-xs)",
-  fontWeight: 700,
+  fontSize: 13,
+  fontWeight: 620,
   whiteSpace: "nowrap",
 };
 
 const providerCardListStyle: CSSProperties = {
   display: "grid",
-  gap: 8,
+  gap: 0,
+  overflow: "hidden",
+  border: "1px solid var(--border-subtle)",
+  borderRadius: 17,
+  backgroundColor: "var(--surface-base)",
 };
 
 const emptyProviderListStyle: CSSProperties = {
@@ -1035,23 +1039,21 @@ const emptyProviderTitleStyle: CSSProperties = {
 
 
 const providerCardStyle = (active: boolean, editing: boolean): CSSProperties => ({
-  minHeight: 74,
+  minHeight: 82,
   display: "grid",
   gridTemplateColumns: "minmax(0, 1fr) 186px",
   alignItems: "center",
   gap: 12,
-  padding: "9px 12px",
-  borderRadius: "var(--radius-sm, 8px)",
-  border: active
-    ? "1px solid var(--accent-primary)"
-    : editing
-      ? "1px solid color-mix(in oklch, var(--accent-primary) 55%, var(--border-subtle))"
-      : "1px solid var(--border-subtle)",
+  padding: "11px 14px",
+  border: 0,
+  borderBottom: "1px solid var(--border-subtle)",
+  borderRadius: 0,
   backgroundColor: active
-    ? "color-mix(in oklch, var(--accent-primary) 9%, var(--surface-base))"
+    ? "var(--surface-active)"
     : editing
-      ? "color-mix(in oklch, var(--accent-primary) 5%, var(--surface-base))"
-      : "var(--surface-soft)",
+      ? "var(--surface-hover)"
+      : "var(--surface-base)",
+  boxShadow: active ? "inset 3px 0 0 var(--accent-primary)" : "none",
 });
 
 const providerCardMainStyle: CSSProperties = {
@@ -1059,7 +1061,7 @@ const providerCardMainStyle: CSSProperties = {
   minHeight: 54,
   minWidth: 0,
   display: "grid",
-  gridTemplateColumns: "36px minmax(0, 1fr)",
+  gridTemplateColumns: "40px minmax(0, 1fr)",
   alignItems: "center",
   gap: 10,
   border: 0,
@@ -1072,16 +1074,16 @@ const providerCardMainStyle: CSSProperties = {
 
 const providerCardTitleStyle: CSSProperties = {
   color: "var(--text-primary)",
-  fontSize: "var(--text-sm)",
-  fontWeight: 700,
+  fontSize: 15,
+  fontWeight: 640,
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
 };
 
 const providerCardUrlStyle: CSSProperties = {
-  color: "var(--accent-primary)",
-  fontSize: "var(--text-xs)",
+  color: "var(--text-muted)",
+  fontSize: 13,
   fontFamily: "var(--font-mono)",
   overflow: "hidden",
   textOverflow: "ellipsis",
@@ -1094,7 +1096,7 @@ const providerCardMetaStyle: CSSProperties = {
   gap: 5,
   minWidth: 0,
   color: "var(--text-muted)",
-  fontSize: "var(--text-2xs)",
+  fontSize: 12,
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
@@ -1124,7 +1126,7 @@ const providerCardActionsStyle: CSSProperties = {
 const iconActionStyle: CSSProperties = {
   width: 30,
   height: 30,
-  borderRadius: "var(--radius-sm, 6px)",
+  borderRadius: 9,
   border: "1px solid var(--border-subtle)",
   backgroundColor: "var(--surface-base)",
   color: "var(--text-muted)",
@@ -1143,7 +1145,7 @@ const useActionStyle = (active: boolean): CSSProperties => ({
   justifyContent: "center",
   gap: 6,
   padding: 0,
-  borderRadius: "var(--radius-sm, 6px)",
+  borderRadius: 9,
   border: active ? "1px solid var(--accent-primary)" : 0,
   backgroundColor: active ? "var(--surface-base)" : "var(--accent-primary)",
   color: active ? "var(--accent-primary)" : "var(--text-on-accent, var(--text-primary))",

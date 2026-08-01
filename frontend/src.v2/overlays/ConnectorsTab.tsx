@@ -75,7 +75,7 @@ export const ConnectorsTab = () => {
 
       {mode === "servers" && (
         <>
-          <Section title="MCP 服务">
+          <Section title="MCP 服务" description="这里显示 MCP 运行时实际加载的服务、连接状态和可用工具数量。">
             {mcpServers.length === 0 && <div style={emptyInlineStyle}>尚未配置 MCP 服务。</div>}
             {mcpServers.map((server) => (
               <div key={server.name} style={mcpServerRowStyle}>
@@ -125,7 +125,7 @@ export const ConnectorsTab = () => {
             ))}
           </Section>
 
-          <Section title="添加服务">
+          <Section title="添加服务" description="stdio 启动本地进程；HTTP 连接现有的 Streamable HTTP 服务。">
             <div className="grid gap-2">
               <div className="flex gap-2">
                 <input type="text" value={newServerName} onChange={(e) => setNewServerName(e.target.value)} placeholder="服务名称" style={{ ...inputStyle, flex: 1 }} />
@@ -172,7 +172,7 @@ export const ConnectorsTab = () => {
       )}
 
       {mode === "marketplace" && (
-        <Section title="连接市场">
+        <Section title="连接市场" description="市场项目来自后端连接目录；安装后仍由同一个 MCP 运行时管理。">
           {marketplaceConnectors.length === 0 && <div style={emptyInlineStyle}>暂未加载市场项目。</div>}
           {marketplaceConnectors.length > 0 && (
             <div style={marketplaceListStyle}>

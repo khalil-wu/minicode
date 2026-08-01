@@ -106,18 +106,18 @@ export const TreeNode = memo(({
         style={{
           display: "flex",
           alignItems: "center",
-          gap: 5,
+          gap: 6,
           height: ROW_HEIGHT[density],
-          margin: "1px 8px",
+          margin: "1px 7px",
           padding: "0 8px",
           paddingLeft: 8 + depth * 15,
           cursor: "pointer",
           color: selected ? "var(--text-primary)" : node.is_dir ? "var(--text-primary)" : "var(--text-secondary)",
           background: selected ? "var(--surface-active)" : "transparent",
           border: "1px solid transparent",
-          borderColor: selected ? "color-mix(in oklch, var(--accent-primary) 32%, transparent)" : "transparent",
-          borderRadius: "var(--radius-sm, 6px)",
-          boxShadow: selected ? "inset 2px 0 0 var(--accent-primary)" : "none",
+          borderColor: "transparent",
+          borderRadius: 8,
+          boxShadow: "none",
           transition: "background 80ms ease, border-color 80ms ease, box-shadow 80ms ease",
         }}
       >
@@ -144,7 +144,7 @@ export const TreeNode = memo(({
           lineHeight: "20px",
           fontFamily: "var(--font-ui)",
           color: gitStatus ? GIT_STATUS_COLOR[gitStatus] : undefined,
-          fontWeight: selected ? 650 : node.is_dir ? 560 : 450,
+          fontWeight: selected ? 620 : node.is_dir ? 540 : 440,
         }}>
           {node.name}
         </span>
@@ -160,7 +160,7 @@ export const TreeNode = memo(({
           </span>
         )}
         {loading && (
-          <span role="status" aria-label={`Loading ${node.name}`} style={{ color: "var(--text-muted)", flexShrink: 0, display: "inline-flex" }}>
+          <span role="status" aria-label={`正在加载 ${node.name}`} style={{ color: "var(--text-muted)", flexShrink: 0, display: "inline-flex" }}>
             <LoaderCircle size={14} className="animate-spin" aria-hidden="true" />
           </span>
         )}

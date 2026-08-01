@@ -23,8 +23,8 @@ export interface ContextMenuState {
 // ── Constants ──────────────────────────────────────────────────────────
 
 export const ROW_HEIGHT: Record<ExplorerDensity, number> = {
-  compact: 28,
-  comfortable: 30,
+  compact: 30,
+  comfortable: 34,
 };
 
 export const HIDDEN_TREE_NAMES = new Set([
@@ -77,11 +77,11 @@ export const fileTreeRootStyle: React.CSSProperties = {
 };
 
 export const fileTreeHeaderStyle: React.CSSProperties = {
-  minHeight: 36,
+  minHeight: 42,
   display: "flex",
   alignItems: "center",
   gap: 6,
-  padding: "6px 12px",
+  padding: "7px 14px",
   borderBottom: "1px solid var(--border-subtle)",
   background: "var(--surface-sidebar)",
 };
@@ -92,14 +92,14 @@ export const fileTreeRootLabelStyle: React.CSSProperties = {
   whiteSpace: "nowrap",
   color: "var(--text-primary)",
   fontSize: "var(--text-sm)",
-  fontWeight: 600,
+  fontWeight: 630,
 };
 
 export const fileTreeToolbarStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   gap: 6,
-  padding: "6px 12px",
+  padding: "6px 10px 8px",
   borderBottom: "1px solid var(--border-subtle)",
   background: "var(--surface-sidebar)",
 };
@@ -114,14 +114,14 @@ export const fileTreeListStyle: React.CSSProperties = {
 export const fileTreeSearchStyle: React.CSSProperties = {
   flex: 1,
   minWidth: 0,
-  height: 30,
+  height: 32,
   display: "flex",
   alignItems: "center",
   gap: 5,
   padding: "0 9px",
   border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 7px)",
-  background: "var(--surface-page)",
+  borderRadius: 9,
+  background: "var(--surface-base)",
   color: "var(--text-muted)",
 };
 
@@ -178,7 +178,7 @@ export const treeChevronStyle: React.CSSProperties = {
 };
 
 export const treeIconStyle: React.CSSProperties = {
-  width: 18,
+  width: 17,
   display: "inline-flex",
   alignItems: "center",
   justifyContent: "center",

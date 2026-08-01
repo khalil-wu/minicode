@@ -42,7 +42,7 @@
 /* Final Codex reference alignment */
 :root,
 [data-theme="light"] {
-  --header-height: 36px;
+  --header-height: 44px;
   --sidebar-min-width: 252px;
   --sidebar-max-width: 348px;
   --chat-axis-width: calc(100% - 48px);
@@ -3061,7 +3061,7 @@ html[data-theme="light"] .mc-sidebar-mode-tab[aria-selected="true"] {
 
 :root,
 [data-theme="light"] {
-  --header-height: 36px;
+  --header-height: 44px;
   --sidebar-min-width: 252px;
   --sidebar-max-width: 348px;
   --chat-axis-width: calc(100% - 48px);

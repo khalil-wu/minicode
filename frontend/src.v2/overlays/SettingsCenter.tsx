@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
-  Blend,
+  Blocks,
   Bot,
   CalendarClock,
   FlaskConical,
@@ -133,13 +133,13 @@ export const SettingsCenter = () => {
   if (!settingsOpen) return null;
 
   const tabs = [
-    { id: "general" as const, group: "个人", label: "常规", description: "管理权限、内容显示和桌面更新。", icon: <Settings /> },
-    { id: "provider" as const, group: "个人", label: "模型", description: "配置模型提供商、接口、凭据和推理强度。", icon: <Bot /> },
-    { id: "connectors" as const, group: "集成", label: "连接", description: "将 MiniCode 连接到 MCP 服务和外部工具。", icon: <Plug /> },
-    { id: "scheduler" as const, group: "集成", label: "已安排", description: "创建定时任务并查看最近运行结果。", icon: <CalendarClock /> },
-    { id: "plugins" as const, group: "集成", label: "插件", description: "管理本地插件和插件开发工具。", icon: <Blend /> },
-    { id: "features" as const, group: "编码", label: "实验功能", description: "预览开发中的功能并覆盖功能开关。", icon: <FlaskConical /> },
-    { id: "advanced" as const, group: "编码", label: "高级", description: "管理环境变量和运行时诊断。", icon: <Wrench /> },
+    { id: "general" as const, group: "个人", label: "常规", description: "设置外观、默认运行权限和内容显示方式。", icon: <Settings /> },
+    { id: "provider" as const, group: "个人", label: "模型", description: "管理模型提供商、兼容接口、凭据和推理能力。", icon: <Bot /> },
+    { id: "connectors" as const, group: "集成", label: "连接", description: "管理由 MCP 运行时承载的服务与外部工具。", icon: <Plug /> },
+    { id: "scheduler" as const, group: "集成", label: "已安排", description: "管理后端调度器中的定时任务和最近运行结果。", icon: <CalendarClock /> },
+    { id: "plugins" as const, group: "集成", label: "插件", description: "启用本地插件，并查看其带来的技能、MCP 和应用能力。", icon: <Blocks /> },
+    { id: "features" as const, group: "编码", label: "实验功能", description: "预览仍在开发中的能力并管理功能开关。", icon: <FlaskConical /> },
+    { id: "advanced" as const, group: "编码", label: "高级", description: "管理工具运行时使用的环境变量和诊断信息。", icon: <Wrench /> },
   ];
   const activeTabMeta = tabs.find((tab) => tab.id === activeTab) ?? tabs[0];
   const normalizedSettingsQuery = settingsQuery.trim().toLowerCase();
@@ -211,6 +211,7 @@ export const SettingsCenter = () => {
           <div className="settings-center-content">
             <header className="settings-page-heading">
               <h2 id="settings-page-title">{activeTabMeta.label}</h2>
+              <p>{activeTabMeta.description}</p>
             </header>
             <div className="settings-page-body" key={activeTab}>
           {activeTab === "general" && (
