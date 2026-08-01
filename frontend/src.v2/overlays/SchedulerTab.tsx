@@ -196,6 +196,7 @@ export const SchedulerTab = ({
                 schedule: effectiveSchedule,
                 timezone,
                 isolation,
+                permission_mode: "auto",
                 conversation_id: taskMode === "heartbeat" ? conversationId ?? undefined : undefined,
               });
               setNewTaskName("");

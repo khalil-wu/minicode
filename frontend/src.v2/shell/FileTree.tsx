@@ -98,14 +98,15 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   const searchEpochRef = useRef(0);
   const gitMap = useMemo(() => {
     const next = new Map<string, GitStatus>();
+    const treePath = (path: string) => isDesktop() ? joinWorkspacePath(workingDirectory, path) : path;
     for (const file of gitChanges.workingTree) {
       const patch = file.patch ?? "";
-      next.set(file.path, patch.includes("deleted file mode") ? "deleted" : "modified");
+      next.set(treePath(file.path), patch.includes("deleted file mode") ? "deleted" : "modified");
     }
-    for (const path of gitChanges.untracked) next.set(path, "untracked");
-    for (const file of gitChanges.staged) next.set(file.path, "staged");
+    for (const path of gitChanges.untracked) next.set(treePath(path), "untracked");
+    for (const file of gitChanges.staged) next.set(treePath(file.path), "staged");
     return next;
-  }, [gitChanges]);
+  }, [gitChanges, workingDirectory]);
 
   const refresh = useCallback(async () => {
     const epoch = ++refreshEpochRef.current;
@@ -205,7 +206,10 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   }, [workingDirectory]);
 
   const refreshChangedPaths = useCallback(async (changes: { path: string; event: string; timestamp: number }[]) => {
-    const parents = Array.from(new Set(changes.map((change) => parentTreePath(change.path, workingDirectory))));
+    const parents = Array.from(new Set(changes.map((change) => parentTreePath(
+      isDesktop() ? joinWorkspacePath(workingDirectory, change.path) : change.path,
+      workingDirectory,
+    ))));
     if (!parents.length) return;
     try {
       await Promise.all(parents.map((parent) => (
@@ -420,15 +424,15 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   if (loading && !tree) {
     return (
       <div style={{ padding: 12, color: "var(--text-muted)", fontSize: "var(--text-sm)", display: "grid", gap: 8 }}>
-        <div>{slowLoading ? "Still loading file tree..." : "Loading file tree..."}</div>
+        <div>{slowLoading ? "文件较多，仍在加载…" : "正在加载文件…"}</div>
         {slowLoading && (
           <>
             <div style={{ fontSize: "var(--text-xs)", lineHeight: 1.45 }}>
-              Large workspaces can take longer on the first scan. You can wait, retry, or switch to a smaller folder.
+              大型工作区首次扫描会稍慢。你可以继续等待、重试，或切换到较小的文件夹。
             </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <button onClick={refresh} style={refreshBtn}>重试</button>
-              {isDesktop() && <button onClick={() => void openWorkspaceFolder()} style={refreshBtn}>Switch folder</button>}
+              {isDesktop() && <button onClick={() => void openWorkspaceFolder()} style={refreshBtn}>切换文件夹</button>}
             </div>
           </>
         )}
@@ -517,7 +521,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
       >
       {hasQuery ? (
         searchLoading ? (
-          <div style={fileTreeEmptyStyle}>Searching workspace...</div>
+          <div style={fileTreeEmptyStyle}>正在搜索工作区…</div>
         ) : searchResults.length > 0 ? (
           searchResults.map((result) => (
             <SearchResultRow
@@ -531,7 +535,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
             />
           ))
         ) : (
-          <div style={fileTreeEmptyStyle}>No files match "{query.trim()}".</div>
+          <div style={fileTreeEmptyStyle}>没有与“{query.trim()}”匹配的文件。</div>
         )
       ) : children.length > 0 ? (
         children.map((node) => (

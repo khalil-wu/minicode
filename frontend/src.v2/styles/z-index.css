@@ -27,7 +27,7 @@
  * 800  - Drawers (slide-in panels)
  * 900  - Modal backdrop
  * 1000 - Regular modals (Settings, CommandPalette, QuickOpen, etc.)
- * 1050 - Critical approval prompts (AskUserPrompt, DiffReviewModal)
+ * 1050 - Critical inline approval/review prompts
  * 1100 - Toast notifications
  * 1200 - System dialogs (confirm/alert from DialogService)
  * 1250 - Context menus (right-click menus)

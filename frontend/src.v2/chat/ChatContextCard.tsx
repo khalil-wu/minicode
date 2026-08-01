@@ -4,8 +4,6 @@ import {
   FileText,
   ListChecks,
   MonitorPlay,
-  Network,
-  Paperclip,
   PanelRightOpen,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -301,7 +299,10 @@ export const ChatContextCard = () => {
   };
   const openBackgroundTasks = () => useAppStore.getState().setRightStackTab("tasks");
 
-  if (cardPresence === "hidden") return null;
+  // Empty context is already reachable from the header/sidebar controls.  A
+  // permanently visible zero-state card steals reading width without helping
+  // the user, so only surface this contextual rail when it has real content.
+  if (cardPresence === "hidden" || contextCount === 0) return null;
 
   return (
     <aside className="mc-chat-context-card" data-state={cardPresence} aria-label="工作区上下文摘要">
@@ -323,31 +324,6 @@ export const ChatContextCard = () => {
       </header>
 
       <div className="mc-chat-context-card-body">
-        {contextCount === 0 && (
-          <section className="mc-chat-context-card-section mc-chat-context-card-empty" aria-label="上下文入口">
-            <button type="button" className="mc-chat-context-empty-row" onClick={() => openAgent()}>
-              <Network size={16} />
-              <span>子智能体</span>
-              <small>0</small>
-            </button>
-            <button type="button" className="mc-chat-context-empty-row" onClick={() => openPanel("tasks")}>
-              <Paperclip size={16} />
-              <span>来源</span>
-              <small>0</small>
-            </button>
-            <button type="button" className="mc-chat-context-empty-row" onClick={() => openBrowserTarget()}>
-              <MonitorPlay size={16} />
-              <span>浏览器</span>
-              <small>0</small>
-            </button>
-            <button type="button" className="mc-chat-context-empty-row" onClick={openBackgroundTasks}>
-              <ListChecks size={16} />
-              <span>后台任务</span>
-              <small>0</small>
-            </button>
-          </section>
-        )}
-
         {agentViews.length > 0 && <section className="mc-chat-context-card-section" aria-label="子智能体摘要">
           <button type="button" className="mc-chat-context-section-title" onClick={() => openAgent()}>
             <span>子智能体</span>

@@ -3,7 +3,7 @@
  * and DetailsTab (inspector entries / recent tool calls).
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Copy, Database, Download, FolderOpen, GitBranch, TerminalSquare, Upload } from 'lucide-react'
+import { ChevronDown, Copy, Database, Download, FolderOpen, GitBranch, TerminalSquare, Upload } from 'lucide-react'
 import { isDesktop, revealPath } from '../../desktop/runtime'
 import { fetchWorkspaceGitStatus, type WorkspaceGitStatusResponse } from '../../protocol/workspace'
 import { useAppStore } from '../../stores'
@@ -26,12 +26,54 @@ export const InspectorTab = () => (
 const InspectorTabContent = () => {
   const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities)
   const traceExportEnabled = capabilityFeatureEnabled(runtimeCapabilities, 'agent_trace_export_v1', false)
+  const [advancedOpen, setAdvancedOpen] = useState(false)
   return (
-    <div style={{ display: 'grid', gap: 12 }}>
+    <div style={{ display: 'grid', gap: 14 }}>
       <ContextTab />
-      <RunTimelineSection traceExportEnabled={traceExportEnabled} />
-      <RuntimeMetricsSection />
-      <DetailsTab traceExportEnabled={traceExportEnabled} />
+      <RunOverviewSection />
+      <button
+        type="button"
+        aria-expanded={advancedOpen}
+        onClick={() => setAdvancedOpen((value) => !value)}
+        style={advancedToggleStyle}
+      >
+        <span style={{ display: 'grid', gap: 2 }}>
+          <strong style={{ color: 'var(--text-primary)', fontSize: 'var(--text-sm)' }}>高级诊断</strong>
+          <small style={{ color: 'var(--text-muted)', fontSize: 'var(--text-xs)' }}>面向开发者的事件、性能和原始请求信息</small>
+        </span>
+        <ChevronDown size={16} style={{ transform: advancedOpen ? 'rotate(180deg)' : 'none', transition: 'transform 140ms ease' }} />
+      </button>
+      {advancedOpen && (
+        <section aria-label="高级诊断" style={{ display: 'grid', gap: 16 }}>
+          <RunTimelineSection traceExportEnabled={traceExportEnabled} />
+          <RuntimeMetricsSection />
+          <DetailsTab traceExportEnabled={traceExportEnabled} />
+        </section>
+      )}
+    </div>
+  )
+}
+
+const RunOverviewSection = () => {
+  const messages = useAppStore((s) => s.messages)
+  const agentProgress = useAppStore((s) => s.agentProgress)
+  const replayEvents = useMemo(() => buildRunReplayEvents(messages, agentProgress), [messages, agentProgress])
+  const summary = useMemo(() => buildRunReplaySummary(replayEvents), [replayEvents])
+  const status = summary.outcome === 'needs_attention'
+    ? `${summary.failedOrBlocked} 项需要处理`
+    : summary.outcome === 'running'
+      ? `${summary.running} 项进行中`
+      : summary.outcome === 'completed'
+        ? '已完成'
+        : '尚未开始'
+  return (
+    <div style={{ display: 'grid', gap: 8 }}>
+      <SectionLabel label="本次运行" />
+      <InfoCard>
+        <InfoRow label="状态" value={status} tone={summary.outcome === 'needs_attention' ? 'warning' : summary.outcome === 'running' ? 'accent' : 'muted'} />
+        {replayEvents.length > 0 && <InfoRow label="活动" value={`${replayEvents.length} 条`} />}
+        {summary.spanMs != null && <InfoRow label="耗时" value={`${(summary.spanMs / 1000).toFixed(1)} 秒`} mono />}
+      </InfoCard>
     </div>
   )
 }
@@ -49,14 +91,14 @@ const RunTimelineSection = ({ traceExportEnabled }: { traceExportEnabled: boolea
   const copySessionReplay = async () => {
     const sessionId = getWebSocket()?.sessionId
     if (!sessionId) {
-      setSessionReplayStatus('No active session')
+      setSessionReplayStatus('当前没有活动会话')
       return
     }
-    setSessionReplayStatus('Loading session replay...')
+    setSessionReplayStatus('正在读取会话记录…')
     try {
       const payload = await fetchReplayExport({ sessionId, conversationId, limit: 500 })
       await navigator.clipboard?.writeText(JSON.stringify(payload, null, 2))
-      setSessionReplayStatus(`Copied ${payload.event_count} session events`)
+      setSessionReplayStatus(`已复制 ${payload.event_count} 条会话事件`)
     } catch (error) {
       setSessionReplayStatus(error instanceof Error ? error.message : String(error))
     }
@@ -64,29 +106,29 @@ const RunTimelineSection = ({ traceExportEnabled }: { traceExportEnabled: boolea
   return (
     <div style={{ display: 'grid', gap: 8 }}>
       <div style={sectionHeaderWithActionsStyle}>
-        <SectionLabel label="Run Timeline" />
+        <SectionLabel label="运行记录" />
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           <SmallButton
             icon={<TerminalSquare size={14} />}
-            label={expanded ? 'Hide events' : 'Show recent events'}
+            label={expanded ? '收起事件' : '查看最近事件'}
             onClick={() => setExpanded((value) => !value)}
           />
         {traceExportEnabled && (
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-            <SmallButton icon={<Copy size={14} />} label="Copy JSONL" onClick={() => void navigator.clipboard?.writeText(exportJsonl())} />
-            <SmallButton icon={<Download size={14} />} label="Download JSONL" onClick={() => downloadText('minicode-run-timeline.jsonl', exportJsonl(), 'application/x-ndjson')} />
-            <SmallButton icon={<Copy size={14} />} label="Copy Replay" onClick={() => void navigator.clipboard?.writeText(replayJsonl())} />
-            <SmallButton icon={<Download size={14} />} label="Download Replay" onClick={() => downloadText('minicode-run-replay.jsonl', replayJsonl(), 'application/x-ndjson')} />
-            <SmallButton icon={<Copy size={14} />} label="Copy Session Replay" onClick={() => void copySessionReplay()} />
+            <SmallButton icon={<Copy size={14} />} label="复制 JSONL" onClick={() => void navigator.clipboard?.writeText(exportJsonl())} />
+            <SmallButton icon={<Download size={14} />} label="下载 JSONL" onClick={() => downloadText('minicode-run-timeline.jsonl', exportJsonl(), 'application/x-ndjson')} />
+            <SmallButton icon={<Copy size={14} />} label="复制回放" onClick={() => void navigator.clipboard?.writeText(replayJsonl())} />
+            <SmallButton icon={<Download size={14} />} label="下载回放" onClick={() => downloadText('minicode-run-replay.jsonl', replayJsonl(), 'application/x-ndjson')} />
+            <SmallButton icon={<Copy size={14} />} label="复制会话回放" onClick={() => void copySessionReplay()} />
           </div>
         )}
         </div>
       </div>
       {traceExportEnabled && sessionReplayStatus && <div style={sessionReplayStatusStyle}>{sessionReplayStatus}</div>}
       <InfoCard>
-        <InfoRow label="Events" value={replayEvents.length === 0 ? 'No runtime events' : `${replayEvents.length} events`} mono />
-        <InfoRow label="Status" value={replaySummary.outcome === 'needs_attention' ? `${replaySummary.failedOrBlocked} need attention` : replaySummary.outcome === 'running' ? `${replaySummary.running} running` : replaySummary.outcome === 'completed' ? 'Completed' : 'Idle'} tone={replaySummary.outcome === 'needs_attention' ? 'warning' : replaySummary.outcome === 'running' ? 'accent' : 'muted'} />
-        <InfoRow label="Span" value={replaySummary.spanMs == null ? 'n/a' : `${(replaySummary.spanMs / 1000).toFixed(1)}s`} mono />
+        <InfoRow label="事件" value={replayEvents.length === 0 ? '暂无运行事件' : `${replayEvents.length} 条`} mono />
+        <InfoRow label="状态" value={replaySummary.outcome === 'needs_attention' ? `${replaySummary.failedOrBlocked} 项需要处理` : replaySummary.outcome === 'running' ? `${replaySummary.running} 项进行中` : replaySummary.outcome === 'completed' ? '已完成' : '空闲'} tone={replaySummary.outcome === 'needs_attention' ? 'warning' : replaySummary.outcome === 'running' ? 'accent' : 'muted'} />
+        <InfoRow label="耗时" value={replaySummary.spanMs == null ? '—' : `${(replaySummary.spanMs / 1000).toFixed(1)} 秒`} mono />
       </InfoCard>
       {expanded && (
         <div style={timelineShellStyle}>
@@ -104,12 +146,12 @@ const ReplayPreview = ({ events, summary }: { events: RunReplayEvent[]; summary:
   const visibleEvents = events.slice(0, 8)
   return (
     <div style={{ display: 'grid', gap: 8 }}>
-      <SectionLabel label="Replay View" />
+      <SectionLabel label="回放预览" />
       <InfoCard>
-        <InfoRow label="Events" value={`${summary.events} replayable`} mono />
-        <InfoRow label="Coverage" value={`${summary.coveragePercent}% timed · ${summary.phases.join(', ') || 'none'}`} tone={summary.coveragePercent >= 95 ? 'accent' : 'warning'} mono />
-        <InfoRow label="Outcome" value={replayOutcomeLabel(summary)} tone={summary.outcome === 'needs_attention' ? 'warning' : summary.outcome === 'completed' ? 'accent' : 'muted'} />
-        <InfoRow label="Span" value={summary.spanMs == null ? 'n/a' : `${(summary.spanMs / 1000).toFixed(2)}s`} mono />
+        <InfoRow label="事件" value={`${summary.events} 条可回放`} mono />
+        <InfoRow label="覆盖率" value={`${summary.coveragePercent}% 有计时 · ${summary.phases.join(', ') || '无阶段'}`} tone={summary.coveragePercent >= 95 ? 'accent' : 'warning'} mono />
+        <InfoRow label="结果" value={replayOutcomeLabel(summary)} tone={summary.outcome === 'needs_attention' ? 'warning' : summary.outcome === 'completed' ? 'accent' : 'muted'} />
+        <InfoRow label="耗时" value={summary.spanMs == null ? '—' : `${(summary.spanMs / 1000).toFixed(2)} 秒`} mono />
       </InfoCard>
       <div style={replayListStyle}>
         {visibleEvents.map((event) => (
@@ -121,7 +163,7 @@ const ReplayPreview = ({ events, summary }: { events: RunReplayEvent[]; summary:
           </div>
         ))}
         {events.length > visibleEvents.length && (
-          <div style={replayMoreStyle}>+{events.length - visibleEvents.length} more replay events</div>
+          <div style={replayMoreStyle}>另有 {events.length - visibleEvents.length} 条回放事件</div>
         )}
       </div>
     </div>
@@ -146,10 +188,10 @@ const ContextTab = () => {
 
   const conversation = conversations.find((c) => c.id === conversationId)
   const workspacePath = conversation?.worktreePath || conversation?.workspaceRoot || workingDirectory || workspaceGit?.currentPath || ''
-  const branch = conversation?.gitBranch || workspaceGit?.branch || 'No branch'
+  const branch = conversation?.gitBranch || workspaceGit?.branch || '无分支'
   const hasWorkspacePath = Boolean(workspacePath.trim())
-  const displayWorkspace = workspaceDisplayName(workspacePath, 'Computer')
-  const displayBranch = branchDisplayName(branch) || 'No branch'
+  const displayWorkspace = workspaceDisplayName(workspacePath, '本机')
+  const displayBranch = branchDisplayName(branch) || '无分支'
   const contextPercent = contextUsage && contextUsage.limit > 0 ? Math.round((contextUsage.used / contextUsage.limit) * 100) : null
   const contextLedger = contextUsage?.ledger
   const visibleLedgerEntries = contextLedger?.entries.filter((entry) =>
@@ -192,83 +234,83 @@ const ContextTab = () => {
     <div style={{ display: 'grid', gap: 10 }}>
       {hasSessionRows && (
         <>
-          <SectionLabel label="Session" />
+          <SectionLabel label="会话" />
           <InfoCard>
-            <InfoRow label="Conversation" value={conversation?.title || conversationId || 'Untitled'} />
+            <InfoRow label="任务" value={conversation?.title || conversationId || '未命名'} />
             {hasWorkspacePath && (
               <InfoRow
-                label="Isolation"
-                value={conversation?.gitIsolated || workspaceGit?.isWorktree ? 'Protected workspace' : 'Shared workspace'}
+                label="工作区模式"
+                value={conversation?.gitIsolated || workspaceGit?.isWorktree ? '隔离工作区' : '共享工作区'}
                 tone={conversation?.gitIsolated || workspaceGit?.isWorktree ? 'accent' : 'muted'}
               />
             )}
-            {displayBranch !== 'No branch' && <InfoRow label="Branch" value={displayBranch} mono />}
+            {displayBranch !== '无分支' && <InfoRow label="分支" value={displayBranch} mono />}
           </InfoCard>
         </>
       )}
       {hasWorkspaceRows && (
         <>
-          <SectionLabel label="Workspace" />
+          <SectionLabel label="工作区" />
           <InfoCard>
-            <InfoRow label="Path" value={displayWorkspace} mono />
+            <InfoRow label="位置" value={displayWorkspace} mono />
             <InfoRow
-              label="Changes"
-              value={gitLoading ? 'Checking...' : gitError ? 'Unavailable' : changedCount == null ? 'Unknown' : changedCount === 0 ? 'Clean' : `${changedCount} changed`}
+              label="更改"
+              value={gitLoading ? '检查中…' : gitError ? '暂不可用' : changedCount == null ? '未知' : changedCount === 0 ? '无更改' : `${changedCount} 项`}
               tone={gitError || (changedCount && changedCount > 0) ? 'warning' : 'muted'}
             />
             {gitError && (
               <div style={{ color: 'var(--state-warning)', background: 'color-mix(in oklch, var(--state-warning) 9%, transparent)', border: '1px solid color-mix(in oklch, var(--state-warning) 32%, transparent)', borderRadius: 'var(--radius-sm, 4px)', padding: '6px 8px', fontSize: 'var(--text-xs)', lineHeight: 1.4 }}>
-                Git status failed: {gitError}
+                无法读取 Git 状态：{gitError}
               </div>
             )}
             <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
-              <SmallButton icon={<FolderOpen size={14} />} label="Reveal" disabled={!isDesktop()} onClick={() => void revealPath(workspacePath)} />
-              <SmallButton icon={<Copy size={14} />} label="Copy" onClick={() => void navigator.clipboard?.writeText(workspacePath)} />
-              <SmallButton icon={<GitBranch size={14} />} label="Refresh" onClick={refreshGitStatus} />
+              <SmallButton icon={<FolderOpen size={14} />} label="打开位置" disabled={!isDesktop()} onClick={() => void revealPath(workspacePath)} />
+              <SmallButton icon={<Copy size={14} />} label="复制路径" onClick={() => void navigator.clipboard?.writeText(workspacePath)} />
+              <SmallButton icon={<GitBranch size={14} />} label="刷新" onClick={refreshGitStatus} />
             </div>
           </InfoCard>
         </>
       )}
       {hasRuntimeRows && (
         <>
-          <SectionLabel label="Runtime" />
+          <SectionLabel label="运行环境" />
           <InfoCard>
             {contextPercent != null && (
-              <InfoRow label="Context" value={`${contextPercent}% (${contextUsage?.used}/${contextUsage?.limit})`} tone={contextPercent >= 85 ? 'warning' : 'muted'} />
+              <InfoRow label="上下文" value={`${contextPercent}% (${contextUsage?.used}/${contextUsage?.limit})`} tone={contextPercent >= 85 ? 'warning' : 'muted'} />
             )}
             {contextUsage?.compactedAt && (
               <InfoRow
-                label="Compact"
-                value={`${new Date(contextUsage.compactedAt).toLocaleTimeString()}: ${contextUsage.compactSummary || 'Done'}`}
+                label="最近压缩"
+                value={`${new Date(contextUsage.compactedAt).toLocaleTimeString()}：${contextUsage.compactSummary || '已完成'}`}
                 tone="accent"
               />
             )}
-            {terminalSessions.length > 0 && <InfoRow label="Terminals" value={String(terminalSessions.length)} />}
-            {activeEditorPath && <InfoRow label="Editor" value={activeEditorPath} mono />}
+            {terminalSessions.length > 0 && <InfoRow label="终端" value={String(terminalSessions.length)} />}
+            {activeEditorPath && <InfoRow label="编辑器" value={activeEditorPath} mono />}
             {terminalSessions.length > 0 && (
-              <SmallButton icon={<TerminalSquare size={14} />} label="Open Terminal" onClick={() => setRightStackTab('terminal')} />
+              <SmallButton icon={<TerminalSquare size={14} />} label="打开终端" onClick={() => setRightStackTab('terminal')} />
             )}
           </InfoCard>
         </>
       )}
       {contextLedger && (
         <>
-          <SectionLabel label="Context Ledger" />
+          <SectionLabel label="上下文用量" />
           <InfoCard>
-            <InfoRow label="Estimated" value={`${formatNumber(contextLedger.estimated_tokens)} tok`} mono />
-            <InfoRow label="Actual" value={`${formatNumber(contextLedger.actual_tokens)} tok`} mono />
-            <InfoRow label="Compactions" value={String(contextLedger.compaction_count)} mono />
+            <InfoRow label="估算" value={`${formatNumber(contextLedger.estimated_tokens)} 令牌`} mono />
+            <InfoRow label="实际" value={`${formatNumber(contextLedger.actual_tokens)} 令牌`} mono />
+            <InfoRow label="压缩次数" value={String(contextLedger.compaction_count)} mono />
             <InfoRow
-              label="Native attachments"
-              value={`${formatNumber(contextLedger.native_attachment_tokens)} tok · ${contextLedger.native_attachment_count} items`}
+              label="原生附件"
+              value={`${formatNumber(contextLedger.native_attachment_tokens)} 令牌 · ${contextLedger.native_attachment_count} 项`}
               mono
               tone={contextLedger.native_attachment_count > 0 ? 'accent' : 'muted'}
             />
             {visibleLedgerEntries.map((entry) => (
               <InfoRow
                 key={entry.category}
-                label={entry.label}
-                value={`${formatNumber(entry.estimated_tokens)} tok · ${entry.item_count} items · ${entry.source_count} sources`}
+                label={localizedLedgerLabel(entry.label)}
+                value={`${formatNumber(entry.estimated_tokens)} 令牌 · ${entry.item_count} 项 · ${entry.source_count} 个来源`}
                 mono
                 title={entry.sources.length > 0 ? entry.sources.join(', ') : undefined}
               />
@@ -294,19 +336,19 @@ const RuntimeMetricsSection = () => {
   if (!summary.hasSignals) return null
   return (
     <div style={{ display: 'grid', gap: 8 }}>
-      <SectionLabel label="Runtime Metrics" />
+      <SectionLabel label="性能指标" />
       <InfoCard>
-        <InfoRow label="TTFT" value={formatMaybeMs(summary.ttftMs)} mono tone={metricTone(summary.ttftMs, 2500)} />
-        <InfoRow label="Tool Start" value={formatMaybeMs(summary.avgToolStartLatencyMs)} mono tone={metricTone(summary.avgToolStartLatencyMs, 500)} />
-        <InfoRow label="Tool Exec" value={formatMaybeMs(summary.avgToolExecMs)} mono />
-        <InfoRow label="Cache Saved" value={`${formatNumber(summary.cacheSavedMs)} ms${summary.cacheHitRate == null ? '' : ` · ${summary.cacheHitRate}% hit`}`} mono tone={summary.cacheSavedMs > 0 ? 'accent' : 'muted'} />
-        <InfoRow label="Batching" value={summary.batchedGroups > 0 ? `${summary.batchedTools} tools in ${summary.batchedGroups} groups` : 'No grouped dispatch'} tone={summary.batchedGroups > 0 ? 'accent' : 'muted'} />
-        <InfoRow label="Coordination" value={coordinationMetricLabel(summary)} tone={summary.subagentSignals > 0 ? 'accent' : 'muted'} />
-        <InfoRow label="Prefetch" value={summary.prefetchSignals > 0 ? `${summary.prefetchSignals} warm cache signals` : 'No warm cache signal'} tone={summary.prefetchSignals > 0 ? 'accent' : 'muted'} />
-        <InfoRow label="Stalls" value={summary.stallSignals > 0 ? `${summary.stallSignals} signals` : 'None'} tone={summary.stallSignals > 0 ? 'warning' : 'muted'} />
-        <InfoRow label="Recovery" value={summary.recoveryTotal > 0 ? `${summary.recoverySucceeded}/${summary.recoveryTotal} succeeded` : 'No recovery'} tone={summary.recoveryTotal > summary.recoverySucceeded ? 'warning' : summary.recoveryTotal > 0 ? 'accent' : 'muted'} />
-        <InfoRow label="Approvals" value={summary.approvalSignals > 0 ? `${summary.approvalSignals} waits` : 'No approval wait'} tone={summary.approvalSignals > 0 ? 'warning' : 'muted'} />
-        <InfoRow label="Trace" value={summary.traceCompleteness == null ? 'n/a' : `${summary.traceCompleteness}% timed`} tone={summary.traceCompleteness != null && summary.traceCompleteness < 95 ? 'warning' : 'muted'} />
+        <InfoRow label="首字时间" value={formatMaybeMs(summary.ttftMs)} mono tone={metricTone(summary.ttftMs, 2500)} />
+        <InfoRow label="工具启动" value={formatMaybeMs(summary.avgToolStartLatencyMs)} mono tone={metricTone(summary.avgToolStartLatencyMs, 500)} />
+        <InfoRow label="工具执行" value={formatMaybeMs(summary.avgToolExecMs)} mono />
+        <InfoRow label="缓存收益" value={`${formatNumber(summary.cacheSavedMs)} ms${summary.cacheHitRate == null ? '' : ` · 命中 ${summary.cacheHitRate}%`}`} mono tone={summary.cacheSavedMs > 0 ? 'accent' : 'muted'} />
+        <InfoRow label="批处理" value={summary.batchedGroups > 0 ? `${summary.batchedTools} 个工具 / ${summary.batchedGroups} 组` : '未分组调度'} tone={summary.batchedGroups > 0 ? 'accent' : 'muted'} />
+        <InfoRow label="协作" value={coordinationMetricLabel(summary)} tone={summary.subagentSignals > 0 ? 'accent' : 'muted'} />
+        <InfoRow label="预热" value={summary.prefetchSignals > 0 ? `${summary.prefetchSignals} 个缓存信号` : '无预热信号'} tone={summary.prefetchSignals > 0 ? 'accent' : 'muted'} />
+        <InfoRow label="停顿" value={summary.stallSignals > 0 ? `${summary.stallSignals} 个信号` : '无'} tone={summary.stallSignals > 0 ? 'warning' : 'muted'} />
+        <InfoRow label="恢复" value={summary.recoveryTotal > 0 ? `${summary.recoverySucceeded}/${summary.recoveryTotal} 成功` : '未触发恢复'} tone={summary.recoveryTotal > summary.recoverySucceeded ? 'warning' : summary.recoveryTotal > 0 ? 'accent' : 'muted'} />
+        <InfoRow label="审批等待" value={summary.approvalSignals > 0 ? `${summary.approvalSignals} 次` : '无'} tone={summary.approvalSignals > 0 ? 'warning' : 'muted'} />
+        <InfoRow label="追踪完整度" value={summary.traceCompleteness == null ? '—' : `${summary.traceCompleteness}% 有计时`} tone={summary.traceCompleteness != null && summary.traceCompleteness < 95 ? 'warning' : 'muted'} />
       </InfoCard>
     </div>
   )
@@ -384,37 +426,37 @@ const DetailsTab = ({ traceExportEnabled }: { traceExportEnabled: boolean }) => 
           event.target.value = ''
         }}
       />
-      <SectionLabel label="Inspector" />
+      <SectionLabel label="原始诊断" />
       {!focusedEntry && inspectorEntries.length === 0 && (
         <InfoCard>
-          <InfoRow label="Entries" value="No inspector entries" />
-          <SmallButton icon={<Upload size={14} />} label="Import JSONL" onClick={() => importRef.current?.click()} />
+          <InfoRow label="记录" value="暂无诊断记录" />
+          <SmallButton icon={<Upload size={14} />} label="导入 JSONL" onClick={() => importRef.current?.click()} />
         </InfoCard>
       )}
       {(focusedEntry || inspectorEntries.length > 0) && (
         <>
           {providerEntries.length > 0 && (
             <InfoCard>
-              <InfoRow label="Provider" value={`${providerEntries.length} calls`} />
-              <InfoRow label="Tokens" value={`${formatNumber(usageTotals.input)} in / ${formatNumber(usageTotals.output)} out`} mono />
-              <InfoRow label="Cache" value={`${sessionCacheHit == null ? 'n/a' : `${sessionCacheHit}%`} hit · ${formatNumber(usageTotals.cacheRead)} read`} tone={sessionCacheHit ? 'accent' : 'muted'} />
-              {usageTotals.cacheDeleted > 0 && <InfoRow label="Cache Deleted" value={formatNumber(usageTotals.cacheDeleted)} mono />}
-              <InfoRow label="Reasoning" value={formatNumber(usageTotals.reasoning)} mono />
+              <InfoRow label="模型调用" value={`${providerEntries.length} 次`} />
+              <InfoRow label="令牌" value={`${formatNumber(usageTotals.input)} 输入 / ${formatNumber(usageTotals.output)} 输出`} mono />
+              <InfoRow label="缓存" value={`${sessionCacheHit == null ? '—' : `${sessionCacheHit}%`} 命中 · 读取 ${formatNumber(usageTotals.cacheRead)}`} tone={sessionCacheHit ? 'accent' : 'muted'} />
+              {usageTotals.cacheDeleted > 0 && <InfoRow label="已删除缓存" value={formatNumber(usageTotals.cacheDeleted)} mono />}
+              <InfoRow label="推理令牌" value={formatNumber(usageTotals.reasoning)} mono />
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 7 }}>
                 {traceExportEnabled && (
                   <>
-                    <SmallButton icon={<Copy size={14} />} label="Copy JSONL" onClick={() => void navigator.clipboard?.writeText(providerTraceExportJsonl(providerRaws))} />
-                    <SmallButton icon={<Download size={14} />} label="Download JSONL" onClick={() => downloadText('minicode-provider-traces.jsonl', providerTraceExportJsonl(providerRaws), 'application/x-ndjson')} />
+                    <SmallButton icon={<Copy size={14} />} label="复制 JSONL" onClick={() => void navigator.clipboard?.writeText(providerTraceExportJsonl(providerRaws))} />
+                    <SmallButton icon={<Download size={14} />} label="下载 JSONL" onClick={() => downloadText('minicode-provider-traces.jsonl', providerTraceExportJsonl(providerRaws), 'application/x-ndjson')} />
                   </>
                 )}
-                <SmallButton icon={<Upload size={14} />} label="Import JSONL" onClick={() => importRef.current?.click()} />
+                <SmallButton icon={<Upload size={14} />} label="导入 JSONL" onClick={() => importRef.current?.click()} />
               </div>
             </InfoCard>
           )}
           {providerEntries.length === 0 && (
             <InfoCard>
-              <InfoRow label="Provider" value="No provider traces yet" />
-              <SmallButton icon={<Upload size={14} />} label="Import JSONL" onClick={() => importRef.current?.click()} />
+              <InfoRow label="模型调用" value="暂无追踪记录" />
+              <SmallButton icon={<Upload size={14} />} label="导入 JSONL" onClick={() => importRef.current?.click()} />
             </InfoCard>
           )}
           {cacheEntries.length > 0 && <CacheDiagnosisCard entries={cacheEntries} />}
@@ -426,7 +468,7 @@ const DetailsTab = ({ traceExportEnabled }: { traceExportEnabled: boolean }) => 
                 onClick={() => setFilter(item)}
                 style={filterButtonStyle(filter === item)}
               >
-                {item}
+                {({ all: '全部', provider: '模型', tool: '工具', cache: '缓存', usage: '用量' } as const)[item]}
               </button>
             ))}
           </div>
@@ -653,17 +695,17 @@ const metricTone = (value: number | null, warningAt: number): 'warning' | 'muted
 
 const coordinationMetricLabel = (summary: RuntimeMetricSummary): string => {
   const parts = [
-    summary.subagentSignals > 0 ? `${summary.subagentSignals} agent spans` : '',
-    summary.cacheSpanSignals > 0 ? `${summary.cacheSpanSignals} cache spans` : '',
+    summary.subagentSignals > 0 ? `${summary.subagentSignals} 个子智能体阶段` : '',
+    summary.cacheSpanSignals > 0 ? `${summary.cacheSpanSignals} 个缓存阶段` : '',
   ].filter(Boolean)
-  return parts.length > 0 ? parts.join(' · ') : 'No coordination spans'
+  return parts.length > 0 ? parts.join(' · ') : '无协作阶段'
 }
 
 const replayOutcomeLabel = (summary: RunReplaySummary): string => {
-  if (summary.outcome === 'empty') return 'No replay events'
-  if (summary.outcome === 'running') return `${summary.running} still open`
-  if (summary.outcome === 'needs_attention') return `${summary.failedOrBlocked} need attention`
-  return 'Replay is complete'
+  if (summary.outcome === 'empty') return '暂无回放事件'
+  if (summary.outcome === 'running') return `${summary.running} 项仍在运行`
+  if (summary.outcome === 'needs_attention') return `${summary.failedOrBlocked} 项需要处理`
+  return '回放已完成'
 }
 
 const cacheMetricRowLabel = (entry: InspectorEntry): string => {
@@ -827,6 +869,16 @@ const formatDiffValue = (value: unknown): string => {
 
 const formatNumber = (value: number): string => Math.max(0, Number(value || 0)).toLocaleString()
 
+const localizedLedgerLabel = (label: string): string => ({
+  history: '对话历史',
+  'tool results': '工具结果',
+  tools: '工具定义',
+  system: '系统提示',
+  skills: '技能',
+  retrieved: '检索内容',
+  attachments: '附件',
+}[label.trim().toLowerCase()] ?? label)
+
 const downloadText = (filename: string, content: string, type: string): void => {
   const blob = new Blob([content], { type })
   const url = URL.createObjectURL(blob)
@@ -843,6 +895,24 @@ const safeFilePart = (value: string): string =>
   (value || 'trace').replace(/[^a-z0-9._-]+/gi, '-').slice(0, 80) || 'trace'
 
 // ── Styles ─────────────────────────────────────────────────────
+
+const advancedToggleStyle: React.CSSProperties = {
+  width: '100%',
+  minHeight: 52,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: 12,
+  padding: '9px 11px',
+  border: '1px solid var(--border-subtle)',
+  borderRadius: 'var(--radius-md, 9px)',
+  background: 'var(--surface-soft)',
+  color: 'var(--text-secondary)',
+  cursor: 'pointer',
+  textAlign: 'left',
+  font: 'inherit',
+}
+
 
 const eventButtonStyle = (active: boolean): React.CSSProperties => ({
   display: 'grid',

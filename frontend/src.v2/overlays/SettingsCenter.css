@@ -642,7 +642,7 @@ html[data-theme="light"] .settings-workspace-sidebar {
 
 html[data-theme="light"] .settings-card {
   border-color: var(--border-subtle);
-  background: var(--surface-soft);
+  background: var(--surface-base);
 }
 
 @media (max-width: 1120px) {
@@ -692,6 +692,10 @@ html[data-theme="light"] .settings-card {
     width: auto;
     flex: 0 0 auto;
     padding: 0 12px;
+  }
+
+  .settings-workspace .settings-center-tab-label {
+    display: inline;
   }
 
   .settings-center-main {

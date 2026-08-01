@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -560,7 +561,12 @@ def _lsp_sandbox_runner(workspace_root: str) -> SandboxRunner:
             workspace_root=workspace,
             writable_roots=(),
             readable_roots=(),
-            allow_network=False,
+            # Codex's Windows restricted-token backend provides the required
+            # filesystem boundary only for network-enabled policies unless its
+            # elevated WFP layer is installed. LSP servers are trusted host
+            # executables and need cross-platform availability, so use that
+            # established Codex boundary instead of requiring a container.
+            allow_network=sys.platform == "win32",
             timeout=0,
         )
     )

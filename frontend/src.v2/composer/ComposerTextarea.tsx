@@ -200,7 +200,7 @@ export const ComposerTextarea = ({
         if (e.key === "Enter" && !e.shiftKey) {
           // Ignore Enter while an IME composition is active (CJK input commits
           // with Enter); otherwise the half-composed text is sent. Mirrors the
-          // isComposing guard in AskUserPrompt.
+          // Keep IME composition from being mistaken for a submit shortcut.
           if (e.nativeEvent.isComposing || e.keyCode === 229) return;
           e.preventDefault();
           onSubmit();

@@ -70,6 +70,11 @@ class EnvVault:
             data["entries"][name] = {
                 "description": entry.description,
                 "scope": entry.scope,
+                # Preserve each legacy record until *that record* has been
+                # successfully copied into the OS credential store. Saving a
+                # different entry must not destroy still-unmigrated ciphertext.
+                **({"value": entry.encrypted_value} if entry.encrypted_value else {}),
+                **({"salt": entry.salt} if entry.salt else {}),
             }
         atomic_write_text(self._path, json.dumps(data, indent=2))
 

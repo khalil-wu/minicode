@@ -15,6 +15,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from pathspec.gitignore import GitIgnoreSpec
+
+from backend.security.sensitive_files import is_sensitive_file
 from backend.workspace.path_filters import is_windows_reserved_path
 
 logger = logging.getLogger(__name__)
@@ -137,6 +140,16 @@ class FuzzySearchEngine:
             ".mypy_cache",
             ".ruff_cache",
         }
+        gitignore_path = self.workspace_root / ".gitignore"
+        try:
+            gitignore = GitIgnoreSpec.from_lines(
+                gitignore_path.read_text(encoding="utf-8").splitlines()
+                if gitignore_path.is_file()
+                else []
+            )
+        except OSError:
+            logger.warning("Failed to read .gitignore for fuzzy search", exc_info=True)
+            gitignore = GitIgnoreSpec.from_lines([])
 
         try:
             for path in self.workspace_root.rglob("*"):
@@ -146,6 +159,7 @@ class FuzzySearchEngine:
 
                 # 跳过忽略的目录
                 rel_parts = path.relative_to(self.workspace_root).parts
+                rel_path = Path(*rel_parts)
                 if any(part in ignore_dirs for part in rel_parts):
                     continue
 
@@ -153,7 +167,10 @@ class FuzzySearchEngine:
                 if any(part.startswith(".") for part in rel_parts):
                     continue
 
-                if is_windows_reserved_path(Path(*rel_parts)):
+                if gitignore.match_file(rel_path.as_posix()) or is_sensitive_file(rel_path):
+                    continue
+
+                if is_windows_reserved_path(rel_path):
                     continue
 
                 self._file_cache.append(path)

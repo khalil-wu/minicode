@@ -17,18 +17,6 @@ from backend.services.chat_api_service import run_rest_chat
 from backend.services.workspace_service import git_branch_for, main_worktree_root
 
 
-_PERMISSION_MODE_ALIASES = {
-    "auto_approve": "auto",
-    "ask": "confirm",
-    "ask_permissions": "confirm",
-    "full_access": "bypass",
-}
-
-
-def _permission_mode(value: str) -> str:
-    return _PERMISSION_MODE_ALIASES.get(str(value or "").strip().lower(), str(value or "confirm"))
-
-
 async def run_scheduled_task(
     task: Any,
     run: Any,
@@ -47,7 +35,11 @@ async def run_scheduled_task(
         }
 
     repository = ConversationRepository()
-    permission_mode = _permission_mode(str(getattr(task, "permission_mode", "confirm")))
+    from backend.services.scheduler_service import scheduled_permission_mode
+
+    # Persisted legacy records are also fenced at execution time. A stale
+    # full_access/bypass value degrades to confirm instead of regaining power.
+    permission_mode = scheduled_permission_mode(getattr(task, "permission_mode", "confirm"))
     requested_conversation_id = str(getattr(task, "conversation_id", "") or "").strip()
     conversation = repository.get_conversation(requested_conversation_id) if requested_conversation_id else None
     invalid_conversation_reason = ""

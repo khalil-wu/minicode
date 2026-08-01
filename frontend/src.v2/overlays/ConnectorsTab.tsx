@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { LogIn, RefreshCw, Trash2 } from "lucide-react";
+import { parseArgsStringToArgv } from "string-argv";
 import { useAppStore } from "../stores";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { BrandIcon } from "../components/BrandIcon";
@@ -33,6 +34,11 @@ const connectorAuthLabel = (auth?: string): string | null => {
   if (auth === "local_app") return "本地应用";
   return auth.replace(/_/g, " ");
 };
+
+const parseMcpArgs = (value: string): string[] => parseArgsStringToArgv(value).map((arg) => {
+  const quotedEquals = arg.match(/^([^=]+=)(["'])(.*)\2$/s);
+  return quotedEquals ? `${quotedEquals[1]}${quotedEquals[3]}` : arg;
+});
 
 const connectorStatusLabel = (status?: string): string => {
   if (status === "connected") return "已连接";
@@ -146,7 +152,7 @@ export const ConnectorsTab = () => {
                       name: newServerName.trim(),
                       transport: newServerTransport,
                       command: newServerTransport === "stdio" ? newServerCommand.trim() : undefined,
-                      args: newServerTransport === "stdio" ? newServerArgs.split(/\s+/).filter(Boolean) : undefined,
+                      args: newServerTransport === "stdio" ? parseMcpArgs(newServerArgs) : undefined,
                       url: newServerTransport === "http" ? newServerUrl.trim() : undefined,
                     });
                     setNewServerName("");

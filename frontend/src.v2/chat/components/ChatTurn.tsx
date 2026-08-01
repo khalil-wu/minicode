@@ -1,5 +1,5 @@
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
-import { Copy, FileDown, RotateCcw, Search, X } from "lucide-react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Copy, FileDown, MessageSquareQuote, RotateCcw, Search, X } from "lucide-react";
 import type {
   AssistantMarkdownCellState,
   ChatTurnState,
@@ -134,18 +134,28 @@ function CellWithContextMenu({
   className?: string;
   onStopExecution?: () => void;
 }) {
-  const items = useMemo(() => buildCellMenuItems(cell), [cell]);
-  const { onContextMenu, menu } = useContextMenu(items);
+  const cellRef = useRef<HTMLDivElement>(null);
+  const { onContextMenu, menu } = useContextMenu(() => {
+    const selection = window.getSelection();
+    const anchor = selection?.anchorNode;
+    const focus = selection?.focusNode;
+    const selectedText = anchor && focus
+      && cellRef.current?.contains(anchor)
+      && cellRef.current?.contains(focus)
+      ? selection?.toString().trim() ?? ""
+      : "";
+    return buildCellMenuItems(cell, selectedText);
+  });
 
   return (
-    <div className={className} onContextMenu={onContextMenu} style={{ position: "relative" }}>
+    <div ref={cellRef} className={className} onContextMenu={onContextMenu} style={{ position: "relative" }}>
       <HistoryCellRenderer cell={cell} isActive={isActive} onStopExecution={onStopExecution} />
       {menu}
     </div>
   );
 }
 
-function buildCellMenuItems(cell: HistoryCellState): ContextMenuItem[] {
+function buildCellMenuItems(cell: HistoryCellState, selectedText = ""): ContextMenuItem[] {
   const text = getCellText(cell);
   if (!text) return [];
 
@@ -171,6 +181,16 @@ function buildCellMenuItems(cell: HistoryCellState): ContextMenuItem[] {
       disabled: isStreaming,
     },
   ];
+
+  if (selectedText) {
+    items.push({
+      label: "Ask about selection",
+      icon: <MessageSquareQuote size={14} />,
+      onClick: () => {
+        useAppStore.getState().openSideChatWithSelection(selectedText, "Conversation selection");
+      },
+    });
+  }
 
   // Recall is available for user messages and assistant messages with a messageId
   if (cell.kind === "user_message") {

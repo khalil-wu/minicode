@@ -117,11 +117,11 @@
   --weight-semibold: 600;
   --weight-bold:     700;
 
-  /* ── Radius (5) — compact desktop-workbench geometry. ─── */
-  --radius-sm:   4px;
-  --radius-md:   6px;
-  --radius-lg:   8px;
-  --radius-xl:   10px;
+  /* ── Radius (5) — soft desktop geometry shared by navigation and cards. ─── */
+  --radius-sm:   6px;
+  --radius-md:   8px;
+  --radius-lg:   12px;
+  --radius-xl:   16px;
   --radius-full: 9999px;
 
   /* ── Shadows (4) ──────────────────────────────────────── */
@@ -309,7 +309,7 @@
   /* Surface (9) */
   --surface-sunken:  oklch(0.975 0.004 250);
   --surface-base:    oklch(1 0 0);
-  --surface-sidebar: oklch(0.985 0.004 250);
+  --surface-sidebar: oklch(0.985 0.009 245);
   --surface-page:    oklch(0.975 0.004 250);
   --surface-soft:    oklch(0.955 0.005 250);
   --surface-panel:   oklch(0.935 0.006 250);

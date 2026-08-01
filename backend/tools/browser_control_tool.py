@@ -57,6 +57,15 @@ class BrowserControlTool(BaseTool):
         "get_console_logs",
         "get_network_logs",
     }
+    _PRIVATE_READ_ACTIONS = {
+        "screenshot",
+        "get_text",
+        "get_html",
+        "get_dom",
+        "wait_for_element",
+        "get_console_logs",
+        "get_network_logs",
+    }
     _WRITE_ACTIONS = {"navigate", "click", "type", "press_key", "scroll", "evaluate"}
     _ACTIONS = _READ_ACTIONS | _WRITE_ACTIONS
     _MAX_TARGETS = 30
@@ -205,7 +214,7 @@ class BrowserControlTool(BaseTool):
 
     def check_permission(self, args: dict[str, Any] | None = None, context=None) -> PermissionLevel | None:
         action = str((args or {}).get("action") or "").strip().lower()
-        if action in self._WRITE_ACTIONS:
+        if action in self._WRITE_ACTIONS or action in self._PRIVATE_READ_ACTIONS:
             return PermissionLevel.CONFIRM
         return PermissionLevel.AUTO
 

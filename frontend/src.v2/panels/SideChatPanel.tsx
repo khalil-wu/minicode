@@ -48,13 +48,21 @@ export const SideChatPanel = () => {
   }, [id]);
 
   const listRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [thread?.messages.length, thread?.messages.at(-1)?.content]);
 
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, [thread?.selectedContext?.text]);
+
   const submit = () => {
     const content = (thread?.draft ?? "").trim();
     if (!content || !thread || thread.isStreaming) return;
+    const selectedPrefix = thread.messages.length === 0 && thread.selectedContext?.text
+      ? `Selected context${thread.selectedContext.source ? ` (${thread.selectedContext.source})` : ""}:\n\n${thread.selectedContext.text}\n\n`
+      : "";
     const inheritedPrefix = thread.messages.length === 0 && thread.inheritedContext
       ? `${thread.inheritedContext}\n\nSide-chat question:\n`
       : "";
@@ -62,7 +70,7 @@ export const SideChatPanel = () => {
     const userMessageId = uniqueMessageId("su");
     const sent = sendChatMessage({
       displayContent: content,
-      backendContent: `${inheritedPrefix}${content}`,
+      backendContent: `${selectedPrefix}${inheritedPrefix}${content}`,
       conversationId: id,
       allowWhileStreaming: false,
       skipLocalAppend: true,
@@ -96,8 +104,7 @@ export const SideChatPanel = () => {
         }}
       >
         <span className="flex-1">
-          Side chat / inherited context /{" "}
-          <span style={{ fontFamily: "var(--font-mono)" }}>{id}</span>
+          {thread.selectedContext ? "Ask about selection" : "Side chat"}
         </span>
         <span
           style={{
@@ -120,7 +127,23 @@ export const SideChatPanel = () => {
               fontSize: "var(--text-sm)",
             }}
           >
-            This side chat inherits a compact summary of the current thread, then stays separate.
+            This side chat stays separate from the main conversation.
+            {thread.selectedContext && (
+              <div
+                className="mt-2.5 p-2.5 text-left whitespace-pre-wrap max-h-40 overflow-auto"
+                style={{
+                  border: "1px solid var(--accent-primary)",
+                  borderRadius: "var(--radius-sm, 6px)",
+                  background: "var(--surface-raised)",
+                  color: "var(--text-secondary)",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: "var(--text-xs)",
+                }}
+              >
+                {thread.selectedContext.source && <div className="mb-1">{thread.selectedContext.source}</div>}
+                {thread.selectedContext.text}
+              </div>
+            )}
             {thread.inheritedContext && (
               <div
                 className="mt-2.5 p-2.5 text-left whitespace-pre-wrap max-h-30 overflow-auto"
@@ -188,6 +211,7 @@ export const SideChatPanel = () => {
         }}
       >
         <textarea
+          ref={inputRef}
           value={thread.draft}
           onChange={(e) => setDraft(id, e.target.value)}
           onKeyDown={(e) => {

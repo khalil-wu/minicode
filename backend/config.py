@@ -722,10 +722,9 @@ def _llm_history(
             "reasoning_effort_levels": _coerce_model_list(raw.get("reasoning_effort_levels")),
             "thinking_budget": _coerce_int(raw.get("thinking_budget", 0), 0),
             "has_api_key": has_api_key,
+            "api_key": api_key if include_api_keys else "",
             "updated_at": float(raw.get("updated_at") or 0),
         }
-        if include_api_keys:
-            entry["api_key"] = api_key
         normalized_history.append(entry)
     normalized_history.sort(key=lambda item: float(item.get("updated_at") or 0), reverse=True)
     history: list[dict[str, Any]] = []
@@ -1160,7 +1159,7 @@ def get_llm_settings_payload(settings_data: dict[str, Any] | None = None) -> dic
         "openai": {
             "display_name": openai["display_name"],
             "has_api_key": bool(openai["api_key"]),
-            "api_key": openai["api_key"],
+            "api_key": "",
             "base_url": openai["base_url"],
             "model": openai["model"],
             "available_models": openai["available_models"],
@@ -1176,7 +1175,7 @@ def get_llm_settings_payload(settings_data: dict[str, Any] | None = None) -> dic
         "anthropic": {
             "display_name": anthropic["display_name"],
             "has_api_key": bool(anthropic["api_key"]),
-            "api_key": anthropic["api_key"],
+            "api_key": "",
             "base_url": anthropic["base_url"],
             "model": anthropic["model"],
             "available_models": anthropic["available_models"],
@@ -1187,7 +1186,7 @@ def get_llm_settings_payload(settings_data: dict[str, Any] | None = None) -> dic
         "custom": {
             "display_name": custom["display_name"],
             "has_api_key": bool(custom["api_key"]),
-            "api_key": custom["api_key"],
+            "api_key": "",
             "base_url": custom["base_url"],
             "model": custom["model"],
             "available_models": custom["available_models"],
@@ -1201,7 +1200,7 @@ def get_llm_settings_payload(settings_data: dict[str, Any] | None = None) -> dic
             "prompt_cache_retention": custom["prompt_cache_retention"],
             "reasoning_effort_levels": custom["reasoning_effort_levels"],
         },
-        "provider_history": _llm_history(settings_data, include_api_keys=True),
+        "provider_history": _llm_history(settings_data),
         "active_model": active_by_provider.get(provider, openai["model"]),
     }
 

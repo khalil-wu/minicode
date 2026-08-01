@@ -13,7 +13,7 @@ from fastapi import HTTPException
 from fastapi.responses import FileResponse
 
 from backend.atomic_io import atomic_write_bytes
-from backend.security.sensitive_files import is_sensitive_file
+from backend.security.sensitive_files import is_protected_write_path, is_sensitive_file
 
 from .models import (
     WorkspaceDeleteResponse,
@@ -149,12 +149,9 @@ class WorkspaceService:
         return FileResponse(target, media_type=media_type, headers={"Content-Disposition": disposition})
 
     def write_file(self, path: str, content: str) -> WorkspaceFileResponse:
-        self.ensure_not_sensitive_file(
-            self.resolve_workspace_path(path, follow_final_symlink=False),
-            operation="modify",
-        )
+        self.ensure_write_allowed(self.resolve_workspace_path(path, follow_final_symlink=False))
         target = self.resolve_workspace_path(path)
-        self.ensure_not_sensitive_file(target, operation="modify")
+        self.ensure_write_allowed(target)
         if target.exists() and target.is_dir():
             raise HTTPException(status_code=400, detail="Cannot write content into a directory path.")
 
@@ -178,12 +175,9 @@ class WorkspaceService:
         )
 
     def compare_and_write_file(self, path: str, expected_hash: str, content: str) -> WorkspaceFileResponse:
-        self.ensure_not_sensitive_file(
-            self.resolve_workspace_path(path, follow_final_symlink=False),
-            operation="modify",
-        )
+        self.ensure_write_allowed(self.resolve_workspace_path(path, follow_final_symlink=False))
         target = self.resolve_workspace_path(path)
-        self.ensure_not_sensitive_file(target, operation="modify")
+        self.ensure_write_allowed(target)
         if target.exists() and target.is_dir():
             raise HTTPException(status_code=400, detail="Cannot write content into a directory path.")
 
@@ -232,10 +226,7 @@ class WorkspaceService:
         )
 
     def create_directory(self, path: str) -> WorkspacePathResponse:
-        self.ensure_not_sensitive_file(
-            self.resolve_workspace_path(path, follow_final_symlink=False),
-            operation="create",
-        )
+        self.ensure_write_allowed(self.resolve_workspace_path(path, follow_final_symlink=False))
         target = self.resolve_workspace_path(path)
         if target.exists():
             raise HTTPException(status_code=409, detail=f"Path already exists: {path}")
@@ -253,8 +244,8 @@ class WorkspaceService:
         source = self.resolve_workspace_path(path, follow_final_symlink=False)
         destination = self.resolve_workspace_path(new_path, follow_final_symlink=False)
 
-        self.ensure_not_sensitive_file(source, operation="rename")
-        self.ensure_not_sensitive_file(destination, operation="rename")
+        self.ensure_write_allowed(source)
+        self.ensure_write_allowed(destination)
 
         self.ensure_not_workspace_root(source)
         self.ensure_not_workspace_root(destination)
@@ -277,7 +268,7 @@ class WorkspaceService:
     def delete_path(self, path: str, recursive: bool) -> WorkspaceDeleteResponse:
         target = self.resolve_workspace_path(path, follow_final_symlink=False)
         self.ensure_not_workspace_root(target)
-        self.ensure_not_sensitive_file(target, operation="delete")
+        self.ensure_write_allowed(target)
 
         if not target.exists() and not target.is_symlink():
             raise HTTPException(status_code=404, detail=f"Path not found: {path}")
@@ -415,6 +406,13 @@ class WorkspaceService:
                 status_code=403,
                 detail=f"Refusing to {operation} sensitive credential file.",
             )
+
+    @staticmethod
+    def ensure_write_allowed(path: Path) -> None:
+        """Apply the same protected-path chokepoint as agent file tools."""
+        WorkspaceService.ensure_not_sensitive_file(path, operation="modify")
+        if is_protected_write_path(path):
+            raise HTTPException(status_code=403, detail="Refusing to modify protected path.")
 
     def workspace_path_payload(self, path: Path) -> WorkspacePathResponse:
         is_symlink = path.is_symlink()

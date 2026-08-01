@@ -9,6 +9,24 @@ class SchedulerServiceError(ValueError):
     """User-recoverable scheduler operation failure."""
 
 
+_SCHEDULED_PERMISSION_ALIASES = {
+    "ask": "confirm",
+    "ask_permissions": "confirm",
+    "auto_approve": "auto",
+}
+
+
+def scheduled_permission_mode(value: Any, *, reject_unsafe: bool = False) -> str:
+    """Scheduled runs may be interactive-confirm or normal auto, never bypass."""
+    raw = str(value or "confirm").strip().lower()
+    normalized = _SCHEDULED_PERMISSION_ALIASES.get(raw, raw)
+    if normalized in {"confirm", "auto"}:
+        return normalized
+    if reject_unsafe:
+        raise SchedulerServiceError("Scheduled task permission mode must be 'confirm' or 'auto'")
+    return "confirm"
+
+
 @dataclass
 class SchedulerOperationResult:
     tasks: list[dict[str, Any]]
@@ -39,7 +57,7 @@ def add_scheduled_task(scheduler: Any, data: dict[str, Any], *, workspace_root: 
     name = _required_field(data.get("name"), "Task name is required")
     prompt = _required_field(data.get("prompt"), "Task prompt is required")
     schedule = _required_field(data.get("schedule"), "Task schedule is required")
-    permission_mode = str(data.get("permission_mode", "confirm"))
+    permission_mode = scheduled_permission_mode(data.get("permission_mode"), reject_unsafe=True)
     timezone = str(data.get("timezone") or "UTC").strip() or "UTC"
     isolation = str(data.get("isolation") or "worktree").strip().lower()
     if not is_valid_timezone(timezone):

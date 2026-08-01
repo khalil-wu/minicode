@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
@@ -29,6 +30,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 WORKTREE_GIT_TIMEOUT_SECONDS = 120
+WORKTREE_SNAPSHOT_MAX_PER_REPO = 50
+WORKTREE_SNAPSHOT_MAX_AGE_DAYS = 30
 
 
 @dataclass
@@ -373,7 +376,9 @@ class WorktreeManager:
             label=label,
         )
         logger.info("Captured worktree snapshot %s (%s) for %s", snapshot_id, snapshot_sha[:8], wt)
-        return self._snapshots().save(record)
+        saved = self._snapshots().save(record)
+        self.prune_snapshots(exclude_ids={saved.id})
+        return saved
 
     def restore_snapshot(
         self,
@@ -433,6 +438,37 @@ class WorktreeManager:
             repo_root=self.repo_root,
             limit=limit,
         )
+
+    def prune_snapshots(
+        self,
+        *,
+        max_records: int = WORKTREE_SNAPSHOT_MAX_PER_REPO,
+        max_age_days: int = WORKTREE_SNAPSHOT_MAX_AGE_DAYS,
+        exclude_ids: set[str] | None = None,
+    ) -> int:
+        """Bound recoverable snapshots and remove both metadata and git refs."""
+        excluded = exclude_ids or set()
+        records = self._snapshots().list(repo_root=self.repo_root, limit=10_000)
+        cutoff = datetime.now(UTC) - timedelta(days=max(1, max_age_days))
+        removed = 0
+        for index, record in enumerate(records):
+            if record.id in excluded:
+                continue
+            try:
+                created_at = datetime.fromisoformat(record.created_at)
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=UTC)
+            except (TypeError, ValueError):
+                created_at = datetime.min.replace(tzinfo=UTC)
+            if index < max(1, max_records) and created_at >= cutoff:
+                continue
+            expected_ref = f"refs/minicode/wt-snapshots/{record.id}"
+            if not self._git_ok(self.repo_root, "update-ref", "-d", expected_ref):
+                logger.warning("Could not prune worktree snapshot ref %s", expected_ref)
+                continue
+            if self._snapshots().delete(record.id):
+                removed += 1
+        return removed
 
     def safe_remove_worktree(
         self,

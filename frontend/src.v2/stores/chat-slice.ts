@@ -1121,6 +1121,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
   ensureSideChat: (id) =>
     set((s) => {
       if (s.sideChats[id]) return s;
+      const selectedContext = s.sideChatPendingContext ?? undefined;
       const recentMessages = s.messages
         .filter((message) => message.role === "user" || message.role === "assistant")
         .slice(-6)
@@ -1134,9 +1135,10 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         ? `Main conversation context:\n${recentMessages.join("\n")}`
         : "";
       return {
+        sideChatPendingContext: null,
         sideChats: {
           ...s.sideChats,
-          [id]: { id, messages: [], isStreaming: false, draft: "", inheritedContext },
+          [id]: { id, messages: [], isStreaming: false, draft: "", inheritedContext, selectedContext },
         },
       };
     }),

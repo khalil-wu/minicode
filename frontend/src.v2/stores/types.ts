@@ -556,6 +556,7 @@ export interface WorkspaceSlice {
   activeBottomTab: "terminal" | "git" | "tasks" | "timeline" | "debug" | "budget";
   panelSlots: PanelSlot[];
   sideChatOpen: boolean;
+  sideChatPendingContext: { text: string; source?: string } | null;
   terminalSessions: TerminalSessionInfo[];
   terminalSnapshots: Record<string, TerminalSnapshotInfo>;
   backgroundTasks: BackgroundTaskEntry[];
@@ -587,6 +588,7 @@ export interface WorkspaceSlice {
   openEditorFile: (path: string, label?: string, target?: { line?: number; column?: number }) => void;
   consumeEditorOpenRequest: (path: string) => void;
   toggleSideChat: () => void;
+  openSideChatWithSelection: (text: string, source?: string) => void;
   addBackgroundTask: (task: BackgroundTaskEntry) => void;
   addBrowserAnnotation: (annotation: BrowserAnnotation) => void;
   removeBrowserAnnotation: (id: string) => void;
@@ -1067,6 +1069,7 @@ export interface SideChatThread {
   isStreaming: boolean;
   draft: string;
   inheritedContext?: string;
+  selectedContext?: { text: string; source?: string };
 }
 
 export interface ChatSlice {

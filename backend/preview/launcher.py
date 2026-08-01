@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shlex
 import socket
 import subprocess
@@ -414,15 +415,26 @@ async def start_static_preview(
         raise RuntimeError("Static preview path must be an HTML file")
 
     port = _allocate_loopback_port()
-    argv = [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"]
+    access_token = secrets.token_urlsafe(24)
+    argv = [
+        sys.executable,
+        "-m",
+        "backend.preview.static_server",
+        "--port",
+        str(port),
+        "--root",
+        str(target.parent),
+        "--token",
+        access_token,
+    ]
     command = subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
     identity = hashlib.sha256(str(target).encode("utf-8")).hexdigest()
     config = PreviewLaunchConfig(
         name=f"static-{identity}",
         command=command,
-        cwd=str(target.parent),
+        cwd=str(Path(__file__).resolve().parents[2]),
         port=port,
-        url=f"http://127.0.0.1:{port}/{quote(target.name)}",
+        url=f"http://127.0.0.1:{port}/{access_token}/{quote(target.name)}",
         source="static-html",
     )
     return await _start_preview_config(

@@ -16,6 +16,7 @@ export type RuntimeCommandState = {
   agentMode?: "build" | "plan" | "review" | "explore";
   permissionMode?: "ask_permissions" | "plan" | "auto" | "bypass";
   availableSkills?: SkillInfo[];
+  slashCommands?: SlashCommand[];
   skillsMarketplaceOpen?: boolean;
   automationsOpen?: boolean;
   toggleAutomations?: () => void;
@@ -307,10 +308,18 @@ export const executeRuntimeSlashCommand = async (
   commandLine: string,
   deps: RuntimeSlashCommandDeps,
 ): Promise<RuntimeSlashCommandResult> => {
+  const command = commandLine.match(/^(\/[a-z][\w-]*)/i)?.[1] ?? commandLine;
+  const isTemplate = shouldTokenizeRuntimeSlashCommand(
+    command,
+    deps.getState().slashCommands ?? [],
+  );
   const sent = await deps.sendChatMessage({
     displayContent: commandLine,
     backendContent: commandLine,
-    skipLocalAppend: true,
+    // Template commands enter the normal agent stream and therefore need the
+    // same client-owned message ids as an ordinary prompt. Local/server
+    // commands render their own response and keep the historical no-append path.
+    skipLocalAppend: !isTemplate,
   });
   return result(sent, sent ? "input" : "none");
 };

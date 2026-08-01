@@ -37,7 +37,9 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
   quotedMessage: null,
   permissionMode: initialPermissionMode(),
   agentMode: initialAgentMode(),
-  effortLevel: "high" as const,
+  // Match Codex's balanced default; model/runtime capabilities still decide
+  // which effort levels are actually exposed and accepted.
+  effortLevel: "medium" as const,
   prMonitor: null,
   actionChip: null,
   mentionResults: [],

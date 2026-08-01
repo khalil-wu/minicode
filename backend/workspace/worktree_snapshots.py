@@ -86,6 +86,20 @@ class WorktreeSnapshotStore:
         except (OSError, json.JSONDecodeError):
             return None
 
+    def delete(self, snapshot_id: str) -> bool:
+        """Delete one metadata record after its matching git ref is removed."""
+        try:
+            path = self._path_for(snapshot_id)
+        except ValueError:
+            return False
+        try:
+            path.unlink()
+            return True
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return False
+
     def list(
         self,
         conversation_id: str | None = None,

@@ -23,34 +23,6 @@ from backend.tools.output_limits import (
 logger = logging.getLogger(__name__)
 
 
-class _ExternalProcessHandle:
-    """Popen-like adapter so external desktop PTYs use the shared tree killer."""
-
-    def __init__(self, pid: int) -> None:
-        import psutil
-
-        self.pid = pid
-        self._process = psutil.Process(pid)
-
-    def poll(self) -> int | None:
-        import psutil
-
-        try:
-            return None if self._process.is_running() and self._process.status() != psutil.STATUS_ZOMBIE else 0
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            return 0
-
-    def kill(self) -> None:
-        self._process.kill()
-
-    def wait(self) -> int | None:
-        import psutil
-
-        try:
-            return self._process.wait(timeout=2.0)
-        except (psutil.NoSuchProcess, psutil.TimeoutExpired):
-            return None
-
 MAX_OUTPUT_LENGTH = CLAUDE_BASH_OUTPUT_MAX_CHARS
 DEFAULT_TIMEOUT_MS = 0
 MAX_TIMEOUT_MS = 2_147_483_647
@@ -113,7 +85,6 @@ class TerminalSession:
         self._is_windows = platform.system() == "Windows"
         self._exit_notified = False
         self._external_pid: int | None = None
-        self._external_process_start_time: float | None = None
         self._external_alive: bool | None = None
 
     @property
@@ -181,10 +152,6 @@ class TerminalSession:
         if shell:
             self._shell_cmd = [shell]
         if pid is not None:
-            if pid != self._external_pid or self._external_process_start_time is None:
-                from backend.terminal.task_persistence import get_process_start_time
-
-                self._external_process_start_time = get_process_start_time(pid)
             self._external_pid = pid
         self._external_alive = is_alive
         if not self._started_at:
@@ -328,25 +295,9 @@ class TerminalSession:
 
     async def kill(self) -> None:
         if self._process is None:
-            if self._external_pid is None or not self._external_alive:
-                return
-            from backend.terminal.task_persistence import is_process_alive, process_identity_matches
-
-            if not is_process_alive(self._external_pid):
-                self._external_alive = False
-                return
-            if not process_identity_matches(
-                self._external_pid,
-                self._external_process_start_time,
-            ):
-                raise RuntimeError(
-                    f"Refusing to kill unverified external terminal process {self._external_pid}"
-                )
-            await terminate_process_tree(_ExternalProcessHandle(self._external_pid))
-            if is_process_alive(self._external_pid):
-                raise RuntimeError(
-                    f"External terminal process {self._external_pid} did not stop"
-                )
+            # Electron/node-pty is the sole owner of desktop terminals.  The
+            # backend stores only a reconnectable mirror and must never kill
+            # that process when a WebSocket session expires.
             self._external_alive = False
             return
 

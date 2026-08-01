@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { Check, Copy, KeyRound, Pencil, Play, Plus, Trash2 } from "lucide-react";
+import { Check, KeyRound, Pencil, Play, Plus, Trash2 } from "lucide-react";
 import { pushToast } from "./ToastContainer";
 import { apiBase, authHeaders } from "../protocol/api";
 import { sendClientCommand } from "../protocol/ws-outbox";
@@ -86,6 +86,7 @@ export const ProviderTab = ({
   const [provider, setProvider] = useState<ProviderId>(selectedProvider);
   const [displayName, setDisplayName] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [hasStoredApiKey, setHasStoredApiKey] = useState(false);
   const [baseUrl, setBaseUrl] = useState("");
   const [modelName, setModelName] = useState("");
   const [availableModelList, setAvailableModelList] = useState<string[]>([]);
@@ -131,6 +132,7 @@ export const ProviderTab = ({
     const fallback = defaultSectionForProvider(nextProvider);
     setDisplayName(providerDisplayName(section));
     setApiKey(section?.api_key ?? "");
+    setHasStoredApiKey(Boolean(section?.has_api_key));
     setBaseUrl(section?.base_url ?? fallback.base_url ?? "");
     setModelName(section?.model ?? fallback.model ?? "");
     const savedModels = section?.available_models ?? fallback.available_models ?? [];
@@ -176,6 +178,7 @@ export const ProviderTab = ({
     applyProviderSection(id, defaultSectionForProvider(id));
     setDisplayName("");
     setApiKey("");
+    setHasStoredApiKey(false);
     setConnectionStatus("idle");
     setConnectionResult(null);
         setModelsStatus("idle");
@@ -200,6 +203,7 @@ export const ProviderTab = ({
     });
     setDisplayName("");
     setApiKey("");
+    setHasStoredApiKey(false);
         setConnectionStatus("idle");
     setConnectionResult(null);
     setModelsStatus("idle");
@@ -317,7 +321,10 @@ export const ProviderTab = ({
       setProvider(draft.provider);
       onProviderChange(draft.provider);
       setDisplayName(providerDisplayName(section) || draft.displayName);
-      setApiKey(section?.api_key ?? draft.apiKey);
+      // Settings responses never echo secrets. A successful replacement is
+      // immediately cleared from component state after it reaches the vault.
+      setApiKey("");
+      setHasStoredApiKey(Boolean(section?.has_api_key || draft.apiKey.trim()));
       setBaseUrl(section?.base_url ?? draft.baseUrl);
       const active = String(section?.model || draft.modelName || saved.active_model || "");
       if (active) {
@@ -351,7 +358,7 @@ export const ProviderTab = ({
           source: "settings.provider.save",
         }, { silent: true });
       }
-      setConnectionStatus("success");
+      setConnectionStatus("idle");
       if (!options.quiet) {
         pushToast(
           options.activate
@@ -722,31 +729,16 @@ export const ProviderTab = ({
       </Section>
 
       <Section title="API 密钥">
-        <div style={{ display: "flex", gap: 8 }}>
-          <input
-            type="text"
-            aria-label="API 密钥"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            placeholder={providerConfig.placeholder}
-            spellCheck={false}
-            style={inputStyle}
-          />
-          <button
-            type="button"
-            aria-label="复制 API 密钥"
-            title="复制 API 密钥"
-            disabled={!apiKey}
-            onClick={() => {
-              if (!apiKey) return;
-              void navigator.clipboard?.writeText(apiKey);
-              pushToast("API 密钥已复制", "success");
-            }}
-            style={{ ...iconActionStyle, width: 38, height: 38, flexShrink: 0, opacity: apiKey ? 1 : 0.45 }}
-          >
-            <Copy size={15} />
-          </button>
-        </div>
+        <input
+          type="password"
+          aria-label="API 密钥"
+          value={apiKey}
+          onChange={(e) => setApiKey(e.target.value)}
+          placeholder={hasStoredApiKey ? "已保存密钥；输入新密钥以替换" : providerConfig.placeholder}
+          autoComplete="new-password"
+          spellCheck={false}
+          style={inputStyle}
+        />
       </Section>
 
       {providerConfig.hasBaseUrl && (

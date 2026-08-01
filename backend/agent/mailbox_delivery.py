@@ -184,6 +184,7 @@ async def inject_subagent_mailbox_updates(
             await emit_event(
                 "subagent.mailbox",
                 {
+                    "conversation_id": conversation_id,
                     "subagent_id": participant_id,
                     "count": len(messages),
                     "high_water": high_water,

@@ -49,6 +49,7 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
   return {
     ...layout,
     sideChatOpen: false,
+    sideChatPendingContext: null,
     terminalSessions: [],
     terminalSnapshots: {},
     backgroundTasks: [],
@@ -343,6 +344,24 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
         ),
       })),
     toggleSideChat: () => set((s) => ({ sideChatOpen: !s.sideChatOpen })),
+    openSideChatWithSelection: (text, source) => {
+      const selected = String(text || "").trim().slice(0, 12_000);
+      if (!selected) return;
+      const context = { text: selected, ...(source ? { source } : {}) };
+      set((state) => {
+        const activeThreadId = state.sideChatOpen ? Object.keys(state.sideChats).at(-1) : undefined;
+        if (activeThreadId && state.sideChats[activeThreadId]) {
+          return {
+            sideChatOpen: true,
+            sideChats: {
+              ...state.sideChats,
+              [activeThreadId]: { ...state.sideChats[activeThreadId], selectedContext: context },
+            },
+          };
+        }
+        return { sideChatOpen: true, sideChatPendingContext: context };
+      });
+    },
     addBackgroundTask: (task) =>
       set((s) => ({
         backgroundTasks: [

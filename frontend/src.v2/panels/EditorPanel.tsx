@@ -47,6 +47,14 @@ const LazyMonacoEditor = lazy(async () => {
 
 type MonacoEditorInstance = {
   getSelection: () => unknown;
+  getModel?: () => { getValueInRange: (range: unknown) => string } | null;
+  addAction?: (descriptor: {
+    id: string;
+    label: string;
+    contextMenuGroupId?: string;
+    contextMenuOrder?: number;
+    run: (editor: MonacoEditorInstance) => void;
+  }) => unknown;
   executeEdits: (source: string, edits: Array<{ range: unknown; text: string; forceMoveMarkers?: boolean }>) => void;
   focus: () => void;
   revealLineInCenter?: (lineNumber: number) => void;
@@ -944,6 +952,23 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                 onMount={(editor) => {
                   monacoMountedRef.current = true;
                   editorRef.current = editor as MonacoEditorInstance;
+                  (editor as MonacoEditorInstance).addAction?.({
+                    id: "minicode.ask-about-selection",
+                    label: "Ask about selection in side chat",
+                    contextMenuGroupId: "navigation",
+                    contextMenuOrder: 1.5,
+                    run: (mountedEditor) => {
+                      const selection = mountedEditor.getSelection();
+                      const text = selection
+                        ? mountedEditor.getModel?.()?.getValueInRange(selection).trim() ?? ""
+                        : "";
+                      if (!text) {
+                        pushToast("Select some code first.", "warning");
+                        return;
+                      }
+                      useAppStore.getState().openSideChatWithSelection(text, activeTab.path);
+                    },
+                  });
                   editor.onDidChangeCursorPosition((event) => {
                     setCursor({ line: event.position.lineNumber, column: event.position.column });
                   });

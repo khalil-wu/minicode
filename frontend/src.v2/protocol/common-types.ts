@@ -316,6 +316,7 @@ export interface SchedulerAddCommand {
   schedule: string;
   timezone?: string;
   isolation?: "worktree" | "workspace";
+  permission_mode?: "confirm" | "auto";
   conversation_id?: string;
 }
 

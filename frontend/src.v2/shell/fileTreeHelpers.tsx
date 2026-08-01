@@ -111,7 +111,7 @@ export const replaceNodeChildren = (
   path: string,
   children: WorkspaceTreeNode[],
 ): WorkspaceTreeNode => {
-  if (node.path === path) return { ...node, children };
+  if (isSameTreePath(node.path, path)) return { ...node, children };
   if (!node.children) return node;
   return {
     ...node,
