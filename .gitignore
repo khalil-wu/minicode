@@ -94,6 +94,8 @@ data/parent_notifications/
 data/user-message-queue/
 data/extensions/
 data/skills/
+data/agent-runtime/
+frontend/.audit/
 desktop/release-*/
 desktop/_start_*.txt
 tmp-artifacts-test/
