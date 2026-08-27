@@ -51,6 +51,18 @@ frontend/test-results/
 .coverage
 htmlcov/
 
+# Test source (kept locally, excluded from GitHub)
+/conftest.py
+/tests/
+/backend/tests/
+/frontend/tests/
+**/*.test.js
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.js
+**/*.spec.ts
+**/*.spec.tsx
+
 # Local runtime, logs, and tool state
 settings.json
 *.log
