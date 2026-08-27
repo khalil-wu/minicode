@@ -22,6 +22,12 @@ from backend.agent.context_ledger import (
     estimate_native_attachments,
 )
 from backend.agent.state import AgentState
+from backend.agent.history_store import (
+    ConversationHistory,
+    estimate_message_tokens,
+    group_raw_messages,
+    repair_tool_messages,
+)
 from backend.config import AgentSettings, TokenBudget
 from backend.agent.attachment_policy import (
     AttachmentInputPlan,
@@ -67,12 +73,6 @@ def clone_context_builder(builder: "ContextBuilder") -> "ContextBuilder":
     """Clone reusable prompt/history state for branch-style agent runs."""
     cloned = copy(builder)
     for name in (
-        "_history",
-        "_history_token_estimates",
-        "_history_frozen_count",
-        "_history_frozen_metadata_present",
-        "_pending_hydration_frozen_prefix_count",
-        "_last_message_timestamp_ms",
         "_pending_runtime_context_update",
         "_persistent_notes",
         "_read_file_hashes",
@@ -83,6 +83,9 @@ def clone_context_builder(builder: "ContextBuilder") -> "ContextBuilder":
     ):
         if hasattr(builder, name):
             setattr(cloned, name, deepcopy(getattr(builder, name)))
+    # ConversationHistory clones independently: its estimator is a bound
+    # helper on the source builder and must not be deep-copied.
+    cloned._history_store = builder._history_store.clone()
     return cloned
 
 
@@ -506,6 +509,71 @@ def _has_leading_runtime_context(content: str) -> bool:
 class ContextBuilder:
     """Builds the active prompt context while keeping history compact."""
 
+    # History state delegates to ConversationHistory. The builder keeps the
+    # private spellings (_history, _history_frozen_count, ...) as properties so
+    # existing logic reads naturally while every mutation lives in the store.
+    @property
+    def _history(self) -> list[LLMMessage]:
+        return self._history_store.messages
+
+    @_history.setter
+    def _history(self, value: list[LLMMessage]) -> None:
+        self._history_store.messages = value
+
+    @property
+    def _history_frozen_count(self) -> int:
+        return self._history_store.frozen_count
+
+    @_history_frozen_count.setter
+    def _history_frozen_count(self, value: int) -> None:
+        self._history_store.frozen_count = value
+
+    @property
+    def _history_frozen_metadata_present(self) -> bool:
+        return self._history_store.frozen_metadata_present
+
+    @_history_frozen_metadata_present.setter
+    def _history_frozen_metadata_present(self, value: bool) -> None:
+        self._history_store.frozen_metadata_present = value
+
+    @property
+    def _pending_hydration_frozen_prefix_count(self) -> int:
+        return self._history_store.pending_hydration_frozen_prefix_count
+
+    @_pending_hydration_frozen_prefix_count.setter
+    def _pending_hydration_frozen_prefix_count(self, value: int) -> None:
+        self._history_store.pending_hydration_frozen_prefix_count = value
+
+    @property
+    def _last_message_timestamp_ms(self) -> int:
+        return self._history_store.last_message_timestamp_ms
+
+    @_last_message_timestamp_ms.setter
+    def _last_message_timestamp_ms(self, value: int) -> None:
+        self._history_store.last_message_timestamp_ms = value
+
+    @property
+    def _history_token_estimates(self) -> list[int]:
+        return self._history_store.token_estimates
+
+    @property
+    def _history_tokens_total(self) -> int:
+        return self._history_store.tokens_total
+
+    def _estimate_history_message(
+        self,
+        message: LLMMessage,
+        raw_content: Any | None = None,
+    ) -> int:
+        """Token estimator used by ConversationHistory (content + native media)."""
+        return int(
+            estimate_message_tokens(
+                raw_content if raw_content is not None else message.content,
+                message.tool_calls,
+            )
+            + estimate_native_attachments(message.images, message.documents)[0]
+        )
+
     def __init__(
         self,
         token_budget: TokenBudget | None = None,
@@ -519,21 +587,10 @@ class ContextBuilder:
     ) -> None:
         self._budget = token_budget or TokenBudget()
         self._agent_settings = agent_settings or AgentSettings()
-        self._history: list[LLMMessage] = []
-        # Number of transcript messages whose exact bytes have already been
-        # handed to a provider.  Once a message is in this prefix, runtime
-        # refresh/cleanup must never rewrite it: mature agent runtimes append
-        # new dynamic context after the sent transcript instead.
-        self._history_frozen_count = 0
-        # Older snapshots have no sent-boundary marker.  We treat their
-        # durable transcript as already sent and carry that conservative
-        # assumption through partial hydration.
-        self._history_frozen_metadata_present = False
-        self._pending_hydration_frozen_prefix_count = 0
-        self._last_message_timestamp_ms = 0
+        # Ordered transcript lives in ConversationHistory; the builder reaches
+        # it through the _history/_history_* property delegates below.
+        self._history_store = ConversationHistory(estimator=self._estimate_history_message)
         self._pending_runtime_context_update = ""
-        self._history_token_estimates: list[int] = []
-        self._history_tokens_total = 0
         self._persistent_notes: list[dict[str, str]] = []
         self._compaction_count = 0
         self._skill_executor = skill_executor
@@ -742,7 +799,7 @@ class ContextBuilder:
             self._history_frozen_count = 0
             self._pending_hydration_frozen_prefix_count = 0
         self._history[insert_at:insert_at] = missing
-        self._ensure_history_timestamps()
+        self._history_store.ensure_timestamps()
 
     @staticmethod
     def _skill_path_from_fragment(fragment: str) -> str:
@@ -870,21 +927,21 @@ class ContextBuilder:
 
         self._compact_old_user_runtime_context_for_cache()
         for skill_injection in skill_injections:
-            self._append_history_message(
+            self._history_store.append(
                 LLMMessage(role="user", content=skill_injection),
                 raw_content=skill_injection,
             )
         retrieved_context = self._consume_retrieved_context(state)
         if retrieved_context:
             rendered_retrieval = wrap_untrusted_content(retrieved_context, "retrieval")
-            self._append_history_message(
+            self._history_store.append(
                 LLMMessage(
                     role="user",
                     content=rendered_retrieval,
                 ),
                 raw_content=rendered_retrieval,
             )
-        self._append_history_message(
+        self._history_store.append(
             LLMMessage(
                 role="user",
                 content=user_turn_content,
@@ -940,7 +997,7 @@ class ContextBuilder:
         if self._is_standalone_legacy_runtime_update(text):
             return
         rendered = f"User-configured hook feedback:\n{text}"
-        self._append_history_message(
+        self._history_store.append(
             LLMMessage(role="user", content=rendered),
             raw_content=rendered,
         )
@@ -963,7 +1020,7 @@ class ContextBuilder:
             await self.start_turn(user_message, active_state)
 
         messages: list[LLMMessage] = []
-        self._ensure_history_timestamps()
+        self._history_store.ensure_timestamps()
         if allow_time_based_microcompact:
             self.maybe_time_based_microcompact(active_state)
         self._enforce_per_message_tool_budget()
@@ -1210,7 +1267,7 @@ class ContextBuilder:
         # derived accounting, while freezing the exact marker result on resume.
         self._history_frozen_count = 0
         self._pending_hydration_frozen_prefix_count = 0
-        self._rebuild_history_token_cache()
+        self._history_store.rebuild_token_cache()
         self._last_actual_prompt_tokens = 0
         self._last_estimated_prompt_tokens = 0
         self._reconstruct_tool_result_budget_state()
@@ -1279,7 +1336,7 @@ class ContextBuilder:
             # Restoring immutable media after a provider boundary creates a new
             # prompt segment; do not claim the old byte boundary still holds.
             self._history_frozen_count = 0
-            self._rebuild_history_token_cache()
+            self._history_store.rebuild_token_cache()
 
     @staticmethod
     def _workspace_root_for_state(state: AgentState) -> Path | None:
@@ -1421,7 +1478,7 @@ class ContextBuilder:
             if latest_runtime == refreshed_runtime:
                 return False
             wrapper = f"<system-reminder>\n{refreshed_runtime}\n</system-reminder>"
-            self._append_history_message(
+            self._history_store.append(
                 LLMMessage(
                     role="user",
                     content=wrapper,
@@ -1464,7 +1521,7 @@ class ContextBuilder:
             runtime_context=refreshed_runtime,
             timestamp_ms=active.timestamp_ms,
         )
-        self._rebuild_history_token_cache()
+        self._history_store.rebuild_token_cache()
         self._last_actual_prompt_tokens = 0
         return True
 
@@ -1934,7 +1991,7 @@ class ContextBuilder:
             and content_text.strip() == previous.content.strip()
         ):
             return
-        self._append_history_message(
+        self._history_store.append(
             LLMMessage(role="user", content=content_text),
             raw_content=content,
         )
@@ -1946,7 +2003,7 @@ class ContextBuilder:
         phase: str = "",
         provider_items: list[dict[str, Any]] | None = None,
     ) -> None:
-        self._append_history_message(
+        self._history_store.append(
             LLMMessage(
                 role="assistant",
                 content=str(content),
@@ -2016,7 +2073,7 @@ class ContextBuilder:
             "Inspect its pixels only when the active provider receives native image input; "
             "otherwise state that the image cannot be inspected with the current model."
         )
-        self._append_history_message(
+        self._history_store.append(
             LLMMessage(
                 role="user",
                 content=content,
@@ -2035,7 +2092,7 @@ class ContextBuilder:
         provider_items: list[dict[str, Any]] | None = None,
     ) -> None:
         """Append assistant message with tool_calls. Optionally preserve preceding text."""
-        self._append_history_message(
+        self._history_store.append(
             LLMMessage(
                 role="assistant",
                 content=content,
@@ -2048,88 +2105,10 @@ class ContextBuilder:
     def reconcile_dangling_tool_calls(self) -> int:
         """Keep tool messages valid for OpenAI-compatible providers.
 
-        Tool result messages are only legal as replies to the immediately
-        preceding assistant message's tool_calls. Interrupted streams and older
-        snapshots can leave either dangling assistant tool_calls or orphan tool
-        messages. Insert placeholders for the former and drop the latter before
-        the next provider request.
-
-        Returns the number of placeholders inserted.
+        Delegates to :class:`ConversationHistory`; returns the number of
+        placeholders inserted.
         """
-
-        def make_placeholder(call_id: str, tool_name: str) -> LLMMessage:
-            return LLMMessage(
-                role="tool",
-                content=(
-                    f"[Tool call '{tool_name}' did not complete. "
-                    "Do not retry the same call; use the information you already have or try a different approach.]"
-                ),
-                name=tool_name,
-                tool_call_id=call_id,
-                is_error=True,
-            )
-
-        repaired: list[LLMMessage] = []
-        pending_ids: dict[str, str] = {}
-        pending_order: list[str] = []
-        inserted = 0
-        dropped = 0
-
-        def flush_pending() -> None:
-            nonlocal inserted
-            if not pending_order:
-                return
-            for call_id in list(pending_order):
-                tool_name = pending_ids.get(call_id, "unknown")
-                repaired.append(make_placeholder(call_id, tool_name))
-                inserted += 1
-                logger.debug(
-                    "Synthesized placeholder for dangling tool_call_id=%s (%s)",
-                    call_id,
-                    tool_name,
-                )
-            pending_ids.clear()
-            pending_order.clear()
-
-        for msg in self._history:
-            if msg.role == "assistant":
-                flush_pending()
-                repaired.append(msg)
-                if msg.tool_calls:
-                    for tc in msg.tool_calls:
-                        pending_ids[tc.id] = tc.name
-                        pending_order.append(tc.id)
-                continue
-
-            if msg.role == "tool":
-                call_id = str(msg.tool_call_id or "").strip()
-                if call_id and call_id in pending_ids:
-                    repaired.append(msg)
-                    pending_ids.pop(call_id, None)
-                    pending_order = [
-                        pending for pending in pending_order if pending != call_id
-                    ]
-                else:
-                    dropped += 1
-                    logger.debug(
-                        "Dropped orphan tool message tool_call_id=%s",
-                        call_id or "<missing>",
-                    )
-                continue
-
-            flush_pending()
-            repaired.append(msg)
-
-        flush_pending()
-
-        if inserted or dropped:
-            self._history = repaired
-            # Protocol repair changes the serialized suffix. Any previous
-            # sent-marker is no longer a reliable contiguous boundary.
-            self._history_frozen_count = 0
-            self._rebuild_history_token_cache()
-
-        return inserted
+        return self._history_store.repair()
 
     def append_system_note(self, content: str) -> None:
         text = str(content or "").strip()
@@ -2178,7 +2157,7 @@ class ContextBuilder:
                 f"</function_call_result>"
             )
 
-        self._append_history_message(
+        self._history_store.append(
             LLMMessage(
                 role="tool",
                 content=content,
@@ -2286,7 +2265,7 @@ class ContextBuilder:
                 self._history_frozen_count,
                 len(self._history),
             )
-            self._rebuild_history_token_cache()
+            self._history_store.rebuild_token_cache()
             self._last_actual_prompt_tokens = 0
         return changed
 
@@ -2451,7 +2430,7 @@ class ContextBuilder:
             i = j
 
         if content_changed:
-            self._rebuild_history_token_cache()
+            self._history_store.rebuild_token_cache()
             self._last_actual_prompt_tokens = 0
         if newly_persisted > 0:
             logger.info(
@@ -2528,7 +2507,7 @@ class ContextBuilder:
             estimate = (
                 self._history_token_estimates[index]
                 if index < len(self._history_token_estimates)
-                else self._estimate_message_tokens(message.content, message.tool_calls)
+                else estimate_message_tokens(message.content, message.tool_calls)
             )
             attachment_tokens, attachment_count, attachment_sources = (
                 estimate_native_attachments(
@@ -2684,7 +2663,7 @@ class ContextBuilder:
 
         if changed:
             self._history_frozen_count = 0
-            self._rebuild_history_token_cache()
+            self._history_store.rebuild_token_cache()
             self._last_actual_prompt_tokens = 0
             logger.info(
                 "[MediaSizeRecovery] stripped_messages=%d images=%d documents=%d",
@@ -2758,7 +2737,7 @@ class ContextBuilder:
 
         if changed:
             self._history_frozen_count = 0
-            self._rebuild_history_token_cache()
+            self._history_store.rebuild_token_cache()
             self._last_actual_prompt_tokens = 0
             logger.info("[ContentFilterRecovery] quarantined_web_results=%d", changed)
         return changed
@@ -2800,7 +2779,7 @@ class ContextBuilder:
             user_text = self._strip_trusted_runtime_context(runtime_message)
             projected_content = self._build_user_turn_content(user_text, state)
             history_tokens += (
-                self._estimate_message_tokens(
+                estimate_message_tokens(
                     projected_content,
                     runtime_message.tool_calls,
                 )
@@ -2888,7 +2867,7 @@ class ContextBuilder:
         structured_blocks = self._post_compaction_structured_state_blocks(state, root)
         if structured_blocks:
             structured_content = "\n\n".join(structured_blocks)
-            structured_tokens = self._estimate_content_tokens(structured_content)
+            structured_tokens = _estimate_content_tokens(structured_content)
             if structured_tokens <= context_available_tokens:
                 self._persistent_notes.append(
                     {
@@ -2919,7 +2898,7 @@ class ContextBuilder:
             )
             if not block:
                 continue
-            block_tokens = self._estimate_content_tokens(block)
+            block_tokens = _estimate_content_tokens(block)
             if block_tokens > available_tokens:
                 break
             restored_blocks.append(block)
@@ -3088,7 +3067,7 @@ class ContextBuilder:
             max(0, int(cloned._history_frozen_count)),
             len(cloned._history),
         )
-        cloned._rebuild_history_token_cache()
+        cloned._history_store.rebuild_token_cache()
         cloned._last_actual_prompt_tokens = 0
         cloned._last_estimated_prompt_tokens = 0
         return cloned
@@ -3239,7 +3218,7 @@ class ContextBuilder:
         # from evidence the active context no longer contains.
         self._read_file_hashes.clear()
         self._ensure_invoked_skill_messages()
-        self._rebuild_history_token_cache()
+        self._history_store.rebuild_token_cache()
         self._last_actual_prompt_tokens = 0
         self._restore_recent_files_after_compaction(restore_state)
         return compressed_summary
@@ -3400,7 +3379,7 @@ class ContextBuilder:
             for index in self._get_history_within_budget_indices()
             if not _is_prompt_instruction_role(self._history[index].role)
         ]
-        return self._repair_provider_tool_sequence(selected)
+        return repair_tool_messages(selected)[0]
 
     @property
     def history_length(self) -> int:
@@ -3408,14 +3387,8 @@ class ContextBuilder:
 
     def clear(self) -> None:
         clear_system_prompt_sections()
-        self._history.clear()
-        self._history_frozen_count = 0
-        self._history_frozen_metadata_present = False
-        self._pending_hydration_frozen_prefix_count = 0
-        self._last_message_timestamp_ms = 0
+        self._history_store.clear()
         self._pending_runtime_context_update = ""
-        self._history_token_estimates.clear()
-        self._history_tokens_total = 0
         self._persistent_notes.clear()
         self._read_file_hashes.clear()
         self._compaction_count = 0
@@ -3450,7 +3423,7 @@ class ContextBuilder:
         durability boundary from first constructing and hashing an arbitrarily
         large conversation only to truncate it later in ``save_checkpoint``.
         """
-        groups = self._message_groups(self._history)
+        groups = self._history_store.groups()
         if max_messages is not None:
             message_limit = max(0, int(max_messages))
             selected_reversed: list[list[LLMMessage]] = []
@@ -3600,7 +3573,7 @@ class ContextBuilder:
             default=0,
         )
         self._ensure_invoked_skill_messages()
-        self._rebuild_history_token_cache()
+        self._history_store.rebuild_token_cache()
         self._reconstruct_tool_result_budget_state()
 
     def load_snapshot_partial(
@@ -3619,7 +3592,7 @@ class ContextBuilder:
             recent_history: list[dict[str, Any]] = []
             pending_history = raw_history
         else:
-            groups = self._raw_message_groups(raw_history)
+            groups = group_raw_messages(raw_history)
             recent_groups_reversed: list[list[dict[str, Any]]] = []
             recent_count = 0
             for group in reversed(groups):
@@ -3669,7 +3642,7 @@ class ContextBuilder:
             default=0,
         )
         self._ensure_invoked_skill_messages()
-        self._rebuild_history_token_cache()
+        self._history_store.rebuild_token_cache()
         self._reconstruct_tool_result_budget_state()
         return pending_history
 
@@ -3694,111 +3667,9 @@ class ContextBuilder:
             if content.startswith("<persisted-output>"):
                 self._tool_result_budget_replacements[tool_call_id] = content
 
-    @staticmethod
-    def _message_groups(messages: list[LLMMessage]) -> list[list[LLMMessage]]:
-        groups: list[list[LLMMessage]] = []
-        index = 0
-        while index < len(messages):
-            message = messages[index]
-            group = [message]
-            if message.role == "assistant" and message.tool_calls:
-                call_ids = {call.id for call in message.tool_calls if call.id}
-                cursor = index + 1
-                while cursor < len(messages):
-                    candidate = messages[cursor]
-                    if candidate.role != "tool" or (
-                        call_ids and candidate.tool_call_id not in call_ids
-                    ):
-                        break
-                    group.append(candidate)
-                    cursor += 1
-                index = cursor
-            else:
-                index += 1
-            groups.append(group)
-        return groups
-
-    @staticmethod
-    def _raw_message_groups(
-        messages: list[dict[str, Any]],
-    ) -> list[list[dict[str, Any]]]:
-        groups: list[list[dict[str, Any]]] = []
-        index = 0
-        while index < len(messages):
-            message = messages[index]
-            group = [message]
-            tool_calls = (
-                message.get("tool_calls") if isinstance(message, dict) else None
-            )
-            if (
-                message.get("role") == "assistant"
-                and isinstance(tool_calls, list)
-                and tool_calls
-            ):
-                call_ids = {
-                    str(call.get("id") or "")
-                    for call in tool_calls
-                    if isinstance(call, dict) and str(call.get("id") or "")
-                }
-                cursor = index + 1
-                while cursor < len(messages):
-                    candidate = messages[cursor]
-                    if candidate.get("role") != "tool" or (
-                        call_ids
-                        and str(candidate.get("tool_call_id") or "") not in call_ids
-                    ):
-                        break
-                    group.append(candidate)
-                    cursor += 1
-                index = cursor
-            else:
-                index += 1
-            groups.append(group)
-        return groups
-
     def prepend_history_messages(self, messages: list[LLMMessage]) -> None:
-        if not messages:
-            # A completed/empty hydration callback means no older prefix will
-            # be prepended. Do not leave an absolute pending boundary around
-            # for a later unrelated append or skill restore.
-            self._pending_hydration_frozen_prefix_count = 0
-            return
-        prefix = [
-            message
-            for message in messages
-            if not _is_prompt_instruction_role(getattr(message, "role", ""))
-        ]
-        prefix_frozen = min(
-            len(prefix),
-            max(0, int(self._pending_hydration_frozen_prefix_count)),
-        )
-        self._history = prefix + self._history
-        self._history_frozen_count = min(
-            len(self._history),
-            prefix_frozen + max(0, int(self._history_frozen_count)),
-        )
-        self._pending_hydration_frozen_prefix_count = 0
-        self._ensure_history_timestamps()
-        self._rebuild_history_token_cache()
-
-    def _ensure_history_timestamps(self) -> None:
-        """Assign durable timestamps to messages inserted outside the append API."""
-        current = max(
-            (int(message.timestamp_ms or 0) for message in self._history),
-            default=self._last_message_timestamp_ms,
-        )
-        for message in self._history:
-            if message.timestamp_ms is None:
-                current = max(current + 1, 1)
-                message.timestamp_ms = current
-            else:
-                try:
-                    message.timestamp_ms = max(1, int(message.timestamp_ms))
-                except (TypeError, ValueError):
-                    current = max(current + 1, 1)
-                    message.timestamp_ms = current
-            current = max(current, int(message.timestamp_ms or 1))
-        self._last_message_timestamp_ms = max(self._last_message_timestamp_ms, current)
+        """Prepend hydrated prefix messages via ConversationHistory."""
+        self._history_store.prepend(messages)
 
     @staticmethod
     def sanitize_snapshot_history(
@@ -3988,119 +3859,7 @@ class ContextBuilder:
         """Return the session-owned optimistic read state used by file tools."""
         return self._read_file_hashes
 
-    def _append_history_message(
-        self,
-        message: LLMMessage,
-        *,
-        raw_content: Any | None = None,
-    ) -> None:
-        if message.timestamp_ms is None:
-            now_ms = max(1, int(time.time() * 1000))
-            message.timestamp_ms = max(now_ms, self._last_message_timestamp_ms + 1)
-        else:
-            try:
-                message.timestamp_ms = max(1, int(message.timestamp_ms))
-            except (TypeError, ValueError):
-                message.timestamp_ms = max(1, self._last_message_timestamp_ms + 1)
-        self._last_message_timestamp_ms = max(
-            self._last_message_timestamp_ms,
-            int(message.timestamp_ms or 1),
-        )
-        self._history.append(message)
-        estimate = int(
-            self._estimate_message_tokens(
-                raw_content if raw_content is not None else message.content,
-                message.tool_calls,
-            )
-            + estimate_native_attachments(message.images, message.documents)[0]
-        )
-        self._history_token_estimates.append(estimate)
-        self._history_tokens_total += estimate
-
-    def _rebuild_history_token_cache(self) -> None:
-        self._history_token_estimates = [
-            int(
-                self._estimate_message_tokens(message.content, message.tool_calls)
-                + estimate_native_attachments(message.images, message.documents)[0]
-            )
-            for message in self._history
-        ]
-        self._history_tokens_total = sum(self._history_token_estimates)
-
     def _get_history_within_budget_indices(self) -> list[int]:
         # Compact the session before the provider call; do not silently
         # drop older messages through a second history-only budget.
         return list(range(len(self._history)))
-
-    @staticmethod
-    def _repair_provider_tool_sequence(messages: list[LLMMessage]) -> list[LLMMessage]:
-        repaired: list[LLMMessage] = []
-        pending_ids: dict[str, str] = {}
-        pending_order: list[str] = []
-
-        def make_placeholder(call_id: str, tool_name: str) -> LLMMessage:
-            return LLMMessage(
-                role="tool",
-                content=(
-                    f"[Tool call '{tool_name}' did not complete. "
-                    "Use available context; do not repeat the same call unless necessary.]"
-                ),
-                name=tool_name,
-                tool_call_id=call_id,
-                is_error=True,
-            )
-
-        def flush_pending() -> None:
-            if not pending_order:
-                return
-            for call_id in list(pending_order):
-                repaired.append(
-                    make_placeholder(call_id, pending_ids.get(call_id, "unknown"))
-                )
-            pending_ids.clear()
-            pending_order.clear()
-
-        for message in messages:
-            if message.role == "assistant":
-                flush_pending()
-                repaired.append(message)
-                for tool_call in message.tool_calls or []:
-                    pending_ids[tool_call.id] = tool_call.name
-                    pending_order.append(tool_call.id)
-                continue
-
-            if message.role == "tool":
-                call_id = str(message.tool_call_id or "").strip()
-                if call_id and call_id in pending_ids:
-                    repaired.append(message)
-                    pending_ids.pop(call_id, None)
-                    pending_order = [
-                        pending for pending in pending_order if pending != call_id
-                    ]
-                continue
-
-            flush_pending()
-            repaired.append(message)
-
-        flush_pending()
-        return repaired
-
-    @staticmethod
-    def _estimate_message_tokens(
-        content: Any,
-        tool_calls: list[ToolCallEvent] | None = None,
-    ) -> int:
-        return ContextBuilder._estimate_content_tokens(content) + (
-            len(tool_calls or []) * 20
-        )
-
-    @staticmethod
-    def _estimate_content_tokens(content: Any) -> int:
-        if isinstance(content, str):
-            return _estimate_content_tokens(content)
-        # For all non-string types (dict, list, tuple, set, int, etc.),
-        # convert to string representation before applying the same estimator.
-        # Previously this used len(content) // 4 for sized objects, which
-        # returned the number of items (e.g., dict keys) instead of character
-        # count, causing massive token underestimation for dict/set objects.
-        return _estimate_content_tokens(str(content))
