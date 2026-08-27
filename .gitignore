@@ -56,6 +56,7 @@ htmlcov/
 /tests/
 /backend/tests/
 /frontend/tests/
+/cc/
 /frontend/playwright.config.ts
 **/*.test.js
 **/*.test.ts
