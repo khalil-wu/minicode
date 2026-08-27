@@ -84,7 +84,6 @@ def is_raw_provider_reasoning_event(payload: Any) -> bool:
         return False
     if bool(
         payload.get("is_raw_provider_reasoning")
-        or payload.get("isRawProviderReasoning")
     ):
         return True
     visibility = str(payload.get("visibility") or "").strip().lower()

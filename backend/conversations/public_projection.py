@@ -332,7 +332,7 @@ def _project_block(value: Any) -> dict[str, Any] | None:
     if block_type == "thinking":
         visibility = public_text(value.get("visibility"), max_chars=64, single_line=True).lower()
         if visibility in {"hidden", "internal", "redacted", "debug"} or bool(
-            value.get("is_raw_provider_reasoning") or value.get("isRawProviderReasoning")
+            value.get("is_raw_provider_reasoning")
         ):
             return None
         content = public_text(value.get("content"), max_chars=262_144)
@@ -588,7 +588,7 @@ def project_public_transcript_message(value: Any) -> dict[str, Any]:
         ]
         if blocks:
             projected["blocks"] = blocks
-    raw_calls = source.get("tool_calls", source.get("toolCalls"))
+    raw_calls = source.get("tool_calls")
     if isinstance(raw_calls, list):
         calls = [
             project_public_tool_call(raw_call)

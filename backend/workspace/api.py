@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Callable
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -46,9 +45,8 @@ from backend.services.workspace_api_service import (
 from .service import WorkspaceService
 
 
-def create_workspace_router(get_project_root: Callable[[], Path]) -> APIRouter:
+def create_workspace_router() -> APIRouter:
     router = APIRouter(prefix="/api/workspace", tags=["workspace"])
-    _ = get_project_root
 
     def _service(workspace_root: str) -> WorkspaceService:
         value = str(workspace_root or "").strip()
@@ -280,3 +278,5 @@ def create_workspace_router(get_project_root: Callable[[], Path]) -> APIRouter:
 
 def _is_path_within(path: Path, parent: Path) -> bool:
     return is_path_within(path, parent)
+
+

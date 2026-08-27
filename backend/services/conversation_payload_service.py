@@ -143,7 +143,7 @@ def parse_conversation_rename_request(data: dict[str, Any]) -> ConversationRenam
 def parse_conversation_delete_request(data: dict[str, Any]) -> ConversationDeleteRequest:
     return ConversationDeleteRequest(
         conversation_id=str(data.get("conversation_id", "")),
-        cleanup_worktree=bool(data.get("cleanup_worktree") or data.get("cleanupWorktree")),
+        cleanup_worktree=bool(data.get("cleanup_worktree")),
         force_cleanup=bool(data.get("force")),
     )
 
@@ -151,8 +151,8 @@ def parse_conversation_delete_request(data: dict[str, Any]) -> ConversationDelet
 def parse_conversation_clear_request(data: dict[str, Any], *, active_conversation_id: str = "") -> ConversationClearRequest:
     return ConversationClearRequest(
         conversation_id=str(data.get("conversation_id") or active_conversation_id or "").strip(),
-        preserve_plan=bool(data.get("preserve_plan") or data.get("preservePlan")),
-        plan_content=str(data.get("plan_content") or data.get("planContent") or ""),
+        preserve_plan=bool(data.get("preserve_plan")),
+        plan_content=str(data.get("plan_content") or ""),
     )
 
 
@@ -186,9 +186,9 @@ def build_worktree_cleanup_force_required_outcome(cleanup: dict[str, Any]) -> Co
 
 
 def parse_conversation_create_request(data: dict[str, Any]) -> ConversationCreateRequest:
-    git_isolated = bool(data.get("git_isolated") or data.get("gitIsolated"))
-    raw_conversation_type = data.get("conversation_type") or data.get("conversationType")
-    if raw_conversation_type is None and bool(data.get("side_chat") or data.get("sideChat")):
+    git_isolated = bool(data.get("git_isolated"))
+    raw_conversation_type = data.get("conversation_type")
+    if raw_conversation_type is None and bool(data.get("side_chat")):
         raw_conversation_type = "side_chat"
     conversation_type = normalize_conversation_type(raw_conversation_type)
     requested_memory_mode = str(data.get("memory_mode") or "").strip().lower()
@@ -198,9 +198,9 @@ def parse_conversation_create_request(data: dict[str, Any]) -> ConversationCreat
         else ("disabled" if conversation_type == "side_chat" else "enabled")
     )
     activate = conversation_type == "main"
-    workspace_root = str(data.get("workspace_root") or data.get("workspaceRoot") or "").strip()
+    workspace_root = str(data.get("workspace_root") or "").strip()
     permission_mode = normalize_permission_mode(
-        str(data.get("permission_mode") or data.get("permissionMode") or DEFAULT_CONVERSATION_PERMISSION_MODE)
+        str(data.get("permission_mode") or DEFAULT_CONVERSATION_PERMISSION_MODE)
     ) or DEFAULT_CONVERSATION_PERMISSION_MODE
     workspace_required_error = None
     if git_isolated and not workspace_root:
@@ -211,7 +211,7 @@ def parse_conversation_create_request(data: dict[str, Any]) -> ConversationCreat
             error_code="workspace_required",
         )
     return ConversationCreateRequest(
-        conversation_id=str(data.get("conversation_id") or data.get("conversationId") or "").strip() or None,
+        conversation_id=str(data.get("conversation_id") or "").strip() or None,
         title=str(data.get("title") or "New chat"),
         conversation_type=conversation_type,
         memory_mode=memory_mode,

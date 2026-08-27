@@ -75,7 +75,6 @@ class TurnInput:
             {
                 "config_name": str(
                     item.get("config_name")
-                    or item.get("configName")
                     or item.get("name")
                     or ""
                 ).strip(),
@@ -84,7 +83,7 @@ class TurnInput:
             for item in (data.get("plugins") or [])
             if isinstance(item, dict)
             and (
-                str(item.get("config_name") or item.get("configName") or item.get("name") or "").strip()
+                str(item.get("config_name") or item.get("name") or "").strip()
                 or str(item.get("path") or "").strip().startswith("plugin://")
             )
         )

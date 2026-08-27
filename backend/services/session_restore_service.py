@@ -11,21 +11,26 @@ def _snapshot_now() -> str:
 
 
 def seq_from_restore_payload(data: dict[str, Any]) -> int:
-    for key in ("last_seq", "last_seen_seq", "last_event_seq"):
-        value = data.get(key)
-        if isinstance(value, bool):
-            continue
-        if isinstance(value, int):
-            seq = value
-        elif isinstance(value, str) and value.strip().isdigit():
-            try:
-                seq = int(value.strip())
-            except ValueError:
-                continue
-        else:
-            continue
-        if 0 < seq <= 9_007_199_254_740_991:
-            return seq
+    """Return the client's last seen durable replay sequence.
+
+    The wire contract uses the single ``last_seq`` field (see
+    ``protocol/common-types.ts``). Older alias spellings are not accepted so
+    the protocol keeps one canonical name.
+    """
+    value = data.get("last_seq")
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        seq = value
+    elif isinstance(value, str) and value.strip().isdigit():
+        try:
+            seq = int(value.strip())
+        except ValueError:
+            return 0
+    else:
+        return 0
+    if 0 < seq <= 9_007_199_254_740_991:
+        return seq
     return 0
 
 
@@ -185,3 +190,4 @@ def build_session_synced_payload(
         ),
         "snapshot_at": _snapshot_now(),
     }
+

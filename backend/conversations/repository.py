@@ -1727,7 +1727,6 @@ def _is_legacy_raw_provider_reasoning_block(block: Any) -> bool:
         return False
     if bool(
         block.get("is_raw_provider_reasoning")
-        or block.get("isRawProviderReasoning")
     ):
         return True
     visibility = str(block.get("visibility") or "").strip().lower()

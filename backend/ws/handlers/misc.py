@@ -326,7 +326,7 @@ async def handle_read_artifact_command(session: "WebSocketSession", data: dict[s
     try:
         artifact_id = str(data.get("artifact_id", "")).strip()
         conversation_id = str(
-            data.get("conversation_id") or data.get("conversationId") or session.active_conversation_id or ""
+            data.get("conversation_id") or session.active_conversation_id or ""
         ).strip()
         if not conversation_id:
             raise ValueError("read_artifact requires an active or explicit conversation owner")
@@ -458,12 +458,11 @@ async def handle_approval_file_diff_command(session: "WebSocketSession", data: d
         pending_turn_id = str(pending.get("turn_id") or "").strip() if isinstance(pending, dict) else ""
         conversation_id = str(
             data.get("conversation_id")
-            or data.get("conversationId")
             or session.active_conversation_id
             or (pending.get("conversation_id") if isinstance(pending, dict) else "")
             or ""
         ).strip()
-        turn_id = str(data.get("turn_id") or data.get("turnId") or pending_turn_id).strip()
+        turn_id = str(data.get("turn_id") or pending_turn_id).strip()
         result = get_approval_file_diff(
             session._approval_diff_cache,
             tool_call_id=tool_call_id,
@@ -480,11 +479,11 @@ async def handle_approval_file_diff_command(session: "WebSocketSession", data: d
 
 
 async def handle_interrupt_command(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    target_conversation_id = str(data.get("conversation_id") or data.get("conversationId") or "").strip()
+    target_conversation_id = str(data.get("conversation_id") or "").strip()
     target_conversation_id = target_conversation_id or str(session.active_conversation_id or "").strip()
-    expected_turn_id = str(data.get("turn_id") or data.get("turnId") or "").strip()
-    expected_message_id = str(data.get("message_id") or data.get("messageId") or "").strip()
-    expected_task_id = str(data.get("task_id") or data.get("taskId") or "").strip()
+    expected_turn_id = str(data.get("turn_id") or "").strip()
+    expected_message_id = str(data.get("message_id") or "").strip()
+    expected_task_id = str(data.get("task_id") or "").strip()
     stream_state = (
         getattr(session, "_conversation_streams", {}).get(target_conversation_id) or {}
         if target_conversation_id
@@ -662,9 +661,9 @@ async def handle_send_message(session: "WebSocketSession", data: dict[str, Any])
 
 async def handle_user_message_queue_cancel(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     conversation_id = str(
-        data.get("conversation_id") or data.get("conversationId") or session.active_conversation_id or ""
+        data.get("conversation_id") or session.active_conversation_id or ""
     ).strip()
-    message_id = str(data.get("message_id") or data.get("messageId") or "").strip()
+    message_id = str(data.get("message_id") or "").strip()
     if not conversation_id or not message_id:
         await emit_command_error(
             session,
@@ -678,7 +677,7 @@ async def handle_user_message_queue_cancel(session: "WebSocketSession", data: di
                 status="cancelled",
                 conversation_id=conversation_id,
                 message_id=message_id,
-                user_message_id=str(data.get("user_message_id") or data.get("userMessageId") or ""),
+                user_message_id=str(data.get("user_message_id") or ""),
                 reason="user_cancelled",
             )
         )
@@ -699,9 +698,9 @@ async def handle_user_message_queue_cancel(session: "WebSocketSession", data: di
 
 async def handle_user_message_queue_steer(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     conversation_id = str(
-        data.get("conversation_id") or data.get("conversationId") or session.active_conversation_id or ""
+        data.get("conversation_id") or session.active_conversation_id or ""
     ).strip()
-    message_id = str(data.get("message_id") or data.get("messageId") or "").strip()
+    message_id = str(data.get("message_id") or "").strip()
     if not conversation_id or not message_id:
         await emit_command_error(
             session,

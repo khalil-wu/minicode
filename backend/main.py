@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import signal
+from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import urlsplit
@@ -34,6 +35,8 @@ from backend.bootstrap.app import AppBootstrap
 from backend.config import PROJECT_ROOT, load_config
 from backend.runtime_env import ensure_utf8_console_logging
 from backend.version import __version__
+from backend.llm.model_registry import create_session_llm as _create_session_llm
+from backend.ui.preferences import UIPreferencesStore
 from backend.workspace import create_workspace_router
 
 # ── Decomposed sub-modules ──
@@ -71,10 +74,6 @@ if hasattr(asyncio, "WindowsProactorEventLoopPolicy"):
     except Exception as exc:
         logger.warning("Failed to set WindowsProactorEventLoopPolicy: %s", exc)
 
-
-from backend.llm.model_registry import (
-    create_session_llm as _create_session_llm,
-)
 
 
 # ── Frontend paths ──
@@ -339,7 +338,7 @@ app.include_router(health_router)
 
 # ── Workspace router ──
 
-app.include_router(create_workspace_router(lambda: PROJECT_ROOT))
+app.include_router(create_workspace_router())
 
 
 # ── Static file serving ──
@@ -434,9 +433,6 @@ async def index():
 @app.get("/api/ui/preferences")
 async def get_ui_preferences(session_id: str = Query(..., min_length=1)) -> dict[str, Any]:
     """Get user UI preferences (layout, panel sizes, theme overrides)."""
-    from backend.ui.preferences import UIPreferencesStore
-    from pathlib import Path
-
     store = UIPreferencesStore(Path("data/ui_preferences"))
     prefs = store.get(session_id)
     return prefs.to_dict()
@@ -448,9 +444,6 @@ async def update_ui_preferences(
     session_id: str = Query(..., min_length=1)
 ) -> dict[str, Any]:
     """Save UI preferences."""
-    from backend.ui.preferences import UIPreferencesStore
-    from pathlib import Path
-
     store = UIPreferencesStore(Path("data/ui_preferences"))
     updated = store.update(session_id, preferences)
     return {"status": "ok", "preferences": updated.to_dict()}
@@ -508,3 +501,6 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             session.session_id,
             connection_generation=connection_generation,
         )
+
+
+

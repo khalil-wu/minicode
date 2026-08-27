@@ -166,7 +166,7 @@ async def handle_workspace_set(session: "WebSocketSession", data: dict[str, Any]
     """
 
     path_str = str(
-        data.get("path") or data.get("workspace_root") or data.get("workspaceRoot") or ""
+        data.get("path") or data.get("workspace_root") or ""
     ).strip()
     return await _activate_workspace_for_command(
         session,

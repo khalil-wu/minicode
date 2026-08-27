@@ -37,7 +37,7 @@ def _terminal_owned_by_conversation(
 
 
 def _requested_conversation_id(data: dict[str, Any]) -> str:
-    return str(data.get("conversation_id") or data.get("conversationId") or "").strip()
+    return str(data.get("conversation_id") or "").strip()
 
 
 def _known_conversation(session: "WebSocketSession", conversation_id: str) -> bool:
@@ -276,7 +276,7 @@ async def handle_terminal_snapshot_request(session: "WebSocketSession", data: di
         active_session_id=str(getattr(session, "active_terminal_session_id", "") or ""),
     )
     if session_id and _terminal_owned_by_conversation(session, session_id, conversation_id) is None:
-        explicitly_requested = bool(str(data.get("session_id") or data.get("sessionId") or "").strip())
+        explicitly_requested = bool(str(data.get("session_id") or "").strip())
         if explicitly_requested:
             payload = terminal_snapshot_payload(
                 None,

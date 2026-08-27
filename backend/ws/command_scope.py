@@ -37,7 +37,6 @@ def resolve_command_scope(
         data.get("owner_conversation_id")
         or data.get("ownerConversationId")
         or data.get("conversation_id")
-        or data.get("conversationId")
         or ""
     ).strip()
     if requested_conversation_id and requested_conversation_id != active_conversation_id:

@@ -67,7 +67,7 @@ def pollution_sources_from_transcript(transcript: Iterable[Any]) -> list[str]:
     for raw_message in transcript:
         if not isinstance(raw_message, dict):
             continue
-        tool_calls = raw_message.get("tool_calls") or raw_message.get("toolCalls")
+        tool_calls = raw_message.get("tool_calls")
         if isinstance(tool_calls, list):
             records.extend(item for item in tool_calls if isinstance(item, dict))
         blocks = raw_message.get("blocks")

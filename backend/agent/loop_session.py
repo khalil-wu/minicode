@@ -226,7 +226,7 @@ def populate_prompt_context(
         else "confirm"
     )
     agent_mode = str(
-        metadata.get("agent_mode") or metadata.get("agentMode") or "build"
+        metadata.get("agent_mode") or "build"
     ).strip().lower()
     prompt_context["agent_mode"] = (
         agent_mode if agent_mode in {"build", "plan", "review", "explore"} else "build"

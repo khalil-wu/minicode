@@ -211,7 +211,7 @@ def plan_file_reference(path: Path | str, content: str | None = None) -> dict[st
         "path": str(Path(path).expanduser().resolve()),
     }
     if isinstance(content, str) and content:
-        reference["planContent"] = content
+        reference["plan_content"] = content
     return reference
 
 
@@ -325,12 +325,12 @@ def recover_plan_from_transcript(messages: Sequence[Mapping[str, Any]]) -> str |
                     plan = payload.get("plan")
                     if isinstance(plan, str) and plan:
                         return plan
-        plan_content = message.get("planContent") or message.get("plan_content")
+        plan_content = message.get("plan_content")
         if isinstance(plan_content, str) and plan_content:
             return plan_content
         attachment = message.get("attachment")
         if isinstance(attachment, Mapping) and attachment.get("type") == "plan_file_reference":
-            plan = attachment.get("planContent") or attachment.get("plan_content")
+            plan = attachment.get("plan_content")
             if isinstance(plan, str) and plan:
                 return plan
     return None

@@ -1097,6 +1097,120 @@ const conversationIdFor = (e: ServerEvent): string | undefined => {
   return cid;
 };
 
+// ── Explicit event dispatch ──────────────────────────────────────────────
+// Every server event type is owned by exactly one reducer. Dispatch is a
+// lookup, never a first-wins chain: adding a new event type requires
+// declaring its owner here, so two reducers cannot silently compete for the
+// same event. The module-load assertion below fails loudly on duplicates.
+type ServerEventDispatcher = (e: ServerEvent, cid: string | undefined) => boolean;
+
+const CHAT_STREAM_EVENT_TYPES = new Set<string>([
+  "thinking_delta", "thinking", "item.started", "agent_message.delta",
+  "item.completed", "image_chunk", "tool_call", "tool_output_delta",
+  "command_output_chunk", "tool_result", "permission.decision", "agent.item",
+  "done", "error", "stream_resume",
+]);
+const RUNTIME_EVENT_TYPES = new Set<string>([
+  "agent.progress", "runtime.span", "agent.run.started", "agent.run.completed",
+  "context_usage", "context_compacted", "context_ledger", "context_forked",
+  "context_side_query_result", "turn.plan.updated", "task.update",
+  "subagent.start", "subagent.event", "subagent.progress", "subagent.done",
+  "budget_update", "budget.warning", "subagent.mailbox",
+  "subagent.plan_approval_requested", "permission.mode.updated",
+  "runtime.capabilities", "mcp.lifecycle", "mcp.progress",
+  // Handled inside runtimeEvents' default branch:
+  "stream_event", "session.state_changed", "rate_limit",
+]);
+const CONTROL_EVENT_TYPES = new Set<string>([
+  "control_request", "approval.file_diff", "approval.cancelled",
+]);
+const SESSION_EVENT_TYPES = new Set<string>([
+  "user_message.queue.updated", "llm.model.updated", "llm.provider.oauth.auth",
+  "llm.provider.oauth.device_code", "llm.provider.oauth.info",
+  "llm.provider.oauth.progress", "session.restored", "session.synced",
+  "conversation.list", "goal.updated", "conversation.switched",
+]);
+const ARTIFACT_EVENT_TYPES = new Set<string>([
+  "artifact_content", "artifact.preview", "citation.add", "inspector.update",
+]);
+const COMMAND_CATALOG_EVENT_TYPES = new Set<string>([
+  "skills.list", "commands.list", "skills.marketplace.list",
+]);
+const PERIPHERAL_EVENT_TYPES = new Set<string>([
+  "terminal.output", "terminal.resized", "workspace.imported", "file.changed",
+  "terminal.created", "terminal.killed", "terminal.exit", "terminal.list",
+  "terminal.snapshot", "mcp_status", "env.list", "git.pr_status",
+  "scheduler.list", "background.started", "background.stalled",
+  "background.completed",
+]);
+const COMMAND_RESULT_EVENT_TYPES = new Set<string>(["command.result"]);
+const PREVIEW_EVENT_TYPES = new Set<string>([
+  "preview.servers.updated", "preview.server.detected", "preview.server.stopped",
+  "preview.navigated", "preview.refreshed", "preview.launch.config",
+  "preview.launch.started", "preview.server.ready", "preview.server.output",
+  "preview.server.crashed", "preview.server.unhealthy", "preview.launch.stopped",
+  "preview.verified",
+]);
+const CONTROL_PLANE_EVENT_TYPES = new Set<string>([
+  "conversation.hydration.updated", "permission.rules.updated",
+  "checkpoint.created", "checkpoint.list", "checkpoint.rewound",
+  "checkpoint.run.list", "checkpoint.run.resume", "workspace.recent.list",
+  "guidelines.updated",
+]);
+const NOTICE_EVENT_TYPES = new Set<string>([
+  "system_notice", "conversation.compaction.updated",
+  "conversation.summary.updated",
+]);
+const DIFF_EVENT_TYPES = new Set<string>([
+  "turn.diff.updated", "diff.git_working_tree", "diff.git_staged",
+  "diff.git_stage_file", "diff.git_unstage_file", "diff.git_stage_all",
+  "diff.git_unstage_all", "diff.git_revert_file",
+]);
+
+const EVENT_DISPATCHERS: ReadonlyArray<{
+  types: ReadonlySet<string>;
+  dispatch: ServerEventDispatcher;
+}> = [
+  { types: CHAT_STREAM_EVENT_TYPES, dispatch: (e, cid) => handleChatStreamEvent(e, cid, { textStreamBuffer, thinkingStreamBuffer }) },
+  { types: RUNTIME_EVENT_TYPES, dispatch: (e, cid) => handleRuntimeEvent(e, cid) },
+  { types: CONTROL_EVENT_TYPES, dispatch: (e) => handleControlEvent(e) },
+  { types: SESSION_EVENT_TYPES, dispatch: (e, _cid) => handleSessionEvent(e, { textStreamBuffer, thinkingStreamBuffer }) },
+  { types: ARTIFACT_EVENT_TYPES, dispatch: (e, cid) => handleArtifactEvent(e, cid) },
+  { types: COMMAND_CATALOG_EVENT_TYPES, dispatch: (e) => handleCommandCatalogEvent(e) },
+  { types: PERIPHERAL_EVENT_TYPES, dispatch: (e) => handlePeripheralEvent(e) },
+  { types: COMMAND_RESULT_EVENT_TYPES, dispatch: (e) => handleCommandResultEvent(e) },
+  { types: PREVIEW_EVENT_TYPES, dispatch: (e) => handlePreviewEvent(e) },
+  { types: CONTROL_PLANE_EVENT_TYPES, dispatch: (e) => handleControlPlaneProjectionEvent(e) },
+  { types: NOTICE_EVENT_TYPES, dispatch: (e, cid) => handleNoticeEvent(e, cid) },
+  { types: DIFF_EVENT_TYPES, dispatch: (e) => handleDiffEvent(e) },
+];
+
+// Assert disjoint ownership once at module load so a duplicate registration
+// fails loudly instead of silently ordering one reducer ahead of another.
+{
+  const seen = new Set<string>();
+  for (const group of EVENT_DISPATCHERS) {
+    for (const type of group.types) {
+      if (seen.has(type)) {
+        throw new Error(`[useWebSocket] Event type "${type}" is registered by multiple reducers.`);
+      }
+      seen.add(type);
+    }
+  }
+}
+const EVENT_OWNER = new Map<string, ServerEventDispatcher>();
+for (const group of EVENT_DISPATCHERS) {
+  for (const type of group.types) {
+    EVENT_OWNER.set(type, group.dispatch);
+  }
+}
+
+// Transport-layer events are acknowledged by the websocket layer itself
+// (heartbeat pong, client.command.ack in acknowledgeClientCommand). They are
+// still reported to subscribers as handled events, but never enter a business
+// reducer.
+const TRANSPORT_EVENT_TYPES = new Set<string>(["pong", "client.command.ack"]);
+
 const handleServerEvent = (e: ServerEvent): boolean => {
   if (e.type === "session.replay") {
     for (const replayed of eventsFromSessionReplay(e)) {
@@ -1112,18 +1226,13 @@ const handleServerEvent = (e: ServerEvent): boolean => {
   }
 
   const cid = conversationIdFor(e);
-  if (handleChatStreamEvent(e, cid, { textStreamBuffer, thinkingStreamBuffer })) return true;
-  if (handleRuntimeEvent(e, cid)) return true;
-  if (handleControlEvent(e)) return true;
-  if (handleSessionEvent(e, { textStreamBuffer, thinkingStreamBuffer })) return true;
-  if (handleArtifactEvent(e, cid)) return true;
-  if (handleCommandCatalogEvent(e)) return true;
-  if (handlePeripheralEvent(e)) return true;
-  if (handleCommandResultEvent(e)) return true;
-  if (handlePreviewEvent(e)) return true;
-  if (handleControlPlaneProjectionEvent(e)) return true;
-  if (handleNoticeEvent(e, cid)) return true;
-  return handleDiffEvent(e);
+  const dispatch = EVENT_OWNER.get(e.type);
+  if (dispatch) return dispatch(e, cid);
+  if (TRANSPORT_EVENT_TYPES.has(e.type)) return true;
+  // Unknown event types are deliberately unhandled by the renderer. Keeping
+  // them outside any default makes new backend events visible to protocol
+  // validation instead of being swallowed by a catch-all reducer.
+  return false;
 };
 
 // Advance the replay cursor only after the event has been applied.  This is

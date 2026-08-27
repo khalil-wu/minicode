@@ -8,7 +8,7 @@ from fastapi import APIRouter, File, HTTPException, Query, Request, Response, Up
 from starlette.concurrency import run_in_threadpool
 
 from backend.agent.query_engine import QueryEngine
-from backend.attachments.store import MAX_ATTACHMENT_CONTENT_CHARS
+from backend.attachments.store import MAX_ATTACHMENT_CONTENT_BYTES
 from backend.services.chat_api_service import (
     ChatApiServiceError,
     attachment_native_payload,
@@ -76,7 +76,7 @@ async def upload_document(
             if not chunk:
                 break
             total += len(chunk)
-            if total > MAX_ATTACHMENT_CONTENT_CHARS:
+            if total > MAX_ATTACHMENT_CONTENT_BYTES:
                 raise HTTPException(status_code=413, detail="Upload exceeds the 50 MB limit.")
             chunks.append(chunk)
         raw_content = b"".join(chunks)
@@ -225,3 +225,4 @@ async def raw_generated_artifact(
         media_type=media_type,
         file_name=file_name,
     )
+

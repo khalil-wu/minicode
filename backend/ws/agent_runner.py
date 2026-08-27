@@ -3767,15 +3767,7 @@ class SessionAgentRunnerMixin:
         # Each run uses a local LLM/provider/model/config snapshot to avoid overwriting
         # session fields that concurrent runs might be reading
         try:
-            try:
-                run_config = load_config(cwd=run_workspace_root)
-            except TypeError as exc:
-                # Preserve the narrow host/test seam used by older embedders
-                # that expose a zero-argument config loader. Do not mask a
-                # TypeError raised from inside config parsing.
-                if "unexpected keyword argument 'cwd'" not in str(exc):
-                    raise
-                run_config = load_config()
+            run_config = load_config(cwd=run_workspace_root)
             run_settings = (
                 run_config.config_layer_stack.effective_config()
                 if run_config.config_layer_stack is not None
@@ -5459,3 +5451,4 @@ class SessionAgentRunnerMixin:
                     conversation_summary_payload,
                     log_context="conversation.summary.updated",
                 )
+

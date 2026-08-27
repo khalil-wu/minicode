@@ -103,7 +103,7 @@ const attachmentTransportRef = (payload: Record<string, unknown>): Record<string
 
 const contextRefSignature = (ref: MessageContextRef): Record<string, unknown> => {
   if (ref.kind === "plugin") {
-    return { kind: ref.kind, configName: ref.configName, path: ref.path };
+    return { kind: ref.kind, config_name: ref.configName, path: ref.path };
   }
   if (ref.kind === "skill") {
     return { kind: ref.kind, name: ref.name, path: ref.path ?? "" };
@@ -404,7 +404,7 @@ export const sendChatMessage = ({
     type: "user_message",
     content: contentForBackend,
     ...(targetWorkspaceRoot ? { workspace_root: targetWorkspaceRoot } : {}),
-    ...(targetWorkspaceRoot && state.activeTabPath ? { primaryFile: state.activeTabPath, activeTabPath: state.activeTabPath } : {}),
+    ...(targetWorkspaceRoot && state.activeTabPath ? { primary_file: state.activeTabPath, active_tab_path: state.activeTabPath } : {}),
     permission_mode: toBackendPermissionMode(state.permissionMode),
     agent_mode: state.agentMode,
     ...(targetConversationId ? { conversation_id: targetConversationId } : {}),

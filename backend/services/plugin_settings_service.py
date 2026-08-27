@@ -2136,7 +2136,6 @@ def resolve_enabled_plugin_mentions(
             continue
         config_name = str(
             mention.get("config_name")
-            or mention.get("configName")
             or mention.get("name")
             or ""
         ).strip()

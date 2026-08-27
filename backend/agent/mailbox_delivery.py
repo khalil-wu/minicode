@@ -626,7 +626,7 @@ async def inject_parent_notifications(
     """Inject durable child completion notifications into a parent turn."""
     if not _mailbox_deliverable(metadata):
         return 0
-    agent_mode = str(metadata.get("agent_mode") or metadata.get("agentMode") or "").strip().lower()
+    agent_mode = str(metadata.get("agent_mode") or "").strip().lower()
     agent_role = str(metadata.get("agent_role") or metadata.get("role") or "main").strip().lower()
     if agent_mode == "subagent" or agent_role in {"subagent", "side_query", "background"}:
         return 0

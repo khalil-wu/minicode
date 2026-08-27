@@ -28,7 +28,7 @@ class TerminalCommandRequest:
 
 
 def resolve_terminal_session_id(data: dict[str, Any], *, active_session_id: str = "") -> str:
-    session_id = str(data.get("session_id") or data.get("sessionId") or "").strip()
+    session_id = str(data.get("session_id") or "").strip()
     if session_id:
         return session_id
     return str(active_session_id or "").strip()
@@ -160,7 +160,7 @@ def terminal_snapshot_payload(
 
 
 def mirror_session_id(data: dict[str, Any]) -> str:
-    return str(data.get("session_id") or data.get("sessionId") or "").strip()[:128]
+    return str(data.get("session_id") or "").strip()[:128]
 
 
 def optional_int(value: Any) -> int | None:

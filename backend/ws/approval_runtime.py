@@ -262,20 +262,20 @@ class SessionApprovalRuntimeMixin:
 
         expected_conversation_id = str(pending.get("conversation_id") or "").strip()
         supplied_conversation_id = str(
-            response.get("conversation_id") or response.get("conversationId") or ""
+            response.get("conversation_id") or ""
         ).strip()
         if expected_conversation_id and supplied_conversation_id != expected_conversation_id:
             return "Approval response does not belong to the pending conversation"
 
         expected_turn_id = str(pending.get("turn_id") or "").strip()
         supplied_turn_id = str(
-            response.get("turn_id") or response.get("turnId") or ""
+            response.get("turn_id") or ""
         ).strip()
         if expected_turn_id and supplied_turn_id != expected_turn_id:
             return "Approval response does not belong to the pending turn"
         expected_message_id = str(pending.get("message_id") or "").strip()
         supplied_message_id = str(
-            response.get("message_id") or response.get("messageId") or ""
+            response.get("message_id") or ""
         ).strip()
         if expected_message_id and supplied_message_id != expected_message_id:
             return "Approval response does not belong to the pending message"
@@ -413,7 +413,7 @@ class SessionApprovalRuntimeMixin:
         if "guidance" not in payload and isinstance(feedback, str) and feedback.strip():
             payload["guidance"] = feedback.strip()
 
-        for key in ("conversation_id", "conversationId", "turn_id", "turnId", "message_id"):
+        for key in ("conversation_id", "turn_id", "message_id"):
             value = data.get(key)
             if value not in (None, ""):
                 payload.setdefault(key, value)

@@ -128,11 +128,6 @@ class DurableUserMessageQueue:
                     self._owner_id,
                 )
 
-    def __del__(self) -> None:
-        try:
-            self.close()
-        except Exception:
-            pass
 
     def _owner_is_live_unlocked(self, owner_id: str) -> bool:
         owner = str(owner_id or "").strip()
@@ -962,3 +957,4 @@ class DurableUserMessageQueue:
             self._client_inflight_owners[command_id] = self._owner_id
             raise
         return True
+

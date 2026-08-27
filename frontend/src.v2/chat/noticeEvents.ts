@@ -137,10 +137,6 @@ export const handleNoticeEvent = (e: ServerEvent, conversationId?: string): bool
       }));
       return true;
     }
-    case "command_output_chunk":
-    case "client.command.ack":
-    case "pong":
-      return true;
     default:
       return false;
   }

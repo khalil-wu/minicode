@@ -148,8 +148,6 @@ SKIP_FORCED_ARTIFACT_TOOL_NAMES = {"read_artifact"}
 _CREATED_FILE_EDIT_TRACKER_KEY = "_created_file_edit_records"
 
 
-class _WorkspaceTargetPathError(ValueError):
-    """Raised when an executable mutation target cannot be proven in scope."""
 
 
 @dataclass(frozen=True)

@@ -430,7 +430,7 @@ class MemoryGenerationCoordinator:
                 continue
             content = self._strip_injected_fragments(str(raw_message.get("content") or ""))
             item: dict[str, Any] = {"role": role, "content": content}
-            tool_calls = raw_message.get("tool_calls") or raw_message.get("toolCalls")
+            tool_calls = raw_message.get("tool_calls")
             if isinstance(tool_calls, list):
                 item["tool_calls"] = [
                     self._filtered_tool_call(call)

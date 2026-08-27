@@ -151,16 +151,11 @@ async def run_owned_rest_chat(
         )
         if str(name).strip()
     ]
-    try:
-        tool_registry = bootstrap.create_tool_registry(
-            artifact_store,
-            config=config,
-            mcp_manager=mcp_manager,
-        )
-    except TypeError as exc:
-        if "mcp_manager" not in str(exc):
-            raise
-        tool_registry = bootstrap.create_tool_registry(artifact_store, config=config)
+    tool_registry = bootstrap.create_tool_registry(
+        artifact_store,
+        config=config,
+        mcp_manager=mcp_manager,
+    )
     permission_checker = bootstrap.create_permission_checker(config=config)
 
     try:
@@ -581,3 +576,4 @@ def generated_artifact_native_payload(
 
     extension = GENERATED_IMAGE_EXTENSIONS[media_type]
     return body, media_type, f"generated-{artifact_id}.{extension}"
+

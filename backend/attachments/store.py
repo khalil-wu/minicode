@@ -20,6 +20,11 @@ from backend.owner_scope import (
 ATTACHMENT_DATA_DIR = DATA_ROOT / "attachments"
 ATTACHMENT_INDEX_FILE = "index.json"
 ARTIFACT_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+# Upload size limits are enforced in bytes on the wire (api/routes_chat.py)
+# and in characters once content has been decoded into text (below). Keeping
+# the two units distinct prevents a UTF-8 multi-byte file from being measured
+# against the wrong yardstick.
+MAX_ATTACHMENT_CONTENT_BYTES = 50 * 1024 * 1024
 MAX_ATTACHMENT_CONTENT_CHARS = 50 * 1024 * 1024
 MAX_ATTACHMENT_METADATA_CHARS = 256 * 1024
 MAX_ATTACHMENT_NATIVE_DATA_CHARS = ((MAX_ATTACHMENT_CONTENT_CHARS + 2) // 3) * 4
@@ -433,3 +438,4 @@ class AttachmentStore:
         if not ARTIFACT_ID_RE.fullmatch(safe_id):
             raise ValueError("artifact_id may only contain letters, numbers, '_' and '-'")
         return safe_id
+

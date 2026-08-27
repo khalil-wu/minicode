@@ -191,15 +191,10 @@ def _command_targets_conversation_delete_fence(
     targets: set[str] = set()
     for key in (
         "conversation_id",
-        "conversationId",
         "preferred_conversation_id",
-        "preferredConversationId",
         "source_conversation_id",
-        "sourceConversationId",
         "target_conversation_id",
-        "targetConversationId",
         "parent_conversation_id",
-        "parentConversationId",
     ):
         value = str(data.get(key) or "").strip()
         if value:
@@ -2666,7 +2661,7 @@ class WebSocketSession(
         oauth_pending = getattr(self, "_provider_oauth_pending", {})
         oauth_future = oauth_pending.get(request_id)
         if oauth_future is not None:
-            conversation_id = str(payload.get("conversation_id") or payload.get("conversationId") or "").strip()
+            conversation_id = str(payload.get("conversation_id") or "").strip()
             expected_conversation = str(getattr(oauth_future, "conversation_id", "") or "").strip()
             if expected_conversation and expected_conversation != conversation_id:
                 logger.debug("Ignoring OAuth control response with invalid owner: %s", request_id)
@@ -2817,7 +2812,6 @@ class WebSocketSession(
         if oauth_future is not None:
             supplied_conversation_id = str(
                 command.data.get("conversation_id")
-                or command.data.get("conversationId")
                 or ""
             ).strip()
             expected_conversation_id = str(
@@ -2858,7 +2852,7 @@ class WebSocketSession(
             content = str(command.data.get("content", ""))
             attachments = normalize_attachment_payloads(command.data.get("attachments", []))
             requested_conversation_id = str(
-                command.data.get("conversation_id") or command.data.get("conversationId") or ""
+                command.data.get("conversation_id") or ""
             ).strip()
             target_conversation_id = requested_conversation_id or self.active_conversation_id or ""
             if requested_conversation_id:
@@ -2870,7 +2864,7 @@ class WebSocketSession(
 
             # Handle workspace switching if requested
             requested_workspace_root = str(
-                command.data.get("workspace_root") or command.data.get("workspaceRoot") or ""
+                command.data.get("workspace_root") or ""
             ).strip()
             if requested_workspace_root:
                 success, target_conversation_id = await self._handle_user_message_workspace(
@@ -2882,16 +2876,14 @@ class WebSocketSession(
                         target_conversation_id,
                         reason="workspace_activation_failed",
                         message_id=str(
-                            command.data.get("assistant_message_id")
-                            or command.data.get("assistantMessageId")
-                            or ""
+                            command.data.get("assistant_message_id") or ""
                         ),
                     )
                     return
 
             # Handle permission mode update if requested
             requested_permission_mode = normalize_permission_mode(
-                str(command.data.get("permission_mode") or command.data.get("permissionMode") or "")
+                str(command.data.get("permission_mode") or "")
             )
             permission_result = await self._handle_user_message_permission(
                 requested_permission_mode, target_conversation_id
@@ -2905,16 +2897,14 @@ class WebSocketSession(
                     target_conversation_id,
                     reason="permission_mode_rejected",
                     message_id=str(
-                        command.data.get("assistant_message_id")
-                        or command.data.get("assistantMessageId")
-                        or ""
+                        command.data.get("assistant_message_id") or ""
                     ),
                 )
                 return
 
             message_metadata: dict[str, Any] = {
                 key: str(command.data.get(key) or "").strip()
-                for key in ("primaryFile", "primary_file", "activeTabPath", "active_tab_path")
+                for key in ("primary_file", "active_tab_path")
                 if str(command.data.get(key) or "").strip()
             }
             selected_skills = [
@@ -2933,7 +2923,6 @@ class WebSocketSession(
                 {
                     "config_name": str(
                         item.get("config_name")
-                        or item.get("configName")
                         or item.get("name")
                         or ""
                     ).strip(),
@@ -2942,7 +2931,7 @@ class WebSocketSession(
                 for item in (command.data.get("plugins") or [])
                 if isinstance(item, dict)
                 and (
-                    str(item.get("config_name") or item.get("configName") or item.get("name") or "").strip()
+                    str(item.get("config_name") or item.get("name") or "").strip()
                     or str(item.get("path") or "").strip().startswith("plugin://")
                 )
             ]
@@ -2950,23 +2939,18 @@ class WebSocketSession(
                 message_metadata["selected_plugins"] = selected_plugins
             for source_key, target_key in (
                 ("agent_mode", "agent_mode"),
-                ("agentMode", "agent_mode"),
                 ("agent_role", "agent_role"),
-                ("agentRole", "agent_role"),
             ):
                 value = str(command.data.get(source_key) or "").strip()
                 if value:
                     message_metadata[target_key] = value
             assistant_message_id = str(
-                command.data.get("assistant_message_id")
-                or command.data.get("assistantMessageId")
-                or ""
+                command.data.get("assistant_message_id") or ""
             ).strip() or f"assistant_{uuid.uuid4().hex}"
             message_metadata["assistant_message_id"] = assistant_message_id
             command.data["assistant_message_id"] = assistant_message_id
             user_message_id = str(
                 command.data.get("user_message_id")
-                or command.data.get("userMessageId")
                 or ""
             ).strip() or f"user_{uuid.uuid4().hex}"
             message_metadata["user_message_id"] = user_message_id
