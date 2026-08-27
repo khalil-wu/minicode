@@ -40,9 +40,11 @@ desktop/*.log
 # Test
 .pytest_cache/
 .pytest-tmp/
+.pytest-tmp-current/
 .test-tmp/
 .test-runs/
 .pytest_tmp_*/
+data/pytest-*/
 tests/.tmp/
 test-results/
 frontend/test-results/
@@ -57,19 +59,17 @@ settings.json
 *.bak
 .tmp/
 .tmp-*
-.codex/
-.codex-logs/
-.codex-temp/
-.codex-runlogs/
-.codex-run-logs/
-.claude/
+.minicode-logs/
+.minicode-temp/
+.minicode-runlogs/
+.minicode-run-logs/
 .agents/
 .kiro/
 .minicode/
 .openmcp/
 .playwright-mcp/
 .testdata_preview_launcher/
-desktop/.codex-runlogs/
+desktop/.minicode-runlogs/
 backend/data/
 backend/storage/
 data/attachments/
@@ -92,20 +92,39 @@ data/swarm/
 data/tool-results/
 data/parent_notifications/
 data/user-message-queue/
+data/extensions/
+data/skills/
 desktop/release-*/
 desktop/_start_*.txt
 tmp-artifacts-test/
-frontend/dist.backup/
-frontend/test-results/
 frontend/_build_*.txt
 .minicode/worktrees/
 
+# Local app working data
+/audit/
+/output/
+/memory/
+
+# Local browser automation, Postman, and crash captures
+/.playwright-cli/
+/.postman/
+postman/
+bash.exe.stackdump
+google_redirect.html
+pelican-bike.html
+
 # Local review, benchmark, and reference-source outputs
+/tmp/
 /artifacts/
-/pi-src/
-/pi-src-full/
-/earendil-works-pi-*.tgz
+/minicode-src/
+/minicode-src-full/
 /figma/
+/num/
+
+# Generated local reports, captures, and downloaded snapshots
+/AUDIT-*.md
+/*_news.html
+/minicode-ui-*.png
 
 # UI review screenshots
 /right-panel-*.png
@@ -116,3 +135,38 @@ frontend/_build_*.txt
 /frontend/demo/.shots/
 /frontend/minicode-*.png
 /frontend/probe-*.png
+
+# Local audit indexes, exports, and generated review snapshots
+/.audit-pack/
+/.minicode-audit/runs/
+/.minicode-audit/batch_results/
+/.minicode-audit/**/python_index.json
+/.minicode-audit/**/typescript_index.json
+/.minicode-audit/**/javascript_index.json
+/.minicode-audit/**/javascript_summary.json
+/.minicode-audit/**/source_manifest.json
+/.minicode-audit/**/source_summary.json
+/.minicode-audit/**/audit_func_index.json
+/.minicode-audit/**/remaining-*.txt
+/.minicode-audit/**/REMAINING-*.md
+/.minicode-audit/**/findings.md
+/.minicode-audit/**/workspace-router-auth-trace.txt
+/.audit-*-dump.txt
+/__audit_index.py
+/__backend_defs.json
+/__core_list.txt
+/__filelist.txt
+/__head.txt
+/__make_ts_pack.py
+/__pack_modules.py
+/__src_list.txt
+/__top_funcs.py
+/__top_funcs.txt
+/audit_func_index.json
+/*_files.txt
+/*_prod.txt
+/dirs.txt
+/tree.txt
+/js_files.txt
+/RELEASE-READINESS-AUDIT-*.md
+/desktop/.audit-*-dump.txt

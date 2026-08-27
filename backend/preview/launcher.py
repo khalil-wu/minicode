@@ -19,8 +19,13 @@ from pathlib import Path
 from typing import Any, Callable, Coroutine
 from urllib.parse import quote, urlparse
 
-from backend.runtime_env import sanitized_subprocess_env
-from backend.subprocesses import spawn_shell, terminate_process_tree
+from backend.sandbox import (
+    AdditionalPermissionProfile,
+    NetworkPermissions,
+    SandboxPolicy,
+    SandboxRunner,
+)
+from backend.subprocesses import terminate_process_tree
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +57,14 @@ class PreviewLaunchProcess:
     session_id: str = ""
     conversation_id: str = ""
     workspace_root: str = ""
+    # Set when a stop request could not prove the preview tree exited. The
+    # process then stays registered so its exit can still be observed.
+    cleanup_pending: bool = False
+    cleanup_reason: str = ""
     stderr_tail: deque[str] = field(default_factory=lambda: deque(maxlen=20))
     output_tail: deque[dict[str, str]] = field(default_factory=lambda: deque(maxlen=80))
     _monitor_task: asyncio.Task[None] | None = field(default=None, repr=False)
+    _sandbox_runner: SandboxRunner | None = field(default=None, repr=False)
     ready_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
     @property
@@ -112,6 +122,20 @@ def _safe_workspace_root(root: str | Path | None) -> Path:
     return Path(root).resolve() if root else Path.cwd().resolve()
 
 
+class PreviewLaunchConfigError(RuntimeError):
+    """The user's explicit preview configuration could not be honoured.
+
+    A misconfigured ``.minicode/launch.json`` must never be substituted by an
+    inferred ``package.json`` guess: the user asked for something specific and
+    has to be told their file was rejected, not silently overruled.
+    """
+
+    def __init__(self, source: str, reason: str):
+        self.source = source
+        self.reason = reason
+        super().__init__(f"{source} is invalid: {reason}")
+
+
 def _coerce_config(raw: dict[str, Any], workspace_root: Path, source: str) -> PreviewLaunchConfig | None:
     command = raw.get("command") or raw.get("runtimeExecutable")
     if not isinstance(command, str) or not command.strip():
@@ -154,50 +178,73 @@ def _coerce_config(raw: dict[str, Any], workspace_root: Path, source: str) -> Pr
 
 
 def load_preview_launch_configs(workspace_root: str | Path | None) -> list[PreviewLaunchConfig]:
+    """Return the preview configurations for a workspace.
+
+    ``.minicode/launch.json`` is the user's explicit declaration: if it exists it
+    is authoritative, and anything wrong with it raises
+    :class:`PreviewLaunchConfigError` instead of degrading into "this project has
+    no preview configuration" and silently inferring an ``npm run dev`` guess
+    from ``package.json``.  The ``package.json`` inference only runs when no
+    ``launch.json`` is present at all.
+    """
+
     root = _safe_workspace_root(workspace_root)
-    configs: list[PreviewLaunchConfig] = []
-    launch_path = root / ".claude" / "launch.json"
+    launch_path = root / ".minicode" / "launch.json"
     if launch_path.exists():
+        source = ".minicode/launch.json"
         try:
             payload = json.loads(launch_path.read_text(encoding="utf-8"))
-            raw_configs = payload.get("configurations") if isinstance(payload, dict) else None
-            if isinstance(raw_configs, list):
-                configs.extend(
-                    config
-                    for item in raw_configs
-                    if isinstance(item, dict)
-                    for config in [_coerce_config(item, root, ".claude/launch.json")]
-                    if config is not None
+        except OSError as exc:
+            raise PreviewLaunchConfigError(source, f"the file could not be read ({exc})") from exc
+        except json.JSONDecodeError as exc:
+            raise PreviewLaunchConfigError(source, f"invalid JSON at line {exc.lineno} ({exc.msg})") from exc
+        if not isinstance(payload, dict):
+            raise PreviewLaunchConfigError(source, f"top-level value is {type(payload).__name__}, expected an object")
+        raw_configs = payload.get("configurations")
+        if not isinstance(raw_configs, list):
+            raise PreviewLaunchConfigError(source, '"configurations" must be a list')
+        configs: list[PreviewLaunchConfig] = []
+        for index, item in enumerate(raw_configs):
+            if not isinstance(item, dict):
+                raise PreviewLaunchConfigError(
+                    source, f"configurations[{index}] is {type(item).__name__}, expected an object"
                 )
-        except (OSError, json.JSONDecodeError):
-            pass
-
-    if configs:
+            config = _coerce_config(item, root, source)
+            if config is None:
+                raise PreviewLaunchConfigError(
+                    source,
+                    f'configurations[{index}] needs a non-empty "command" or "runtimeExecutable" string',
+                )
+            configs.append(config)
         return configs
 
     package_json = root / "package.json"
     if package_json.exists():
         try:
             payload = json.loads(package_json.read_text(encoding="utf-8"))
-            scripts = payload.get("scripts") if isinstance(payload, dict) else None
-            if isinstance(scripts, dict):
-                for script_name in ("dev", "start", "serve"):
-                    if isinstance(scripts.get(script_name), str):
-                        script = str(scripts[script_name])
-                        is_vite = bool(re.search(r"(?:^|\s|[/\\])vite(?:\s|$)", script))
-                        port = 5173 if is_vite else 0
-                        return [
-                            PreviewLaunchConfig(
-                                name=f"npm run {script_name}",
-                                command=f"npm run {script_name}",
-                                cwd=str(root),
-                                port=port,
-                                url=f"http://127.0.0.1:{port}" if port else "",
-                                source="package.json",
-                            )
-                        ]
-        except (OSError, json.JSONDecodeError):
-            pass
+        except (OSError, json.JSONDecodeError) as exc:
+            # package.json is an inference source, not the user's preview
+            # declaration, so a broken one leaves evidence without blocking the
+            # panel. .minicode/launch.json is the channel for an explicit choice.
+            logger.warning("Cannot infer a preview command from %s: %s", package_json, exc)
+            return []
+        scripts = payload.get("scripts") if isinstance(payload, dict) else None
+        if isinstance(scripts, dict):
+            for script_name in ("dev", "start", "serve"):
+                if isinstance(scripts.get(script_name), str):
+                    script = str(scripts[script_name])
+                    is_vite = bool(re.search(r"(?:^|\s|[/\\])vite(?:\s|$)", script))
+                    port = 5173 if is_vite else 0
+                    return [
+                        PreviewLaunchConfig(
+                            name=f"npm run {script_name}",
+                            command=f"npm run {script_name}",
+                            cwd=str(root),
+                            port=port,
+                            url=f"http://127.0.0.1:{port}" if port else "",
+                            source="package.json",
+                        )
+                    ]
 
     return []
 
@@ -220,6 +267,63 @@ def running_preview_processes(
         and process.conversation_id == conversation
         and (not workspace or process.workspace_root == workspace)
     ]
+
+
+def preview_url_is_owned(
+    url: str,
+    *,
+    session_id: str = "",
+    conversation_id: str = "",
+    workspace_root: str | Path | None = None,
+    extra_urls: tuple[str, ...] | list[str] = (),
+) -> bool:
+    """Check a URL against the origin of an active, owner-scoped preview.
+
+    The check intentionally compares origins rather than paths: a preview
+    server may serve a router entry point, assets, and API endpoints on the
+    same bound port.  Ownership remains exact on session, conversation, and
+    workspace, so another conversation cannot borrow a local port merely by
+    knowing its number.
+    """
+
+    try:
+        parsed = urlparse(str(url or "").strip())
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            return False
+        requested = _preview_origin(parsed)
+    except (TypeError, ValueError):
+        return False
+
+    candidates = [str(value).strip() for value in extra_urls if str(value).strip()]
+    candidates.extend(
+        process.effective_url
+        for process in running_preview_processes(
+            session_id=session_id,
+            conversation_id=conversation_id,
+            workspace_root=workspace_root,
+        )
+        if process.effective_url
+    )
+    for candidate in candidates:
+        try:
+            candidate_parsed = urlparse(candidate)
+            if _preview_origin(candidate_parsed) == requested:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _preview_origin(parsed: Any) -> tuple[str, str, int] | None:
+    scheme = str(getattr(parsed, "scheme", "") or "").lower()
+    host = str(getattr(parsed, "hostname", "") or "").lower().rstrip(".")
+    if scheme not in {"http", "https"} or not host:
+        return None
+    try:
+        port = parsed.port or (443 if scheme == "https" else 80)
+    except ValueError:
+        return None
+    return scheme, host, int(port)
 
 
 async def _monitor_process(
@@ -283,9 +387,22 @@ async def _monitor_process(
         logger.debug("Preview monitor error: %s", exc)
 
     await launched.process.wait()
+    if launched._sandbox_runner is not None:
+        # Long-lived container sandboxes keep a cidfile/name owned by the
+        # runner. Natural exit must release that state just like explicit stop.
+        if not await launched._sandbox_runner.terminate(launched.process):
+            logger.warning(
+                "Preview %s exited but its sandbox resources could not be proven released",
+                launched.id,
+            )
     was_stopping = launched.status == "stopping"
     launched.status = "exited" if was_stopping or launched.process.returncode == 0 else "crashed"
-    _RUNNING.pop(launched.id, None)
+    # _RUNNING is keyed by a deterministic preview id, so a restart reuses this
+    # exact key. Both awaits above are yield points during which the user may
+    # have restarted the preview and overwritten the slot; popping by id alone
+    # would evict the live replacement and orphan it beyond every stop path.
+    if _RUNNING.get(launched.id) is launched:
+        _RUNNING.pop(launched.id, None)
 
     if broadcast and not was_stopping and launched.process.returncode != 0:
         await broadcast({
@@ -304,6 +421,7 @@ async def start_preview_launch(
     *,
     session_id: str,
     conversation_id: str,
+    sandbox_policy: SandboxPolicy | None = None,
 ) -> PreviewLaunchProcess:
     session = str(session_id or "").strip()
     conversation = str(conversation_id or "").strip()
@@ -312,13 +430,26 @@ async def start_preview_launch(
     configs = load_preview_launch_configs(workspace_root)
     if not configs:
         raise RuntimeError("No preview launch configuration found")
-    config = next((item for item in configs if item.name == name), configs[0])
+    requested = str(name or "").strip()
+    if not requested:
+        config = configs[0]
+    else:
+        config = next((item for item in configs if item.name == requested), None)
+        if config is None:
+            # Falling back to configs[0] started a different server than asked
+            # for and reported success with its URL — the caller (including the
+            # model's preview tool) had no way to see the substitution.
+            raise RuntimeError(
+                f"No preview configuration named '{requested}'. Available: "
+                + ", ".join(item.name for item in configs)
+            )
     return await _start_preview_config(
         config,
         broadcast,
         session_id=session,
         conversation_id=conversation,
         workspace_root=_safe_workspace_root(workspace_root),
+        sandbox_policy=sandbox_policy,
     )
 
 
@@ -347,6 +478,7 @@ async def _start_preview_config(
     session_id: str,
     conversation_id: str,
     workspace_root: str | Path | None = None,
+    sandbox_policy: SandboxPolicy | None = None,
 ) -> PreviewLaunchProcess:
     session = str(session_id or "").strip()
     conversation = str(conversation_id or "").strip()
@@ -365,13 +497,43 @@ async def _start_preview_config(
             port=port,
             url=config.url or f"http://127.0.0.1:{port}",
         )
-    env = sanitized_subprocess_env()
+    env_overrides: dict[str, str] = {}
     if config.port:
-        env.setdefault("PORT", str(config.port))
-    process = await spawn_shell(
+        env_overrides["PORT"] = str(config.port)
+    sandbox_root = _safe_workspace_root(workspace_root or config.cwd)
+    if sandbox_policy is None:
+        # Desktop preview commands are explicit user control-plane operations.
+        policy = SandboxPolicy(
+            workspace_root=sandbox_root,
+            writable_roots=(sandbox_root,),
+            allow_network=True,
+            env_overrides=env_overrides,
+        )
+    else:
+        if sandbox_policy.policy_limitations:
+            raise RuntimeError(
+                "Preview launch is blocked because the managed network policy "
+                "requires enforcement that is unavailable on this host: "
+                + "; ".join(sandbox_policy.policy_limitations)
+            )
+        # Starting preview_server is a CONFIRM tool action. Represent that
+        # approval as an additional network capability while preserving every
+        # filesystem deny, writable-root and fail-closed setting from the turn.
+        policy = sandbox_policy.with_additional_permissions(
+            AdditionalPermissionProfile(
+                network=NetworkPermissions(enabled=True),
+            )
+        )
+        policy = replace(
+            policy,
+            env_overrides={**policy.env_overrides, **env_overrides},
+            timeout=None,
+        )
+    sandbox_runner = SandboxRunner(policy)
+    process = await sandbox_runner.spawn_shell_interactive(
         config.command,
         cwd=config.cwd,
-        env=env,
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -381,7 +543,8 @@ async def _start_preview_config(
         process=process,
         session_id=session,
         conversation_id=conversation,
-        workspace_root=str(_safe_workspace_root(workspace_root or config.cwd)),
+        workspace_root=str(sandbox_root),
+        _sandbox_runner=sandbox_runner,
     )
     _RUNNING[preview_id] = launched
     launched._monitor_task = asyncio.create_task(_monitor_process(launched, broadcast))
@@ -401,6 +564,7 @@ async def start_static_preview(
     *,
     session_id: str,
     conversation_id: str,
+    sandbox_policy: SandboxPolicy | None = None,
 ) -> PreviewLaunchProcess:
     root = _safe_workspace_root(workspace_root)
     target = Path(file_path)
@@ -443,6 +607,7 @@ async def start_static_preview(
         session_id=session_id,
         conversation_id=conversation_id,
         workspace_root=root,
+        sandbox_policy=sandbox_policy,
     )
 
 
@@ -476,6 +641,19 @@ async def stop_preview_launches_for_session(session_id: str) -> list[PreviewLaun
     ])
 
 
+async def stop_preview_launches_for_conversation(conversation_id: str) -> list[PreviewLaunchProcess]:
+    """Stop every preview writer owned by a deleted conversation."""
+
+    owner = str(conversation_id or "").strip()
+    if not owner:
+        return []
+    return await _stop_preview_processes([
+        process
+        for process in _active_preview_processes()
+        if process.conversation_id == owner
+    ])
+
+
 async def stop_all_preview_launches() -> list[PreviewLaunchProcess]:
     """Stop all previews during application shutdown."""
     return await _stop_preview_processes(_active_preview_processes())
@@ -484,11 +662,39 @@ async def stop_all_preview_launches() -> list[PreviewLaunchProcess]:
 async def _stop_preview_processes(
     targets: list[PreviewLaunchProcess],
 ) -> list[PreviewLaunchProcess]:
+    """Stop previews and refuse to report a teardown that was not proven.
+
+    A surviving dev server keeps writing to the workspace, so its registry
+    entry and monitor task are retained as the reaping handle and the caller
+    is told the cleanup is unfinished.
+    """
+    unproven: list[str] = []
     for proc in targets:
         if proc.process.returncode is None:
             proc.status = "stopping"
-            await terminate_process_tree(proc.process)
+            if proc._sandbox_runner is not None:
+                reaped = await proc._sandbox_runner.terminate(proc.process)
+            else:
+                reaped = await terminate_process_tree(proc.process)
+            if not reaped:
+                proc.cleanup_pending = True
+                proc.cleanup_reason = "preview_tree_survived_kill"
+                unproven.append(proc.id)
+                logger.warning(
+                    "Preview %s could not be proven stopped; keeping its handle",
+                    proc.id,
+                )
+                continue
+        proc.cleanup_pending = False
+        proc.cleanup_reason = ""
         if proc._monitor_task and not proc._monitor_task.done():
             proc._monitor_task.cancel()
-        _RUNNING.pop(proc.id, None)
+        # A restart during the await above may already own this deterministic
+        # key; only the entry we actually stopped may leave the registry.
+        if _RUNNING.get(proc.id) is proc:
+            _RUNNING.pop(proc.id, None)
+    if unproven:
+        raise RuntimeError(
+            "Preview processes could not be proven stopped: " + ", ".join(sorted(unproven))
+        )
     return targets

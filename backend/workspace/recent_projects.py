@@ -13,12 +13,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from backend.atomic_io import atomic_write_text, canonical_file_path_key, file_mutation_locks
 from backend.config import DATA_ROOT
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_STORE_PATH = DATA_ROOT / "recent_projects.json"
 MAX_RECENT_PROJECTS = 20
+
+
+class RecentProjectPersistenceError(RuntimeError):
+    """Raised when an explicit MRU mutation cannot be persisted."""
 
 
 @dataclass
@@ -76,70 +81,101 @@ class RecentProjectStore:
             logger.warning("Failed to load recent projects: %s", exc)
             self._projects = []
 
-    def _save(self) -> None:
-        """保存到文件。"""
+    def _save(self, *, strict: bool = False) -> bool:
+        """保存到文件；显式删除操作可要求失败向上传播。"""
         try:
             self._store_path.parent.mkdir(parents=True, exist_ok=True)
             data = [p.to_dict() for p in self._projects]
-            self._store_path.write_text(
+            atomic_write_text(
+                self._store_path,
                 json.dumps(data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
             )
         except Exception as exc:
             logger.warning("Failed to save recent projects: %s", exc)
+            if strict:
+                raise RecentProjectPersistenceError(
+                    "Recent workspace metadata could not be saved"
+                ) from exc
+            return False
+        return True
 
     def add(self, path: str, name: str, project_type: str = "unknown") -> None:
         """记录打开的项目（若已存在则更新时间戳并移到最前）。"""
         normalized = str(Path(path).resolve())
-
-        # 移除已存在的记录
-        self._projects = [p for p in self._projects if p.path != normalized]
-
-        # 插入到最前面
-        self._projects.insert(0, RecentProject(
-            path=normalized,
-            name=name,
-            project_type=project_type,
-            last_opened=time.time(),
-        ))
-
-        # 保持上限
-        self._projects = self._projects[:MAX_RECENT_PROJECTS]
-        self._save()
+        identity = canonical_file_path_key(normalized)
+        with file_mutation_locks([self._store_path]):
+            self._load()
+            # Remove spelling aliases of the same project (not distinct POSIX
+            # paths that differ by case), then insert the latest display path.
+            self._projects = [
+                project
+                for project in self._projects
+                if canonical_file_path_key(project.path) != identity
+            ]
+            self._projects.insert(0, RecentProject(
+                path=normalized,
+                name=name,
+                project_type=project_type,
+                last_opened=time.time(),
+            ))
+            self._projects = self._projects[:MAX_RECENT_PROJECTS]
+            self._save()
 
     def list(self, limit: int = 10, clean: bool = True) -> list[RecentProject]:
         """获取最近项目列表。clean=True 时自动移除不存在的路径。"""
-        if clean:
-            before = len(self._projects)
-            existing: list[RecentProject] = []
-            for project in self._projects:
-                try:
-                    if Path(project.path).exists():
-                        existing.append(project)
-                except OSError:
-                    # Stale recent entries can point at removed worktrees,
-                    # disconnected drives, or sandboxes no longer accessible
-                    # to this process. Treat them as unavailable instead of
-                    # aborting the websocket command without a response.
-                    logger.debug("Recent project path is unavailable: %s", project.path)
-            self._projects = existing
-            if len(self._projects) != before:
-                self._save()
+        with file_mutation_locks([self._store_path]):
+            self._load()
+            if clean:
+                before = len(self._projects)
+                existing: list[RecentProject] = []
+                for project in self._projects:
+                    try:
+                        if Path(project.path).exists():
+                            existing.append(project)
+                    except OSError:
+                        # Stale recent entries can point at removed worktrees,
+                        # disconnected drives, or sandboxes no longer accessible
+                        # to this process. Treat them as unavailable instead of
+                        # aborting the websocket command without a response.
+                        logger.debug("Recent project path is unavailable: %s", project.path)
+                self._projects = existing
+                if len(self._projects) != before:
+                    self._save()
 
         return self._projects[:limit]
 
     def remove(self, path: str) -> bool:
         """移除指定路径的记录。"""
         normalized = str(Path(path).resolve())
-        before = len(self._projects)
-        self._projects = [p for p in self._projects if p.path != normalized]
+        identity = canonical_file_path_key(normalized)
+        with file_mutation_locks([self._store_path]):
+            self._load()
+            original = list(self._projects)
+            candidate = [
+                project
+                for project in self._projects
+                if canonical_file_path_key(project.path) != identity
+            ]
+            if len(candidate) != len(original):
+                self._projects = candidate
+                try:
+                    self._save(strict=True)
+                except RecentProjectPersistenceError:
+                    self._projects = original
+                    raise
+                return True
+            return False
 
-        if len(self._projects) != before:
-            self._save()
-            return True
-        return False
-
-    def clear(self) -> None:
-        """清空所有记录。"""
-        self._projects.clear()
-        self._save()
+    def clear(self) -> int:
+        """清空所有记录并返回被移除的记录数。"""
+        with file_mutation_locks([self._store_path]):
+            self._load()
+            removed = len(self._projects)
+            original = list(self._projects)
+            self._projects.clear()
+            try:
+                self._save(strict=True)
+            except RecentProjectPersistenceError:
+                self._projects = original
+                raise
+            return removed

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, crashReporter, dialog, Menu, Notification, shell } = require("electron");
+const { app, BrowserWindow, crashReporter, dialog, Menu, Notification, session, shell } = require("electron");
 const fs = require("node:fs");
 const crypto = require("node:crypto");
 const path = require("node:path");
@@ -81,27 +81,48 @@ function resolvePythonCommand() {
 
 const PYTHON_COMMAND = resolvePythonCommand();
 
-function resolveCodexSandboxExecutable() {
-  if (process.env.MINICODE_CODEX_SANDBOX_EXE) {
-    return process.env.MINICODE_CODEX_SANDBOX_EXE;
-  }
-  if (process.platform !== "win32") return "";
-  const candidate = app.isPackaged
-    ? path.join(process.resourcesPath, "windows-sandbox", "codex.exe")
-    : path.join(
-        __dirname,
-        "node_modules",
-        "@openai",
-        "codex-win32-x64",
-        "vendor",
-        "x86_64-pc-windows-msvc",
-        "bin",
-        "codex.exe",
-      );
-  return fs.existsSync(candidate) ? candidate : "";
-}
+const RENDERER_CSP = [
+  "default-src 'self'",
+  "base-uri 'self'",
+  "object-src 'none'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob: https: http://localhost:* http://127.0.0.1:*",
+  "font-src 'self' data:",
+  "connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:* https://localhost:* https://127.0.0.1:* wss://localhost:* wss://127.0.0.1:*",
+  "frame-src 'self' data: blob: http://localhost:* http://127.0.0.1:*",
+  "worker-src 'self' blob:",
+  "media-src 'self' data: blob:",
+  "form-action 'self'",
+].join("; ");
 
-const CODEX_SANDBOX_EXECUTABLE = resolveCodexSandboxExecutable();
+// Dev variant: the Vite react-refresh preamble is an inline module script, so
+// script-src must allow inline (and localhost) content when serving from the
+// dev server. Production (file:) keeps the strict policy above.
+const RENDERER_CSP_DEV = RENDERER_CSP.replace(
+  "script-src 'self'",
+  "script-src 'self' 'unsafe-inline' http://localhost:* http://127.0.0.1:*",
+);
+
+function installRendererCspHeaders() {
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    const isDevDocument =
+      Boolean(FRONTEND_DEV_URL) && details.url.startsWith(FRONTEND_DEV_URL);
+    const isRendererDocument =
+      details.resourceType === "mainFrame" &&
+      (details.url.startsWith("file:") || isDevDocument);
+    if (!isRendererDocument) {
+      callback({ responseHeaders: details.responseHeaders });
+      return;
+    }
+    const responseHeaders = { ...(details.responseHeaders || {}) };
+    for (const name of Object.keys(responseHeaders)) {
+      if (name.toLowerCase() === "content-security-policy") delete responseHeaders[name];
+    }
+    responseHeaders["Content-Security-Policy"] = [isDevDocument ? RENDERER_CSP_DEV : RENDERER_CSP];
+    callback({ responseHeaders });
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Module-level state
@@ -288,7 +309,7 @@ function buildDiagnosticsPayload() {
     release: {
       channel: "windows_private_beta",
       safetyDefaults: {
-        defaultPermissionMode: "ask_permissions",
+        defaultPermissionMode: "confirm",
         backendPermissionMode: "confirm",
         networkAccess: "tool_layer_approval_required",
         windowsSandbox: "docker_workspace_container_fail_closed",
@@ -617,10 +638,6 @@ function buildApplicationMenu() {
       label: "Help",
       submenu: [
         {
-          label: "Open MiniCode Docs",
-          click: () => { void shell.openExternal("https://github.com"); },
-        },
-        {
           label: "Reveal Desktop Log",
           click: () => {
             const logPath = utils.getDesktopLogPath();
@@ -740,24 +757,8 @@ const trustedWorkspaceLedgerPath = path.join(
   "data",
   "trusted_workspaces.json",
 );
-let legacyActiveWorkspaceRoot = "";
-try {
-  const activeWorkspacePath = path.join(
-    app.getPath("userData"),
-    "data",
-    "active_workspace.json",
-  );
-  const activeWorkspace = JSON.parse(fs.readFileSync(activeWorkspacePath, "utf8"));
-  legacyActiveWorkspaceRoot = typeof activeWorkspace?.root === "string"
-    ? activeWorkspace.root
-    : "";
-} catch {
-  // A missing or stale workspace is normal on first launch.
-}
-
 security.init({
   initialRoots: trustedWorkspaceRoots,
-  approvedRoots: legacyActiveWorkspaceRoot ? [legacyActiveWorkspaceRoot] : [],
   readOnlyRoots: [path.join(app.getPath("userData"), "data", "tool-results")],
   userOutputRoots: [
     app.getPath("desktop"),
@@ -767,9 +768,6 @@ security.init({
   trustedRootsFile: trustedWorkspaceLedgerPath,
   logger: appendDesktopLog,
 });
-if (legacyActiveWorkspaceRoot) {
-  security.restoreTrustedWorkspaceRoot(legacyActiveWorkspaceRoot);
-}
 
 backendSidecar.init({
   writeStdout,
@@ -789,7 +787,6 @@ backendSidecar.init({
     desktopDir: app.getPath("desktop"),
     documentsDir: app.getPath("documents"),
     downloadsDir: app.getPath("downloads"),
-    codexSandboxExe: CODEX_SANDBOX_EXECUTABLE,
     restartInitialDelayMs: BACKEND_RESTART_INITIAL_DELAY_MS,
     restartMaxDelayMs: BACKEND_RESTART_MAX_DELAY_MS,
     restartJitterRatio: 0.15,
@@ -816,7 +813,19 @@ windowManager.init({
   desktopIconPath: DESKTOP_ICON_PATH,
   frontendDevUrl: FRONTEND_DEV_URL,
   getAppRoot,
-  onMainWindowCreated: closeStartupFailureWindow,
+  onMainWindowCreated: (mainWindow) => {
+    closeStartupFailureWindow();
+    updater.invalidateActivity("activity.renderer_created");
+    mainWindow.webContents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
+      if (isMainFrame && !isInPlace) updater.invalidateActivity("activity.renderer_navigation");
+    });
+    mainWindow.webContents.on("render-process-gone", () => {
+      updater.invalidateActivity("activity.renderer_gone");
+    });
+    mainWindow.on("closed", () => {
+      updater.invalidateActivity("activity.renderer_closed");
+    });
+  },
   getPendingDeepLink: () => pendingDeepLink,
   onDiagnosticIncident: recordDiagnosticIncident,
 });
@@ -824,6 +833,7 @@ windowManager.init({
 embeddedBrowserManager.init({
   appendDesktopLog,
   getMainWindow: () => windowManager.getMainWindow(),
+  assessBrowserNavigationPolicy: cdpBridge.assessBrowserNavigationPolicy,
 });
 
 embeddedBrowserBridge.init({
@@ -852,7 +862,7 @@ ipcHandlers.init({
   embeddedBrowserManager,
   ptyManager,
   updater,
-  get lastPickedWorkspaceRoot() { return lastPickedWorkspaceRoot; },
+  getLastPickedWorkspaceRoot: () => lastPickedWorkspaceRoot,
   setLastPickedWorkspaceRoot: (v) => { lastPickedWorkspaceRoot = v; },
 });
 
@@ -914,13 +924,19 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   if (quitCleanupStarted) return;
   quitCleanupStarted = true;
-  ptyManager.killAllSessions();
-  embeddedBrowserManager.disposeAll();
   windowManager.clearWindowStateSaveTimer();
   windowManager.persistWindowState();
   void Promise.allSettled([
+    ptyManager.killAllSessions(),
     backendSidecar.stopBackendSidecar(),
-    embeddedBrowserBridge.stop(),
+    (async () => {
+      const bridgeStop = embeddedBrowserBridge.stop();
+      try {
+        embeddedBrowserManager.disposeAll();
+      } finally {
+        await bridgeStop;
+      }
+    })(),
   ]).finally(() => {
     quitCleanupComplete = true;
     app.quit();
@@ -955,6 +971,7 @@ app.on("child-process-gone", (_event, details) => {
 
 app.whenReady().then(async () => {
   app.setAppUserModelId("MiniCode.Desktop");
+  installRendererCspHeaders();
   if (process.defaultApp && process.argv.length >= 2) {
     app.setAsDefaultProtocolClient("minicode", process.execPath, [path.resolve(process.argv[1])]);
   } else {
@@ -962,7 +979,21 @@ app.whenReady().then(async () => {
   }
   buildApplicationMenu();
   ipcHandlers.registerIpcHandlers();
-  const embeddedBrowserEndpoint = await embeddedBrowserBridge.start();
+  // The embedded browser bridge is an optional control surface.  A listen
+  // failure here must be visible evidence and must not silently kill the
+  // rest of startup (updater + backend + window never ran when this await
+  // rejected, leaving the app hung with no UI).
+  let embeddedBrowserEndpoint = "";
+  try {
+    embeddedBrowserEndpoint = await embeddedBrowserBridge.start();
+  } catch (error) {
+    appendDesktopLog(
+      `[desktop] embedded browser bridge failed to start: ${
+        error instanceof Error ? error.stack || error.message : String(error)
+      }`,
+    );
+    appendDesktopLog("[desktop] continuing startup without the embedded browser bridge");
+  }
   process.env.MINICODE_EMBEDDED_BROWSER_ENDPOINT = embeddedBrowserEndpoint;
   process.env.MINICODE_EMBEDDED_BROWSER_TOKEN = RUNTIME_TOKEN;
   appendDesktopLog("[desktop] app ready");
@@ -974,6 +1005,7 @@ app.whenReady().then(async () => {
     app,
     getMainWindow: () => windowManager.getMainWindow(),
     logger: appendDesktopLog,
+    getActivePtySessions: () => ptyManager.listActiveSessions(),
   });
   if (rollbackLaunched) return;
   const startupSucceeded = await attemptAppStartup("when-ready");

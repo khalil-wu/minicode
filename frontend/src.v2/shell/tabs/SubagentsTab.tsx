@@ -5,21 +5,46 @@
  * Inspector. This panel only answers: what is being worked on, where it stands,
  * and what result is available.
  */
-import { ArrowLeft, Bot, ChevronDown, ChevronRight, Send, Square } from "lucide-react";
-import { useState } from "react";
-import { MarkdownRenderer } from "../../chat/messages/MarkdownRenderer";
+import { ArrowLeft, Bot, ChevronDown, ChevronRight, RefreshCw, Square } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { projectMessagesToTurns } from "../../chat/chatSurfaceState";
+import { ChatTurn } from "../../chat/components/ChatTurn";
+import {
+  hydrateMessages,
+  type BackendTranscriptMessage,
+} from "../../chat/transcriptHydration";
 import { AgentAvatar } from "../../components/AgentAvatar";
 import {
   projectAgentViews,
   type AgentView,
 } from "../../lib/agent-view-model";
-import { sendClientCommand } from "../../protocol/ws-outbox";
+import {
+  commandResultSucceeded,
+  sendClientCommandAwaitResult,
+} from "../../protocol/ws-outbox";
 import { useAppStore } from "../../stores";
-import type { SubagentMessageState } from "../../stores/types";
+import type { ChatMessage } from "../../stores/types";
+import { pushToast } from "../../overlays/ToastContainer";
 import { EmptyLine, SmallButton } from "../SidebarShared";
 import "./SubagentsTab.css";
 
 const COMPLETED_PREVIEW_LIMIT = 6;
+
+type TranscriptPresentationSource = "none" | "durable" | "push";
+
+type TranscriptPresentation = {
+  ownerId: string | null;
+  messages: ChatMessage[];
+  seq: number;
+  source: TranscriptPresentationSource;
+};
+
+const emptyTranscriptPresentation = (): TranscriptPresentation => ({
+  ownerId: null,
+  messages: [],
+  seq: -1,
+  source: "none",
+});
 
 const AGENT_UI_TEXT: Record<string, string> = {
   "Needs attention": "需要处理",
@@ -113,22 +138,33 @@ const AgentDetail = ({
   onBack,
   onFetchResult,
   onStop,
-  messages,
-  canSteer,
-  onSendMessage,
+  transcriptMessages,
+  workspaceRoot,
+  transcriptLoading,
+  transcriptError,
+  onRefreshTranscript,
+  pendingAction,
 }: {
   view: AgentView;
   onBack: () => void;
   onFetchResult: () => void;
   onStop: () => void;
-  messages: SubagentMessageState[];
-  canSteer: boolean;
-  onSendMessage: (message: string) => void;
+  transcriptMessages: ChatMessage[];
+  workspaceRoot: string;
+  transcriptLoading: boolean;
+  transcriptError: string;
+  onRefreshTranscript: () => void;
+  pendingAction: "stop" | "result" | null;
 }) => {
-  const [messageDraft, setMessageDraft] = useState("");
-  const hasResult = Boolean(view.resultContent || view.resultError);
-  const showSummary = Boolean(view.summary && view.summary !== view.title)
-    && (view.status === "running" || !hasResult);
+  const isLive = view.status === "running" || view.status === "waiting";
+  const turns = useMemo(
+    () => projectMessagesToTurns(
+      transcriptMessages,
+      isLive,
+      workspaceRoot,
+    ),
+    [isLive, transcriptMessages, workspaceRoot],
+  );
 
   return (
     <section className="subagents-detail" aria-label={`子智能体任务详情：${view.title}`}>
@@ -146,96 +182,62 @@ const AgentDetail = ({
           <strong>{view.title}</strong>
           <span>{[statusText(view), relativeTimeText(view.relativeTimeLabel)].filter(Boolean).join(" · ")}</span>
         </span>
+        <span className="subagents-detail-header-actions">
+          <button
+            type="button"
+            className="subagents-detail-icon-action"
+            aria-label="刷新子智能体工作详情"
+            title="刷新工作详情"
+            onClick={onRefreshTranscript}
+            disabled={transcriptLoading}
+          >
+            <RefreshCw size={14} className={transcriptLoading ? "is-spinning" : undefined} />
+          </button>
+          {view.canStop && (
+            <button
+              type="button"
+              className="subagents-detail-icon-action subagents-detail-stop"
+              aria-label={pendingAction === "stop" ? "正在停止子智能体" : "停止子智能体"}
+              title="停止子智能体"
+              onClick={onStop}
+              disabled={pendingAction != null}
+            >
+              <Square size={13} />
+            </button>
+          )}
+        </span>
       </header>
 
       <div className="subagents-detail-body">
-        {hasResult && (
-          <section className="subagents-detail-result" aria-label="任务结果">
-            {view.resultError && (
-              <div className="subagents-detail-error">{view.resultError}</div>
-            )}
-            {view.resultContent && <MarkdownRenderer content={view.resultContent} />}
-          </section>
+        {transcriptError && (
+          <div className="subagents-transcript-error" role="status">
+            <span>{transcriptError}</span>
+            <button type="button" onClick={onRefreshTranscript}>重试</button>
+          </div>
         )}
-
-        {showSummary && <p className="subagents-detail-lead">{view.summary}</p>}
-
-        {view.needsResult && !hasResult && (
-          <p className="subagents-result-ready">结果已准备好，可以获取。</p>
+        {transcriptLoading && transcriptMessages.length === 0 && (
+          <div className="subagents-transcript-loading">正在载入工作详情…</div>
         )}
-
-        {(view.activityLog.length > 0 || messages.length > 0 || canSteer || view.needsResult || view.canStop) && (
-          <details className="subagents-runtime-details">
-            <summary>运行详情</summary>
-            <div className="subagents-runtime-details-body">
-              {view.activityLog.length > 0 && (
-                <section className="subagents-detail-timeline" aria-label="时间线">
-                  <h3>时间线</h3>
-                  <ol>
-                    {view.activityLog.map((activity, index) => (
-                      <li key={`${index}-${activity}`}>{activity}</li>
-                    ))}
-                  </ol>
-                </section>
-              )}
-
-              {(messages.length > 0 || canSteer) && (
-                <section className="subagents-detail-messages" aria-label="协作消息">
-                  <h3>消息</h3>
-                  {messages.length > 0 && (
-                    <ol>
-                      {messages.map((message) => (
-                        <li key={message.messageId} data-sender={message.senderId === "user" ? "user" : "agent"}>
-                          <span>{message.senderId === "user" ? "你" : view.title}</span>
-                          <p>{message.content}</p>
-                          {message.deliveryStatus === "sending" && <small>发送中…</small>}
-                          {message.deliveryStatus === "failed" && <small>发送失败</small>}
-                        </li>
-                      ))}
-                    </ol>
-                  )}
-                  {canSteer && (
-                    <form
-                      className="subagents-message-composer"
-                      onSubmit={(event) => {
-                        event.preventDefault();
-                        const value = messageDraft.trim();
-                        if (!value) return;
-                        onSendMessage(value);
-                        setMessageDraft("");
-                      }}
-                    >
-                      <textarea
-                        value={messageDraft}
-                        onChange={(event) => setMessageDraft(event.target.value)}
-                        placeholder="继续给这个子智能体补充指令…"
-                        aria-label="给这个子智能体发送消息"
-                        rows={2}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-                            event.preventDefault();
-                            event.currentTarget.form?.requestSubmit();
-                          }
-                        }}
-                      />
-                      <button type="submit" disabled={!messageDraft.trim()} aria-label="发送给子智能体">
-                        <Send size={14} />
-                      </button>
-                    </form>
-                  )}
-                </section>
-              )}
-
-              <div className="subagents-detail-actions">
-                {view.needsResult && (
-                  <SmallButton icon={<ChevronRight size={14} />} label="获取结果" onClick={onFetchResult} />
-                )}
-                {view.canStop && (
-                  <SmallButton icon={<Square size={14} />} label="停止任务" onClick={onStop} />
-                )}
-              </div>
-            </div>
-          </details>
+        {!transcriptLoading && !transcriptError && turns.length === 0 && (
+          <div className="subagents-transcript-empty">
+            {isLive ? "子智能体正在启动，工作记录会实时显示在这里。" : "这个子智能体没有可回放的工作记录。"}
+          </div>
+        )}
+        {turns.length > 0 && (
+          <div className="subagents-transcript" aria-label="子智能体工作记录">
+            {turns.map((turn) => (
+              <ChatTurn
+                key={turn.id}
+                turn={turn}
+                isTranscriptMode
+              />
+            ))}
+          </div>
+        )}
+        {view.needsResult && transcriptMessages.length === 0 && (
+          <div className="subagents-detail-actions">
+            <SmallButton icon={<ChevronRight size={14} />} label={pendingAction === "result" ? "正在获取" : "获取结果"} onClick={onFetchResult} disabled={pendingAction != null} />
+          </div>
         )}
       </div>
     </section>
@@ -247,58 +249,194 @@ export const SubagentsTab = () => {
   const selectedAgentId = useAppStore((state) => state.focusedSubagentId);
   const setSelectedAgentId = useAppStore((state) => state.setFocusedSubagentId);
   const [showAllCompleted, setShowAllCompleted] = useState(false);
+  const [pendingAction, setPendingAction] = useState<{ id: string; kind: "stop" | "result" } | null>(null);
+  const [transcriptPresentation, setTranscriptPresentation] = useState<TranscriptPresentation>(
+    emptyTranscriptPresentation,
+  );
+  const [transcriptLoading, setTranscriptLoading] = useState(false);
+  const [transcriptError, setTranscriptError] = useState("");
+  const transcriptRequestRef = useRef(0);
+  const transcriptPresentationRef = useRef<TranscriptPresentation>(emptyTranscriptPresentation());
   const views = projectAgentViews(subagents);
   const selectedView = views.find((view) => view.id === selectedAgentId);
   const selectedAgent = subagents.find((agent) => agent.id === selectedAgentId);
   const conversationId = useAppStore((state) => state.conversationId);
+  const workingDirectory = useAppStore((state) => state.workingDirectory);
+  const visibleTranscript = transcriptPresentation.ownerId === selectedAgentId
+    ? transcriptPresentation
+    : emptyTranscriptPresentation();
+  const commitTranscriptPresentation = useCallback((next: TranscriptPresentation) => {
+    transcriptPresentationRef.current = next;
+    setTranscriptPresentation(next);
+  }, []);
 
-  const stop = (id: string) => {
-    sendClientCommand({ type: "subagent.cancel", subagent_id: id });
+  const loadTranscript = useCallback(async (id: string) => {
+    if (!conversationId) return;
+    const requestId = ++transcriptRequestRef.current;
+    const ownerConversationId = conversationId;
+    setTranscriptLoading(true);
+    setTranscriptError("");
+    try {
+      const result = await sendClientCommandAwaitResult({
+        type: "subagent.transcript",
+        subagent_id: id,
+        conversation_id: conversationId,
+        workspace_root: workingDirectory || undefined,
+      }, "subagent.transcript", { silent: true });
+      if (
+        requestId !== transcriptRequestRef.current
+        || useAppStore.getState().conversationId !== ownerConversationId
+        || useAppStore.getState().focusedSubagentId !== id
+      ) return;
+      const resultLevel = String(result.level || "").toLowerCase();
+      if (!commandResultSucceeded(result) || resultLevel === "warning") {
+        setTranscriptError(result.message || "无法读取子智能体工作记录。");
+        return;
+      }
+      const rawMessages = Array.isArray(result.data?.messages)
+        ? result.data.messages as BackendTranscriptMessage[]
+        : [];
+      const responseSeq = Number(result.data?.seq ?? 0);
+      const currentPresentation = transcriptPresentationRef.current;
+      if (
+        currentPresentation.ownerId === id
+        && Number.isFinite(responseSeq)
+        && (
+          responseSeq < currentPresentation.seq
+          || (responseSeq === currentPresentation.seq && currentPresentation.source === "push")
+        )
+      ) return;
+      const nextSeq = Number.isFinite(responseSeq) ? responseSeq : 0;
+      const hydrated = hydrateMessages(rawMessages);
+      commitTranscriptPresentation({
+        ownerId: id,
+        messages: hydrated,
+        seq: nextSeq,
+        source: "durable",
+      });
+    } catch (error) {
+      if (requestId !== transcriptRequestRef.current) return;
+      setTranscriptError(error instanceof Error ? error.message : "无法读取子智能体工作记录。");
+    } finally {
+      if (requestId === transcriptRequestRef.current) setTranscriptLoading(false);
+    }
+  }, [conversationId, workingDirectory, commitTranscriptPresentation]);
+
+  useEffect(() => {
+    setPendingAction(null);
+    transcriptRequestRef.current += 1;
+    setTranscriptLoading(false);
+    setTranscriptError("");
+    if (!selectedAgentId || !conversationId) {
+      commitTranscriptPresentation(emptyTranscriptPresentation());
+      return;
+    }
+    const current = useAppStore.getState().subagents.find((agent) => agent.id === selectedAgentId);
+    const hasPushedSnapshot = current?.transcriptSeq != null;
+    commitTranscriptPresentation({
+      ownerId: selectedAgentId,
+      messages: current?.transcriptMessages ?? [],
+      seq: current?.transcriptSeq ?? -1,
+      source: hasPushedSnapshot ? "push" : "none",
+    });
+    void loadTranscript(selectedAgentId);
+  }, [
+    conversationId,
+    selectedAgentId,
+    workingDirectory,
+    commitTranscriptPresentation,
+    loadTranscript,
+  ]);
+
+  useEffect(() => {
+    if (!selectedAgentId || selectedAgent?.transcriptSeq == null) return;
+    const pushedMessages = selectedAgent.transcriptMessages ?? [];
+    const currentPresentation = transcriptPresentationRef.current;
+    if (
+      currentPresentation.ownerId === selectedAgentId
+      && selectedAgent.transcriptSeq <= currentPresentation.seq
+    ) return;
+    transcriptRequestRef.current += 1;
+    setTranscriptLoading(false);
+    setTranscriptError("");
+    commitTranscriptPresentation({
+      ownerId: selectedAgentId,
+      messages: pushedMessages,
+      seq: selectedAgent.transcriptSeq,
+      source: "push",
+    });
+  }, [
+    selectedAgent?.transcriptMessages,
+    selectedAgent?.transcriptSeq,
+    selectedAgentId,
+    commitTranscriptPresentation,
+  ]);
+
+  const stop = async (id: string) => {
+    if (!conversationId) return;
+    if (pendingAction?.id === id) return;
+    const ownerConversationId = conversationId;
+    setPendingAction({ id, kind: "stop" });
+    try {
+      const result = await sendClientCommandAwaitResult({
+        type: "subagent.cancel",
+        subagent_id: id,
+        conversation_id: conversationId,
+        workspace_root: workingDirectory || undefined,
+      }, "subagent.cancel");
+      if (useAppStore.getState().conversationId !== ownerConversationId) return;
+      if (!commandResultSucceeded(result)) {
+        pushToast(result.message || "停止子智能体失败。", "error", 4000);
+      } else if (String(result.level || "").toLowerCase() === "warning" && result.message) {
+        pushToast(result.message, "warning", 3500);
+      }
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : "停止子智能体失败。", "error", 4000);
+    } finally {
+      setPendingAction((current) => current?.id === id && current.kind === "stop" ? null : current);
+    }
   };
 
-  const fetchResult = (id: string) => {
-    sendClientCommand({
-      type: "subagent.status",
-      subagent_id: id,
-      include_result: true,
-    });
-  };
-
-  const sendMessage = (id: string, message: string) => {
-    const target = subagents.find((agent) => agent.id === id);
-    const messageId = globalThis.crypto?.randomUUID?.() ?? `msg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
-    const optimistic: SubagentMessageState = {
-      messageId,
-      senderId: "user",
-      recipientId: id,
-      content: message,
-      createdAt: Date.now(),
-      deliveryStatus: "sending",
-    };
-    useAppStore.getState().updateSubagent(id, {
-      messages: [...(target?.messages ?? []), optimistic].slice(-100),
-    }, conversationId ?? undefined);
-    sendClientCommand({
-      type: "send_message",
-      recipient: id,
-      sender: "user",
-      message,
-      message_id: messageId,
-      conversation_id: conversationId ?? undefined,
-      task_id: target?.taskId,
-    });
+  const fetchResult = async (id: string) => {
+    if (!conversationId) return;
+    if (pendingAction?.id === id) return;
+    const ownerConversationId = conversationId;
+    setPendingAction({ id, kind: "result" });
+    try {
+      const result = await sendClientCommandAwaitResult({
+        type: "subagent.status",
+        subagent_id: id,
+        include_result: true,
+        conversation_id: conversationId,
+        workspace_root: workingDirectory || undefined,
+      }, "subagent.status");
+      if (useAppStore.getState().conversationId !== ownerConversationId) return;
+      if (!commandResultSucceeded(result)) {
+        pushToast(result.message || "获取子智能体结果失败。", "error", 4000);
+      } else if (String(result.level || "").toLowerCase() === "warning" && result.message) {
+        pushToast(result.message, "warning", 3500);
+      }
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : "获取子智能体结果失败。", "error", 4000);
+    } finally {
+      setPendingAction((current) => current?.id === id && current.kind === "result" ? null : current);
+    }
   };
 
   if (selectedView) {
     return (
       <AgentDetail
+        key={`${conversationId}:${selectedView.id}`}
         view={selectedView}
         onBack={() => setSelectedAgentId(null)}
-        onFetchResult={() => fetchResult(selectedView.id)}
-        onStop={() => stop(selectedView.id)}
-        messages={selectedAgent?.messages ?? []}
-        canSteer={Boolean(selectedAgent && ["pending", "running", "blocked"].includes(selectedAgent.status))}
-        onSendMessage={(message) => sendMessage(selectedView.id, message)}
+        onFetchResult={() => void fetchResult(selectedView.id)}
+        onStop={() => void stop(selectedView.id)}
+        transcriptMessages={visibleTranscript.messages}
+        workspaceRoot={workingDirectory}
+        transcriptLoading={transcriptLoading}
+        transcriptError={transcriptError}
+        onRefreshTranscript={() => void loadTranscript(selectedView.id)}
+        pendingAction={pendingAction?.id === selectedView.id ? pendingAction.kind : null}
       />
     );
   }
@@ -352,7 +490,7 @@ export const SubagentsTab = () => {
                     view={view}
                     onOpen={() => {
                       setSelectedAgentId(view.id);
-                      fetchResult(view.id);
+                      if (view.needsResult) void fetchResult(view.id);
                     }}
                   />
                 ))}

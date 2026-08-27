@@ -9,7 +9,6 @@
   --mc-icon-sm: 14px;
   --mc-icon-md: 16px;
   --mc-icon-lg: 20px;
-  --mc-icon-stroke: 1.65;
   --mc-icon-folder: color-mix(in oklch, var(--accent-primary) 68%, var(--text-secondary));
   --mc-icon-code: color-mix(in oklch, var(--state-info) 78%, var(--text-secondary));
   --mc-icon-config: color-mix(in oklch, var(--state-warning) 70%, var(--text-secondary));
@@ -54,7 +53,7 @@
               box-shadow var(--duration-base) var(--easing-standard),
               opacity var(--duration-base) var(--easing-standard),
               transform var(--duration-base) var(--easing-standard);
-  font-weight: 500;
+  font-weight: var(--fw-medium);
   display: inline-flex;
   align-items: center;
   gap: var(--spacing-2);
@@ -91,8 +90,38 @@
   background: color-mix(in oklch, var(--state-danger) 88%, white);
 }
 
+/* Ghost：无边框透明底，hover 才浮现。此前 .btn-ghost 被 10+ 处引用
+   却没有任何视觉定义（仅 .btn-ghost-danger:focus-visible 一条），独立
+   使用时按钮是裸的。 */
+.btn-ghost {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.btn-ghost:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
+/* Accent：主色的柔和底版本（审批卡等场景），对应 InlineAgentPrompt
+   的 accentButtonStyle 视觉。 */
+.btn-accent {
+  border: 1px solid color-mix(in oklch, var(--accent-primary) 40%, var(--border-subtle));
+  background: color-mix(in oklch, var(--accent-primary) 8%, var(--surface-base));
+  color: var(--accent-primary);
+}
+
+.btn-accent:hover:not(:disabled) {
+  background: color-mix(in oklch, var(--accent-primary) 14%, var(--surface-base));
+}
+
 .btn:disabled {
-  opacity: 0.3;
+  opacity: 0.45;
   cursor: not-allowed;
 }
 
@@ -109,7 +138,7 @@
   flex: 0 0 auto;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: var(--radius-sm, 6px);
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -226,7 +255,7 @@
   padding: 0 6px;
   color: var(--text-secondary);
   font-size: var(--text-sm);
-  font-weight: 650;
+  font-weight: var(--fw-semibold);
   white-space: nowrap;
   pointer-events: none;
 }
@@ -269,8 +298,8 @@
 }
 
 .settings-center-tab-icon > svg {
-  width: 16px;
-  height: 16px;
+  width: var(--mc-icon-md);
+  height: var(--mc-icon-md);
 }
 
 .settings-center-tab[aria-current="page"] .settings-center-tab-icon {
@@ -293,13 +322,15 @@
 }
 
 .app-route-loading > svg {
-  width: 20px;
-  height: 20px;
-  stroke-width: 1.7;
+  width: var(--mc-icon-lg);
+  height: var(--mc-icon-lg);
+  stroke-width: var(--mc-icon-stroke);
 }
 
+/* 导航项文字始终显示；此前为「仅图标」导航时代设为 display:none，
+   已由 SettingsCenter.css 用更高优先级选择器抵消，这里直接归正。 */
 .settings-center-tab-label {
-  display: none;
+  display: inline;
 }
 
 .file-tree-action {
@@ -331,8 +362,8 @@
 }
 
 .editor-tab-file-icon-svg {
-  width: 14px;
-  height: 14px;
+  width: var(--mc-icon-sm);
+  height: var(--mc-icon-sm);
 }
 
 .editor-empty-file-icon {
@@ -458,8 +489,66 @@
   pointer-events: none;
 }
 
+.mc-connection-banner {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 16px;
+  color: var(--text-secondary);
+  background: var(--surface-soft);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+
+.mc-connection-banner[data-kind="warning"] {
+  color: color-mix(in oklch, var(--state-warning) 76%, var(--text-primary));
+  background: color-mix(in oklch, var(--surface-base) 92%, var(--state-warning));
+}
+
+.mc-connection-banner[data-kind="connecting"] {
+  color: var(--text-secondary);
+  background: color-mix(in oklch, var(--surface-soft) 92%, var(--state-info));
+}
+
+.mc-connection-banner-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: color-mix(in oklch, var(--state-info) 72%, var(--text-muted));
+}
+
+.mc-connection-banner[data-kind="warning"] .mc-connection-banner-dot {
+  background: color-mix(in oklch, var(--state-warning) 78%, var(--text-muted));
+}
+
+body:has(.mc-sidebar-right[data-open="true"]:not([data-embedded="true"])) .toast-container {
+  top: calc(var(--header-height) + 58px);
+}
+
+body:has(.mc-connection-banner):has(.mc-sidebar-right[data-open="true"]:not([data-embedded="true"])) .toast-container {
+  top: calc(var(--header-height) + 90px);
+}
+
 body:has(.mc-connection-banner) .toast-container {
   top: calc(var(--header-height) + 42px);
+}
+
+body:has(.settings-workspace.settings-center) .toast-container {
+  top: auto;
+  bottom: 16px;
+}
+
+@media (min-width: 880px) {
+  body:has(.mc-narrow-drawer-surface[data-side="right"]) .toast-container {
+    right: calc(min(480px, calc(100vw - 16px)) + 20px);
+  }
+
+  body:has(.mc-side-chat-surface) .toast-container {
+    right: calc(min(420px, calc(100vw - 32px)) + 28px);
+  }
 }
 
 .toast-card {
@@ -473,8 +562,10 @@ body:has(.mc-connection-banner) .toast-container {
   color: var(--text-primary);
   background: color-mix(in oklch, var(--surface-raised) 96%, var(--toast-tone));
   border: 1px solid color-mix(in oklch, var(--border-subtle) 82%, var(--toast-tone));
-  border-radius: var(--radius-md, 8px);
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow-soft, var(--shadow-sm));
+  /* Hover must stay interactive: pause auto-dismiss + allow selecting the
+     message text (error toasts are exactly what users need to copy). */
   pointer-events: auto;
 }
 
@@ -486,8 +577,8 @@ body:has(.mc-connection-banner) .toast-container {
 }
 
 .toast-icon > svg {
-  width: 15px;
-  height: 15px;
+  width: var(--mc-icon-sm);
+  height: var(--mc-icon-sm);
 }
 
 .toast-message {
@@ -497,11 +588,18 @@ body:has(.mc-connection-banner) .toast-container {
   overflow-wrap: anywhere;
 }
 
-.toast-card[data-type="info"] .toast-message,
-.toast-card[data-type="success"] .toast-message {
+/* Clamp every tone to 3 lines so a long error cannot balloon the toast;
+   hover reveals the full message for reading/copying. */
+.toast-card .toast-message {
+  display: -webkit-box;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.toast-card:hover .toast-message {
+  -webkit-line-clamp: unset;
+  overflow: visible;
 }
 
 .toast-dismiss {
@@ -514,8 +612,9 @@ body:has(.mc-connection-banner) .toast-container {
   color: var(--text-muted);
   background: transparent;
   border: 0;
-  border-radius: var(--radius-sm, 5px);
+  border-radius: var(--radius-sm);
   cursor: pointer;
+  pointer-events: auto;
 }
 
 .toast-dismiss:hover {
@@ -540,6 +639,15 @@ body:has(.mc-connection-banner) .toast-container {
     top: calc(var(--header-height) + 58px);
   }
 
+  body:has(.settings-workspace.settings-center) .toast-container,
+  body:has(.mc-narrow-drawer-surface[data-side="right"]) .toast-container,
+  body:has(.mc-side-chat-surface) .toast-container {
+    top: auto;
+    right: 10px;
+    bottom: 10px;
+    left: 10px;
+  }
+
   .toast-card {
     min-height: 48px;
     padding: 8px 8px 8px 12px;
@@ -559,7 +667,7 @@ body:has(.mc-connection-banner) .toast-container {
   gap: 10px;
   padding: 5px 9px;
   border: 1px solid transparent;
-  border-radius: var(--radius-sm, 7px);
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-secondary);
   font-family: var(--font-ui);
@@ -587,27 +695,45 @@ body:has(.mc-connection-banner) .toast-container {
   background: color-mix(in oklch, var(--surface-page) 72%, transparent);
   color: var(--text-secondary);
   font-size: var(--text-xs);
-  font-weight: 600;
+  font-weight: var(--fw-semibold);
   white-space: nowrap;
 }
 
 .mc-connection-status > svg {
   width: 14px;
   height: 14px;
-  stroke-width: 1.75;
+  stroke-width: var(--mc-icon-stroke);
 }
 
 .mc-connection-status[data-connected="true"] > svg {
   color: var(--state-success);
 }
 
-.mc-connection-status[data-connected="false"] > svg {
+.mc-connection-status[data-kind="preview"] > svg {
+  color: var(--text-muted);
+}
+
+.mc-connection-status[data-kind="connecting"] > svg {
+  color: var(--state-info);
+}
+
+.mc-connection-status[data-kind="warning"] > svg {
   color: var(--state-danger);
 }
 
 .mc-connection-status[data-connected="false"] {
   width: auto;
   padding: 0 7px;
+}
+
+.mc-connection-status-spinner {
+  animation: spin 1s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mc-connection-status-spinner {
+    animation: none;
+  }
 }
 
 .mc-window-controls {
@@ -670,7 +796,7 @@ body:has(.mc-connection-banner) .toast-container {
 .card-header {
   padding: var(--spacing-3) var(--spacing-4);
   border-bottom: 1px solid var(--border-subtle);
-  font-weight: 500;
+  font-weight: var(--fw-medium);
   font-size: var(--text-md);
 }
 
@@ -714,7 +840,7 @@ body:has(.mc-connection-banner) .toast-container {
   padding: 2px 8px;
   border-radius: var(--radius-full);
   font-size: var(--text-xs);
-  font-weight: 500;
+  font-weight: var(--fw-medium);
 }
 
 .badge-success {
@@ -758,30 +884,10 @@ body:has(.mc-connection-banner) .toast-container {
   overflow: hidden;
 }
 
-/* ========== 滚动条样式 ========== */
-.custom-scrollbar::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-.custom-scrollbar::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.custom-scrollbar::-webkit-scrollbar-thumb {
-  background: var(--border-medium);
-  border-radius: var(--radius-full);
-}
-
-.custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: var(--border-rail);
-}
-
-/* File tree: keep the scrollbar hidden until hover or active scrolling. */
-.file-tree-scroll {
-  scrollbar-color: transparent transparent;
-}
-
+/* File tree: keep the scrollbar hidden until hover or active scrolling.
+   隐藏/显形全部由 ::-webkit-scrollbar-thumb 的 background 负责，不能用
+   scrollbar-color —— 声明标准属性会使同元素的伪元素规则整体失效，thumb
+   圆角随之丢失。 */
 .file-tree-scroll::-webkit-scrollbar {
   width: 8px;
 }
@@ -792,13 +898,8 @@ body:has(.mc-connection-banner) .toast-container {
 
 .file-tree-scroll::-webkit-scrollbar-thumb {
   background: transparent;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
   transition: background-color var(--transition-fast);
-}
-
-.file-tree-scroll:hover,
-.file-tree-scroll.is-scrolling {
-  scrollbar-color: var(--border-rail) transparent;
 }
 
 .file-tree-scroll:hover::-webkit-scrollbar-thumb,
@@ -810,49 +911,7 @@ body:has(.mc-connection-banner) .toast-container {
   background: var(--border-rail);
 }
 
-/* ========== 动画 ========== */
-@keyframes component-fade-in {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
-@keyframes component-slide-up {
-  from {
-    transform: translateY(10px);
-    opacity: 0;
-  }
-  to {
-    transform: translateY(0);
-    opacity: 1;
-  }
-}
-
-@keyframes component-pulse {
-  0%, 100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.4;
-  }
-}
-
 /* @keyframes spin lives in reset.css (global) */
-
-.animate-fadeIn {
-  animation: component-fade-in var(--duration-base) var(--easing-standard);
-}
-
-.animate-slideUp {
-  animation: component-slide-up var(--duration-base) var(--easing-standard);
-}
-
-.animate-pulse {
-  animation: component-pulse 1.5s ease-in-out infinite;
-}
 
 .animate-spin {
   animation: spin 1s linear infinite;
@@ -972,7 +1031,8 @@ body:has(.mc-connection-banner) .toast-container {
   }
 
   .mc-sidebar-mode-tab {
-    min-height: 44px !important;
+    height: 34px !important;
+    min-height: 34px !important;
   }
 
   .mc-sidebar-nav {
@@ -1010,60 +1070,10 @@ body:has(.mc-connection-banner) .toast-container {
 
 }
 
+/* 设置中心的响应式（含侧栏收成横向导航条）由 overlays/SettingsCenter.css
+   在 760px 断点统一负责；此处历史上还针对 640px 把它当对话框重新定尺寸，
+   选择器 .settings-center-body / .settings-center-close 早已不存在于 DOM。 */
 @media (max-width: 640px) {
-  .settings-center {
-    width: calc(100vw - 24px) !important;
-    height: calc(100dvh - 24px) !important;
-    max-height: none !important;
-  }
-
-  .settings-center-body {
-    grid-template-columns: minmax(0, 1fr) !important;
-    grid-template-rows: auto minmax(0, 1fr) !important;
-  }
-
-  .settings-center-tabs {
-    flex-direction: row !important;
-    align-items: center !important;
-    overflow-x: auto !important;
-    overflow-y: hidden !important;
-    border-right: 0 !important;
-    border-bottom: 1px solid var(--border-subtle) !important;
-    scrollbar-width: none;
-  }
-
-  .settings-center-tabs::-webkit-scrollbar {
-    display: none;
-  }
-
-  .settings-center-tabs > button {
-    min-width: max-content;
-    min-height: 38px !important;
-    width: auto !important;
-    justify-content: center !important;
-    gap: 7px !important;
-    padding: 0 10px !important;
-    box-shadow: none !important;
-  }
-
-  .settings-center-tab-label {
-    display: inline;
-    font-weight: 650;
-  }
-
-  .settings-center-tabs > button[aria-current="page"] {
-    box-shadow: inset 0 -2px 0 var(--accent-primary) !important;
-  }
-
-  .settings-center-content {
-    padding: 16px !important;
-  }
-
-  .settings-center-close {
-    width: 44px !important;
-    height: 44px !important;
-  }
-
   .agent-editor {
     width: calc(100vw - 24px) !important;
     height: calc(100dvh - 24px) !important;
@@ -1171,4 +1181,61 @@ body:has(.mc-connection-banner) .toast-container {
 
 .gap-4 {
   gap: var(--spacing-4);
+}
+
+/* ════════════════════════════════════════════════════════
+   Shared panel empty state (components/EmptyState.tsx)
+   ════════════════════════════════════════════════════════ */
+.mc-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 28px 16px;
+  text-align: center;
+}
+
+.mc-empty-state[data-compact="true"] {
+  padding: 14px 10px;
+}
+
+.mc-empty-state-icon {
+  display: inline-flex;
+  margin-bottom: 4px;
+  color: var(--text-muted);
+  opacity: 0.65;
+}
+
+.mc-empty-state-title {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: var(--fw-medium);
+}
+
+.mc-empty-state-hint {
+  max-width: 300px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+.mc-empty-state-action {
+  margin-top: 10px;
+}
+
+.mc-empty-state-action .btn,
+.mc-empty-state-action button {
+  min-height: 32px;
+  padding: 0 14px;
+  border: 1px solid color-mix(in oklch, var(--accent-primary) 32%, transparent);
+  border-radius: var(--mc-control-radius);
+  background: color-mix(in oklch, var(--accent-primary) 13%, transparent);
+  color: var(--accent-primary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.mc-empty-state-action .btn:hover,
+.mc-empty-state-action button:hover {
+  background: color-mix(in oklch, var(--accent-primary) 20%, transparent);
 }

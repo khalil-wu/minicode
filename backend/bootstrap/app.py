@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import Awaitable, Callable
-from inspect import signature
+from inspect import Parameter, signature
+from pathlib import Path
 from typing import Any
 
-from backend.config import AppConfig, DATA_ROOT, PROJECT_ROOT, load_config
+from backend.config import DATA_ROOT, AppConfig, load_config
 from backend.memory.file_memory import FileMemory
 from backend.memory.manager import MemoryManager
 from backend.permissions.checker import PermissionChecker
@@ -17,9 +19,6 @@ logger = logging.getLogger(__name__)
 
 _STARTUP_STEP_TIMEOUT_SECONDS = 8.0
 _STARTUP_TIMED_OUT = object()
-_MCP_SAMPLING_MAX_MESSAGES = 16
-_MCP_SAMPLING_MAX_TEXT_CHARS = 24_000
-_MCP_SAMPLING_MAX_IMAGE_BYTES = 4 * 1024 * 1024
 
 
 async def _with_startup_timeout(label: str, awaitable: Awaitable[Any], timeout: float = _STARTUP_STEP_TIMEOUT_SECONDS) -> Any:
@@ -42,20 +41,23 @@ class AppBootstrap:
         *,
         build_tool_registry: Callable[..., ToolRegistry],
         build_status_payload: Callable[[], dict[str, Any]] | None = None,
-        create_llm_adapter: Callable[..., Any],
+        create_session_llm: Callable[..., Any],
         ws_manager: Any,
         on_mcp_status_change: Callable[[str, Any], Awaitable[None]],
         status_cache_ttl_seconds: float = 5.0,
     ) -> None:
         self._build_tool_registry = build_tool_registry
         self._build_status_payload = build_status_payload
-        self._create_llm_adapter = create_llm_adapter
+        self._create_session_llm = create_session_llm
         self.ws_manager = ws_manager
         self._on_mcp_status_change = on_mcp_status_change
         self._status_cache_ttl_seconds = status_cache_ttl_seconds
 
         self.config: AppConfig | None = None
         self.mcp_manager: Any | None = None
+        self._mcp_managers: dict[str, Any] = {}
+        self._mcp_start_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._mcp_manager_lock = asyncio.Lock()
         self.skill_manager: Any | None = None
         self.skill_executor: Any | None = None
         self.file_memory: Any | None = None
@@ -75,6 +77,28 @@ class AppBootstrap:
             asyncio.to_thread(refresh_native_os_sandbox)
         )
         self.config = load_config()
+
+        try:
+            from backend.ws.client_command_log import cleanup_stale_client_command_logs
+            from backend.ws.event_log import cleanup_stale_replay_logs
+
+            cleanup_result = await _to_thread_with_timeout(
+                "Websocket session log cleanup",
+                lambda: (
+                    cleanup_stale_replay_logs(DATA_ROOT / "ws-event-log"),
+                    cleanup_stale_client_command_logs(DATA_ROOT / "client-command-log"),
+                ),
+            )
+            if cleanup_result is not _STARTUP_TIMED_OUT:
+                replay_logs, command_logs = cleanup_result
+                if replay_logs or command_logs:
+                    logger.info(
+                        "Cleaned stale websocket session logs: replay=%d command=%d",
+                        replay_logs,
+                        command_logs,
+                    )
+        except Exception as exc:
+            logger.warning("Websocket session log cleanup failed: %s", exc)
 
         try:
             self.file_memory = FileMemory()
@@ -99,22 +123,13 @@ class AppBootstrap:
             logger.warning("Skills init failed: %s", exc)
 
         try:
-            from backend.mcp.manager import MCPServerManager
-            self.mcp_manager = MCPServerManager(
-                on_status_change=self._on_mcp_status_change,
-                sampling_handler=self._handle_mcp_sampling,
-                elicitation_handler=self._handle_mcp_elicitation,
+            from backend.workspace.state import get_explicit_active_workspace_root
+
+            await self.ensure_mcp_manager(
+                get_explicit_active_workspace_root(),
+                activate=True,
             )
-            mcp_start_task = asyncio.create_task(self.mcp_manager.start_all())
-            started = await _with_startup_timeout("MCP manager", asyncio.shield(mcp_start_task), timeout=30.0)
-            if started is _STARTUP_TIMED_OUT:
-                # 不销毁整个 MCP manager — 让慢速服务器（如 npx）在后台继续连接。
-                # 后端已经可用，WebSocket 客户端会在服务器连接后收到 mcp.lifecycle 事件。
-                logger.warning(
-                    "MCP manager startup timed out; some servers may still be connecting in background"
-                )
-            else:
-                logger.info("MCP manager initialized")
+            logger.info("MCP manager initialized")
         except Exception as exc:
             logger.warning("MCP init failed: %s", exc)
 
@@ -131,7 +146,6 @@ class AppBootstrap:
             project_root = Path(SETTINGS_FILE).resolve().parent if SETTINGS_FILE.exists() else None
             hook_mgr = HookManager.from_settings(settings_data, workspace_root=project_root)
             set_hook_manager(hook_mgr)
-            await _with_startup_timeout("Setup hook", hook_mgr.run_setup(trigger="startup"), timeout=5.0)
             hook_count = len(hook_mgr.pre_tool) + len(hook_mgr.post_tool)
             if hook_count:
                 logger.info("Hooks loaded: %d pre_tool, %d post_tool", len(hook_mgr.pre_tool), len(hook_mgr.post_tool))
@@ -167,6 +181,8 @@ class AppBootstrap:
                     "type": "scheduler.list",
                     "tasks": self.task_scheduler.list_tasks(workspace_root=workspace_root),
                     "runs": self.task_scheduler.list_runs(workspace_root=workspace_root),
+                    "conversation_id": str(getattr(session, "active_conversation_id", "") or ""),
+                    "workspace_root": workspace_root,
                 }
                 await session._send_ws_payload(payload, log_context="scheduler.list")
             except Exception:
@@ -197,7 +213,9 @@ class AppBootstrap:
                 raw_root = session._current_workspace_root()
                 if not raw_root:
                     continue
-                workspace_key = str(Path(raw_root).expanduser().resolve(strict=False)).casefold()
+                workspace_key = os.path.normcase(
+                    str(Path(raw_root).expanduser().resolve(strict=False))
+                )
                 sessions_by_workspace.setdefault(workspace_key, session)
             except (OSError, RuntimeError, ValueError):
                 logger.debug("PR automation ignored an invalid workspace", exc_info=True)
@@ -230,13 +248,37 @@ class AppBootstrap:
                 except asyncio.CancelledError:
                     pass
                 self._pr_monitor_task = None
+            try:
+                from backend.memory.generation import drain_memory_background_tasks
+
+                pending_memory = await drain_memory_background_tasks(timeout=5.0)
+                if pending_memory:
+                    logger.warning(
+                        "Memory shutdown drain left %d worker(s) pending",
+                        len(pending_memory),
+                    )
+            except Exception as exc:
+                logger.debug("Memory worker shutdown error (continuing): %s", exc)
             if self.task_scheduler:
                 try:
                     await self.task_scheduler.stop()
                 except Exception as exc:
                     logger.debug("Task scheduler stop error (harmless): %s", exc)
-            if self.mcp_manager:
-                await self.mcp_manager.stop_all()
+            pending_starts = list(self._mcp_start_tasks.values())
+            for task in pending_starts:
+                if not task.done():
+                    task.cancel()
+            if pending_starts:
+                await asyncio.gather(*pending_starts, return_exceptions=True)
+            self._mcp_start_tasks.clear()
+            managers = list(dict.fromkeys(self._mcp_managers.values()))
+            if managers:
+                await asyncio.gather(
+                    *(manager.stop_all() for manager in managers),
+                    return_exceptions=True,
+                )
+                self._mcp_managers.clear()
+                self.mcp_manager = None
                 logger.info("MCP manager stopped")
             try:
                 from backend.lsp.client import get_lsp_manager
@@ -264,27 +306,227 @@ class AppBootstrap:
         self.config = load_config()
         return self.config
 
-    def create_tool_registry(self, artifact_store: Any) -> ToolRegistry:
+    def create_tool_registry(
+        self,
+        artifact_store: Any,
+        *,
+        config: AppConfig | None = None,
+        mcp_manager: Any | None = None,
+    ) -> ToolRegistry:
+        return self._build_tool_registry(
+            artifact_store,
+            llm_provider=lambda: self.create_llm(config=config),
+            mcp_manager=(
+                mcp_manager if mcp_manager is not None else self.mcp_manager
+            ),
+        )
+
+    @staticmethod
+    def _mcp_workspace_key(workspace_root: str | Path | None) -> str:
+        from backend.owner_scope import canonical_workspace_root
+
+        return canonical_workspace_root(workspace_root) or "<projectless>"
+
+    async def _handle_scoped_mcp_status_change(
+        self,
+        manager: Any,
+        server_name: str,
+        status: Any,
+    ) -> None:
+        callback = self._on_mcp_status_change
         try:
-            params = signature(self._build_tool_registry).parameters
-            kwargs: dict[str, Any] = {}
-            if "llm_provider" in params:
-                kwargs["llm_provider"] = self.create_llm
-            if "mcp_manager" in params:
-                kwargs["mcp_manager"] = self.mcp_manager
-            if kwargs:
-                return self._build_tool_registry(artifact_store, **kwargs)
+            params = signature(callback).parameters
         except (TypeError, ValueError):
-            pass
-        return self._build_tool_registry(artifact_store)
+            params = {}
+        positional = [
+            parameter
+            for parameter in params.values()
+            if parameter.kind
+            in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        accepts_varargs = any(
+            parameter.kind == Parameter.VAR_POSITIONAL
+            for parameter in params.values()
+        )
+        if accepts_varargs or len(positional) >= 3:
+            await callback(server_name, status, manager)
+        elif manager is self.mcp_manager:
+            await callback(server_name, status)
 
-    def create_permission_checker(self) -> PermissionChecker:
-        config = self.config or self.refresh_config()
-        return PermissionChecker(config.permissions)
+    def _new_mcp_manager(self, workspace_root: Path | None) -> Any:
+        from backend.mcp.manager import MCPServerManager
 
-    def create_llm(self, *, model_override: str | None = None) -> Any:
-        config = self.config or self.refresh_config()
-        return self._create_llm_adapter(config, model_override=model_override)
+        owner: dict[str, Any] = {}
+
+        async def on_status_change(server_name: str, status: Any) -> None:
+            manager = owner.get("manager")
+            if manager is not None:
+                await self._handle_scoped_mcp_status_change(
+                    manager,
+                    server_name,
+                    status,
+                )
+
+        manager = MCPServerManager(
+            on_status_change=on_status_change,
+            elicitation_handler=self._handle_mcp_elicitation,
+            workspace_root=workspace_root,
+        )
+        owner["manager"] = manager
+        return manager
+
+    async def ensure_mcp_manager(
+        self,
+        workspace_root: str | Path | None,
+        *,
+        activate: bool = False,
+        reload: bool = False,
+    ) -> Any:
+        """Return the session MCP owner bound to one explicit workspace."""
+
+        manager, key, start_task = await self._prepare_mcp_manager(
+            workspace_root,
+            activate=activate,
+        )
+        return await self._await_mcp_manager_ready(
+            manager,
+            key,
+            start_task,
+            reload=reload,
+        )
+
+    async def _prepare_mcp_manager(
+        self,
+        workspace_root: str | Path | None,
+        *,
+        activate: bool,
+    ) -> tuple[Any, str, asyncio.Task[Any] | None]:
+        """Bind the workspace owner without waiting for external servers."""
+
+        resolved_root = (
+            Path(workspace_root).expanduser().resolve()
+            if workspace_root is not None and str(workspace_root).strip()
+            else None
+        )
+        key = self._mcp_workspace_key(resolved_root)
+        async with self._mcp_manager_lock:
+            manager = self._mcp_managers.get(key)
+            if manager is None:
+                manager = self._new_mcp_manager(resolved_root)
+                self._mcp_managers[key] = manager
+                self._mcp_start_tasks[key] = asyncio.create_task(manager.start_all())
+            start_task = self._mcp_start_tasks.get(key)
+            if activate:
+                self.mcp_manager = manager
+
+        return manager, key, start_task
+
+    async def _await_mcp_manager_ready(
+        self,
+        manager: Any,
+        key: str,
+        start_task: asyncio.Task[Any] | None,
+        *,
+        reload: bool,
+    ) -> Any:
+        """Wait for one prepared manager's connection lifecycle."""
+
+        startup_result: Any = None
+        if start_task is not None and not start_task.done():
+            try:
+                workspace_label = getattr(manager, "workspace_root", None) or "projectless"
+                startup_result = await _with_startup_timeout(
+                    f"MCP manager ({workspace_label})",
+                    asyncio.shield(start_task),
+                    timeout=30.0,
+                )
+            except Exception:
+                if start_task.done():
+                    async with self._mcp_manager_lock:
+                        if self._mcp_start_tasks.get(key) is start_task:
+                            self._mcp_start_tasks.pop(key, None)
+                raise
+            if startup_result is _STARTUP_TIMED_OUT:
+                return manager
+        if start_task is not None:
+            try:
+                await start_task
+            finally:
+                if start_task.done():
+                    async with self._mcp_manager_lock:
+                        if self._mcp_start_tasks.get(key) is start_task:
+                            self._mcp_start_tasks.pop(key, None)
+
+        if reload:
+            await manager.reload_config()
+        return manager
+
+    async def begin_mcp_workspace_activation(
+        self,
+        workspace_root: str | Path | None,
+    ) -> tuple[Any, asyncio.Task[Any]]:
+        """Bind a workspace now and finish MCP startup in the background."""
+
+        manager, key, start_task = await self._prepare_mcp_manager(
+            workspace_root,
+            activate=True,
+        )
+        ready_task = asyncio.create_task(
+            self._await_mcp_manager_ready(
+                manager,
+                key,
+                start_task,
+                reload=True,
+            )
+        )
+        return manager, ready_task
+
+    async def activate_mcp_workspace(
+        self,
+        workspace_root: str | Path | None,
+    ) -> Any:
+        return await self.ensure_mcp_manager(
+            workspace_root,
+            activate=True,
+            reload=True,
+        )
+
+    def get_mcp_manager_for_workspace(
+        self,
+        workspace_root: str | Path | None,
+    ) -> Any | None:
+        return self._mcp_managers.get(self._mcp_workspace_key(workspace_root))
+
+    async def reload_mcp_managers(self, *, exclude: Any | None = None) -> None:
+        managers = [
+            manager
+            for manager in dict.fromkeys(self._mcp_managers.values())
+            if manager is not exclude
+        ]
+        if managers:
+            await asyncio.gather(
+                *(manager.reload_config() for manager in managers),
+                return_exceptions=False,
+            )
+
+    def create_permission_checker(self, *, config: AppConfig | None = None) -> PermissionChecker:
+        effective_config = config or self.config or self.refresh_config()
+        return PermissionChecker(effective_config.permissions)
+
+    def create_llm(
+        self,
+        *,
+        model_override: str | None = None,
+        config: AppConfig | None = None,
+    ) -> Any:
+        effective_config = config or self.config or self.refresh_config()
+        return self._create_session_llm(
+            effective_config,
+            model_override=model_override,
+            provider_override=(
+                str(getattr(effective_config.llm, "provider", "") or "") or None
+            ),
+        )
 
     def build_status_payload(self) -> dict[str, Any]:
         now = time.monotonic()
@@ -326,13 +568,68 @@ class AppBootstrap:
             return None, {}
         session_id = str(owner.get("session_id") or "").strip()
         conversation_id = str(owner.get("conversation_id") or "").strip()
-        if not session_id or not conversation_id:
+        owner_manager = owner.get("mcp_manager")
+        try:
+            owner_generation = int(owner.get("conversation_run_generation"))
+        except (TypeError, ValueError):
+            owner_generation = 0
+        if (
+            not session_id
+            or not conversation_id
+            or owner_manager is None
+            or owner_generation <= 0
+        ):
             return None, owner
-        for session in self.ws_manager._sessions.values():
+        iter_sessions = getattr(self.ws_manager, "iter_sessions", None)
+        sessions = (
+            list(iter_sessions())
+            if callable(iter_sessions)
+            else list(getattr(self.ws_manager, "_sessions", {}).values())
+        )
+        for session in sessions:
             if (
                 str(getattr(session, "session_id", "") or "") == session_id
                 and bool(getattr(session, "_is_connected", False))
             ):
+                repository = getattr(session, "conversation_repo", None)
+                get_conversation = getattr(repository, "get_conversation", None)
+                conversation = (
+                    get_conversation(conversation_id)
+                    if callable(get_conversation)
+                    else None
+                )
+                workspace_for_conversation = getattr(
+                    session,
+                    "_workspace_root_for_conversation",
+                    None,
+                )
+                manager_for_workspace = getattr(
+                    session,
+                    "_mcp_manager_for_workspace",
+                    None,
+                )
+                if (
+                    conversation is None
+                    or not callable(workspace_for_conversation)
+                    or not callable(manager_for_workspace)
+                ):
+                    return None, owner
+                workspace_root = workspace_for_conversation(conversation)
+                if manager_for_workspace(workspace_root) is not owner_manager:
+                    return None, owner
+
+                from backend.agent.conversation_query_guard import (
+                    conversation_query_guards,
+                )
+
+                active_claim = conversation_query_guards().active_claim(
+                    conversation_id
+                )
+                if (
+                    active_claim is None
+                    or active_claim.generation != owner_generation
+                ):
+                    return None, owner
                 return session, owner
         return None, owner
 
@@ -380,249 +677,11 @@ class AppBootstrap:
             if cancel_wait is not None:
                 await asyncio.gather(cancel_wait, return_exceptions=True)
 
-    async def _approve_mcp_sampling(
-        self,
-        session: Any,
-        owner: dict[str, Any],
-        *,
-        server_name: str,
-        request_id: str,
-        max_tokens: int,
-        message_count: int,
-        image_count: int,
-        has_system_prompt: bool,
-        prompt_preview: str,
-        preview_truncated: bool,
-    ) -> bool:
-        import uuid
-
-        approval_id = f"mcp_sampling_{uuid.uuid4().hex}"
-        conversation_id = str(owner.get("conversation_id") or "").strip()
-        args = {
-            "server": server_name,
-            "max_tokens": max_tokens,
-            "message_count": message_count,
-            "image_count": image_count,
-            "has_system_prompt": has_system_prompt,
-            # This is server-supplied content, never trusted host instruction.
-            # The desktop must show it before the user authorizes a paid model
-            # call on the server's behalf.
-            "prompt_preview": prompt_preview,
-            "prompt_preview_truncated": preview_truncated,
-            "request_id": request_id,
-        }
-        if session._use_control_protocol:
-            payload = {
-                "type": "control_request",
-                "request_id": approval_id,
-                "conversation_id": conversation_id,
-                "request": {
-                    "subtype": "can_use_tool",
-                    "tool_name": f"mcp_sampling:{server_name}",
-                    "input": args,
-                    "tool_use_id": approval_id,
-                    "source_tool": f"mcp:{server_name}",
-                },
-            }
-        else:
-            payload = {
-                "type": "approval_request",
-                "request_id": approval_id,
-                "conversation_id": conversation_id,
-                "tool_name": f"mcp_sampling:{server_name}",
-                "args": args,
-                "description": f"MCP server '{server_name}' requests a host model call.",
-            }
-        session._pending_approval_payloads[approval_id] = payload
-        await session._send_ws_payload(payload, log_context="mcp:sampling-approval")
-        result = await self._await_mcp_owner_operation(
-            session._approval_handler(approval_id),
-            owner,
-            label="sampling approval",
-            maximum_seconds=300.0,
-        )
-        return isinstance(result, dict) and result.get("action") == "approve"
-
-    async def _handle_mcp_sampling(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Handle sampling/createMessage request from MCP server."""
-        import base64
-        import binascii
-
-        from backend.llm.base import LLMAdapter, LLMMessage, UsageInfo
-
-        session, owner = self._resolve_mcp_request_session(params)
-        if session is None:
-            raise PermissionError("MCP sampling request is not bound to an active session and conversation")
-        server_name = str(params.get("_mcp_server_name") or "unknown").strip()
-        request_id = str(params.get("_mcp_request_id") or "").strip()
-        mcp_messages = params.get("messages", [])
-        if not isinstance(mcp_messages, list) or not mcp_messages:
-            raise ValueError("MCP sampling request contains no messages")
-        if len(mcp_messages) > _MCP_SAMPLING_MAX_MESSAGES:
-            raise ValueError(
-                f"MCP sampling request exceeds {_MCP_SAMPLING_MAX_MESSAGES} messages"
-            )
-        try:
-            requested_max_tokens = int(params.get("maxTokens") or 0)
-        except (TypeError, ValueError):
-            requested_max_tokens = 0
-        if requested_max_tokens <= 0:
-            raise ValueError("MCP sampling request must include a positive maxTokens")
-        max_tokens = min(requested_max_tokens, 2048)
-        system_prompt = str(params.get("systemPrompt") or "").strip()
-
-        # MCP sampling's separate systemPrompt is not a host system message.
-        # The protocol message roles are user/assistant only; accepting a
-        # server-forged system role would let an extension change the priority
-        # of an otherwise reviewed, untrusted request.
-        llm_messages: list[LLMMessage] = []
-        preview_lines: list[str] = []
-        total_text_chars = len(system_prompt)
-        image_count = 0
-        if system_prompt:
-            preview_lines.append(f"systemPrompt (untrusted): {system_prompt}")
-        for index, msg in enumerate(mcp_messages, 1):
-            if not isinstance(msg, dict):
-                raise ValueError(f"MCP sampling message {index} must be an object")
-            role = str(msg.get("role") or "").strip().lower()
-            if role not in {"user", "assistant"}:
-                raise ValueError(
-                    f"MCP sampling message {index} has unsupported role {role!r}"
-                )
-            content_field = msg.get("content")
-            content_text = ""
-            images: list[dict[str, str]] = []
-            blocks: list[Any]
-            if isinstance(content_field, list):
-                blocks = content_field
-            elif isinstance(content_field, dict):
-                blocks = [content_field]
-            elif isinstance(content_field, str):
-                content_text = content_field
-                blocks = []
-            else:
-                raise ValueError(
-                    f"MCP sampling message {index} content must be text or content blocks"
-                )
-            for block in blocks:
-                if not isinstance(block, dict):
-                    raise ValueError(f"MCP sampling message {index} has an invalid content block")
-                block_type = str(block.get("type") or "").strip().lower()
-                if block_type == "text":
-                    content_text += str(block.get("text") or "")
-                elif block_type == "image":
-                    data = str(block.get("data") or "")
-                    if not data:
-                        raise ValueError(f"MCP sampling message {index} image has no data")
-                    media_type = str(block.get("mimeType") or "").strip().lower()
-                    if not media_type.startswith("image/"):
-                        raise ValueError(
-                            f"MCP sampling message {index} has invalid image MIME type"
-                        )
-                    try:
-                        decoded_size = len(base64.b64decode(data, validate=True))
-                    except (binascii.Error, ValueError) as exc:
-                        raise ValueError(
-                            f"MCP sampling message {index} image is not valid base64"
-                        ) from exc
-                    if decoded_size > _MCP_SAMPLING_MAX_IMAGE_BYTES:
-                        raise ValueError(
-                            f"MCP sampling image exceeds {_MCP_SAMPLING_MAX_IMAGE_BYTES} bytes"
-                        )
-                    images.append({
-                        "media_type": media_type,
-                        "data": data,
-                    })
-                    image_count += 1
-                else:
-                    raise ValueError(
-                        f"MCP sampling message {index} uses unsupported content type {block_type!r}"
-                    )
-            total_text_chars += len(content_text)
-            if total_text_chars > _MCP_SAMPLING_MAX_TEXT_CHARS:
-                raise ValueError(
-                    f"MCP sampling text exceeds {_MCP_SAMPLING_MAX_TEXT_CHARS} characters"
-                )
-            preview_lines.append(
-                f"{role}: {content_text}" + (f" [images: {len(images)}]" if images else "")
-            )
-            llm_messages.append(LLMMessage(role=role, content=content_text, images=images))
-
-        # Text is already bounded above. Send all of it to the approval UI so
-        # approval never authorizes prompt text that the user could not review.
-        preview_text = "\n\n".join(preview_lines).strip()
-        approved = await self._approve_mcp_sampling(
-            session,
-            owner,
-            server_name=server_name,
-            request_id=request_id,
-            max_tokens=max_tokens,
-            message_count=len(mcp_messages),
-            image_count=image_count,
-            has_system_prompt=bool(system_prompt),
-            prompt_preview=preview_text,
-            preview_truncated=False,
-        )
-        if not approved:
-            raise PermissionError("MCP sampling request was rejected by the user")
-        logger.info(
-            "Approved MCP sampling request server=%s session=%s conversation=%s max_tokens=%s",
-            server_name,
-            owner.get("session_id"),
-            owner.get("conversation_id"),
-            max_tokens,
-        )
-
-        if system_prompt:
-            llm_messages.insert(
-                0,
-                LLMMessage(
-                    role="user",
-                    content=(
-                        f"[Untrusted instruction supplied by MCP server {server_name}]\n"
-                        f"{system_prompt}"
-                    ),
-                ),
-            )
-
-        adapter = session.llm
-        # ``simple_chat`` normally reports usage into the currently bound turn
-        # bucket. Server callbacks run on the MCP reader task, so bind a local
-        # bucket explicitly and commit its *actual* usage to the shared tree.
-        # Reserving maxTokens here made the budget pessimistic and still missed
-        # prompt tokens/cost; Codex-style accounting records provider usage.
-        sampling_usage = UsageInfo()
-        usage_token = LLMAdapter.bind_turn_usage(sampling_usage)
-        try:
-            reply_text = await self._await_mcp_owner_operation(
-                adapter.simple_chat(llm_messages, max_tokens=max_tokens),
-                owner,
-                label="sampling model call",
-                maximum_seconds=60.0,
-            )
-        finally:
-            LLMAdapter.unbind_turn_usage(usage_token)
-
-        rollout_budget = owner.get("rollout_budget")
-        if rollout_budget is not None:
-            rollout_budget.record_usage_total(
-                f"mcp-sampling:{server_name}:{request_id}",
-                sampling_usage,
-            )
-
-        return {
-            "model": getattr(adapter, "model_name", "default-model"),
-            "stopReason": "stop",
-            "role": "assistant",
-            "content": {
-                "type": "text",
-                "text": reply_text,
-            }
-        }
-
     async def _handle_mcp_elicitation(self, params: dict[str, Any]) -> dict[str, Any]:
         """Handle elicitation/create request from MCP server."""
         import uuid
+
+        from backend.hooks.manager import HookEvent, get_hook_manager
 
         session, owner = self._resolve_mcp_request_session(params)
         if not session:
@@ -630,41 +689,61 @@ class AppBootstrap:
 
         request_id = f"elicit_{uuid.uuid4().hex}"
         prompt = str(params.get("prompt") or "").strip()
-        schema = params.get("schema") or {}
+        if not prompt:
+            prompt = "MCP server requests additional input."
+        raw_schema = params.get("schema")
+        schema = dict(raw_schema) if isinstance(raw_schema, dict) else {}
         conversation_id = str(owner.get("conversation_id") or "").strip()
 
-        # Build the payload
-        if session._use_control_protocol:
-            payload = {
-                "type": "control_request",
-                "request_id": request_id,
-                "conversation_id": conversation_id,
-                "request": {
-                    "subtype": "elicitation",
-                    "tool_use_id": request_id,
-                    "prompt": prompt,
-                    "question": prompt,
-                    "schema": schema,
+        # cc runs Elicitation hooks and validates the requested schema
+        # before prompting (elicitationHandler.ts); a blocked hook cancels.
+        hook_mgr = get_hook_manager()
+        if hook_mgr is not None and hook_mgr.has_hooks(HookEvent.ELICITATION):
+            hook_result = await hook_mgr.run_elicitation(
+                prompt,
+                elicitation_id=request_id,
+                mcp_server_name=str(params.get("_mcp_server_name") or ""),
+                mode=str(params.get("mode") or ""),
+                url=str(params.get("url") or ""),
+                requested_schema=schema or None,
+            )
+            if getattr(hook_result, "blocked", False):
+                return {
+                    "action": "cancel",
+                    "error": str(getattr(hook_result, "message", "") or "Elicitation blocked by hook"),
                 }
-            }
-        else:
-            payload = {
-                "type": "elicitation_request",
-                "request_id": request_id,
-                "conversation_id": conversation_id,
+
+        # Build the payload
+        payload = {
+            "type": "control_request",
+            "request_id": request_id,
+            "conversation_id": conversation_id,
+            "request": {
+                "subtype": "elicitation",
+                "tool_use_id": request_id,
                 "prompt": prompt,
+                "question": prompt,
                 "schema": schema,
             }
+        }
 
         # Register future for async wait-response
         future = asyncio.get_running_loop().create_future()
         session._pending_approvals[request_id] = future
         session._pending_approval_payloads[request_id] = payload
 
-        # Send event to client
-        await session._send_ws_payload(payload, log_context="mcp:elicitation")
-
         try:
+            # Send event to client. A disconnected owner must fail immediately
+            # instead of leaving an unreachable prompt registered for five
+            # minutes, and every exit path below shares the same cleanup.
+            sent = await session._send_ws_payload(payload, log_context="mcp:elicitation")
+            if not sent:
+                await session._emit_approval_cancelled_once(
+                    [request_id],
+                    reason="mcp_elicitation_delivery_failed",
+                    conversation_id=conversation_id,
+                )
+                return {"action": "cancel", "error": "MCP elicitation could not be delivered"}
             # Wait for user input from the desktop app (up to 5 minutes)
             result = await self._await_mcp_owner_operation(
                 future,
@@ -675,7 +754,23 @@ class AppBootstrap:
 
             # The client responds via "answer" or "approval" command, which resolves
             # the future with the payload. Let's inspect result structure:
+            if str(result.get("action") or "").strip().lower() in {
+                "cancel",
+                "deny",
+                "reject",
+            }:
+                await session._emit_approval_cancelled_once(
+                    [request_id],
+                    reason="mcp_elicitation_rejected",
+                    conversation_id=conversation_id,
+                )
+                return {"action": "cancel", "error": "User cancelled the elicitation"}
             answer = result.get("answer") or result.get("content") or ""
+            await session._emit_approval_cancelled_once(
+                [request_id],
+                reason="mcp_elicitation_resolved",
+                conversation_id=conversation_id,
+            )
             return {
                 "action": "submit",
                 "response": {
@@ -683,11 +778,33 @@ class AppBootstrap:
                 }
             }
         except TimeoutError:
+            await session._emit_approval_cancelled_once(
+                [request_id],
+                reason="mcp_elicitation_timeout",
+                conversation_id=conversation_id,
+            )
             return {"action": "cancel", "error": "User response timed out"}
         except PermissionError as exc:
+            await session._emit_approval_cancelled_once(
+                [request_id],
+                reason="mcp_elicitation_owner_cancelled",
+                conversation_id=conversation_id,
+            )
             return {"action": "cancel", "error": str(exc)}
         except asyncio.CancelledError:
+            await session._emit_approval_cancelled_once(
+                [request_id],
+                reason="mcp_elicitation_cancelled",
+                conversation_id=conversation_id,
+            )
             return {"action": "cancel", "error": "Interaction cancelled"}
+        except Exception as exc:
+            await session._emit_approval_cancelled_once(
+                [request_id],
+                reason="mcp_elicitation_failed",
+                conversation_id=conversation_id,
+            )
+            return {"action": "cancel", "error": str(exc) or "MCP elicitation failed"}
         finally:
             session._pending_approvals.pop(request_id, None)
             session._pending_approval_payloads.pop(request_id, None)

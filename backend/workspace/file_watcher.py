@@ -1,8 +1,8 @@
 """
 文件系统监控服务（基于 watchdog）。
 
-参考 Claude Code 的 fileChangedWatcher.ts 实现：
-- 使用 chokidar 风格的配置（稳定期 500ms）
+文件变更监控采用 watchdog；防抖和忽略规则按本项目的工作区语义实现：
+- 稳定期 500ms 防抖
 - 支持忽略模式（.git, node_modules 等）
 - 防抖处理避免重复触发
 - 异步事件通知

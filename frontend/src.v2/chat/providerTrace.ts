@@ -11,6 +11,9 @@ import { promptCacheHitRate } from "./cacheUsage";
 
 export interface ProviderUsageSummary {
   input: number;
+  ordinaryInput?: number;
+  inputIncludesCacheRead?: boolean;
+  inputIncludesCacheWrite?: boolean;
   output: number;
   cacheRead: number;
   cacheWrite: number;
@@ -28,21 +31,25 @@ export interface ProviderTraceExportPackage {
   model: string;
   finish_reason: string;
   event_type: string;
+  request_id?: string;
   usage: ProviderUsageSummary;
   cache_hit_rate: number | null;
-  continuation_summary: string;
   output_sequence: string;
   output_phase_counts: string;
   response_lifecycle: string;
   provider_timeline_sequence: string;
   provider_timeline_event_counts: string;
   request_summary: ProviderRawMetadata["request_summary"];
-  stateful_continuation?: ProviderRawMetadata["stateful_continuation"];
   loop_metrics?: ProviderRawMetadata["loop_metrics"];
   output_items: ProviderRawMetadata["output_items"];
   provider_timeline: ProviderRawMetadata["provider_timeline"];
   safety: ProviderRawMetadata["safety"];
   prompt_cache_diagnostic?: ProviderRawMetadata["prompt_cache_diagnostic"];
+  raw_usage?: ProviderRawMetadata["raw_usage"];
+  citations?: ProviderRawMetadata["citations"];
+  search_sources?: ProviderRawMetadata["search_sources"];
+  container?: ProviderRawMetadata["container"];
+  refusal?: ProviderRawMetadata["refusal"];
   diagnostics: string[];
   request_diff_summary?: string[];
 }
@@ -58,7 +65,6 @@ export interface ProviderSafeRequestPackage {
     redacted: true;
     instructions_len?: number;
     instructions_sent_len?: number;
-    instructions_omitted_by_continuation?: boolean;
     instructions_hash?: string;
     instructions_full_hash?: string;
   };
@@ -79,7 +85,6 @@ export interface ProviderSafeRequestPackage {
     redacted: true;
     input_items_len?: number;
     input_items_sent_len?: number;
-    input_items_omitted_by_continuation?: number;
     input_items_logical_len?: number;
     input_chars?: number;
     input_item_counts?: Record<string, number>;
@@ -93,8 +98,6 @@ export interface ProviderSafeRequestPackage {
         ? Duplicates
         : unknown
       : unknown;
-    previous_response_id_present?: boolean;
-    previous_response_id_hash?: string;
   };
   metadata: {
     redacted: true;
@@ -154,7 +157,7 @@ const stringList = (value: unknown): string[] =>
     : [];
 
 const SENSITIVE_EXPORT_KEY_RE = /^(?:authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|secret|password|cookie|set-cookie)$/i;
-const PROMPT_CONTENT_EXPORT_KEY_RE = /^(?:instructions|system|system_prompt|developer_prompt|prompt|encrypted_content|content|text|arguments)$/i;
+const PROMPT_CONTENT_EXPORT_KEY_RE = /^(?:instructions|system|system_prompt|developer_prompt|prompt|encrypted_content|encrypted[_-]?index|content|text|cited[_-]?text|arguments|explanation)$/i;
 
 const shouldOmitExportKey = (key: string): boolean =>
   SENSITIVE_EXPORT_KEY_RE.test(key) || PROMPT_CONTENT_EXPORT_KEY_RE.test(key);
@@ -187,6 +190,13 @@ export const providerUsageSummary = (raw?: ProviderRawMetadata | null): Provider
       : undefined;
   const result: ProviderUsageSummary = {
     input: numberField(usage.input_tokens ?? usage.prompt_tokens ?? deepSeekPromptTotal ?? usage.input),
+    ordinaryInput: optionalNumberField(usage.ordinary_input_tokens ?? usage.ordinaryInput),
+    inputIncludesCacheRead: typeof usage.input_includes_cache_read === "boolean"
+      ? usage.input_includes_cache_read
+      : undefined,
+    inputIncludesCacheWrite: typeof usage.input_includes_cache_write === "boolean"
+      ? usage.input_includes_cache_write
+      : undefined,
     output: numberField(usage.output_tokens ?? usage.completion_tokens ?? usage.output),
     cacheRead: numberField(
       usage.cache_read_input_tokens
@@ -204,6 +214,76 @@ export const providerUsageSummary = (raw?: ProviderRawMetadata | null): Provider
   const cacheDeleted = numberField(usage.cache_deleted_input_tokens ?? usage.cacheDeleted);
   if (cacheDeleted > 0) result.cacheDeleted = cacheDeleted;
   return result;
+};
+
+export interface ProviderNativeUsageDetails {
+  cache5m: number;
+  cache1h: number;
+  webSearchRequests: number;
+  webFetchRequests: number;
+  serviceTier: string;
+  inferenceGeo: string;
+}
+
+export const providerNativeUsageDetails = (
+  raw?: ProviderRawMetadata | null,
+): ProviderNativeUsageDetails => {
+  const usage = recordField(raw?.raw_usage ?? raw?.usage);
+  const cacheCreation = recordField(usage.cache_creation);
+  const serverTools = recordField(usage.server_tool_use);
+  return {
+    cache5m: numberField(cacheCreation.ephemeral_5m_input_tokens),
+    cache1h: numberField(cacheCreation.ephemeral_1h_input_tokens),
+    webSearchRequests: numberField(serverTools.web_search_requests),
+    webFetchRequests: numberField(serverTools.web_fetch_requests),
+    serviceTier: String(usage.service_tier || "").trim(),
+    inferenceGeo: String(usage.inference_geo || "").trim(),
+  };
+};
+
+export const providerSearchSourcesSummary = (
+  raw?: ProviderRawMetadata | null,
+): string => {
+  const sources = Array.isArray(raw?.search_sources) ? raw.search_sources : [];
+  const urls = new Set(
+    sources.map((source) => String(source?.url || "").trim()).filter(Boolean),
+  );
+  return sources.length > 0
+    ? `${sources.length} source${sources.length === 1 ? "" : "s"}${urls.size !== sources.length ? ` · ${urls.size} link${urls.size === 1 ? "" : "s"}` : ""}`
+    : "none";
+};
+
+export const hasProviderContainerMetadata = (
+  container?: ProviderRawMetadata["container"] | null,
+): boolean => Boolean(
+  String(container?.id || "").trim()
+  || String(container?.expires_at || "").trim(),
+);
+
+export const hasProviderRefusalMetadata = (
+  refusal?: ProviderRawMetadata["refusal"] | null,
+): boolean => Boolean(
+  String(refusal?.type || "").trim()
+  || String(refusal?.category || "").trim()
+  || refusal?.explanation_available === true,
+);
+
+export const providerContainerSummary = (
+  raw?: ProviderRawMetadata | null,
+): string => {
+  if (!hasProviderContainerMetadata(raw?.container)) return "none";
+  const id = String(raw?.container?.id || "").trim();
+  const expiresAt = String(raw?.container?.expires_at || "").trim();
+  return [id || "unknown id", expiresAt ? `expires ${expiresAt}` : "expiry n/a"].join(" · ");
+};
+
+export const providerRefusalSummary = (
+  raw?: ProviderRawMetadata | null,
+): string => {
+  const refusal = raw?.refusal;
+  if (!hasProviderRefusalMetadata(refusal)) return "none";
+  const category = String(refusal?.category || "").trim();
+  return category ? `declined · ${category}` : "declined";
 };
 
 export const providerCacheHitRate = (usage: ProviderUsageSummary): number | null => {
@@ -225,78 +305,25 @@ export const providerCacheDiagnosis = (raw?: ProviderRawMetadata | null): string
   return `${cacheState} · ${hitState} · ${stability}`;
 };
 
-export const providerContinuationLabel = (raw?: ProviderRawMetadata | null): string => {
-  const summary = raw?.request_summary ?? {};
-  return summary.previous_response_id_present
-    ? `stateful continuation ${summary.previous_response_id_hash || "present"}`
-    : "full request / no previous response";
-};
-
-export const providerContinuationDetail = (raw?: ProviderRawMetadata | null): string => {
-  const summary = raw?.request_summary ?? {};
-  if (!summary.previous_response_id_present) return "No stateful continuation";
-  const hash = summary.previous_response_id_hash || "present";
-  const counts = summary.input_item_counts ?? {};
-  const inputLen = numberField(summary.input_items_len);
-  const toolOutputs = numberField(counts.function_call_output);
-  const nonToolInput = Object.entries(counts)
-    .filter(([key, value]) => key !== "function_call_output" && numberField(value) > 0)
-    .map(([key, value]) => `${key} ${numberField(value)}`)
-    .join(", ");
-  if (inputLen <= 0) return `Continuation ${hash} with empty captured input`;
-  if (toolOutputs > 0 && !nonToolInput) return `Continuation ${hash} with tool outputs only (${toolOutputs})`;
-  return `Continuation ${hash} with ${inputLen} captured input items${nonToolInput ? ` (${nonToolInput})` : ""}`;
-};
-
 export const providerInstructionsTransportSummary = (raw?: ProviderRawMetadata | null): string => {
   const summary = raw?.request_summary ?? {};
   const total = numberField(summary.instructions_len);
   const sent = numberField(summary.instructions_sent_len);
   if (total <= 0) return "no instructions";
-  if (summary.instructions_omitted_by_continuation === true) {
-    return `sent 0/${total} chars via previous_response_id`;
-  }
   if (sent > 0 && sent !== total) return `sent ${sent}/${total} chars`;
   if (sent > 0) return `sent ${sent} chars`;
   return `tracked ${total} chars`;
-};
-
-export const providerStatefulContinuationSummary = (raw?: ProviderRawMetadata | null): string => {
-  const stateful = raw?.stateful_continuation;
-  if (!stateful?.configured) return "stateful not configured";
-  if (stateful.enabled === false) {
-    return stateful.disabled_reason
-      ? `stateful disabled (${stateful.disabled_reason})`
-      : "stateful disabled";
-  }
-  if (stateful.reset_reason) return `stateful reset (${stateful.reset_reason})`;
-  if (stateful.used) {
-    const omitted = numberField(stateful.input_items_omitted);
-    return omitted > 0 ? `stateful used, omitted ${omitted} input items` : "stateful used";
-  }
-  if (stateful.stored_response_id_hash) {
-    const covered = numberField(stateful.covered_items);
-    return covered > 0 ? `stateful stored, covered ${covered} items` : "stateful stored";
-  }
-  return stateful.enabled ? "stateful ready" : "stateful pending";
 };
 
 export const providerRequestModeSummary = (raw?: ProviderRawMetadata | null): string => {
   const summary = raw?.request_summary ?? {};
   const params = recordField(summary.request_params);
   const wire = String(summary.wire_api || raw?.provider || "unknown").trim() || "unknown";
-  const stateful = raw?.stateful_continuation?.configured
-    ? providerStatefulContinuationSummary(raw)
-    : summary.previous_response_id_present
-    ? "stateful used"
-    : params.store === true
-      ? "stateful ready"
-      : "stateful off";
   const retention = typeof params.prompt_cache_retention === "string" && params.prompt_cache_retention.trim()
     ? `retention ${params.prompt_cache_retention.trim()}`
     : "retention off";
   const store = "store" in params ? `store ${String(params.store)}` : "store n/a";
-  return `${wire} · ${stateful} · ${retention} · ${store}`;
+  return `${wire} · ${retention} · ${store}`;
 };
 
 export const providerTraceDiagnostics = (raw?: ProviderRawMetadata | null): string[] => {
@@ -329,14 +356,9 @@ export const providerTraceDiagnostics = (raw?: ProviderRawMetadata | null): stri
     /incomplete|failed|error|cancel|abort|interrupt/i.test(String(item.status ?? item.finish_reason ?? "")),
   );
   const maybeAborted = /cancel|abort|interrupt/i.test(`${raw.event_type ?? ""} ${raw.finish_reason ?? ""}`);
-  const continuationToolOnly =
-    summary.previous_response_id_present &&
-    numberField(summary.input_item_counts?.function_call_output) > 0 &&
-    Object.entries(summary.input_item_counts ?? {}).every(([key, value]) => key === "function_call_output" || numberField(value) <= 0);
   const model = String(raw.model || summary.model || "").toLowerCase();
   const wireApi = String(summary.wire_api || "").toLowerCase();
   const isGptLike = /(^|[/:-])gpt-|codex/.test(model);
-  const requestParams = recordField(summary.request_params);
   const toolNames = stringList(summary.tool_names);
 
   if (!outputItems.length) diagnostics.push("no output_items summary");
@@ -345,25 +367,14 @@ export const providerTraceDiagnostics = (raw?: ProviderRawMetadata | null): stri
   if (finalAnswerCount === 1) diagnostics.push("final_answer phase present");
   if (finalAnswerCount > 1) diagnostics.push(`multiple final_answer phases: ${finalAnswerCount}`);
   if (toolAfterFinal) diagnostics.push("tool call appears after final_answer phase");
-  if (continuationToolOnly) diagnostics.push("stateful continuation carries tool outputs only");
   if (isGptLike && wireApi === "chat") {
-    diagnostics.push("GPT-like model is using chat completions; switch this provider to Responses to enable previous_response_id continuation");
+    diagnostics.push("GPT-like model is using Chat Completions instead of the Responses wire API");
   }
   if (wireApi === "responses" && summary.prompt_cache_key_present === false) {
     diagnostics.push("Responses request missing prompt_cache_key; stable prompt cache routing is disabled");
   }
-  if (isGptLike && wireApi === "responses" && requestParams.store !== true && !summary.previous_response_id_present) {
-    diagnostics.push("Responses request not stored; previous_response_id continuation cannot be used on the next turn");
-  }
   if (toolNames.length === 1 && toolNames[0] === "minicode_app") {
     diagnostics.push("single minicode_app bridge tool detected; current backend tool/cache path may be bypassed");
-  }
-  if (raw.stateful_continuation?.configured && raw.stateful_continuation.enabled === false) {
-    diagnostics.push(
-      raw.stateful_continuation.disabled_reason
-        ? `stateful continuation disabled: ${raw.stateful_continuation.disabled_reason}`
-        : "stateful continuation disabled by provider request shape",
-    );
   }
   if (hasToolCall && raw.finish_reason && !/tool|stop|completed|end/i.test(raw.finish_reason)) {
     diagnostics.push(`tool call with unusual finish reason: ${raw.finish_reason}`);
@@ -741,7 +752,6 @@ export const providerRequestDiffSummary = (
   const delta = (before?: number, after?: number) => numberField(after) - numberField(before);
   const inputDelta = delta(previous.input_items_len, current?.input_items_len);
   const logicalInputDelta = delta(previous.input_items_logical_len ?? previous.input_items_len, current?.input_items_logical_len ?? current?.input_items_len);
-  const omittedByContinuation = numberField(current?.input_items_omitted_by_continuation);
   const inputDetail = providerInputDeltaSummary(previous.input_item_counts, current?.input_item_counts);
   const toolDetail = providerToolDeltaSummary(previous.tool_names, current?.tool_names);
   const toolSchemaDetail = providerToolSchemaDeltaSummary(previous.tool_schema_hashes, current?.tool_schema_hashes);
@@ -749,9 +759,7 @@ export const providerRequestDiffSummary = (
     ? `names ${toolDetail}; schema ${toolSchemaDetail}`
     : toolDetail || (toolSchemaDetail ? `schema ${toolSchemaDetail}` : "");
   const paramsDetail = providerParamsDeltaSummary(previous.request_params, current?.request_params);
-  const paramKeysDetail = providerParamKeyDeltaSummary(previous.request_param_keys, current?.request_param_keys, {
-    ignore: ["previous_response_id"],
-  });
+  const paramKeysDetail = providerParamKeyDeltaSummary(previous.request_param_keys, current?.request_param_keys);
   const combinedParamsDetail = paramsDetail && paramKeysDetail
     ? `${paramsDetail}; keys ${paramKeysDetail}`
     : paramsDetail || (paramKeysDetail ? `keys ${paramKeysDetail}` : "");
@@ -761,12 +769,6 @@ export const providerRequestDiffSummary = (
   const abortMarkerSummary = abortMarkerChanged
     ? current?.turn_aborted_marker_present ? "Abort marker appeared" : "Abort marker cleared"
     : current?.turn_aborted_marker_present ? "Abort marker present" : "";
-  const continuationChanged = changed(["previous_response_id_present", "previous_response_id_hash"]);
-  const continuationDetail = omittedByContinuation > 0
-    ? `Continuation used; omitted ${omittedByContinuation} input items`
-    : continuationChanged
-      ? "Continuation changed"
-      : "Continuation unchanged";
   const scaffoldChanged = changed([
     "instructions_hash",
     "tools_hash",
@@ -789,9 +791,7 @@ export const providerRequestDiffSummary = (
     toolsChanged ? `Tools changed${combinedToolDetail ? ` (${combinedToolDetail})` : ""}` : `Tools unchanged${typeof current?.tools_len === "number" ? ` (${current.tools_len} tools${typeof current.tools_chars === "number" ? `, ${current.tools_chars} chars` : ""})` : ""}`,
     paramsChanged ? `Params changed${combinedParamsDetail ? ` (${combinedParamsDetail})` : ""}` : "Params unchanged",
     changed(["prompt_cache_key_present", "prompt_cache_key_hash"]) ? "Cache routing changed" : "Cache routing unchanged",
-    continuationDetail,
     inputDelta === 0 && !inputDetail ? "Input item count unchanged" : `Input items ${inputDelta > 0 ? "+" : ""}${inputDelta}${inputDetail ? ` (${inputDetail})` : ""}`,
-    ...(omittedByContinuation > 0 ? [`Logical input items ${logicalInputDelta > 0 ? "+" : ""}${logicalInputDelta}`] : []),
     changed(["metadata_keys"]) ? "Metadata keys changed" : "Metadata keys unchanged",
     ...(abortMarkerSummary ? [abortMarkerSummary] : []),
     scaffoldSummary,
@@ -812,21 +812,29 @@ export const providerTraceExportPackage = (
     model: raw.model ?? raw.request_summary?.model ?? "",
     finish_reason: raw.finish_reason ?? "",
     event_type: raw.event_type ?? "",
+    request_id: raw.request_id,
     usage,
     cache_hit_rate: providerCacheHitRate(usage),
-    continuation_summary: providerContinuationDetail(raw),
     output_sequence: providerOutputSequence(raw.output_items),
     output_phase_counts: providerOutputPhaseCounts(raw.output_items),
     response_lifecycle: providerResponseLifecycle(raw.provider_timeline),
     provider_timeline_sequence: providerTimelineSequence(raw.provider_timeline),
     provider_timeline_event_counts: providerTimelineEventCounts(raw.provider_timeline),
     request_summary: sanitizeProviderTraceExportValue(raw.request_summary ?? {}) as ProviderRawMetadata["request_summary"],
-    stateful_continuation: sanitizeProviderTraceExportValue(raw.stateful_continuation ?? {}) as ProviderRawMetadata["stateful_continuation"],
     loop_metrics: sanitizeProviderTraceExportValue(raw.loop_metrics ?? {}) as ProviderRawMetadata["loop_metrics"],
     output_items: sanitizeProviderTraceExportValue(raw.output_items ?? []) as ProviderRawMetadata["output_items"],
     provider_timeline: sanitizeProviderTraceExportValue(raw.provider_timeline ?? []) as ProviderRawMetadata["provider_timeline"],
     safety: sanitizeProviderTraceExportValue(raw.safety ?? { redacted_prompt: true }) as ProviderRawMetadata["safety"],
     prompt_cache_diagnostic: sanitizeProviderTraceExportValue(raw.prompt_cache_diagnostic ?? {}) as ProviderRawMetadata["prompt_cache_diagnostic"],
+    raw_usage: sanitizeProviderTraceExportValue(raw.raw_usage ?? {}) as ProviderRawMetadata["raw_usage"],
+    citations: sanitizeProviderTraceExportValue(raw.citations ?? []) as ProviderRawMetadata["citations"],
+    search_sources: sanitizeProviderTraceExportValue(raw.search_sources ?? []) as ProviderRawMetadata["search_sources"],
+    ...(hasProviderContainerMetadata(raw.container) ? {
+      container: sanitizeProviderTraceExportValue(raw.container) as ProviderRawMetadata["container"],
+    } : {}),
+    ...(hasProviderRefusalMetadata(raw.refusal) ? {
+      refusal: sanitizeProviderTraceExportValue(raw.refusal) as ProviderRawMetadata["refusal"],
+    } : {}),
     diagnostics: providerTraceDiagnostics(raw),
     request_diff_summary: requestDiffSummary,
   };
@@ -858,7 +866,6 @@ export const providerSafeRequestPackage = (raw: ProviderRawMetadata): ProviderSa
       redacted: true,
       instructions_len: summary.instructions_len,
       instructions_sent_len: summary.instructions_sent_len,
-      instructions_omitted_by_continuation: summary.instructions_omitted_by_continuation,
       instructions_hash: summary.instructions_hash,
       instructions_full_hash: summary.instructions_full_hash,
     },
@@ -872,17 +879,14 @@ export const providerSafeRequestPackage = (raw: ProviderRawMetadata): ProviderSa
       largest_tools: summary.largest_tools,
     },
     input: {
-    redacted: true,
-    input_items_len: summary.input_items_len,
-    input_items_sent_len: summary.input_items_sent_len,
-    input_items_omitted_by_continuation: summary.input_items_omitted_by_continuation,
-    input_items_logical_len: summary.input_items_logical_len,
-    input_chars: summary.input_chars,
+      redacted: true,
+      input_items_len: summary.input_items_len,
+      input_items_sent_len: summary.input_items_sent_len,
+      input_items_logical_len: summary.input_items_logical_len,
+      input_chars: summary.input_chars,
       input_item_counts: summary.input_item_counts,
       largest_input_items: summary.largest_input_items,
       duplicate_input_content: summary.duplicate_input_content,
-      previous_response_id_present: summary.previous_response_id_present,
-      previous_response_id_hash: summary.previous_response_id_hash,
     },
     metadata: {
       redacted: true,
@@ -926,9 +930,20 @@ export const providerTraceExportJsonl = (raws: ProviderRawMetadata[]): string =>
 export const providerTracePayloadFromExport = (value: unknown): Record<string, unknown> | null => {
   if (!value || typeof value !== "object") return null;
   const item = value as Record<string, unknown>;
-  if (item.kind === "provider_trace") return item;
+  if (item.kind === "provider_trace") {
+    const sanitized = sanitizeProviderTraceExportValue(item);
+    return sanitized && typeof sanitized === "object" && !Array.isArray(sanitized)
+      ? sanitized as Record<string, unknown>
+      : null;
+  }
   if (item.kind !== "minicode_provider_trace_export") return null;
-  return {
+  const container = item.container && typeof item.container === "object"
+    ? sanitizeProviderTraceExportValue(item.container) as ProviderRawMetadata["container"]
+    : undefined;
+  const refusal = item.refusal && typeof item.refusal === "object"
+    ? sanitizeProviderTraceExportValue(item.refusal) as ProviderRawMetadata["refusal"]
+    : undefined;
+  const payload: Record<string, unknown> = {
     kind: "provider_trace",
     provider: typeof item.provider === "string" ? item.provider : "",
     model: typeof item.model === "string" ? item.model : "",
@@ -938,11 +953,19 @@ export const providerTracePayloadFromExport = (value: unknown): Record<string, u
     output_items: Array.isArray(item.output_items) ? item.output_items : [],
     provider_timeline: Array.isArray(item.provider_timeline) ? item.provider_timeline : [],
     request_summary: item.request_summary && typeof item.request_summary === "object" ? item.request_summary : {},
-    stateful_continuation: item.stateful_continuation && typeof item.stateful_continuation === "object" ? item.stateful_continuation : {},
     loop_metrics: item.loop_metrics && typeof item.loop_metrics === "object" ? item.loop_metrics : {},
     safety: item.safety && typeof item.safety === "object" ? item.safety : { redacted_prompt: true },
     prompt_cache_diagnostic: item.prompt_cache_diagnostic && typeof item.prompt_cache_diagnostic === "object" ? item.prompt_cache_diagnostic : {},
+    raw_usage: item.raw_usage && typeof item.raw_usage === "object" ? sanitizeProviderTraceExportValue(item.raw_usage) : {},
+    citations: Array.isArray(item.citations) ? sanitizeProviderTraceExportValue(item.citations) : [],
+    search_sources: Array.isArray(item.search_sources) ? sanitizeProviderTraceExportValue(item.search_sources) : [],
+    ...(hasProviderContainerMetadata(container) ? { container } : {}),
+    ...(hasProviderRefusalMetadata(refusal) ? { refusal } : {}),
   };
+  const sanitized = sanitizeProviderTraceExportValue(payload);
+  return sanitized && typeof sanitized === "object" && !Array.isArray(sanitized)
+    ? sanitized as Record<string, unknown>
+    : null;
 };
 
 export const providerTracePayloadFromDone = (
@@ -953,6 +976,9 @@ export const providerTracePayloadFromDone = (
   const usage = fallbackUsage
     ? {
         input_tokens: fallbackUsage.input,
+        ordinary_input_tokens: fallbackUsage.ordinaryInput,
+        input_includes_cache_read: fallbackUsage.inputIncludesCacheRead,
+        input_includes_cache_write: fallbackUsage.inputIncludesCacheWrite,
         output_tokens: fallbackUsage.output,
         cache_read_input_tokens: fallbackUsage.cacheRead,
         cache_creation_input_tokens: fallbackUsage.cacheWrite,
@@ -968,15 +994,30 @@ export const providerTracePayloadFromDone = (
     model: raw.model ?? raw.request_summary?.model ?? "",
     finish_reason: raw.finish_reason ?? "",
     event_type: raw.event_type ?? "",
+    request_id: raw.request_id,
     usage,
+    raw_usage: sanitizeProviderTraceExportValue(raw.raw_usage ?? raw.usage ?? {}),
+    citations: sanitizeProviderTraceExportValue(raw.citations ?? []),
+    search_sources: sanitizeProviderTraceExportValue(raw.search_sources ?? []),
+    ...(hasProviderContainerMetadata(raw.container) ? {
+      container: sanitizeProviderTraceExportValue(raw.container),
+    } : {}),
+    ...(hasProviderRefusalMetadata(raw.refusal) ? {
+      refusal: sanitizeProviderTraceExportValue(raw.refusal),
+    } : {}),
     output_items: raw.output_items ?? [],
     provider_timeline: raw.provider_timeline ?? [],
     request_summary: raw.request_summary ?? {},
-    stateful_continuation: raw.stateful_continuation ?? {},
     loop_metrics: raw.loop_metrics ?? {},
     safety: raw.safety ?? { redacted_prompt: true },
     prompt_cache_diagnostic: raw.prompt_cache_diagnostic ?? {},
     trace_id: raw.trace_id,
+    iteration_id: raw.iteration_id,
+    call_index: raw.call_index,
+    diagnostics_deferred: raw.diagnostics_deferred,
+    diagnostics_ref: raw.diagnostics_ref,
+    diagnostics_bytes: raw.diagnostics_bytes,
+    diagnostics_loaded: raw.diagnostics_loaded,
   };
 };
 
@@ -995,14 +1036,11 @@ export const providerRequestDiff = (
     "tool_schema_hashes",
     "prompt_cache_key_present",
     "prompt_cache_key_hash",
-    "previous_response_id_present",
-    "previous_response_id_hash",
     "request_params",
     "request_param_keys",
     "turn_aborted_marker_present",
     "input_items_len",
     "input_items_sent_len",
-    "input_items_omitted_by_continuation",
     "input_items_logical_len",
     "input_chars",
     "input_item_counts",

@@ -3,13 +3,11 @@ import {
   FileImage,
   FileText,
   ListChecks,
-  MonitorPlay,
   PanelRightOpen,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AgentAvatar } from "../components/AgentAvatar";
 import { BrandIcon } from "../components/BrandIcon";
-import { ImageLightbox } from "../components/ImageLightbox";
 import {
   embeddedBrowserActivate,
   embeddedBrowserList,
@@ -18,17 +16,19 @@ import {
   type EmbeddedBrowserState,
 } from "../desktop/runtime";
 import { projectAgentViews } from "../lib/agent-view-model";
-import { getWebSocket } from "../hooks/useWebSocket";
-import { previewUrlForPath } from "../shell/fileTreeHelpers";
 import { useAppStore } from "../stores";
 import type { ChatMessage, RightStackTab } from "../stores/types";
+import { artifactRawResourceUrlWithToken } from "../protocol/api";
+import { getWebSocket } from "../hooks/useWebSocket";
+import { openAttachmentPreview, openWorkspaceFilePreview } from "./openAttachmentPreview";
 import { openWebTarget } from "./openWebTarget";
 import "./ChatContextCard.css";
 
 interface ContextSource {
   id: string;
   label: string;
-  url: string;
+  url?: string;
+  detail: string;
   messageId: string;
 }
 
@@ -41,6 +41,8 @@ interface ContextAttachment {
   docId?: string;
   path?: string;
   mediaType?: string;
+  previewUrl?: string;
+  generated?: boolean;
   relatedCount: number;
 }
 
@@ -72,12 +74,14 @@ const collectSources = (messages: ChatMessage[]): ContextSource[] => {
 
   for (const message of messages) {
     for (const citation of message.citations ?? []) {
-      const url = citation.url || citation.source;
-      if (!url) continue;
+      const source = String(citation.url || citation.source || "").trim();
+      if (!source) continue;
+      const url = /^https?:\/\//i.test(source) ? source : undefined;
       push({
-        id: `citation:${url}`,
-        label: citation.title || citation.label || sourceLabel(url),
-        url,
+        id: `citation:${source}`,
+        label: citation.title || citation.label || (url ? sourceLabel(url) : "Provider location"),
+        ...(url ? { url } : {}),
+        detail: citation.label || (url ? sourceLabel(url) : source),
         messageId: message.id,
       });
     }
@@ -86,7 +90,10 @@ const collectSources = (messages: ChatMessage[]): ContextSource[] => {
   return items.slice(-6).reverse();
 };
 
-const collectAttachments = (messages: ChatMessage[]): ContextAttachment[] => {
+const collectAttachments = (
+  messages: ChatMessage[],
+  generatedImageOwner?: { sessionId: string; conversationId: string },
+): ContextAttachment[] => {
   const items: Omit<ContextAttachment, "relatedCount">[] = [];
   const seen = new Set<string>();
   for (const message of messages) {
@@ -117,6 +124,28 @@ const collectAttachments = (messages: ChatMessage[]): ContextAttachment[] => {
         mediaType: attachment.isImage ? "image/*" : undefined,
       });
     }
+    for (const artifact of message.artifacts ?? []) {
+      const id = artifact.artifactId || `${message.id}:artifact:${items.length}`;
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      items.push({
+        id,
+        label: artifact.summary || (artifact.kind === "image" ? "生成图片" : "生成文件"),
+        kind: artifact.kind === "image" ? "image" : "file",
+        messageId: message.id,
+        artifactId: artifact.artifactId,
+        mediaType: artifact.mediaType,
+        previewUrl: inlineImagePreviewUrl(artifact.url)
+          || (artifact.kind === "image" && generatedImageOwner
+            ? artifactRawResourceUrlWithToken(
+                artifact.artifactId,
+                generatedImageOwner.sessionId,
+                generatedImageOwner.conversationId,
+              )
+            : ""),
+        generated: true,
+      });
+    }
   }
   const groupCounts = new Map<string, number>();
   for (const item of items) groupCounts.set(item.messageId, (groupCounts.get(item.messageId) ?? 0) + 1);
@@ -126,26 +155,37 @@ const collectAttachments = (messages: ChatMessage[]): ContextAttachment[] => {
   }));
 };
 
+const inlineImagePreviewUrl = (value?: string): string => {
+  const url = String(value || "").trim();
+  if (!url || url.length > 16 * 1024 * 1024) return "";
+  return /^data:image\/(?:png|jpeg|jpg|gif|webp);base64,[A-Za-z0-9+/=\s]+$/i.test(url) ? url : "";
+};
+
 export const ChatContextCard = () => {
   const messages = useAppStore((state) => state.messages);
   const subagents = useAppStore((state) => state.subagents);
   const backgroundTasks = useAppStore((state) => state.backgroundTasks);
   const conversationId = useAppStore((state) => state.conversationId);
+  const isConnected = useAppStore((state) => state.isConnected);
   const rightPanelOpen = useAppStore((state) => state.rightPanelOpen);
   const setRightStackTab = useAppStore((state) => state.setRightStackTab);
   const setFocusedSubagentId = useAppStore((state) => state.setFocusedSubagentId);
   const [browserTargets, setBrowserTargets] = useState<EmbeddedBrowserState[]>([]);
-  const [attachmentPreview, setAttachmentPreview] = useState<{ src: string; name: string } | null>(null);
-  const [pendingAttachmentId, setPendingAttachmentId] = useState<string | null>(null);
-  const [failedAttachmentId, setFailedAttachmentId] = useState<string | null>(null);
-  const pendingAttachmentIdRef = useRef<string | null>(null);
+  const [collapsed, setCollapsed] = useState(false);
   const [cardPresence, setCardPresence] = useState<"visible" | "exiting" | "preparing" | "hidden">(
     rightPanelOpen ? "hidden" : "visible",
   );
   const previousRightPanelOpenRef = useRef(rightPanelOpen);
   const agentViews = useMemo(() => projectAgentViews(subagents), [subagents]);
   const sources = useMemo(() => collectSources(messages), [messages]);
-  const attachments = useMemo(() => collectAttachments(messages), [messages]);
+  const sessionId = isConnected ? String(getWebSocket()?.sessionId || "").trim() : "";
+  const attachments = useMemo(
+    () => collectAttachments(
+      messages,
+      sessionId && conversationId ? { sessionId, conversationId } : undefined,
+    ),
+    [conversationId, messages, sessionId],
+  );
 
   useEffect(() => {
     const wasOpen = previousRightPanelOpenRef.current;
@@ -173,7 +213,8 @@ export const ChatContextCard = () => {
     if (!isDesktop()) return;
     let cancelled = false;
     const refresh = () => {
-      void Promise.resolve(embeddedBrowserList()).then((targets) => {
+      if (!conversationId) return;
+      void Promise.resolve(embeddedBrowserList(conversationId)).then((targets) => {
         if (!cancelled && Array.isArray(targets)) {
           setBrowserTargets(targets.filter((target) => target.url && target.url !== "about:blank"));
         }
@@ -181,6 +222,7 @@ export const ChatContextCard = () => {
     };
     refresh();
     const unsubscribe = onEmbeddedBrowserEvent((event) => {
+      if (event.conversationId !== conversationId) return;
       if (!event.url || event.url === "about:blank" || event.type === "new-tab-request") return;
       setBrowserTargets((current) => {
         const nextTarget = { ...event, active: true };
@@ -194,60 +236,37 @@ export const ChatContextCard = () => {
       cancelled = true;
       unsubscribe?.();
     };
-  }, []);
+  }, [conversationId]);
 
   useEffect(() => {
     if (!rightPanelOpen && isDesktop()) {
-      void Promise.resolve(embeddedBrowserList()).then((targets) => {
+      if (!conversationId) return;
+      void Promise.resolve(embeddedBrowserList(conversationId)).then((targets) => {
         if (Array.isArray(targets)) {
           setBrowserTargets(targets.filter((target) => target.url && target.url !== "about:blank"));
         }
       });
     }
-  }, [rightPanelOpen]);
-
-  useEffect(() => {
-    const onArtifactImagePreview = (event: Event) => {
-      const detail = (event as CustomEvent<{ artifactId?: string; url?: string }>).detail;
-      const artifactId = pendingAttachmentIdRef.current;
-      if (!artifactId || detail?.artifactId !== artifactId || !detail.url) return;
-      const attachment = attachments.find((item) => item.artifactId === artifactId);
-      setAttachmentPreview({ src: detail.url, name: attachment?.label || "image" });
-      pendingAttachmentIdRef.current = null;
-      setPendingAttachmentId(null);
-      setFailedAttachmentId(null);
-    };
-    window.addEventListener("artifact:image-preview", onArtifactImagePreview);
-    return () => window.removeEventListener("artifact:image-preview", onArtifactImagePreview);
-  }, [attachments]);
-
-  useEffect(() => {
-    if (!pendingAttachmentId) return;
-    const artifactId = pendingAttachmentId;
-    const timeout = window.setTimeout(() => {
-      if (pendingAttachmentIdRef.current !== artifactId) return;
-      pendingAttachmentIdRef.current = null;
-      setPendingAttachmentId(null);
-      setFailedAttachmentId(artifactId);
-    }, 10_000);
-    return () => window.clearTimeout(timeout);
-  }, [pendingAttachmentId]);
+  }, [conversationId, rightPanelOpen]);
 
   const activeAgents = agentViews.filter((agent) => agent.status !== "completed");
   const completedAgents = agentViews.filter((agent) => agent.status === "completed");
   const scopedBackgroundTasks = backgroundTasks.filter((task) =>
     Boolean(conversationId) && task.conversationId === conversationId
   );
+  const stalledBackgroundTasks = scopedBackgroundTasks.filter((task) => task.status === "stalled").length;
   const runningBackgroundTasks = scopedBackgroundTasks.filter((task) => task.status === "running").length;
   const failedBackgroundTasks = scopedBackgroundTasks.filter((task) => task.status === "failed").length;
   const cancelledBackgroundTasks = scopedBackgroundTasks.filter((task) => task.status === "cancelled").length;
-  const backgroundTaskSummary = runningBackgroundTasks > 0
-    ? `${runningBackgroundTasks} 个运行中`
-    : failedBackgroundTasks > 0
-      ? `${failedBackgroundTasks} 个失败`
-      : cancelledBackgroundTasks > 0
-        ? "已取消"
-        : "已完成";
+  const backgroundTaskSummary = stalledBackgroundTasks > 0
+    ? `${stalledBackgroundTasks} 个等待输入`
+    : runningBackgroundTasks > 0
+      ? `${runningBackgroundTasks} 个运行中`
+      : failedBackgroundTasks > 0
+        ? `${failedBackgroundTasks} 个失败`
+        : cancelledBackgroundTasks > 0
+          ? "已取消"
+          : "已完成";
   const hasBackgroundTasks = scopedBackgroundTasks.length > 0;
   const contextCount = attachments.length + sources.length + browserTargets.length + agentViews.length + (hasBackgroundTasks ? 1 : 0);
 
@@ -257,73 +276,78 @@ export const ChatContextCard = () => {
     setRightStackTab("subagents");
   };
   const openBrowserTarget = (target?: EmbeddedBrowserState) => {
-    if (target?.id) void embeddedBrowserActivate(target.id);
+    if (target?.id && conversationId) void embeddedBrowserActivate(conversationId, target.id);
     setRightStackTab("browser");
   };
   const openAttachment = (attachment: ContextAttachment) => {
     const store = useAppStore.getState();
-    const isImage = attachment.kind === "image" || attachment.mediaType?.startsWith("image/");
-    if (isImage && attachment.path) {
-      setAttachmentPreview({
-        src: previewUrlForPath(attachment.path, store.workingDirectory || ""),
-        name: attachment.label,
-      });
-      return;
-    }
-    if (isImage && attachment.artifactId) {
-      setFailedAttachmentId(null);
-      pendingAttachmentIdRef.current = attachment.artifactId;
-      setPendingAttachmentId(attachment.artifactId);
-      getWebSocket()?.send({
-        type: "read_artifact",
-        artifact_id: attachment.artifactId,
-        purpose: "image_preview",
-      });
-      return;
+    if (attachment.generated && attachment.artifactId) {
+      const target = Array.from(document.querySelectorAll<HTMLElement>("[data-artifact-id]"))
+        .find((element) => element.dataset.artifactId === attachment.artifactId);
+      if (target) {
+        target.scrollIntoView?.({ behavior: "smooth", block: "center" });
+        target.classList.add("assistant-cell-artifact-context-target");
+        window.setTimeout(() => target.classList.remove("assistant-cell-artifact-context-target"), 1200);
+        return;
+      }
     }
     if (attachment.path) {
-      store.openEditorFile(attachment.path, attachment.label);
+      openWorkspaceFilePreview({
+        path: attachment.path,
+        name: attachment.label,
+        mediaType: attachment.mediaType,
+        kind: attachment.kind,
+        workspaceRoot: store.workingDirectory || "",
+        conversationId: store.conversationId || undefined,
+      });
       return;
     }
     if (attachment.artifactId) {
-      store.addPanel({
-        id: `artifact-${attachment.artifactId}`,
-        kind: "preview",
-        label: attachment.label.slice(0, 24) || "Attachment",
+      openAttachmentPreview({
+        artifactId: attachment.artifactId,
+        name: attachment.label,
+        mediaType: attachment.mediaType,
+        kind: attachment.kind,
+        conversationId: store.conversationId || undefined,
       });
-      store.setRightStackTab("preview");
-      getWebSocket()?.send({ type: "read_artifact", artifact_id: attachment.artifactId, purpose: "attachment" });
       return;
     }
     store.setRightStackTab("artifacts");
   };
   const openBackgroundTasks = () => useAppStore.getState().setRightStackTab("tasks");
 
-  // Empty context is already reachable from the header/sidebar controls.  A
-  // permanently visible zero-state card steals reading width without helping
-  // the user, so only surface this contextual rail when it has real content.
-  if (cardPresence === "hidden" || contextCount === 0) return null;
+  if (contextCount === 0 || cardPresence === "hidden") return null;
 
   return (
-    <aside className="mc-chat-context-card" data-state={cardPresence} aria-label="工作区上下文摘要">
+    <aside
+      className="mc-chat-context-card"
+      data-state={cardPresence}
+      data-collapsed={collapsed ? "true" : "false"}
+      aria-label="工作区上下文摘要"
+    >
       <button
         type="button"
         className="mc-chat-context-card-compact"
-        aria-label="打开上下文详情"
-        title="打开上下文详情"
-        onClick={() => openPanel("tasks")}
+        aria-label={collapsed ? "展开上下文卡片" : "打开上下文详情"}
+        title={collapsed ? "展开上下文卡片" : "打开上下文详情"}
+        onClick={() => collapsed ? setCollapsed(false) : openPanel("tasks")}
       >
         <PanelRightOpen size={18} strokeWidth={1.8} />
       </button>
 
-      <header className="mc-chat-context-card-header">
+      <header className="mc-chat-context-card-header" hidden={collapsed}>
         <span>上下文 <small>{contextCount}</small></span>
-        <button type="button" aria-label="打开上下文详情" title="打开上下文详情" onClick={() => openPanel("tasks")}>
-          <PanelRightOpen size={17} strokeWidth={1.8} />
-        </button>
+        <span className="mc-chat-context-card-header-actions">
+          <button type="button" aria-label="打开上下文详情" title="打开上下文详情" onClick={() => openPanel("tasks")}>
+            <PanelRightOpen size={16} strokeWidth={1.8} />
+          </button>
+          <button type="button" aria-label="收起上下文卡片" title="收起上下文卡片" onClick={() => setCollapsed(true)}>
+            <ChevronRight size={16} strokeWidth={1.8} />
+          </button>
+        </span>
       </header>
 
-      <div className="mc-chat-context-card-body">
+      <div className="mc-chat-context-card-body" hidden={collapsed}>
         {agentViews.length > 0 && <section className="mc-chat-context-card-section" aria-label="子智能体摘要">
           <button type="button" className="mc-chat-context-section-title" onClick={() => openAgent()}>
             <span>子智能体</span>
@@ -365,17 +389,17 @@ export const ChatContextCard = () => {
                   title={attachment.label}
                   onClick={() => openAttachment(attachment)}
                 >
-                  <span><Icon size={15} /></span>
+                  <span>
+                    {attachment.kind === "image" && attachment.previewUrl
+                      ? <img src={attachment.previewUrl} alt="" />
+                      : <Icon size={15} />}
+                  </span>
                   <span className="mc-chat-context-source-content">
                     <span>{attachment.label}</span>
                     <small>
-                      {pendingAttachmentId === attachment.artifactId
-                        ? "加载中"
-                        : failedAttachmentId === attachment.artifactId
-                          ? "加载失败，点击重试"
-                          : attachment.relatedCount > 1
-                            ? `同组 ${attachment.relatedCount} 项`
-                            : "来自当前对话"}
+                      {attachment.relatedCount > 1
+                        ? `同组 ${attachment.relatedCount} 项`
+                        : "来自当前对话"}
                     </small>
                   </span>
                 </button>
@@ -394,14 +418,14 @@ export const ChatContextCard = () => {
             <span>来源</span>
             <small>{sources.length}</small>
           </button>
-          {sources.slice(0, 3).map((source) => (
+          {sources.slice(0, 3).map((source) => source.url ? (
             <button
               key={source.id}
               type="button"
               className="mc-chat-context-source"
               aria-label={`打开来源：${source.label}`}
               title={source.url}
-              onClick={() => openWebTarget(source.url)}
+              onClick={() => openWebTarget(source.url!)}
             >
               <span>
                 <BrandIcon
@@ -413,9 +437,22 @@ export const ChatContextCard = () => {
               </span>
               <span className="mc-chat-context-source-content">
                 <span>{source.label}</span>
-                <small>{sourceLabel(source.url)}</small>
+                <small>{source.detail}</small>
               </span>
             </button>
+          ) : (
+            <div
+              key={source.id}
+              className="mc-chat-context-source"
+              role="note"
+              title={source.detail}
+            >
+              <span><FileText size={15} aria-hidden="true" /></span>
+              <span className="mc-chat-context-source-content">
+                <span>{source.label}</span>
+                <small>{source.detail}</small>
+              </span>
+            </div>
           ))}
           {sources.length > 3 && (
             <button type="button" className="mc-chat-context-more" onClick={() => openPanel("tasks")}>
@@ -466,20 +503,12 @@ export const ChatContextCard = () => {
               <span>后台任务</span>
               <small>{backgroundTaskSummary}</small>
             </button>
-            <button type="button" className="mc-chat-context-empty-row" onClick={openBackgroundTasks}>
+            <button type="button" className="mc-chat-context-task-row" onClick={openBackgroundTasks}>
               <ListChecks size={16} /> 查看后台任务
             </button>
           </section>
         )}
       </div>
-      {attachmentPreview ? (
-        <ImageLightbox
-          src={attachmentPreview.src}
-          alt={attachmentPreview.name}
-          title={attachmentPreview.name}
-          onClose={() => setAttachmentPreview(null)}
-        />
-      ) : null}
     </aside>
   );
 };

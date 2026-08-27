@@ -1,0 +1,97 @@
+"""MiniCode executable extension runtime.
+
+The package is intentionally independent from plugin settings and session
+storage.  Hosts opt in by loading a result and binding the runner to their
+tool/command/provider registries.
+"""
+
+from .loader import (
+    ExtensionLoader,
+    ExtensionModuleCache,
+    clear_extension_cache,
+    discover_and_load_extensions,
+    discover_extensions_in_dir,
+    extension_cache_generation,
+    load_extension_from_factory,
+    load_extensions,
+    load_extensions_cached,
+    resolve_extension_entries,
+)
+from .runtime import (
+    DEFAULT_STALE_MESSAGE,
+    ExtensionAPI,
+    ExtensionCommandContext,
+    ExtensionContext,
+    ExtensionEventBus,
+    ExtensionRunner,
+    ExtensionRuntime,
+    ExtensionToolAdapter,
+)
+from .lifecycle_observer import ExtensionLifecycleObserver
+from .trust import ExtensionTrustPolicy, TrustDecision
+from .types import (
+    Extension,
+    ExtensionCommand,
+    ExtensionError,
+    ExtensionExecutionMode,
+    ExtensionFactory,
+    ExtensionFlag,
+    ExtensionMode,
+    ExtensionProvider,
+    ExtensionRegistrationError,
+    ExtensionScope,
+    ExtensionShortcut,
+    ExtensionSource,
+    ExtensionStaleError,
+    ExtensionToolDefinition,
+    ExtensionTrustError,
+    LoadExtensionsResult,
+    ToolCallDecision,
+    ToolCallEvent,
+    ToolResultEvent,
+    ToolResultPatch,
+)
+
+__all__ = [
+    "DEFAULT_STALE_MESSAGE",
+    "Extension",
+    "ExtensionAPI",
+    "ExtensionCommand",
+    "ExtensionCommandContext",
+    "ExtensionContext",
+    "ExtensionError",
+    "ExtensionExecutionMode",
+    "ExtensionEventBus",
+    "ExtensionFactory",
+    "ExtensionFlag",
+    "ExtensionLoader",
+    "ExtensionMode",
+    "ExtensionModuleCache",
+    "ExtensionProvider",
+    "ExtensionRegistrationError",
+    "ExtensionRunner",
+    "ExtensionRuntime",
+    "ExtensionScope",
+    "ExtensionShortcut",
+    "ExtensionSource",
+    "ExtensionStaleError",
+    "ExtensionToolAdapter",
+    "ExtensionLifecycleObserver",
+    "ExtensionToolDefinition",
+    "ExtensionTrustError",
+    "ExtensionTrustPolicy",
+    "LoadExtensionsResult",
+    "ToolCallDecision",
+    "ToolCallEvent",
+    "ToolResultEvent",
+    "ToolResultPatch",
+    "TrustDecision",
+    "clear_extension_cache",
+    "discover_and_load_extensions",
+    "discover_extensions_in_dir",
+    "extension_cache_generation",
+    "load_extension_from_factory",
+    "load_extensions",
+    "load_extensions_cached",
+    "resolve_extension_entries",
+]

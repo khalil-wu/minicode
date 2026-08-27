@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 
@@ -44,7 +45,7 @@ class RunCheckpointResumeResult:
             "resumed": True,
             "session_id": self.session_id,
             "conversation_id": self.conversation_id,
-            "run_id": self.run_id,
+            "checkpoint_run_id": self.run_id,
             "iteration": self.iteration,
             "stopped_reason": self.stopped_reason,
         }
@@ -54,16 +55,29 @@ def list_checkpoints(
     checkpoint_manager: Any,
     *,
     conversation_id: str,
+    session_id: str = "",
+    workspace_root: str = "",
     limit: int = 50,
 ) -> CheckpointListResult:
     target_conversation_id = str(conversation_id or "").strip()
     if not target_conversation_id:
         raise CheckpointServiceError("No active conversation for checkpoint.list")
     bounded_limit = max(1, min(int(limit or 50), 200))
-    records = checkpoint_manager.list_for_conversation(target_conversation_id, limit=bounded_limit)
+    expected_session = str(session_id or "").strip()
+    expected_workspace = _resolved_workspace(workspace_root)
+    records = checkpoint_manager.list_for_conversation(target_conversation_id, limit=200)
+    records = [
+        record
+        for record in records
+        if (not expected_session or str(record.session_id or "").strip() == expected_session)
+        and (
+            expected_workspace is None
+            or _resolved_workspace(record.workspace_root) == expected_workspace
+        )
+    ][:bounded_limit]
     return CheckpointListResult(
         conversation_id=target_conversation_id,
-        checkpoints=[record.to_dict() for record in records],
+        checkpoints=[record.to_public_dict() for record in records],
     )
 
 
@@ -73,6 +87,7 @@ async def rewind_checkpoint(
     *,
     conversation_id: str = "",
     session_id: str = "",
+    workspace_root: str = "",
 ) -> CheckpointRewindResult:
     clean_checkpoint_id = str(checkpoint_id or "").strip()
     if not clean_checkpoint_id:
@@ -87,13 +102,23 @@ async def rewind_checkpoint(
             raise CheckpointServiceError("Checkpoint does not belong to the active conversation.")
         if expected_session and str(record.session_id or "").strip() != expected_session:
             raise CheckpointServiceError("Checkpoint does not belong to the active session.")
+        expected_workspace = _resolved_workspace(workspace_root)
+        if expected_workspace is not None and _resolved_workspace(record.workspace_root) != expected_workspace:
+            raise CheckpointServiceError("Checkpoint does not belong to the active workspace.")
         record = await checkpoint_manager.rewind(clean_checkpoint_id)
     except Exception as exc:
         raise CheckpointServiceError(f"Checkpoint rewind failed: {exc}") from exc
     return CheckpointRewindResult(
         conversation_id=record.conversation_id,
-        checkpoint=record.to_dict(),
+        checkpoint=record.to_public_dict(),
     )
+
+
+def _resolved_workspace(value: str) -> Path | None:
+    clean = str(value or "").strip()
+    if not clean:
+        return None
+    return Path(clean).expanduser().resolve()
 
 
 def list_run_checkpoints(
@@ -150,7 +175,11 @@ def prepare_run_checkpoint_resume(
     requested_conversation_id: str = "",
     active_conversation_id: str = "",
 ) -> RunCheckpointResumeResult | None:
-    from backend.agent.checkpoint import load_latest_run_checkpoint, validate_storage_id
+    from backend.agent.checkpoint import (
+        CheckpointError,
+        load_latest_run_checkpoint,
+        validate_storage_id,
+    )
 
     clean_session_id = str(session_id or "").strip()
     if not clean_session_id:
@@ -166,10 +195,17 @@ def prepare_run_checkpoint_resume(
     if not conversation_id:
         raise CheckpointServiceError("No active conversation. Cannot resume.")
 
-    checkpoint = load_latest_run_checkpoint(
-        clean_session_id,
-        conversation_id=conversation_id,
-    )
+    # A corrupt checkpoint is a user-visible resume failure, not an unhandled
+    # error: CheckpointError is a RuntimeError, so without this the exception
+    # escapes agent.resume entirely and the durable command path re-claims it
+    # forever while the client never hears back.
+    try:
+        checkpoint = load_latest_run_checkpoint(
+            clean_session_id,
+            conversation_id=conversation_id,
+        )
+    except CheckpointError as exc:
+        raise CheckpointServiceError(f"Cannot resume: {exc}") from exc
     if checkpoint is None:
         return None
 

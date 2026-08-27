@@ -1,20 +1,30 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { lazy, Suspense } from "react";
-import { Circle, Edit3, Eye, FileCode2, FileWarning, GitCompare, Image, LockKeyhole, X } from "lucide-react";
+import { Circle, Edit3, Eye, FileCode2, FileWarning, GitCompare, Image, LockKeyhole, RefreshCw, X } from "lucide-react";
 import { fileGlyphColor, fileIcon } from "../shell/fileTreeHelpers";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
+import EditorWorker from "monaco-editor/editor/editor.worker?worker";
 import { useAppStore } from "../stores";
+import { editorPathComparisonKey, editorPathsEqual } from "../stores/shared-helpers";
 import { workspaceRawResourceUrlWithToken } from "../protocol/api";
 import {
   compareWriteWorkspaceFile,
   readWorkspaceFile,
   searchWorkspaceFiles,
 } from "../protocol/workspace";
-import { fsCompareWriteFile, fsReadFileInfo, fsSearchFiles, isDesktop, revealPath } from "../desktop/runtime";
+import { fsReadFileInfo, fsSearchFiles, isDesktop, revealPath } from "../desktop/runtime";
 import { pushToast } from "../overlays/ToastContainer";
 import { ContextMenu, type ContextMenuItem } from "../components/ContextMenu";
+import {
+  isWindowsLikeWorkspacePath,
+  normalizeWorkspacePath,
+  normalizeWorkspaceRoot,
+  workspacePathWithin,
+  workspacePathsEqual,
+  workspaceRootsEqual,
+} from "../lib/workspace-path";
+import { isImagePath, isPdfPath, isPreviewableMediaPath } from "../lib/media-types";
 
 const configureMonacoWorkers = () => {
   const scope = globalThis as typeof globalThis & {
@@ -33,13 +43,13 @@ const LazyMonacoEditor = lazy(async () => {
   configureMonacoWorkers();
   const [reactMonaco, monaco] = await Promise.all([
     import("@monaco-editor/react"),
-    import("monaco-editor/esm/vs/editor/editor.api.js"),
-    import("monaco-editor/esm/vs/basic-languages/typescript/typescript.contribution.js"),
-    import("monaco-editor/esm/vs/basic-languages/javascript/javascript.contribution.js"),
-    import("monaco-editor/esm/vs/basic-languages/css/css.contribution.js"),
-    import("monaco-editor/esm/vs/basic-languages/html/html.contribution.js"),
-    import("monaco-editor/esm/vs/basic-languages/markdown/markdown.contribution.js"),
-    import("monaco-editor/esm/vs/basic-languages/python/python.contribution.js"),
+    import("monaco-editor/editor/editor.api.js"),
+    import("monaco-editor/languages/definitions/typescript/register.js"),
+    import("monaco-editor/languages/definitions/javascript/register.js"),
+    import("monaco-editor/languages/definitions/css/register.js"),
+    import("monaco-editor/languages/definitions/html/register.js"),
+    import("monaco-editor/languages/definitions/markdown/register.js"),
+    import("monaco-editor/languages/definitions/python/register.js"),
   ]);
   reactMonaco.loader?.config?.({ monaco });
   return { default: reactMonaco.default };
@@ -91,10 +101,10 @@ const basename = (path: string) => path.split(/[/\\]/).filter(Boolean).pop() ?? 
 const dirname = (path: string) => path.replace(/\\/g, "/").split("/").filter(Boolean).slice(0, -1).join("/");
 
 const workspaceRelativePath = (path: string, workingDirectory: string): string => {
-  const normalized = String(path || "").trim().replace(/\\/g, "/");
-  const root = String(workingDirectory || "").trim().replace(/\\/g, "/").replace(/\/+$/, "");
-  if (root && normalized.toLowerCase().startsWith(`${root.toLowerCase()}/`)) {
-    return normalized.slice(root.length + 1);
+  const normalized = normalizeWorkspacePath(path);
+  const root = normalizeWorkspacePath(workingDirectory);
+  if (root && workspacePathWithin(normalized, root)) {
+    return normalized.slice(root.length).replace(/^\/+/, "");
   }
   return normalized.replace(/^\.\/+/, "");
 };
@@ -107,7 +117,9 @@ const resolveUnqualifiedEditorPath = async (path: string, workingDirectory: stri
   const results = isDesktop()
     ? await fsSearchFiles(workingDirectory, query, 50, "file")
     : await searchWorkspaceFiles(workingDirectory, query, 50, "file");
-  const exact = results.filter((result) => result.name.toLowerCase() === query.toLowerCase());
+  const compareName = (value: string): string =>
+    isWindowsLikeWorkspacePath(workingDirectory) ? value.toLowerCase() : value;
+  const exact = results.filter((result) => compareName(result.name) === compareName(query));
   if (exact.length !== 1) return relative;
   return workspaceRelativePath(exact[0].path, workingDirectory);
 };
@@ -128,6 +140,11 @@ const UNSUPPORTED_EDITOR_EXTENSIONS = new Set([
   "jpeg",
   "gif",
   "webp",
+  "avif",
+  "tif",
+  "tiff",
+  "heic",
+  "heif",
   "ico",
   "bmp",
   "pdf",
@@ -153,19 +170,6 @@ const UNSUPPORTED_EDITOR_EXTENSIONS = new Set([
   "woff2",
 ]);
 
-const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "svg"]);
-const PDF_EXTENSIONS = new Set(["pdf"]);
-
-const isImagePath = (path: string): boolean => {
-  const ext = path.split(".").pop()?.toLowerCase() ?? "";
-  return IMAGE_EXTENSIONS.has(ext);
-};
-
-const isPdfPath = (path: string): boolean => {
-  const ext = path.split(".").pop()?.toLowerCase() ?? "";
-  return PDF_EXTENSIONS.has(ext);
-};
-
 const isMarkdownPath = (path: string): boolean => {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
   return ext === "md" || ext === "mdx";
@@ -178,13 +182,11 @@ const isEditablePath = (path: string): boolean => {
 
 const toWorkspaceDisplayPath = (path: string, workingDirectory = ""): string => {
   const decodedSeparators = path.trim().replace(/%5[cC]/g, "/").replace(/%2[fF]/g, "/");
-  const normalized = decodedSeparators.replace(/\\/g, "/").replace(/\/+/g, "/");
-  const root = workingDirectory.trim().replace(/\\/g, "/").replace(/\/+$/, "");
+  const normalized = normalizeWorkspacePath(decodedSeparators);
+  const root = normalizeWorkspacePath(workingDirectory);
   if (!normalized || !root) return normalized;
-  const normalizedLower = normalized.toLowerCase();
-  const rootLower = root.toLowerCase();
-  if (normalizedLower === rootLower) return ".";
-  if (normalizedLower.startsWith(`${rootLower}/`)) {
+  if (workspacePathsEqual(normalized, root)) return ".";
+  if (workspacePathWithin(normalized, root)) {
     return normalized.slice(root.length).replace(/^\/+/, "") || ".";
   }
   return normalized;
@@ -239,7 +241,12 @@ const resolveDesktopFsPath = (path: string, workingDirectory: string): string =>
 const pathsMatch = (a: string, b: string): boolean => {
   const left = a.replace(/\\/g, "/").replace(/^\/+/, "");
   const right = b.replace(/\\/g, "/").replace(/^\/+/, "");
-  return left === right || left.endsWith(`/${right}`) || right.endsWith(`/${left}`);
+  const caseInsensitive = isWindowsLikeWorkspacePath(a) || isWindowsLikeWorkspacePath(b);
+  const leftKey = caseInsensitive ? left.toLowerCase() : left;
+  const rightKey = caseInsensitive ? right.toLowerCase() : right;
+  return leftKey === rightKey
+    || leftKey.endsWith(`/${rightKey}`)
+    || rightKey.endsWith(`/${leftKey}`);
 };
 
 interface FileSnapshot {
@@ -274,34 +281,70 @@ const countMarkdownPreviewImages = (content: string): number => {
 const largeFileReason = (snapshot: FileSnapshot): string | null => {
   const bytes = snapshot.sizeBytes;
   if (bytes != null && bytes > MAX_EDITOR_BYTES) {
-    return `This file is ${formatBytes(bytes)}, which is above the ${formatBytes(MAX_EDITOR_BYTES)} editor limit.`;
+    return `该文件大小为 ${formatBytes(bytes)}，超过编辑器 ${formatBytes(MAX_EDITOR_BYTES)} 的限制。`;
   }
   if (snapshot.content.length > MAX_EDITOR_CHARS) {
-    return `This file has ${snapshot.content.length.toLocaleString()} characters, which is above the editor limit.`;
+    return `该文件包含 ${snapshot.content.length.toLocaleString()} 个字符，超过编辑器限制。`;
   }
   const lines = countLines(snapshot.content);
   if (lines > MAX_EDITOR_LINES) {
-    return `This file has ${lines.toLocaleString()} lines, which is above the editor limit.`;
+    return `该文件包含 ${lines.toLocaleString()} 行，超过编辑器限制。`;
   }
   return null;
 };
 
 const errorMessage = (error: unknown): string =>
-  error instanceof Error ? error.message : String(error || "Could not read file.");
+  error instanceof Error ? error.message : String(error || "无法读取文件。");
 
 const isLargeFileError = (message: string): boolean =>
   /too large|max supported size|above the .*limit|413/i.test(message);
 
-const createMarkdownPreviewComponents = (ownerPath: string, workingDirectory: string) => ({
-  a: (props: React.AnchorHTMLAttributes<HTMLAnchorElement>) => (
-    <a
-      {...props}
-      href={typeof props.href === "string" ? rawFileUrl(resolveWorkspaceAssetPath(props.href, ownerPath, workingDirectory)) : props.href}
-      target="_blank"
-      rel="noreferrer"
-      style={{ color: "var(--accent-primary)" }}
-    />
-  ),
+const createMarkdownPreviewComponents = (
+  ownerPath: string,
+  workingDirectory: string,
+  scopeId: string,
+) => {
+  const slugCounts = new Map<string, number>();
+  const headingId = (children: React.ReactNode): string => {
+    const base = markdownHeadingSlug(reactNodeText(children));
+    const count = (slugCounts.get(base) ?? 0) + 1;
+    slugCounts.set(base, count);
+    return `${scopeId}-${base}${count > 1 ? `-${count}` : ""}`;
+  };
+  const heading = (level: 1 | 2 | 3) => (props: React.HTMLAttributes<HTMLHeadingElement>) => {
+    const id = headingId(props.children);
+    const Tag: "h1" | "h2" | "h3" = level === 1 ? "h1" : level === 2 ? "h2" : "h3";
+    return <Tag {...props} id={id} style={{ scrollMarginTop: 16, ...props.style }} tabIndex={-1} />;
+  };
+  return {
+  a: (props: React.AnchorHTMLAttributes<HTMLAnchorElement>) => {
+    const href = typeof props.href === "string" ? props.href : "";
+    if (href.startsWith("#")) {
+      const target = `${scopeId}-${markdownHeadingSlug(decodeURIComponent(href.slice(1)))}`;
+      return (
+        <a
+          {...props}
+          href={`#${target}`}
+          style={{ color: "var(--accent-primary)" }}
+          onClick={(event) => {
+            event.preventDefault();
+            const element = document.getElementById(target);
+            element?.scrollIntoView({ behavior: "smooth", block: "start" });
+            element?.focus({ preventScroll: true });
+          }}
+        />
+      );
+    }
+    return (
+      <a
+        {...props}
+        href={href ? rawFileUrl(resolveWorkspaceAssetPath(href, ownerPath, workingDirectory)) : props.href}
+        target="_blank"
+        rel="noreferrer"
+        style={{ color: "var(--accent-primary)" }}
+      />
+    );
+  },
   img: (props: React.ImgHTMLAttributes<HTMLImageElement>) => {
     const src = typeof props.src === "string"
       ? rawFileUrl(resolveWorkspaceAssetPath(props.src, ownerPath, workingDirectory))
@@ -370,7 +413,30 @@ const createMarkdownPreviewComponents = (ownerPath: string, workingDirectory: st
   td: (props: React.TdHTMLAttributes<HTMLTableCellElement>) => (
     <td {...props} style={{ border: "1px solid var(--border-subtle)", padding: "6px 10px", ...props.style }} />
   ),
-});
+  h1: heading(1),
+  h2: heading(2),
+  h3: heading(3),
+};
+};
+
+const reactNodeText = (node: React.ReactNode): string => {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(reactNodeText).join("");
+  if (node && typeof node === "object" && "props" in node) {
+    return reactNodeText((node as React.ReactElement<{ children?: React.ReactNode }>).props.children);
+  }
+  return "";
+};
+
+const markdownHeadingSlug = (value: string): string => {
+  const slug = value
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}\s_-]/gu, "")
+    .replace(/[\s_]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug || "section";
+};
 
 const readFileSnapshot = async (path: string, workingDirectory: string): Promise<FileSnapshot | null> => {
   if (!isEditablePath(path)) return null;
@@ -395,7 +461,9 @@ const readFileSnapshot = async (path: string, workingDirectory: string): Promise
 };
 
 export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" } = {}) => {
-  const themeMode = useAppStore((s) => s.themeMode);
+  const resolvedTheme = useAppStore((s) => s.resolvedTheme);
+  const codeTextScale = useAppStore((s) => s.codeTextScale);
+  const reducedMotion = useAppStore((s) => s.reducedMotion);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const editorOpenRequests = useAppStore((s) => s.editorOpenRequests);
   const activeEditorPath = useAppStore((s) => s.activeEditorPath);
@@ -418,9 +486,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   const markTabLoaded = useAppStore((s) => s.markTabLoaded);
   const markTabSaved = useAppStore((s) => s.markTabSaved);
   const markTabExternalChanged = useAppStore((s) => s.markTabExternalChanged);
-
-  const closeOtherEditorTabs = useAppStore((s) => s.closeOtherEditorTabs);
-  const closeAllEditorTabs = useAppStore((s) => s.closeAllEditorTabs);
+  const reloadTab = useAppStore((s) => s.reloadTab);
 
   const [cursor, setCursor] = useState({ line: 1, column: 1 });
   const [saving, setSaving] = useState(false);
@@ -433,33 +499,39 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   const pendingRevealRef = useRef<EditorTarget | null>(null);
   const loadEpochRef = useRef(new Map<string, number>());
 
-  const activeTab = tabs.find((tab) => tab.path === activeTabPath) ?? null;
+  const loadEpochKey = (path: string, directory: string): string =>
+    `${normalizeWorkspaceRoot(directory)}\0${editorPathComparisonKey(path, directory)}`;
+
+  const activeTab = tabs.find((tab) => editorPathsEqual(tab.path, activeTabPath, workingDirectory)) ?? null;
+  const markdownScopeId = useMemo(
+    () => `editor-markdown-${Math.abs(editorPathComparisonKey(activeTab?.path ?? "markdown", workingDirectory).split("").reduce((hash, char) => ((hash * 31) + char.charCodeAt(0)) | 0, 0))}`,
+    [activeTab?.path, workingDirectory],
+  );
   const editorSlot = panelSlots.find((slot) => slot.kind === "editor");
   const editorSlotId = editorSlot?.id ?? "editor";
   const chatSlot = panelSlots.find((slot) => slot.kind === "chat");
   const dirty = activeTab ? !activeTab.readOnly && activeTab.content !== activeTab.original : false;
   const language = useMemo(() => guessLanguage(activeTabPath ?? ""), [activeTabPath]);
-  const monacoTheme = themeMode === "light" ? "light" : "vs-dark";
+  const monacoTheme = resolvedTheme === "light" ? "light" : "vs-dark";
   const canRenderMarkdown = Boolean(activeTab && isMarkdownPath(activeTab.path) && !activeTab.loading && !activeTab.error && !activeTab.largeFile);
   const markdownImageCount = useMemo(
     () => canRenderMarkdown && activeTab ? countMarkdownPreviewImages(activeTab.content) : 0,
     [activeTab, canRenderMarkdown],
   );
   const markdownPreviewComponents = useMemo(
-    () => createMarkdownPreviewComponents(activeTab?.path ?? "", workingDirectory),
-    [activeTab?.path, workingDirectory],
+    () => createMarkdownPreviewComponents(activeTab?.path ?? "", workingDirectory, markdownScopeId),
+    [activeTab?.path, activeTab?.content, workingDirectory, markdownScopeId],
   );
   const markdownPreviewTooImageHeavy = markdownImageCount > MAX_MARKDOWN_PREVIEW_IMAGES;
   const showEditorTabs = chrome === "full";
   const activeGitChange = useMemo(() => {
     if (!activeTabPath) return null;
     const files = [
-      ...(gitChanges.live?.files ?? []),
       ...gitChanges.workingTree,
       ...gitChanges.staged,
     ];
     return files.find((file) => pathsMatch(file.path, activeTabPath) && file.patch) ?? null;
-  }, [activeTabPath, gitChanges.live?.files, gitChanges.workingTree, gitChanges.staged]);
+  }, [activeTabPath, gitChanges.workingTree, gitChanges.staged]);
 
   useEffect(() => {
     setMdPreview(false);
@@ -482,7 +554,8 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
     monacoMountedRef.current = false;
     const path = activeTab.path;
     const id = window.setTimeout(() => {
-      if (!monacoMountedRef.current && useAppStore.getState().activeTabPath === path) {
+      const currentState = useAppStore.getState();
+      if (!monacoMountedRef.current && editorPathsEqual(currentState.activeTabPath, path, currentState.workingDirectory)) {
         setMonacoUnavailable(true);
         console.warn("[EditorPanel] Monaco did not mount; falling back to the plain text editor.");
       }
@@ -497,7 +570,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       void resolveUnqualifiedEditorPath(request.path, workingDirectory).catch(() => (
         workspaceRelativePath(request.path, workingDirectory) || request.path
       )).then((resolvedPath) => {
-        if (workingDirectory !== useAppStore.getState().workingDirectory) return;
+        if (!workspaceRootsEqual(workingDirectory, useAppStore.getState().workingDirectory)) return;
         openEditorTab(resolvedPath);
         loadFileIfNeeded(resolvedPath);
         handleSetActive(resolvedPath, {
@@ -511,25 +584,11 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
 
   // Sync activeEditorPath from workspace slice
   useEffect(() => {
-    if (activeEditorPath && activeEditorPath !== activeTabPath) {
-      const exists = tabs.some((tab) => tab.path === activeEditorPath);
+    if (activeEditorPath && !editorPathsEqual(activeEditorPath, activeTabPath, workingDirectory)) {
+      const exists = tabs.some((tab) => editorPathsEqual(tab.path, activeEditorPath, workingDirectory));
       if (exists) setActiveTab(activeEditorPath);
     }
-  }, [activeEditorPath, activeTabPath, tabs, setActiveTab]);
-
-  // External file changes: track last processed index to handle batches
-  const lastFileChangeLen = useRef(0);
-  useEffect(() => {
-    if (fileChanges.length <= lastFileChangeLen.current) {
-      lastFileChangeLen.current = fileChanges.length;
-      return;
-    }
-    const newChanges = fileChanges.slice(lastFileChangeLen.current);
-    lastFileChangeLen.current = fileChanges.length;
-    for (const change of newChanges) {
-      markTabExternalChanged(change.path);
-    }
-  }, [fileChanges, markTabExternalChanged]);
+  }, [activeEditorPath, activeTabPath, tabs, setActiveTab, workingDirectory]);
 
   // Load persisted tabs on mount
   useEffect(() => {
@@ -542,13 +601,15 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   }, []);
 
   const loadFileContent = async (path: string) => {
-    const epoch = (loadEpochRef.current.get(path) ?? 0) + 1;
-    loadEpochRef.current.set(path, epoch);
     const directory = workingDirectory;
+    const epochKey = loadEpochKey(path, directory);
+    const epoch = (loadEpochRef.current.get(epochKey) ?? 0) + 1;
+    loadEpochRef.current.set(epochKey, epoch);
     const commit = (callback: () => void) => {
-      if (loadEpochRef.current.get(path) !== epoch) return;
-      if (directory !== useAppStore.getState().workingDirectory) return;
-      if (!useAppStore.getState().editorTabs.some((tab) => tab.path === path)) return;
+      if (loadEpochRef.current.get(epochKey) !== epoch) return;
+      if (!workspaceRootsEqual(directory, useAppStore.getState().workingDirectory)) return;
+      const currentState = useAppStore.getState();
+      if (!currentState.editorTabs.some((tab) => editorPathsEqual(tab.path, path, currentState.workingDirectory))) return;
       callback();
     };
     if (isImagePath(path) || isPdfPath(path)) {
@@ -596,15 +657,17 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   };
 
   const loadFileIfNeeded = (path: string) => {
-    const tab = useAppStore.getState().editorTabs.find((t) => t.path === path);
+    const currentState = useAppStore.getState();
+    const tab = currentState.editorTabs.find((t) => editorPathsEqual(t.path, path, currentState.workingDirectory));
     if (tab?.loading) {
       void loadFileContent(path);
     }
   };
 
   const revealEditorTarget = (target: EditorTarget | null = pendingRevealRef.current) => {
-    if (!target?.line || target.path !== activeTabPath) return false;
-    const tab = useAppStore.getState().editorTabs.find((item) => item.path === target.path);
+    if (!target?.line || !editorPathsEqual(target.path, activeTabPath, workingDirectory)) return false;
+    const currentState = useAppStore.getState();
+    const tab = currentState.editorTabs.find((item) => editorPathsEqual(item.path, target.path, currentState.workingDirectory));
     if (!tab || tab.loading || tab.error || tab.largeFile || mdPreview) return false;
     const editor = editorRef.current;
     if (!editor) return false;
@@ -615,7 +678,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
     editor.revealLineInCenter?.(lineNumber);
     editor.focus();
     setCursor({ line: lineNumber, column });
-    if (pendingRevealRef.current?.path === target.path) {
+    if (editorPathsEqual(pendingRevealRef.current?.path, target.path, workingDirectory)) {
       pendingRevealRef.current = null;
     }
     return true;
@@ -661,7 +724,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
 
   const save = async () => {
     if (!activeTab) {
-      pushToast("No file is open.", "info", 1600);
+      pushToast("当前未打开文件。", "info", 1600);
       return;
     }
     if (activeTab.readOnly) {
@@ -669,12 +732,12 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       return;
     }
     if (activeTab.largeFile) {
-      pushToast(`${basename(activeTab.path)} was not loaded into the editor.`, "warning", 2400);
+      pushToast(`${basename(activeTab.path)} 未加载到编辑器中。`, "warning", 2400);
       return;
     }
     if (!dirty) {
       setSaveStatus("saved");
-      pushToast(`${basename(activeTab.path)} is already saved.`, "info", 1400);
+      pushToast(`${basename(activeTab.path)} 已保存。`, "info", 1400);
       window.setTimeout(() => setSaveStatus("idle"), 1000);
       return;
     }
@@ -684,13 +747,30 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
 
     const savePath = activeTab.path;
     const saveContent = activeTab.content;
+    const saveOriginal = activeTab.original;
     const expectedHash = activeTab.contentHash ?? "";
     const saveWorkspace = workingDirectory;
+    const saveEpochKey = loadEpochKey(savePath, saveWorkspace);
+    const saveEpoch = (loadEpochRef.current.get(saveEpochKey) ?? 0) + 1;
+    loadEpochRef.current.set(saveEpochKey, saveEpoch);
+    const canCommitSave = () => {
+      if (loadEpochRef.current.get(saveEpochKey) !== saveEpoch) return false;
+      const state = useAppStore.getState();
+      if (!workspaceRootsEqual(state.workingDirectory, saveWorkspace)) return false;
+      const currentTab = state.editorTabs.find((tab) => editorPathsEqual(tab.path, savePath, state.workingDirectory));
+      return Boolean(
+        currentTab
+        && currentTab.original === saveOriginal
+        && (currentTab.contentHash ?? "") === expectedHash,
+      );
+    };
     try {
-      const result = isDesktop()
-        ? await fsCompareWriteFile(resolveDesktopFsPath(savePath, saveWorkspace), expectedHash, saveContent)
-        : await compareWriteWorkspaceFile(savePath, expectedHash, saveContent, saveWorkspace);
+      // Route saves through the backend even in desktop mode. The agent and
+      // editor then share one guarded mutation queue; native IPC remains for
+      // reads/tree operations but cannot race a Python-side model edit here.
+      const result = await compareWriteWorkspaceFile(savePath, expectedHash, saveContent, saveWorkspace);
       if (result.ok) {
+        if (!canCommitSave()) return;
         const savedFile = result.file as { contentHash?: string; content_hash?: string };
         const nextHash = savedFile.contentHash ?? savedFile.content_hash;
         // Mark exactly the payload acknowledged by disk as the baseline. If
@@ -698,21 +778,88 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
         // content remains newer than original and the tab correctly stays dirty.
         markTabSaved(savePath, saveContent, nextHash);
         setSaveStatus("saved");
-        pushToast(`Saved ${basename(savePath)}`, "success", 1600);
+        pushToast(`已保存 ${basename(savePath)}`, "success", 1600);
         window.setTimeout(() => setSaveStatus("idle"), 1400);
       } else {
+        if (!canCommitSave()) return;
         setSaveStatus("error");
         if (result.conflict) {
           markTabExternalChanged(savePath);
-          pushToast(`${basename(savePath)} changed on disk. Save skipped to avoid overwriting it.`, "warning", 4200);
+          pushToast(`${basename(savePath)} 已在磁盘上更改。为避免覆盖，已跳过保存。`, "warning", 4200);
         } else {
-          pushToast(result.message || `Save failed: ${basename(savePath)}`, "error", 3500);
+          pushToast(result.message || `保存失败：${basename(savePath)}`, "error", 3500);
         }
       }
     } finally {
       setSaving(false);
     }
   };
+
+  const reloadFileFromDisk = async (
+    path: string,
+    { silent = false }: { silent?: boolean } = {},
+  ) => {
+    const stateAtRequest = useAppStore.getState();
+    const tabAtRequest = stateAtRequest.editorTabs.find((tab) => editorPathsEqual(tab.path, path, stateAtRequest.workingDirectory));
+    if (!tabAtRequest) return;
+    const directory = stateAtRequest.workingDirectory;
+    const epochKey = loadEpochKey(path, directory);
+    const epoch = (loadEpochRef.current.get(epochKey) ?? 0) + 1;
+    loadEpochRef.current.set(epochKey, epoch);
+    const canCommit = () => {
+      if (loadEpochRef.current.get(epochKey) !== epoch) return false;
+      const currentState = useAppStore.getState();
+      if (!workspaceRootsEqual(currentState.workingDirectory, directory)) return false;
+      const currentTab = currentState.editorTabs.find((tab) => editorPathsEqual(tab.path, path, currentState.workingDirectory));
+      return Boolean(
+        currentTab
+        && currentTab === tabAtRequest
+        && currentTab.content === tabAtRequest.content
+        && currentTab.original === tabAtRequest.original
+        && currentTab.contentHash === tabAtRequest.contentHash,
+      );
+    };
+    try {
+      const snapshot = await readFileSnapshot(path, directory);
+      if (snapshot == null) throw new Error(`无法读取 ${path}`);
+      if (!canCommit()) return;
+      reloadTab(path, snapshot.content, snapshot.contentHash);
+      if (!silent) pushToast(`已从磁盘重新加载 ${basename(path)}。`, "success", 1800);
+    } catch (error) {
+      if (!canCommit()) return;
+      markTabExternalChanged(path);
+      if (!silent) pushToast(errorMessage(error) || `无法重新加载 ${basename(path)}。`, "error", 3500);
+    }
+  };
+
+  // External changes follow the same contract as established editors: clean
+  // buffers track disk automatically; dirty buffers keep user edits and expose
+  // an explicit reload decision.
+  const lastFileChangeLen = useRef(fileChanges.length);
+  useEffect(() => {
+    if (fileChanges.length <= lastFileChangeLen.current) {
+      lastFileChangeLen.current = fileChanges.length;
+      return;
+    }
+    const newChanges = fileChanges.slice(lastFileChangeLen.current);
+    lastFileChangeLen.current = fileChanges.length;
+    for (const change of newChanges) {
+      const currentState = useAppStore.getState();
+      const tab = currentState.editorTabs.find((candidate) =>
+        editorPathsEqual(candidate.path, change.path, currentState.workingDirectory));
+      if (!tab) continue;
+      if (isImagePath(tab.path) || isPdfPath(tab.path)) continue;
+      if (tab.content === tab.original && change.event !== "delete") {
+        markTabExternalChanged(tab.path);
+        void reloadFileFromDisk(tab.path, { silent: true });
+      } else {
+        markTabExternalChanged(tab.path);
+      }
+    }
+    // reloadFileFromDisk intentionally reads the latest workingDirectory and
+    // store snapshot; fileChanges is the event fence for this effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fileChanges, markTabExternalChanged]);
 
   const revert = () => {
     if (!activeTab || !dirty) return;
@@ -741,18 +888,24 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   };
 
   const handleCloseTab = async (path: string) => {
-    const tab = tabs.find((t) => t.path === path);
+    const tab = tabs.find((t) => editorPathsEqual(t.path, path, workingDirectory));
     if (tab && tab.content !== tab.original) {
       const { showConfirm } = await import("../overlays/DialogService");
       const ok = await showConfirm({
-        title: "Discard changes",
-        message: `Discard changes to ${basename(path)}?`,
-        confirmLabel: "Discard",
+        title: "放弃更改",
+        message: `确定放弃对 ${basename(path)} 的更改吗？`,
+        confirmLabel: "放弃",
         danger: true,
       });
       if (!ok) return;
     }
     closeEditorTab(path);
+  };
+
+  const handleCloseTabs = async (paths: string[]) => {
+    for (const path of paths) {
+      await handleCloseTab(path);
+    }
   };
 
   useEffect(() => {
@@ -799,11 +952,11 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
         <div className="flex min-h-[38px] overflow-x-auto overflow-y-hidden gap-0.5 px-2.5 pt-1.5 pb-0 border-b scrollbar-thin" style={{ borderColor: "var(--border-subtle)", background: "var(--surface-sidebar)", scrollbarColor: "color-mix(in oklch, var(--text-muted) 35%, transparent) transparent" }}>
           {tabs.map((tab) => {
             const tabDirty = tab.content !== tab.original;
-            const active = tab.path === activeTabPath;
+            const active = editorPathsEqual(tab.path, activeTabPath, workingDirectory);
             return (
               <div
                 key={tab.path}
-                className="editor-tab relative inline-flex items-center gap-1.5 h-8 max-w-60 min-w-[124px] flex-none border border-transparent rounded-t-[7px] rounded-b-none cursor-pointer px-2.5 text-[13px] transition-[background,color,border-color] duration-100"
+                className="editor-tab relative inline-flex items-center gap-1.5 h-8 max-w-60 min-w-[124px] flex-none border border-transparent rounded-t-[7px] rounded-b-none cursor-pointer px-2.5 text-xs transition-[background,color,border-color] duration-100"
                 onContextMenu={(e) => {
                   e.preventDefault();
                   setCtxMenu({ x: e.clientX, y: e.clientY, path: tab.path });
@@ -830,15 +983,15 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                     {fileIcon(tab.path, { size: 14, className: "editor-tab-file-icon-svg" })}
                   </span>
                 )}
-                <span className="overflow-hidden text-ellipsis whitespace-nowrap text-[13px]">
+                <span className="overflow-hidden text-ellipsis whitespace-nowrap text-xs">
                   {basename(tab.path)}
                 </span>
                 </button>
                 <button
                   type="button"
                   className="editor-tab-close inline-flex items-center justify-center rounded-[4px] w-[18px] h-[18px] shrink-0 ml-auto transition-[opacity,background] duration-100"
-                  title="Close tab"
-                  aria-label={`Close ${basename(tab.path)}`}
+                  title="关闭标签页"
+                  aria-label={`关闭 ${basename(tab.path)}`}
                   onClick={(event) => {
                     event.stopPropagation();
                     handleCloseTab(tab.path);
@@ -859,7 +1012,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
       {canRenderMarkdown && (
         <div className="flex items-center justify-between gap-2.5 min-h-[34px] px-2.5 py-[5px] border-b" style={{ borderColor: "var(--border-subtle)", background: "var(--surface-page)" }}>
           <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)" }}>{basename(activeTab?.path ?? "Markdown")}</span>
-          <div role="tablist" aria-label="Markdown view mode" className="inline-flex items-center gap-0.5 p-0.5 border rounded-[6px] shrink-0" style={{ borderColor: "var(--border-subtle)", background: "var(--surface-soft)" }}>
+          <div role="tablist" aria-label="Markdown 视图模式" className="inline-flex items-center gap-0.5 p-0.5 border rounded-[6px] shrink-0" style={{ borderColor: "var(--border-subtle)", background: "var(--surface-soft)" }}>
             <button
               type="button"
               role="tab"
@@ -872,11 +1025,11 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                 fontFamily: "var(--font-ui)",
                 fontSize: "var(--text-xs)",
                 fontWeight: !mdPreview ? 650 : 500,
-                boxShadow: !mdPreview ? "0 1px 2px rgba(0,0,0,0.12)" : "none",
+                boxShadow: !mdPreview ? "var(--shadow-sm)" : "none",
               }}
             >
               <Edit3 size={14} />
-              Edit
+              编辑
             </button>
             <button
               type="button"
@@ -890,13 +1043,33 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                 fontFamily: "var(--font-ui)",
                 fontSize: "var(--text-xs)",
                 fontWeight: mdPreview ? 650 : 500,
-                boxShadow: mdPreview ? "0 1px 2px rgba(0,0,0,0.12)" : "none",
+                boxShadow: mdPreview ? "var(--shadow-sm)" : "none",
               }}
             >
               <Eye size={14} />
-              Rendered
+              预览
             </button>
           </div>
+        </div>
+      )}
+
+      {activeTab?.externalChanged && !isPreviewableMediaPath(activeTab.path) && (
+        <div
+          className="min-h-9 px-3 py-1.5 flex items-center gap-2 border-b"
+          style={{ borderColor: "var(--state-warning)", background: "var(--surface-soft)", color: "var(--text-secondary)", fontSize: "var(--text-xs)" }}
+        >
+          <FileWarning size={15} style={{ color: "var(--state-warning)" }} />
+          <span className="flex-1 min-w-0">该文件已在磁盘上更改。</span>
+          <button
+            type="button"
+            onClick={() => void reloadFileFromDisk(activeTab.path)}
+            className="inline-flex items-center gap-1.5 px-2 py-1 border rounded-[4px] cursor-pointer"
+            style={{ borderColor: "var(--border-subtle)", background: "var(--surface-raised)", color: "var(--text-primary)" }}
+            title="放弃编辑器中的更改并从磁盘重新加载"
+          >
+            <RefreshCw size={13} />
+            重新加载
+          </button>
         </div>
       )}
 
@@ -904,12 +1077,12 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
         {activeTab ? (
           activeTab.loading ? (
             <div className="h-full grid place-items-center" style={{ color: "var(--text-muted)" }}>
-              Loading file...
+              正在加载文件...
             </div>
           ) : activeTab.error ? (
             <FileLoadErrorNotice path={activeTab.path} error={activeTab.error} onRetry={() => {
               useAppStore.setState((state) => ({
-                editorTabs: state.editorTabs.map((tab) => tab.path === activeTab.path
+                editorTabs: state.editorTabs.map((tab) => editorPathsEqual(tab.path, activeTab.path, state.workingDirectory)
                   ? { ...tab, loading: true, error: null }
                   : tab),
               }));
@@ -927,7 +1100,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
               onEdit={() => setMdPreview(false)}
             />
           ) : canRenderMarkdown && mdPreview ? (
-            <div className="md-prose editor-markdown-preview flex-1 overflow-y-auto px-[34px] py-6 text-[15px] leading-[1.7] break-words" style={{ color: "var(--text-primary)" }}>
+            <div className="md-prose editor-markdown-preview flex-1 overflow-y-auto px-[34px] py-6 text-base leading-[1.7] break-words" style={{ color: "var(--text-primary)" }}>
               <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownPreviewComponents} urlTransform={markdownUrlTransform}>
                 {activeTab.content}
               </ReactMarkdown>
@@ -954,7 +1127,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                   editorRef.current = editor as MonacoEditorInstance;
                   (editor as MonacoEditorInstance).addAction?.({
                     id: "minicode.ask-about-selection",
-                    label: "Ask about selection in side chat",
+                    label: "在侧边对话中询问所选内容",
                     contextMenuGroupId: "navigation",
                     contextMenuOrder: 1.5,
                     run: (mountedEditor) => {
@@ -963,7 +1136,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                         ? mountedEditor.getModel?.()?.getValueInRange(selection).trim() ?? ""
                         : "";
                       if (!text) {
-                        pushToast("Select some code first.", "warning");
+                        pushToast("请先选择一些代码。", "warning");
                         return;
                       }
                       useAppStore.getState().openSideChatWithSelection(text, activeTab.path);
@@ -978,14 +1151,14 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                   automaticLayout: true,
                   readOnly: Boolean(activeTab.readOnly),
                   fontFamily: "var(--font-mono)",
-                  fontSize: 15,
-                  lineHeight: 23,
+                  fontSize: Math.round(15 * codeTextScale),
+                  lineHeight: Math.round(23 * codeTextScale),
                   minimap: { enabled: false },
                   scrollBeyondLastLine: false,
                   wordWrap: "on",
                   fontLigatures: true,
-                  cursorBlinking: "smooth",
-                  cursorSmoothCaretAnimation: "on",
+                  cursorBlinking: reducedMotion ? "solid" : "smooth",
+                  cursorSmoothCaretAnimation: reducedMotion ? "off" : "on",
                   renderLineHighlight: "all",
                   renderWhitespace: "selection",
                   roundedSelection: false,
@@ -997,7 +1170,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                   glyphMargin: false,
                   bracketPairColorization: { enabled: true },
                   guides: { indentation: true, bracketPairs: true },
-                  smoothScrolling: true,
+                  smoothScrolling: !reducedMotion,
                   stickyScroll: { enabled: false },
                   scrollbar: {
                     verticalScrollbarSize: 12,
@@ -1024,7 +1197,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
 
       <div title={activeTabPath ?? ""} className="flex gap-3 min-h-6 items-center px-3 border-t overflow-hidden whitespace-nowrap text-xs" style={{ color: dirty ? "var(--state-warning)" : "var(--text-muted)", borderColor: "var(--border-subtle)", fontFamily: "var(--font-mono)", background: "var(--surface-sidebar)" }}>
         <span className="flex-1 min-w-0 overflow-hidden text-ellipsis">
-          {activeTabPath || "未打开文件"}{dirty ? " - modified" : ""}
+          {activeTabPath || "未打开文件"}{dirty ? " - 已修改" : ""}
         </span>
         {activeTab?.sizeBytes != null && <span>{formatBytes(activeTab.sizeBytes)}</span>}
         {activeTab?.readOnly && (
@@ -1045,7 +1218,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
               color: "var(--accent-primary)",
               fontFamily: "var(--font-ui)",
               fontSize: "var(--text-xs)",
-              fontWeight: 650,
+              fontWeight: "var(--fw-semibold)",
             }}
           >
             <GitCompare size={14} />
@@ -1054,9 +1227,9 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
             <span style={{ color: "var(--state-danger)" }}>-{activeGitChange.deletions}</span>
           </button>
         )}
-        {saveStatus === "saved" && <span style={{ color: "var(--state-success)" }}>Saved</span>}
-        {saveStatus === "error" && <span style={{ color: "var(--state-danger)" }}>Save failed</span>}
-        <span>{`Ln ${cursor.line}, Col ${cursor.column}`}</span>
+        {saveStatus === "saved" && <span style={{ color: "var(--state-success)" }}>已保存</span>}
+        {saveStatus === "error" && <span style={{ color: "var(--state-danger)" }}>保存失败</span>}
+        <span>{`第 ${cursor.line} 行，第 ${cursor.column} 列`}</span>
       </div>
 
       {ctxMenu && (
@@ -1064,25 +1237,39 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
           position={{ x: ctxMenu.x, y: ctxMenu.y }}
           onClose={() => setCtxMenu(null)}
           items={[
-            { label: "Close tab", onClick: () => handleCloseTab(ctxMenu.path) },
-            { label: "Close other tabs", onClick: () => closeOtherEditorTabs(ctxMenu.path) },
-            { label: "Close all tabs", onClick: () => closeAllEditorTabs() },
+            { label: "关闭标签页", onClick: () => handleCloseTab(ctxMenu.path) },
             {
-              label: "Close to the right",
+              label: "关闭其他标签页",
               onClick: () => {
-                const idx = tabs.findIndex((t) => t.path === ctxMenu.path);
-                tabs.slice(idx + 1).forEach((t) => closeEditorTab(t.path));
+                const paths = tabs.filter((tab) => !editorPathsEqual(tab.path, ctxMenu.path, workingDirectory)).map((tab) => tab.path);
+                void handleCloseTabs(paths);
+              },
+            },
+            { label: "关闭所有标签页", onClick: () => { void handleCloseTabs(tabs.map((tab) => tab.path)); } },
+            {
+              label: "关闭右侧标签页",
+              onClick: () => {
+                const idx = tabs.findIndex((t) => editorPathsEqual(t.path, ctxMenu.path, workingDirectory));
+                void handleCloseTabs(tabs.slice(idx + 1).map((tab) => tab.path));
               },
             },
             { separator: true, label: "" },
             {
-              label: "Copy file path",
-              onClick: () => { void navigator.clipboard.writeText(ctxMenu.path); },
+              label: "复制文件路径",
+              onClick: () => {
+                const absolutePath = resolveDesktopFsPath(ctxMenu.path, workingDirectory);
+                void navigator.clipboard.writeText(absolutePath).then(
+                  () => pushToast("文件路径已复制。", "success", 1600),
+                  (error) => pushToast(`复制文件路径失败：${errorMessage(error)}`, "error", 3000),
+                );
+              },
             },
-            {
+            // Revealing a path needs an OS shell; in browser mode the entry did
+            // nothing at all, so it is not offered there.
+            ...(isDesktop() ? [{
               label: "在文件管理器中显示",
-              onClick: () => { void revealPath(ctxMenu.path); },
-            },
+              onClick: () => { void revealPath(resolveDesktopFsPath(ctxMenu.path, workingDirectory)); },
+            }] : []),
           ]}
         />
       )}
@@ -1092,7 +1279,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
 
 const EditorLoading = () => (
   <div className="h-full grid place-items-center" style={{ color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>
-    Loading editor...
+    正在加载编辑器...
   </div>
 );
 
@@ -1102,7 +1289,8 @@ const PlainTextEditor = ({ value, onChange, onCursorChange, readOnly = false }: 
   };
   return (
     <textarea
-      aria-label="Plain text editor"
+      className="editor-plain-textarea"
+      aria-label="纯文本编辑器"
       value={value}
       readOnly={readOnly}
       spellCheck={false}
@@ -1131,8 +1319,8 @@ const plainTextEditorStyle: React.CSSProperties = {
   background: "var(--surface-base)",
   color: "var(--text-primary)",
   fontFamily: "var(--font-mono)",
-  fontSize: 15,
-  lineHeight: "23px",
+  fontSize: "var(--code-font-size)",
+  lineHeight: "calc(23px * var(--code-text-scale))",
   whiteSpace: "pre",
   overflow: "auto",
   tabSize: 2,
@@ -1141,9 +1329,9 @@ const plainTextEditorStyle: React.CSSProperties = {
 const LargeFileNotice = ({ tab }: { tab: { path: string; loadWarning?: string | null; sizeBytes?: number } }) => (
   <div className="h-full flex flex-col items-center justify-center gap-[9px] p-6 text-center" style={{ color: "var(--text-muted)", background: "var(--surface-base)" }}>
     <FileWarning size={28} style={{ color: "var(--state-warning)" }} />
-    <div className="font-bold" style={{ color: "var(--text-primary)" }}>File not loaded into editor</div>
+    <div className="font-bold" style={{ color: "var(--text-primary)" }}>文件未加载到编辑器</div>
     <div className="max-w-[520px] leading-[1.5]" style={{ color: "var(--text-secondary)", fontSize: "var(--text-sm)" }}>
-      {tab.loadWarning || "This file is too large to render safely in the editor."}
+      {tab.loadWarning || "该文件过大，无法在编辑器中安全呈现。"}
     </div>
     <div className="max-w-[520px] overflow-hidden text-ellipsis whitespace-nowrap" style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)" }}>
       {basename(tab.path)}{tab.sizeBytes != null ? ` - ${formatBytes(tab.sizeBytes)}` : ""}
@@ -1154,7 +1342,7 @@ const LargeFileNotice = ({ tab }: { tab: { path: string; loadWarning?: string | 
 const FileLoadErrorNotice = ({ path, error, onRetry }: { path: string; error: string; onRetry: () => void }) => (
   <div className="h-full flex flex-col items-center justify-center gap-[9px] p-6 text-center" style={{ color: "var(--text-muted)", background: "var(--surface-base)" }}>
     <FileWarning size={28} style={{ color: "var(--state-danger)" }} />
-    <div className="font-bold" style={{ color: "var(--text-primary)" }}>File could not be loaded</div>
+    <div className="font-bold" style={{ color: "var(--text-primary)" }}>无法加载文件</div>
     <div className="max-w-[560px] leading-[1.5]" style={{ color: "var(--state-danger)", fontSize: "var(--text-sm)" }}>
       {error}
     </div>
@@ -1162,7 +1350,7 @@ const FileLoadErrorNotice = ({ path, error, onRetry }: { path: string; error: st
       {path}
     </div>
     <button type="button" onClick={onRetry} className="inline-flex items-center gap-1.5 h-[30px] px-2.5 border rounded-[4px] cursor-pointer font-semibold" style={{ borderColor: "var(--border-subtle)", background: "var(--surface-raised)", color: "var(--text-primary)", fontFamily: "var(--font-ui)", fontSize: "var(--text-xs)" }}>
-      Retry
+      重试
     </button>
   </div>
 );
@@ -1170,45 +1358,40 @@ const FileLoadErrorNotice = ({ path, error, onRetry }: { path: string; error: st
 const MarkdownPreviewLimitNotice = ({ imageCount, onEdit }: { imageCount: number; onEdit: () => void }) => (
   <div className="h-full flex flex-col items-center justify-center gap-[9px] p-6 text-center" style={{ color: "var(--text-muted)", background: "var(--surface-base)" }}>
     <Image size={28} style={{ color: "var(--state-warning)" }} />
-    <div className="font-bold" style={{ color: "var(--text-primary)" }}>Markdown preview skipped</div>
+    <div className="font-bold" style={{ color: "var(--text-primary)" }}>已跳过 Markdown 预览</div>
     <div className="max-w-[520px] leading-[1.5]" style={{ color: "var(--text-secondary)", fontSize: "var(--text-sm)" }}>
-      This Markdown file references {imageCount.toLocaleString()} images. Open it in edit mode to avoid loading them all at once.
+      此 Markdown 文件引用了 {imageCount.toLocaleString()} 张图片。请在编辑模式中打开，避免一次加载全部图片。
     </div>
     <button type="button" onClick={onEdit} className="inline-flex items-center gap-1.5 h-[30px] px-2.5 border rounded-[4px] cursor-pointer font-semibold" style={{ borderColor: "var(--border-subtle)", background: "var(--surface-raised)", color: "var(--text-primary)", fontFamily: "var(--font-ui)", fontSize: "var(--text-xs)" }}>
       <Edit3 size={14} />
-      Edit Markdown
+      编辑 Markdown
     </button>
   </div>
 );
 
 const ImageViewer = ({ path, workingDirectory }: { path: string; workingDirectory: string }) => {
   const imgSrc = rawFileUrl(path, workingDirectory);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => setFailed(false), [imgSrc]);
 
   return (
-    <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6 overflow-auto" style={{ background: "var(--surface-base)" }}>
-      <img
-        src={imgSrc}
-        alt={basename(path)}
-        className="max-w-full object-contain rounded-[4px] border"
-        style={{
-          maxHeight: "calc(100% - 40px)",
-          borderColor: "var(--border-subtle)",
-        }}
-        onError={(e) => {
-          const target = e.currentTarget;
-          target.style.display = "none";
-          const fallback = target.nextElementSibling as HTMLElement | null;
-          if (fallback) fallback.style.display = "flex";
-        }}
-      />
-      <div className="hidden flex-col items-center gap-2" style={{ color: "var(--text-muted)" }}>
-        <Image size={32} />
-        <span style={{ fontSize: "var(--text-sm)" }}>Cannot display image</span>
-        <span style={{ fontSize: "var(--text-xs)", fontFamily: "var(--font-mono)" }}>{basename(path)}</span>
-      </div>
-      <span style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
-        {basename(path)}
-      </span>
+    <div className="flex-1 min-h-0 flex items-center justify-center p-6 overflow-auto" style={{ background: "var(--surface-base)" }}>
+      {failed ? (
+        <div className="flex flex-col items-center gap-2" style={{ color: "var(--text-muted)" }}>
+          <Image size={32} />
+          <span style={{ fontSize: "var(--text-sm)" }}>无法显示图片</span>
+          <span style={{ fontSize: "var(--text-sm)", fontFamily: "var(--font-ui)" }}>{basename(path)}</span>
+        </div>
+      ) : (
+        <img
+          src={imgSrc}
+          alt={basename(path)}
+          className="block max-w-full max-h-full object-contain rounded-[4px]"
+          style={{ width: "auto", height: "auto" }}
+          onError={() => setFailed(true)}
+        />
+      )}
     </div>
   );
 };
@@ -1224,6 +1407,7 @@ const PdfViewer = ({ path, workingDirectory }: { path: string; workingDirectory:
       <iframe
         title={basename(path)}
         src={src}
+        sandbox="allow-scripts allow-same-origin"
         referrerPolicy={EDITOR_FRAME_REFERRER_POLICY}
         style={{
           flex: 1,

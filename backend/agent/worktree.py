@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from backend.atomic_io import atomic_write_text, canonical_file_path_key, file_mutation_locks
 from backend.runtime_env import sanitized_git_env
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,7 @@ _GIT_TIMEOUT_S = 60
 _ACTIVE_WORKTREE_PATHS: set[str] = set()
 # Git roots already swept this process; stale cleanup runs once per root.
 _STALE_SWEEP_DONE: set[str] = set()
+_STALE_SWEEP_COOLDOWN_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -120,7 +123,7 @@ def create_agent_worktree(slug: str, base: Path) -> tuple[AgentWorktree | None, 
     _ensure_excluded(git_root)
     logger.info("Created agent worktree %s (branch %s)", worktree_path, branch)
     resolved_path = worktree_path.resolve()
-    _ACTIVE_WORKTREE_PATHS.add(str(resolved_path))
+    _ACTIVE_WORKTREE_PATHS.add(canonical_file_path_key(resolved_path))
     return (
         AgentWorktree(
             worktree_path=resolved_path,
@@ -139,11 +142,12 @@ def _ensure_excluded(git_root: Path) -> None:
             return
         exclude = Path(git_dir) / "info" / "exclude"
         entry = ".minicode/"
-        existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
-        if entry not in existing.splitlines():
-            exclude.parent.mkdir(parents=True, exist_ok=True)
-            with exclude.open("a", encoding="utf-8") as handle:
-                handle.write(f"\n{entry}\n")
+        with file_mutation_locks([exclude]):
+            existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+            if entry not in existing.splitlines():
+                exclude.parent.mkdir(parents=True, exist_ok=True)
+                suffix = "" if not existing or existing.endswith(("\n", "\r")) else "\n"
+                atomic_write_text(exclude, f"{existing}{suffix}{entry}\n")
     except OSError as exc:  # best-effort only
         logger.debug("Could not update git exclude for %s: %s", git_root, exc)
 
@@ -193,11 +197,12 @@ def cleanup_agent_worktree(worktree: AgentWorktree) -> tuple[bool, str]:
 
     Returns ``(kept, worktree_path_if_kept)``.
     """
-    _ACTIVE_WORKTREE_PATHS.discard(str(worktree.worktree_path))
+    _ACTIVE_WORKTREE_PATHS.discard(canonical_file_path_key(worktree.worktree_path))
     if has_worktree_changes(worktree):
         logger.info("Agent worktree has changes, keeping: %s", worktree.worktree_path)
         return True, str(worktree.worktree_path)
-    remove_agent_worktree(worktree)
+    if not remove_agent_worktree(worktree):
+        return True, str(worktree.worktree_path)
     return False, ""
 
 
@@ -244,7 +249,7 @@ def resume_agent_worktree(
         if not branch or not head:
             return None
         resolved = path.resolve()
-        _ACTIVE_WORKTREE_PATHS.add(str(resolved))
+        _ACTIVE_WORKTREE_PATHS.add(canonical_file_path_key(resolved))
         return AgentWorktree(
             worktree_path=resolved,
             branch=branch,
@@ -269,23 +274,33 @@ def cleanup_stale_worktrees(base: Path) -> None:
         git_root = find_git_root(base)
         if git_root is None:
             return
-        root_key = str(git_root.resolve())
+        root_key = canonical_file_path_key(git_root)
         if root_key in _STALE_SWEEP_DONE:
             return
-        _STALE_SWEEP_DONE.add(root_key)
-
         # Drop registrations whose directories were deleted out-of-band.
         _git(git_root, "worktree", "prune")
 
         worktrees_dir = git_root / ".minicode" / "worktrees"
         if not worktrees_dir.is_dir():
             return
+        lease_path = worktrees_dir / ".janitor.lease"
+        now = time.time()
+        with file_mutation_locks([lease_path]):
+            try:
+                previous = float(lease_path.read_text(encoding="ascii").strip())
+            except (FileNotFoundError, ValueError, OSError):
+                previous = 0.0
+            if now - previous < _STALE_SWEEP_COOLDOWN_SECONDS:
+                _STALE_SWEEP_DONE.add(root_key)
+                return
+            atomic_write_text(lease_path, f"{now:.6f}")
+        _STALE_SWEEP_DONE.add(root_key)
         for entry in worktrees_dir.iterdir():
             try:
                 if not entry.is_dir():
                     continue
                 resolved = entry.resolve()
-                if str(resolved) in _ACTIVE_WORKTREE_PATHS:
+                if canonical_file_path_key(resolved) in _ACTIVE_WORKTREE_PATHS:
                     continue
                 branch = _git_output(resolved, "rev-parse", "--abbrev-ref", "HEAD")
                 if not branch:

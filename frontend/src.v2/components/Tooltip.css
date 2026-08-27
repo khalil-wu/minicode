@@ -1,0 +1,58 @@
+/*
+ * Tooltip — 纯 CSS 悬浮提示（components/Tip.tsx）。
+ *
+ * 显示延迟用 transition-delay 实现：hover 350ms 后浮现，离开立即消失，
+ * 不需要 JS 定时器。气泡是纯视觉增强（aria-hidden），触发元素自己持有
+ * aria-label，屏幕阅读器语义不受影响。
+ */
+
+.mc-tip {
+  position: relative;
+  display: inline-flex;
+}
+
+.mc-tip-bubble {
+  position: absolute;
+  left: 50%;
+  z-index: var(--z-tooltip);
+  padding: 4px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  font-size: var(--text-2xs);
+  line-height: var(--leading-snug);
+  white-space: nowrap;
+  box-shadow: var(--shadow-refined);
+  pointer-events: none;
+  opacity: 0;
+  transform: translateX(-50%) translateY(2px);
+  transition:
+    opacity var(--duration-fast) var(--easing-standard),
+    transform var(--duration-fast) var(--easing-standard);
+  transition-delay: 0s;
+}
+
+.mc-tip[data-side="top"] .mc-tip-bubble {
+  bottom: calc(100% + 6px);
+}
+
+.mc-tip[data-side="bottom"] .mc-tip-bubble {
+  top: calc(100% + 6px);
+}
+
+.mc-tip:hover .mc-tip-bubble,
+.mc-tip:focus-within .mc-tip-bubble {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+  transition-delay: 350ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mc-tip-bubble,
+  .mc-tip:hover .mc-tip-bubble,
+  .mc-tip:focus-within .mc-tip-bubble {
+    transition: none;
+    transition-delay: 0ms;
+  }
+}

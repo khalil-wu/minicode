@@ -6,7 +6,13 @@ import type {
   DiffReviewState,
   UISlice,
 } from "./types";
-import { sendClientCommand } from "../protocol/ws-outbox";
+import {
+  commandResultSucceeded,
+  createClientCommandId,
+  sendClientCommand,
+  sendClientCommandAwaitResult,
+  sendPromptResponseCommand,
+} from "../protocol/ws-outbox";
 import { desktop } from "../desktop/runtime";
 import { buildApprovalResponseCommand } from "../protocol/prompt-responses";
 import {
@@ -14,9 +20,18 @@ import {
   writeLS,
   readLS,
   initialTheme,
+  initialResolvedTheme,
   initialTextScale,
+  initialCodeTextScale,
+  initialReducedMotion,
+  initialViewMode,
+  initialSendShortcut,
+  initialFollowUpBehavior,
+  initialShortcutBindings,
   applyTheme,
   applyTextScale,
+  applyCodeTextScale,
+  applyReducedMotion,
   ensureCodePanelSlots,
   normalizePanelSlots,
   persistPanelSlots,
@@ -24,6 +39,10 @@ import {
   editorStateForWorkspace,
 } from "./shared-helpers";
 import { clampTextScale } from "../lib/text-scale";
+import { clamp } from "../lib/clamp";
+import { DEFAULT_SHORTCUT_BINDINGS } from "../lib/keyboard-shortcuts";
+import { workspaceRootsEqual } from "../lib/workspace-path";
+import { diffFileDecisionForPath, diffFilePathsEqual } from "../chat/diffReviewState";
 
 const initialRemoteImagePolicy = (): UISlice["remoteImagePolicy"] => {
   const stored = readLS(LS.remoteImagePolicy);
@@ -49,6 +68,7 @@ function emptyConversationWorkbenchState(): ConversationWorkbenchState {
     diffReview: null,
     previewArtifact: null,
     livePreviewUrl: null,
+    terminalSessions: [],
     activeTerminalSessionId: null,
     rightStackTab: "tasks",
     rightPanelOpen: false,
@@ -67,6 +87,7 @@ function cloneConversationWorkbenchState(state: ConversationWorkbenchState): Con
     ...state,
     diffReview: cloneDiffReviewState(state.diffReview),
     previewArtifact: cloneArtifactState(state.previewArtifact),
+    terminalSessions: (state.terminalSessions ?? []).map((session) => ({ ...session })),
     draft: state.draft ?? "",
     attachments: (state.attachments ?? []).map((attachment) => ({ ...attachment })),
     quotedMessage: state.quotedMessage ? { ...state.quotedMessage } : null,
@@ -81,6 +102,9 @@ function liveConversationWorkbenchState(s: AppStore): ConversationWorkbenchState
     diffReview: cloneDiffReviewState(s.diffReview),
     previewArtifact: cloneArtifactState(s.previewArtifact),
     livePreviewUrl: s.livePreviewUrl,
+    terminalSessions: s.terminalSessions
+      .filter((session) => session.conversationId === s.conversationId)
+      .map((session) => ({ ...session })),
     activeTerminalSessionId: s.activeTerminalSessionId,
     rightStackTab: s.rightStackTab,
     rightPanelOpen: s.rightPanelOpen,
@@ -120,8 +144,14 @@ function panelSlotsEqual(left: AppStore["panelSlots"], right: AppStore["panelSlo
 
 export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get) => ({
   themeMode: initialTheme(),
+  resolvedTheme: initialResolvedTheme(),
   textScale: initialTextScale(),
-  viewMode: "normal" as const,
+  codeTextScale: initialCodeTextScale(),
+  reducedMotion: initialReducedMotion(),
+  viewMode: initialViewMode(),
+  sendShortcut: initialSendShortcut(),
+  followUpBehavior: initialFollowUpBehavior(),
+  shortcutBindings: initialShortcutBindings(),
   appMode: "code" as const,
   rightStackTab: "tasks" as const,
   rightStackTabLocked: false,
@@ -131,6 +161,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   allowedRemoteImageDomains: [],
   commandPaletteOpen: false,
   settingsOpen: false,
+  settingsTab: "general" as const,
   automationsOpen: false,
   shortcutsHelpOpen: false,
   quickOpenVisible: false,
@@ -142,6 +173,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   currentProviderBaseUrl: "",
   currentWireApi: "",
   availableModels: [],
+  availableModelLabels: {},
   modelsSource: "",
   availableSkills: [],
   marketplaceSkills: [],
@@ -163,6 +195,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   envVars: [],
   gitChanges: { workingTree: [], staged: [], untracked: [], loading: false },
   skillsMarketplaceOpen: false,
+  skillsMarketplaceReturnTarget: "app",
   liveArtifactsOpen: false,
   agentEditorOpen: false,
   toggleAgentEditor: () =>
@@ -183,8 +216,8 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     }),
   setThemeMode: (mode) => {
     writeLS(LS.theme, mode);
-    applyTheme(mode);
-    set({ themeMode: mode });
+    const resolvedTheme = applyTheme(mode);
+    set({ themeMode: mode, resolvedTheme });
   },
   setTextScale: (s) => {
     const v = clampTextScale(s);
@@ -192,7 +225,39 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     applyTextScale(v);
     set({ textScale: v });
   },
-  setViewMode: (m) => set({ viewMode: m }),
+  setCodeTextScale: (s) => {
+    const value = clamp(0.88, 1.2, s);
+    writeLS(LS.codeTextScale, String(value));
+    applyCodeTextScale(value);
+    set({ codeTextScale: value });
+  },
+  setReducedMotion: (reduced) => {
+    writeLS(LS.reducedMotion, reduced ? "1" : "0");
+    applyReducedMotion(reduced);
+    set({ reducedMotion: reduced });
+  },
+  setViewMode: (m) => {
+    writeLS(LS.viewMode, m);
+    set({ viewMode: m });
+  },
+  setSendShortcut: (shortcut) => {
+    writeLS(LS.sendShortcut, shortcut);
+    set({ sendShortcut: shortcut });
+  },
+  setFollowUpBehavior: (behavior) => {
+    writeLS(LS.followUpBehavior, behavior);
+    set({ followUpBehavior: behavior });
+  },
+  setShortcutBinding: (action, binding) => set((state) => {
+    const shortcutBindings = { ...state.shortcutBindings, [action]: binding };
+    writeLS(LS.shortcutBindings, JSON.stringify(shortcutBindings));
+    return { shortcutBindings };
+  }),
+  resetShortcutBindings: () => {
+    const shortcutBindings = { ...DEFAULT_SHORTCUT_BINDINGS };
+    writeLS(LS.shortcutBindings, JSON.stringify(shortcutBindings));
+    set({ shortcutBindings });
+  },
   setAppMode: (m) =>
     set((s) => {
       if (m !== "code") {
@@ -229,13 +294,18 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
           dockCollapsed: false,
         };
       }
-      const rightSidebarWidth = preferredRightSidebarWidth(t, s.rightSidebarWidth);
+      // Legacy callers and replayed command results may still request a
+      // separate plan panel. MiniCode surfaces plan state in the task/activity
+      // view, so keep one canonical destination instead of storing a tab that
+      // SidebarRight cannot render.
+      const canonicalTab = t === "plan" ? "tasks" : t;
+      const rightSidebarWidth = preferredRightSidebarWidth(canonicalTab, s.rightSidebarWidth);
       if (rightSidebarWidth !== s.rightSidebarWidth) {
         writeLS(LS.layout.rightWidth, String(rightSidebarWidth));
       }
       writeLS(LS.layout.rightOpen, "1");
       return {
-        rightStackTab: t,
+        rightStackTab: canonicalTab,
         rightStackTabLocked: options?.automatic ? s.rightStackTabLocked : true,
         rightPanelOpen: true,
         rightSidebarWidth,
@@ -289,6 +359,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         agentEditorOpen: false,
       };
     }),
+  setSettingsTab: (tab) => set({ settingsTab: tab }),
   toggleAutomations: () =>
     set((s) => {
       if (s.automationsOpen) {
@@ -322,14 +393,15 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         agentEditorOpen: false,
       };
     }),
-  toggleSkillsMarketplace: () =>
+  toggleSkillsMarketplace: (returnTarget = "app") =>
     set((s) => {
       if (s.skillsMarketplaceOpen) {
-        return { skillsMarketplaceOpen: false };
+        return { skillsMarketplaceOpen: false, skillsMarketplaceReturnTarget: "app" };
       }
       // Close all other modals when opening skills marketplace
       return {
         skillsMarketplaceOpen: true,
+        skillsMarketplaceReturnTarget: returnTarget,
         commandPaletteOpen: false,
         settingsOpen: false,
         automationsOpen: false,
@@ -382,16 +454,20 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
       currentWireApi: String(meta.wireApi || ""),
     }),
   setAvailableModels: (models) => set({ availableModels: models }),
+  setAvailableModelLabels: (labels) => set({ availableModelLabels: labels }),
   setModelsSource: (source) => set({ modelsSource: source }),
   setAvailableSkills: (skills) => set({ availableSkills: skills }),
   setSlashCommands: (cmds) => set({ slashCommands: cmds }),
   setMarketplaceSkills: (skills) => set({ marketplaceSkills: skills }),
   setWorkingDirectory: (d) => {
-    set((s) => ({
-      ...(d !== s.workingDirectory ? editorStateForWorkspace(d) : {}),
-      workingDirectory: d,
-      workspaceGit: d !== s.workingDirectory ? null : s.workspaceGit,
-    }));
+    set((s) => {
+      const workspaceChanged = !workspaceRootsEqual(d, s.workingDirectory);
+      return {
+        ...(workspaceChanged ? editorStateForWorkspace(d) : {}),
+        workingDirectory: d,
+        workspaceGit: workspaceChanged ? null : s.workspaceGit,
+      };
+    });
     if (d) {
       const rt = desktop();
       if (rt?.trustWorkspace) rt.trustWorkspace(d);
@@ -418,16 +494,18 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         ? s.conversationWorkbenchStates?.[targetId]
         : undefined;
       const next = cloneConversationWorkbenchState(stored ?? emptyConversationWorkbenchState());
-      const activeTerminalSessionId = next.activeTerminalSessionId &&
-        s.terminalSessions.some((session) => (
-          session.id === next.activeTerminalSessionId && session.conversationId === targetId
-        ))
-          ? next.activeTerminalSessionId
-          : null;
+      const terminalSessions = (next.terminalSessions ?? [])
+        .filter((session) => session.conversationId === targetId)
+        .map((session) => ({ ...session }));
+      // Keep the preferred id until the authoritative terminal.list arrives.
+      // It may not be present in an older UI cache, but clearing it here would
+      // overwrite a valid backend session before reconciliation can occur.
+      const activeTerminalSessionId = next.activeTerminalSessionId;
       return {
         diffReview: next.diffReview,
         previewArtifact: next.previewArtifact,
         livePreviewUrl: next.livePreviewUrl,
+        terminalSessions,
         activeTerminalSessionId,
         rightStackTab: next.rightStackTab,
         rightPanelOpen: next.rightPanelOpen,
@@ -443,7 +521,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
               conversationWorkbenchStates: storeConversationWorkbenchState(
                 s,
                 targetId,
-                { ...next, activeTerminalSessionId },
+                { ...next, terminalSessions, activeTerminalSessionId },
               ),
             }
           : {}),
@@ -465,20 +543,24 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         ? {
             ...s.diffReview,
             files: s.diffReview.files.map((file) =>
-              file.path === path ? { ...file, ...patch } : file,
+              diffFilePathsEqual(file.path, path, s.workingDirectory) ? { ...file, ...patch } : file,
             ),
-            diff: s.diffReview.selectedPath === path && patch.patch != null ? patch.patch : s.diffReview.diff,
+            diff: diffFilePathsEqual(s.diffReview.selectedPath, path, s.workingDirectory) && patch.patch != null
+              ? patch.patch
+              : s.diffReview.diff,
           }
         : null,
     })),
   setDiffReviewSelectedPath: (path) =>
     set((s) => {
       if (!s.diffReview) return s;
-      const file = s.diffReview.files.find((item) => item.path === path);
+      const file = s.diffReview.files.find((item) =>
+        diffFilePathsEqual(item.path, path, s.workingDirectory),
+      );
       return {
         diffReview: {
           ...s.diffReview,
-          selectedPath: path,
+          selectedPath: file?.path ?? path,
           diff: file?.patch ?? s.diffReview.diff,
         },
       };
@@ -486,12 +568,18 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   setDiffFileDecision: (path, decision) =>
     set((s) => {
       if (!s.diffReview) return s;
+      const fileDecisions = Object.fromEntries(
+        Object.entries(s.diffReview.fileDecisions).filter(([candidate]) =>
+          !diffFilePathsEqual(candidate, path, s.workingDirectory),
+        ),
+      ) as Record<string, "approved" | "rejected">;
+      fileDecisions[path] = decision;
       return {
         diffReview: {
           ...s.diffReview,
-          fileDecisions: { ...s.diffReview.fileDecisions, [path]: decision },
+          fileDecisions,
           files: s.diffReview.files.map((f) =>
-            f.path === path ? { ...f, decision } : f,
+            diffFilePathsEqual(f.path, path, s.workingDirectory) ? { ...f, decision } : f,
           ),
         },
       };
@@ -513,39 +601,82 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         diffReview: {
           ...s.diffReview,
           lineComments: (s.diffReview.lineComments ?? []).filter(
-            (c) => !(c.filePath === filePath && c.lineIndex === lineIndex),
+            (c) => !(diffFilePathsEqual(c.filePath, filePath, s.workingDirectory) && c.lineIndex === lineIndex),
           ),
         },
       };
     }),
-  submitDiffReviewWithComments: () => {
+  submitDiffReviewWithComments: async () => {
     const s = get();
     if (!s.diffReview) return;
-    const { requestId, lineComments, protocol } = s.diffReview;
+    const { requestId, lineComments, conversationId, turnId, messageId } = s.diffReview;
     const comments = lineComments ?? [];
-    if (comments.length > 0) {
-      sendClientCommand({
-        type: "user_message",
-        content: `Review the following diff comments and revise accordingly:\n${comments.map((c) => `- ${c.filePath}:${c.lineIndex + 1}: ${c.content}`).join("\n")}`,
-      });
-    }
-    const sent = sendClientCommand(buildApprovalResponseCommand(requestId, "approve", protocol));
     set((state) => ({
       diffReview: state.diffReview?.requestId === requestId
-        ? { ...state.diffReview, status: sent ? "submitted" : "error", error: sent ? undefined : "Connection is offline" }
+        ? { ...state.diffReview, status: "submitted", error: undefined }
         : state.diffReview,
     }));
+    const feedback = comments.length > 0
+      ? `Revise the proposed change using these review comments:\n${comments.map((c) => `- ${c.filePath}:${c.lineIndex + 1}: ${c.content}`).join("\n")}`
+      : undefined;
+    const command = buildApprovalResponseCommand(
+      requestId,
+      comments.length > 0 ? "reject" : "approve",
+      { feedback, owner: { conversationId, turnId, messageId } },
+    );
+    try {
+      const result = await sendPromptResponseCommand(command);
+      if (result && !commandResultSucceeded(result)) throw new Error(result.message || "审批未被后端接受");
+      get().clearDiffReview(requestId);
+    } catch (error) {
+      set((state) => ({
+        diffReview: state.diffReview?.requestId === requestId
+          ? { ...state.diffReview, status: "error", error: error instanceof Error ? error.message : "审批提交失败" }
+          : state.diffReview,
+      }));
+    }
   },
-  submitPartialApproval: () => {
+  submitPartialApproval: async () => {
     const s = get();
     if (!s.diffReview) return;
-    const { requestId, fileDecisions, protocol } = s.diffReview;
-    const sent = sendClientCommand(buildApprovalResponseCommand(requestId, "partial", protocol, fileDecisions));
+    const { requestId, fileDecisions, files, conversationId, turnId, messageId } = s.diffReview;
+    const approved = files
+      .filter((file) => diffFileDecisionForPath(fileDecisions, file.path, s.workingDirectory) === "approved")
+      .map((file) => file.path);
+    const rejected = files
+      .filter((file) => diffFileDecisionForPath(fileDecisions, file.path, s.workingDirectory) === "rejected")
+      .map((file) => file.path);
+    const action = rejected.length === 0 ? "approve" : "reject";
+    const feedback = approved.length > 0 && rejected.length > 0
+      ? [
+          "The proposed tool call is atomic and was not executed.",
+          `Reissue a new tool call containing only these approved files: ${approved.join(", ")}.`,
+          `Do not include these rejected files: ${rejected.join(", ")}.`,
+        ].join("\n")
+      : rejected.length > 0
+        ? `Do not modify these rejected files: ${rejected.join(", ")}.`
+        : undefined;
     set((state) => ({
       diffReview: state.diffReview?.requestId === requestId
-        ? { ...state.diffReview, status: sent ? "submitted" : "error", error: sent ? undefined : "Connection is offline" }
+        ? { ...state.diffReview, status: "submitted", error: undefined }
         : state.diffReview,
     }));
+    const command = buildApprovalResponseCommand(
+      requestId,
+      action,
+      { feedback, owner: { conversationId, turnId, messageId } },
+    );
+    try {
+      const result = await sendPromptResponseCommand(command);
+      if (result && !commandResultSucceeded(result)) throw new Error(result.message || "审批未被后端接受");
+      get().clearDiffReview(requestId);
+    } catch (error) {
+      set((state) => ({
+        diffReview: state.diffReview?.requestId === requestId
+          ? { ...state.diffReview, status: "error", error: error instanceof Error ? error.message : "审批提交失败" }
+          : state.diffReview,
+      }));
+    }
   },
   setPreviewArtifact: (artifact) => set({ previewArtifact: artifact }),
   setConversationPreviewArtifact: (conversationId, artifact) =>
@@ -634,8 +765,48 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   setGitChangesLoading: (loading) =>
     set((s) => ({ gitChanges: { ...s.gitChanges, loading } })),
   requestGitChanges: () => {
-    set((s) => ({ gitChanges: { ...s.gitChanges, loading: true } }));
-    sendClientCommand({ type: "diff.git_working_tree" }, { silent: true });
-    sendClientCommand({ type: "diff.git_staged" }, { silent: true });
+    const state = get();
+    const conversationId = String(state.conversationId || "").trim();
+    const workspaceRoot = String(state.workingDirectory || "").trim();
+    if (!conversationId || !workspaceRoot) {
+      set((s) => ({
+        gitChanges: {
+          ...s.gitChanges,
+          workingTree: [],
+          staged: [],
+          untracked: [],
+          loading: false,
+          workspaceRoot,
+          workingTreeRequestId: undefined,
+          stagedRequestId: undefined,
+        },
+      }));
+      return;
+    }
+    const workingTreeRequestId = createClientCommandId();
+    const stagedRequestId = createClientCommandId();
+    set((s) => ({
+      gitChanges: {
+        ...s.gitChanges,
+        loading: true,
+        workspaceRoot,
+        workingTreeRequestId,
+        stagedRequestId,
+      },
+    }));
+    sendClientCommand({
+      type: "diff.git_working_tree",
+      conversation_id: conversationId,
+      workspace: workspaceRoot,
+      request_id: workingTreeRequestId,
+      client_command_id: workingTreeRequestId,
+    }, { silent: true });
+    sendClientCommand({
+      type: "diff.git_staged",
+      conversation_id: conversationId,
+      workspace: workspaceRoot,
+      request_id: stagedRequestId,
+      client_command_id: stagedRequestId,
+    }, { silent: true });
   },
 });

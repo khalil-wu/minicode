@@ -13,9 +13,10 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 
-from backend.mcp.marketplace import get_marketplace_connectors
+from backend.atomic_io import atomic_write_text, file_mutation_locks
+from backend.agent.markdown_scopes import get_minicode_config_home_dir
 
-USER_SKILLS_DIR = Path.home() / ".agents" / "skills"
+USER_SKILLS_DIR = get_minicode_config_home_dir() / "skills"
 
 OPENAI_SKILLS_CONTENTS_URL = "https://api.github.com/repos/openai/skills/contents/skills/.curated?ref=main"
 OPENAI_SKILL_RAW_URL = "https://raw.githubusercontent.com/openai/skills/main/skills/.curated/{name}/SKILL.md"
@@ -32,66 +33,6 @@ OPENAI_SKILLS_METADATA_CONCURRENCY = 8
 FetchJson = Callable[[str], Awaitable[Any] | Any]
 FetchText = Callable[[str], Awaitable[str] | str]
 
-
-CURATED_SKILLS: dict[str, dict[str, Any]] = {
-    "github-actions-auditor": {
-        "name": "github-actions-auditor",
-        "title": "GitHub Actions Auditor",
-        "description": "Review GitHub Actions workflows for unsafe permissions, flaky cache steps, and release blockers.",
-        "triggers": ["github actions", "workflow", "ci", "release", "actions"],
-        "body": """# GitHub Actions Auditor
-
-Use this skill when reviewing GitHub Actions workflows.
-
-Focus on:
-- Overly broad `permissions` blocks.
-- Unpinned third-party actions.
-- Cache keys that can produce flaky or unsafe builds.
-- Release jobs that publish without clear approval or provenance.
-- Matrix jobs that hide failures behind `continue-on-error`.
-
-When reporting findings, list the workflow file, job name, severity, and a concrete fix.
-""",
-    },
-    "react-ui-reviewer": {
-        "name": "react-ui-reviewer",
-        "title": "React UI Reviewer",
-        "description": "Inspect React component hierarchy, accessibility, empty states, and interaction polish.",
-        "triggers": ["react", "ui", "accessibility", "component", "frontend"],
-        "body": """# React UI Reviewer
-
-Use this skill when reviewing or improving React UI.
-
-Focus on:
-- Clear hierarchy, spacing, and readable density.
-- Keyboard navigation and visible focus states.
-- Accessible names for icon-only controls.
-- Loading, empty, disabled, and error states.
-- Avoiding fake controls that do not call real handlers.
-
-Give feedback as specific UI risks with file references and practical fixes.
-""",
-    },
-    "python-refactor-kit": {
-        "name": "python-refactor-kit",
-        "title": "Python Refactor Kit",
-        "description": "Plan safe Python refactors with pytest coverage, dependency checks, and migration notes.",
-        "triggers": ["python", "pytest", "refactor", "typing", "migration"],
-        "body": """# Python Refactor Kit
-
-Use this skill when planning or executing Python refactors.
-
-Focus on:
-- Preserving public behavior with regression tests.
-- Keeping modules small and import boundaries clear.
-- Avoiding broad rewrites when targeted extraction is safer.
-- Running focused pytest commands before broader suites.
-- Calling out migration notes when APIs or config shapes change.
-
-Prefer small, reversible changes backed by tests.
-""",
-    },
-}
 
 _MARKETPLACE_CACHE: dict[str, Any] | None = None
 _MARKETPLACE_CACHE_EXPIRES_AT = 0.0
@@ -170,30 +111,6 @@ def _parse_skill_frontmatter(content: str, fallback_name: str) -> dict[str, str]
 
     metadata.setdefault("title", metadata["name"])
     return metadata
-
-
-def _render_skill_file(entry: dict[str, Any]) -> str:
-    return (
-        "---\n"
-        f"name: {entry['name']}\n"
-        f"description: {entry['description']}\n"
-        "---\n\n"
-        f"{entry['body'].strip()}\n"
-    )
-
-
-def _fallback_marketplace_skills() -> list[dict[str, Any]]:
-    return [
-        {
-            "name": item["name"],
-            "title": item["title"],
-            "description": item["description"],
-            "installed": False,
-            "source": "fallback",
-            "path": f"skills/.curated/{item['name']}",
-        }
-        for item in CURATED_SKILLS.values()
-    ]
 
 
 def _openai_directory_skill_entry(name: str) -> dict[str, Any]:
@@ -305,8 +222,7 @@ def registry_server_to_marketplace_mcp(record: dict[str, Any], installed_names: 
             "server": {
                 "transport": "http",
                 "url": remote["url"],
-                "autoStart": False,
-                "maxRetries": 3,
+                "auto_start": False,
             },
         }
         if remote
@@ -318,7 +234,7 @@ def registry_server_to_marketplace_mcp(record: dict[str, Any], installed_names: 
 
     return {
         "name": name,
-        "providerName": provider_name,
+        "provider_name": provider_name,
         "title": title,
         "description": description,
         "version": version,
@@ -329,11 +245,10 @@ def registry_server_to_marketplace_mcp(record: dict[str, Any], installed_names: 
         "config_snippet": config_snippet,
         "transport": "http" if remote else "manual",
         "url": str((remote or {}).get("url") or ""),
-        "autoStart": False,
-        "maxRetries": 3,
-        "websiteUrl": website_url,
-        "docsUrl": website_url,
-        "iconUrl": icon_url,
+        "auto_start": False,
+        "website_url": website_url,
+        "docs_url": website_url,
+        "icon_url": icon_url,
         "tags": ["MCP", "Registry", "Remote" if config_snippet else "Manual"],
         "official": official_status == "active",
     }
@@ -374,34 +289,9 @@ def _apply_installed_flags(
             skill["installed"] = str(skill.get("name", "")) in installed_skill_names
     for entry in result.get("mcp", []):
         if isinstance(entry, dict):
-            provider_name = str(entry.get("providerName") or "")
+            provider_name = str(entry.get("provider_name") or "")
             entry["installed"] = str(entry.get("name", "")) in installed_mcp_names or provider_name in installed_mcp_names
     return result
-
-
-def _merge_curated_connectors(
-    registry_entries: list[dict[str, Any]],
-    installed_mcp_names: set[str],
-) -> list[dict[str, Any]]:
-    curated = [
-        {
-            **entry,
-            "source": "curated",
-            "providerName": str(entry.get("name") or ""),
-            "websiteUrl": str(entry.get("docsUrl") or ""),
-            "iconUrl": str(entry.get("iconUrl") or ""),
-        }
-        for entry in get_marketplace_connectors(sorted(installed_mcp_names))
-    ]
-    merged = curated[:]
-    seen = {str(entry.get("providerName") or entry.get("name") or "").lower() for entry in curated}
-    for entry in registry_entries:
-        key = str(entry.get("providerName") or entry.get("name") or "").lower()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        merged.append(entry)
-    return merged
 
 
 async def list_extensions_marketplace(
@@ -416,6 +306,21 @@ async def list_extensions_marketplace(
 
     installed_names = installed_names or set()
     installed_mcp_names = installed_mcp_names or set()
+    # Network catalogs are opt-in. MiniCode should remain deterministic and
+    # must not import another user's extension marketplace state by default.
+    network_enabled = fetch_json is not None or fetch_text is not None or str(
+        os.environ.get("MINICODE_ENABLE_NETWORK_MARKETPLACE") or ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if not network_enabled:
+        return _apply_installed_flags({
+            "skills": [],
+            "mcp": [],
+            "source_status": {
+                "openai_skills": {"source": "disabled", "ok": True, "count": 0, "reason": "network marketplace disabled"},
+                "mcp_registry": {"source": "disabled", "ok": True, "count": 0, "reason": "network marketplace disabled"},
+            },
+            "generated_at": _utc_now_iso(),
+        }, installed_names, installed_mcp_names)
     now = time.monotonic()
     if _MARKETPLACE_CACHE is not None and not force_refresh and now < _MARKETPLACE_CACHE_EXPIRES_AT:
         return _apply_installed_flags(_MARKETPLACE_CACHE, installed_names, installed_mcp_names)
@@ -435,8 +340,7 @@ async def list_extensions_marketplace(
                 timeout=OPENAI_SKILLS_CATALOG_TIMEOUT_SECONDS,
             )
         except Exception as exc:
-            fb = _fallback_marketplace_skills()
-            return fb, {"source": "fallback", "ok": False, "count": len(fb), "error": _error_message(exc)}
+            return [], {"source": "unavailable", "ok": False, "count": 0, "error": _error_message(exc)}
 
     async def get_mcp():
         try:
@@ -445,7 +349,10 @@ async def list_extensions_marketplace(
                 timeout=MCP_REGISTRY_SOURCE_TIMEOUT_SECONDS,
             )
         except Exception as exc:
-            return [], {"source": "fallback", "ok": False, "count": 0, "error": _error_message(exc)}
+            # No local connector catalog exists as a fallback.  Reporting one
+            # here would falsely imply that manually-installable MCP entries
+            # remain available when the Registry cannot be reached.
+            return [], {"source": "unavailable", "ok": False, "count": 0, "error": _error_message(exc)}
 
     # These two public sources frequently share a constrained desktop proxy.
     # Fetching them in parallel can make both time out; prioritize the Skill
@@ -455,7 +362,7 @@ async def list_extensions_marketplace(
 
     base_payload = {
         "skills": skills,
-        "mcp": _merge_curated_connectors(mcp, set()),
+        "mcp": mcp,
         "source_status": {
             "openai_skills": openai_status,
             "mcp_registry": mcp_status,
@@ -467,45 +374,6 @@ async def list_extensions_marketplace(
     cache_ttl = MARKETPLACE_CACHE_TTL_SECONDS if all_sources_ok else MARKETPLACE_ERROR_CACHE_TTL_SECONDS
     _MARKETPLACE_CACHE_EXPIRES_AT = now + cache_ttl
     return _apply_installed_flags(base_payload, installed_names, installed_mcp_names)
-
-
-def list_curated_skills(installed_names: set[str] | None = None) -> list[dict[str, Any]]:
-    installed_names = installed_names or set()
-    return [
-        {
-            **item,
-            "installed": item["name"] in installed_names,
-        }
-        for item in _fallback_marketplace_skills()
-    ]
-
-
-def install_curated_skill(skill_name: str, skills_dir: Path | None = None) -> dict[str, Any]:
-    normalized_name = _safe_skill_name(skill_name)
-    if normalized_name not in CURATED_SKILLS:
-        raise KeyError(f"Skill '{skill_name}' is not in the curated marketplace.")
-
-    entry = CURATED_SKILLS[normalized_name]
-    target_root = skills_dir or USER_SKILLS_DIR
-    skill_dir = target_root / normalized_name
-    skill_file = skill_dir / "SKILL.md"
-    if skill_dir.exists():
-        raise FileExistsError(f"Skill '{normalized_name}' is already installed.")
-
-    skill_dir.mkdir(parents=True, exist_ok=False)
-    skill_file.write_text(_render_skill_file(entry), encoding="utf-8")
-
-    return {
-        "installed": True,
-        "skill": {
-            "name": entry["name"],
-            "title": entry["title"],
-            "description": entry["description"],
-            "installed": True,
-            "source": "fallback",
-        },
-        "path": str(skill_file),
-    }
 
 
 async def install_marketplace_skill(
@@ -522,18 +390,18 @@ async def install_marketplace_skill(
         raise FileExistsError(f"Skill '{normalized_name}' is already installed.")
 
     fetch_text = fetch_text or _default_fetch_text
-    source = "openai"
-    try:
-        content = await _maybe_await(fetch_text(OPENAI_SKILL_RAW_URL.format(name=normalized_name)))
-    except Exception:
-        if normalized_name not in CURATED_SKILLS:
-            raise KeyError(f"Skill '{skill_name}' is not in the OpenAI curated marketplace.")
-        content = _render_skill_file(CURATED_SKILLS[normalized_name])
-        source = "fallback"
+    content = await _maybe_await(fetch_text(OPENAI_SKILL_RAW_URL.format(name=normalized_name)))
 
     metadata = _parse_skill_frontmatter(content, normalized_name)
-    skill_dir.mkdir(parents=True, exist_ok=False)
-    skill_file.write_text(content.rstrip() + "\n", encoding="utf-8")
+    with file_mutation_locks([skill_file]):
+        if skill_dir.exists() or skill_dir.is_symlink():
+            raise FileExistsError(f"Skill '{normalized_name}' is already installed.")
+        skill_dir.mkdir(parents=True, exist_ok=False)
+        try:
+            atomic_write_text(skill_file, content.rstrip() + "\n", encoding="utf-8")
+        except Exception:
+            shutil.rmtree(skill_dir, ignore_errors=True)
+            raise
 
     return {
         "installed": True,
@@ -542,9 +410,54 @@ async def install_marketplace_skill(
             "title": metadata.get("title") or normalized_name,
             "description": metadata.get("description") or "",
             "installed": True,
-            "source": source,
+            "source": "openai",
         },
         "path": str(skill_file),
+    }
+
+
+def import_local_skill(source_path: str | Path, skills_dir: Path | None = None) -> dict[str, Any]:
+    """Copy a local SKILL.md directory into MiniCode's private skill root."""
+    source = Path(source_path).expanduser().resolve()
+    if source.is_file() and source.name.casefold() == "skill.md":
+        source_dir = source.parent
+    elif source.is_dir():
+        source_dir = source
+    else:
+        raise FileNotFoundError("本地技能必须是包含 SKILL.md 的文件夹或 SKILL.md 文件。")
+    skill_file = source_dir / "SKILL.md"
+    if not skill_file.is_file() or skill_file.is_symlink():
+        raise ValueError("本地技能目录必须包含真实的 SKILL.md 文件。")
+    for candidate in source_dir.rglob("*"):
+        if candidate.is_symlink():
+            raise ValueError("本地技能不能包含符号链接。")
+    metadata = _parse_skill_frontmatter(skill_file.read_text(encoding="utf-8"), source_dir.name)
+    normalized_name = _safe_skill_name(metadata.get("name") or source_dir.name)
+    target_root = (skills_dir or USER_SKILLS_DIR).resolve()
+    target_dir = target_root / normalized_name
+    if target_root not in target_dir.parents:
+        raise ValueError("技能路径不在 MiniCode 技能目录内。")
+    if target_dir.exists():
+        raise FileExistsError(f"Skill '{normalized_name}' is already installed.")
+    with file_mutation_locks([target_dir / "SKILL.md"]):
+        if target_dir.exists():
+            raise FileExistsError(f"Skill '{normalized_name}' is already installed.")
+        target_dir.mkdir(parents=True, exist_ok=False)
+        try:
+            shutil.copytree(source_dir, target_dir, dirs_exist_ok=True)
+        except Exception:
+            shutil.rmtree(target_dir, ignore_errors=True)
+            raise
+    return {
+        "installed": True,
+        "skill": {
+            "name": normalized_name,
+            "title": metadata.get("title") or normalized_name,
+            "description": metadata.get("description") or "",
+            "installed": True,
+            "source": "minicode-user",
+        },
+        "path": str(target_dir / "SKILL.md"),
     }
 
 
@@ -552,21 +465,24 @@ def remove_user_skill(skill_name: str, skills_dir: Path | None = None) -> dict[s
     normalized_name = _safe_skill_name(skill_name)
 
     target_root = (skills_dir or USER_SKILLS_DIR).resolve()
-    skill_dir = (target_root / normalized_name).resolve()
+    # Keep the final path unresolved so a malicious pre-existing symlink can
+    # be rejected before any recursive removal follows it.
+    skill_dir = target_root / normalized_name
     skill_file = skill_dir / "SKILL.md"
     if target_root not in skill_dir.parents:
         raise ValueError("Skill path is outside the user skills directory.")
-    if not skill_file.exists() or not skill_dir.is_dir():
-        raise FileNotFoundError(f"Skill '{normalized_name}' is not installed in the user skills directory.")
-
-    shutil.rmtree(skill_dir)
-    entry = CURATED_SKILLS.get(normalized_name, {})
+    with file_mutation_locks([skill_file]):
+        if skill_dir.is_symlink() or not skill_file.exists() or not skill_dir.is_dir():
+            raise FileNotFoundError(f"Skill '{normalized_name}' is not installed in the user skills directory.")
+        if skill_file.is_symlink():
+            raise ValueError("Skill file cannot be a symbolic link.")
+        shutil.rmtree(skill_dir)
     return {
         "removed": True,
         "skill": {
             "name": normalized_name,
-            "title": entry.get("title", normalized_name),
-            "description": entry.get("description", ""),
+            "title": normalized_name,
+            "description": "",
             "installed": False,
             "source": "user",
         },

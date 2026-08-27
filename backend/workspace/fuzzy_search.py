@@ -1,5 +1,5 @@
 """
-模糊文件搜索引擎（参考 Claude Code 的 fuzzySearch.ts）。
+模糊文件搜索引擎（MiniCode 实现）。
 
 特性：
 - 评分算法：边界匹配、CamelCase、连续字符
@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -35,7 +36,7 @@ class FuzzySearchEngine:
     """
     模糊文件搜索引擎。
 
-    参考 Claude Code 的评分算法：
+    评分算法（自有设计）：
     - 边界匹配（路径分隔符、单词边界）：+10 分
     - CamelCase 匹配：+8 分
     - 连续字符匹配：每个连续字符 +5 分
@@ -59,6 +60,7 @@ class FuzzySearchEngine:
         """
         self.workspace_root = workspace_root.resolve()
         self._file_cache: list[Path] = []
+        self._file_cache_metadata: dict[Path, tuple[str, frozenset[str]]] = {}
         self._cache_valid = False
 
         logger.info(f"Initialized fuzzy search engine for {workspace_root}")
@@ -89,22 +91,20 @@ class FuzzySearchEngine:
         if not self._cache_valid:
             self._refresh_file_cache()
 
-        # 字符位图预过滤
+        # The cache stores the normalized path and its character index once.
+        # Rebuilding those sets for every query made repeated searches scale
+        # with both the tree size and the query count.
         query_chars = set(query_lower)
-        candidates: list[Path] = []
-
-        for path in self._file_cache:
-            path_str = str(path.relative_to(self.workspace_root)).lower()
-
-            # 快速检查：查询中的所有字符是否都在路径中
-            if query_chars.issubset(set(path_str)):
-                candidates.append(path)
 
         # 评分和排序
         matches: list[FuzzyMatch] = []
 
-        for path in candidates:
-            match = self._score_match(path, query_lower)
+        for path in self._file_cache:
+            path_str, path_chars = self._file_cache_metadata[path]
+            # 快速检查：查询中的所有字符是否都在路径中
+            if not query_chars.issubset(path_chars):
+                continue
+            match = self._score_match(path, query_lower, path_str=path_str)
             if match is not None:
                 # 测试文件惩罚
                 if not include_tests and self._is_test_file(path):
@@ -124,6 +124,7 @@ class FuzzySearchEngine:
     def _refresh_file_cache(self) -> None:
         """刷新文件缓存"""
         self._file_cache.clear()
+        self._file_cache_metadata.clear()
 
         # 忽略的目录
         ignore_dirs = {
@@ -151,37 +152,60 @@ class FuzzySearchEngine:
             logger.warning("Failed to read .gitignore for fuzzy search", exc_info=True)
             gitignore = GitIgnoreSpec.from_lines([])
 
-        try:
-            for path in self.workspace_root.rglob("*"):
-                # 跳过目录
-                if path.is_dir():
-                    continue
+        pending = [self.workspace_root]
+        while pending:
+            directory = pending.pop()
+            try:
+                entries = os.scandir(directory)
+            except OSError:
+                logger.debug("Unable to scan fuzzy-search directory %s", directory, exc_info=True)
+                continue
+            with entries:
+                for entry in entries:
+                    path = Path(entry.path)
+                    try:
+                        rel_path = path.relative_to(self.workspace_root)
+                    except ValueError:
+                        continue
+                    rel_parts = rel_path.parts
 
-                # 跳过忽略的目录
-                rel_parts = path.relative_to(self.workspace_root).parts
-                rel_path = Path(*rel_parts)
-                if any(part in ignore_dirs for part in rel_parts):
-                    continue
+                    # Never follow links out of the workspace. A fuzzy search
+                    # is read-only, but returning a linked secret file is still
+                    # an information disclosure.
+                    if entry.is_symlink():
+                        continue
 
-                # 跳过隐藏文件
-                if any(part.startswith(".") for part in rel_parts):
-                    continue
+                    hidden = any(part.startswith(".") for part in rel_parts)
+                    ignored_name = any(part in ignore_dirs for part in rel_parts)
+                    ignored_by_spec = gitignore.match_file(rel_path.as_posix())
+                    if entry.is_dir(follow_symlinks=False):
+                        if not hidden and not ignored_name and not ignored_by_spec:
+                            pending.append(path)
+                        continue
 
-                if gitignore.match_file(rel_path.as_posix()) or is_sensitive_file(rel_path):
-                    continue
+                    if hidden or ignored_name or ignored_by_spec:
+                        continue
+                    if is_sensitive_file(rel_path) or is_windows_reserved_path(rel_path):
+                        continue
 
-                if is_windows_reserved_path(rel_path):
-                    continue
+                    self._file_cache.append(path)
+                    normalized = rel_path.as_posix()
+                    self._file_cache_metadata[path] = (
+                        normalized,
+                        frozenset(normalized.lower()),
+                    )
 
-                self._file_cache.append(path)
+        self._cache_valid = True
+        logger.info("Refreshed file cache: %d files", len(self._file_cache))
 
-            self._cache_valid = True
-            logger.info(f"Refreshed file cache: {len(self._file_cache)} files")
 
-        except Exception as e:
-            logger.error(f"Failed to refresh file cache: {e}", exc_info=True)
-
-    def _score_match(self, path: Path, query: str) -> Optional[FuzzyMatch]:
+    def _score_match(
+        self,
+        path: Path,
+        query: str,
+        *,
+        path_str: str | None = None,
+    ) -> Optional[FuzzyMatch]:
         """
         计算匹配分数。
 
@@ -192,7 +216,7 @@ class FuzzySearchEngine:
         Returns:
             匹配结果，如果不匹配则返回 None
         """
-        path_str = str(path.relative_to(self.workspace_root))
+        path_str = path_str or str(path.relative_to(self.workspace_root))
         path_lower = path_str.lower()
 
         # 查找匹配位置

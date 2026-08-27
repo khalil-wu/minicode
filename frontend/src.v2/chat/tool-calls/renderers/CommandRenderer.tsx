@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { ShieldAlert } from "lucide-react";
 import type { ToolCallRecord } from "../../../lib/tool-call-reducer";
+import { safeJsonParse } from "../../../lib/safe-parse";
 
 // The backend appends a "[sandbox] ..." paragraph to a failed sandboxed command
 // so the model knows it can retry with escalated permissions. That text is
@@ -26,7 +27,8 @@ function parseCommandSummary(summary: string): {
   const trimmed = summary.trim();
   if (!trimmed) return { output: "", stderr: "", exitCode: null, timedOut: false, sandboxBlocked: false };
   try {
-    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    const parsed = safeJsonParse<Record<string, unknown> | null>(trimmed, null);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
     const stdout = parsed.stdout ?? parsed.output ?? parsed.result ?? parsed.summary;
     const stderr = parsed.stderr ?? parsed.error;
     const exit = parsed.exit_code ?? parsed.exitCode ?? parsed.code;
@@ -77,14 +79,14 @@ export const CommandResultView = ({
       {(parsed.exitCode || parsed.timedOut || parsed.sandboxBlocked) && (
         <div className="flex gap-2 items-center text-[var(--text-muted)] text-xs font-mono">
           {parsed.exitCode && <span>exit {parsed.exitCode}</span>}
-          {parsed.timedOut && <span>timeout</span>}
+          {parsed.timedOut && <span>超时</span>}
           {parsed.sandboxBlocked && (
             <span
-              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-[color-mix(in_oklch,var(--state-warning,#c98a00)_40%,var(--border-subtle))] bg-[color-mix(in_oklch,var(--state-warning,#c98a00)_12%,var(--surface-base))] text-[var(--text-secondary)] font-sans"
-              title="This command failed in the sandbox (no network / writes limited to the workspace). The agent may retry it with escalated permissions, which requires your approval."
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-[color-mix(in_oklch,var(--state-warning)_40%,var(--border-subtle))] bg-[color-mix(in_oklch,var(--state-warning)_12%,var(--surface-base))] text-[var(--text-secondary)] font-sans"
+              title="此命令受到当前沙箱策略限制。Agent 可申请更高权限后重试，但需要你的批准。"
             >
               <ShieldAlert size={14} />
-              sandbox blocked
+              沙箱策略已阻止
             </span>
           )}
         </div>

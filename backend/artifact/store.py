@@ -13,12 +13,19 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING  # noqa: F401  (reserved for forward references in later tasks)
 
 from backend.config import DATA_ROOT
-from backend.atomic_io import atomic_write_text
+from backend.atomic_io import atomic_write_text, file_mutation_locks
+from backend.owner_scope import (
+    OwnerScope,
+    grant_owner_scope,
+    normalize_owner_scopes,
+    owner_scope_matches,
+    remove_conversation_scopes,
+)
 
 # ── Storage paths and limits ─────────────────────────────────
 ARTIFACT_DATA_DIR = DATA_ROOT / "artifacts"
@@ -31,13 +38,25 @@ ARTIFACT_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 # ── On-disk file naming ──────────────────────────────────────
 META_SIDECAR_SUFFIX = ".meta.json"
 CONTENT_UNIT_SUFFIX = ".txt"
-LEGACY_SUFFIX = ".json"
 
 # ── Schema versioning ────────────────────────────────────────
-META_SIDECAR_SCHEMA_VERSION = 2
+META_SIDECAR_SCHEMA_VERSION = 4
 
 # ── Module logger ────────────────────────────────────────────
 logger = logging.getLogger(__name__)
+
+
+class ArtifactPersistenceError(RuntimeError):
+    """Structured evidence that a durable artifact record is unreadable."""
+
+    def __init__(self, path: Path, reason: str, detail: str = "") -> None:
+        self.path = str(path)
+        self.reason = reason
+        self.detail = detail
+        message = f"Artifact persistence failure ({reason}): {path}"
+        if detail:
+            message = f"{message}: {detail}"
+        super().__init__(message)
 
 
 @dataclass
@@ -47,8 +66,11 @@ class ArtifactMeta:
     type: str
     size: int
     preview: str
+    media_type: str = ""
     conversation_id: str = ""
+    conversation_ids: tuple[str, ...] = ()
     workspace_root: str = ""
+    owner_scopes: tuple[OwnerScope, ...] = ()
 
 
 def _build_preview(content: str, preview_lines: int) -> str:
@@ -108,8 +130,11 @@ class MetaSidecar:
     preview: str
     preview_lines: int
     created_at: float
+    media_type: str = ""
     conversation_id: str = ""
+    conversation_ids: tuple[str, ...] = ()
     workspace_root: str = ""
+    owner_scopes: tuple[OwnerScope, ...] = ()
 
     def to_meta(self) -> ArtifactMeta:
         """Project the sidecar onto the public ``ArtifactMeta`` shape."""
@@ -120,8 +145,11 @@ class MetaSidecar:
             type=self.type,
             size=self.size,
             preview=self.preview,
+            media_type=self.media_type,
             conversation_id=self.conversation_id,
+            conversation_ids=self.conversation_ids,
             workspace_root=self.workspace_root,
+            owner_scopes=self.owner_scopes,
         )
 
     @classmethod
@@ -134,6 +162,7 @@ class MetaSidecar:
         content: str,
         preview_lines: int,
         created_at: float,
+        media_type: str = "",
         conversation_id: str = "",
         workspace_root: str = "",
     ) -> MetaSidecar:
@@ -148,8 +177,15 @@ class MetaSidecar:
             preview=_build_preview(content, preview_lines),
             preview_lines=preview_lines,
             created_at=created_at,
+            media_type=media_type,
             conversation_id=conversation_id,
+            conversation_ids=(conversation_id,) if conversation_id else (),
             workspace_root=workspace_root,
+            owner_scopes=normalize_owner_scopes(
+                None,
+                conversation_id=conversation_id,
+                workspace_root=workspace_root,
+            ),
         )
 
     def to_json_payload(self) -> dict[str, object]:
@@ -164,8 +200,11 @@ class MetaSidecar:
             "preview": self.preview,
             "preview_lines": self.preview_lines,
             "created_at": self.created_at,
+            "media_type": self.media_type,
             "conversation_id": self.conversation_id,
+            "conversation_ids": list(self.conversation_ids),
             "workspace_root": self.workspace_root,
+            "owner_scopes": [scope.to_json() for scope in self.owner_scopes],
         }
 
     @classmethod
@@ -183,7 +222,7 @@ class MetaSidecar:
         schema_version = payload.get("schema_version")
         if not isinstance(schema_version, int) or isinstance(schema_version, bool):
             return None
-        if schema_version not in {1, META_SIDECAR_SCHEMA_VERSION}:
+        if schema_version != META_SIDECAR_SCHEMA_VERSION:
             return None
 
         artifact_id = payload.get("artifact_id")
@@ -220,8 +259,34 @@ class MetaSidecar:
         if created_at <= 0:
             return None
 
+        media_type = payload.get("media_type", "")
+        if not isinstance(media_type, str):
+            return None
+
+        conversation_id = str(payload.get("conversation_id") or "")
+        raw_conversation_ids = payload.get("conversation_ids")
+        if raw_conversation_ids is None:
+            conversation_ids = (conversation_id,) if conversation_id else ()
+        elif not isinstance(raw_conversation_ids, list) or any(
+            not isinstance(value, str) for value in raw_conversation_ids
+        ):
+            return None
+        else:
+            conversation_ids = tuple(dict.fromkeys(value for value in raw_conversation_ids if value))
+
+        workspace_root = str(payload.get("workspace_root") or "")
+        try:
+            owner_scopes = normalize_owner_scopes(
+                payload.get("owner_scopes"),
+                conversation_id=conversation_id,
+                conversation_ids=conversation_ids,
+                workspace_root=workspace_root,
+                strict=True,
+            )
+        except (TypeError, ValueError):
+            return None
         return cls(
-            schema_version=schema_version,
+            schema_version=META_SIDECAR_SCHEMA_VERSION,
             artifact_id=artifact_id,
             source=source,
             type=type_field,
@@ -229,85 +294,11 @@ class MetaSidecar:
             preview=preview,
             preview_lines=preview_lines,
             created_at=float(created_at),
-            conversation_id=str(payload.get("conversation_id") or ""),
-            workspace_root=str(payload.get("workspace_root") or ""),
-        )
-
-
-@dataclass(frozen=True)
-class LegacyPayload:
-    """Internal record for an artifact persisted by the prior implementation.
-
-    Legacy files are single ``art_xxxxxxxx.json`` documents that bundle metadata
-    and content together. They predate :class:`MetaSidecar` and have no
-    ``schema_version``, ``preview_lines``, or ``created_at`` field — that's how
-    the read path distinguishes them from new-format sidecars. New writes never
-    produce this format; the reader path is read-only.
-    """
-
-    artifact_id: str
-    source: str
-    type: str
-    size: int
-    preview: str
-    content: str
-
-    def to_meta(self) -> ArtifactMeta:
-        """Project the legacy payload onto the public ``ArtifactMeta`` shape."""
-
-        return ArtifactMeta(
-            artifact_id=self.artifact_id,
-            source=self.source,
-            type=self.type,
-            size=self.size,
-            preview=self.preview,
-        )
-
-    @classmethod
-    def from_json_payload(cls, payload: dict[str, object]) -> LegacyPayload | None:
-        """Parse a legacy payload from a decoded JSON object.
-
-        Returns ``None`` whenever the input is not a dict or any of the six
-        required fields (``artifact_id``, ``source``, ``type``, ``size``,
-        ``preview``, ``content``) is missing or has the wrong type, so the read
-        path can treat the file as unparseable. Logging of parse failures is
-        the caller's responsibility.
-        """
-
-        if not isinstance(payload, dict):
-            return None
-
-        artifact_id = payload.get("artifact_id")
-        if not isinstance(artifact_id, str) or not artifact_id:
-            return None
-
-        source = payload.get("source")
-        if not isinstance(source, str):
-            return None
-
-        type_field = payload.get("type")
-        if not isinstance(type_field, str):
-            return None
-
-        size = payload.get("size")
-        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
-            return None
-
-        preview = payload.get("preview")
-        if not isinstance(preview, str):
-            return None
-
-        content = payload.get("content")
-        if not isinstance(content, str):
-            return None
-
-        return cls(
-            artifact_id=artifact_id,
-            source=source,
-            type=type_field,
-            size=size,
-            preview=preview,
-            content=content,
+            media_type=media_type,
+            conversation_id=conversation_id,
+            conversation_ids=conversation_ids,
+            workspace_root=workspace_root,
+            owner_scopes=owner_scopes,
         )
 
 
@@ -331,22 +322,23 @@ def _write_split_payload(
     loop thread itself.
     """
 
-    atomic_write_text(content_path, content)
-    try:
-        atomic_write_text(
-            meta_path,
-            json.dumps(sidecar.to_json_payload(), ensure_ascii=False, indent=2),
-        )
-    except OSError:
-        content_path.unlink(missing_ok=True)
-        raise
+    with file_mutation_locks([meta_path, content_path]):
+        atomic_write_text(content_path, content)
+        try:
+            atomic_write_text(
+                meta_path,
+                json.dumps(sidecar.to_json_payload(), ensure_ascii=False, indent=2),
+            )
+        except OSError:
+            content_path.unlink(missing_ok=True)
+            raise
 
 
 def _read_meta_sidecar(meta_path: Path) -> MetaSidecar | None:
     """Read a metadata sidecar from disk.
 
-    Returns ``None`` when the file is missing (caller falls through to the legacy
-    reader) or when any parse step fails. Failures are logged at ``WARNING`` with
+    Returns ``None`` when the file is missing or when any parse step fails.
+    Failures are logged at ``WARNING`` with
     a ``reason`` field in ``{"io", "json", "missing-fields"}``. The file on disk
     is never modified, regardless of failure path.
 
@@ -358,24 +350,21 @@ def _read_meta_sidecar(meta_path: Path) -> MetaSidecar | None:
         raw = meta_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    except OSError:
-        logger.warning("artifact parse failed path=%s reason=%s", meta_path, "io")
-        return None
+    except OSError as exc:
+        raise ArtifactPersistenceError(meta_path, "io", str(exc)) from exc
 
     try:
         payload = json.loads(raw)
-    except json.JSONDecodeError:
-        logger.warning("artifact parse failed path=%s reason=%s", meta_path, "json")
-        return None
+    except json.JSONDecodeError as exc:
+        raise ArtifactPersistenceError(meta_path, "json", str(exc)) from exc
 
     sidecar = MetaSidecar.from_json_payload(payload)
     if sidecar is None:
-        # ``from_json_payload`` collapses both missing fields and wrong types into
-        # ``None``; we surface that as a single "missing-fields" reason.
-        logger.warning(
-            "artifact parse failed path=%s reason=%s", meta_path, "missing-fields"
+        raise ArtifactPersistenceError(
+            meta_path,
+            "invalid_record",
+            "metadata does not match the current artifact schema",
         )
-        return None
     return sidecar
 
 
@@ -394,44 +383,8 @@ def _read_content_unit(content_path: Path) -> str | None:
         return content_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    except OSError:
-        logger.warning("artifact parse failed path=%s reason=%s", content_path, "io")
-        return None
-
-
-def _read_legacy_payload(legacy_path: Path) -> LegacyPayload | None:
-    """Read a legacy combined-payload JSON file from disk.
-
-    Returns ``None`` when the file is missing or any parse step fails. Failures
-    are logged at ``WARNING`` with a ``reason`` field in
-    ``{"io", "json", "missing-fields"}``. The file on disk is never modified,
-    regardless of failure path.
-
-    This is a pure-function ``Disk_Worker`` helper intended to run on a worker
-    thread via :func:`asyncio.to_thread`.
-    """
-
-    try:
-        raw = legacy_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
-    except OSError:
-        logger.warning("artifact parse failed path=%s reason=%s", legacy_path, "io")
-        return None
-
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        logger.warning("artifact parse failed path=%s reason=%s", legacy_path, "json")
-        return None
-
-    legacy = LegacyPayload.from_json_payload(payload)
-    if legacy is None:
-        logger.warning(
-            "artifact parse failed path=%s reason=%s", legacy_path, "missing-fields"
-        )
-        return None
-    return legacy
+    except OSError as exc:
+        raise ArtifactPersistenceError(content_path, "io", str(exc)) from exc
 
 
 def _is_expired(created_at: float, now: float, ttl_seconds: int) -> bool:
@@ -449,25 +402,16 @@ def _scan_expired(storage_dir: Path, ttl_seconds: int, now: float) -> list[str]:
     """Enumerate expired artifacts under ``storage_dir`` and unlink their files.
 
     Returns the list of ``artifact_id`` strings whose files were successfully
-    removed during this scan. Both new-format split layouts
-    (``art_<id>.meta.json`` + ``art_<id>.txt``) and legacy single-file payloads
-    (``art_<id>.json``) are considered.
-
-    For new-format artifacts the sidecar's ``created_at`` is the expiry
-    reference; for legacy files (which have no ``created_at`` field on disk) the
-    file's ``mtime`` is the closest approximation, per design.md.
+    removed during this scan. Artifacts use one split layout:
+    ``art_<id>.meta.json`` plus ``art_<id>.txt``.
 
     Failure handling:
 
     * ``FileNotFoundError`` during stat or unlink (concurrent removal) is
       silently skipped — the artifact is excluded from the returned list and no
       log entry is emitted.
-    * Any other ``OSError`` during unlink is logged at ``WARNING`` as
-      ``"artifact cleanup failed id=%s error=%r"`` and the artifact is excluded
-      from the returned list. The scan continues with the remaining files.
-    * Sidecar parse failures (``_read_meta_sidecar`` returns ``None``) are
-      already logged inside that helper and the artifact is silently skipped
-      here.
+    * Any other persistence failure aborts the cleanup transaction with
+      structured evidence; callers retain ``cleanup_pending``.
 
     This is a pure-function ``Disk_Worker`` helper intended to run on a worker
     thread via :func:`asyncio.to_thread`.
@@ -475,51 +419,33 @@ def _scan_expired(storage_dir: Path, ttl_seconds: int, now: float) -> list[str]:
 
     removed: list[str] = []
 
-    # New-format: ``art_<id>.meta.json`` paired with ``art_<id>.txt``.
     for meta_path in storage_dir.glob(f"art_*{META_SIDECAR_SUFFIX}"):
         artifact_id = meta_path.name.removesuffix(META_SIDECAR_SUFFIX)
-        sidecar = _read_meta_sidecar(meta_path)
-        if sidecar is None:
-            # Parse helper already logged when applicable; skip the artifact.
-            continue
-        if not _is_expired(sidecar.created_at, now, ttl_seconds):
-            continue
-        try:
-            (storage_dir / f"{artifact_id}{META_SIDECAR_SUFFIX}").unlink()
-            # The content unit may legitimately be missing if the prior write
-            # rolled back after the sidecar landed.
-            (storage_dir / f"{artifact_id}{CONTENT_UNIT_SUFFIX}").unlink(missing_ok=True)
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            logger.warning("artifact cleanup failed id=%s error=%r", artifact_id, exc)
-            continue
-        removed.append(artifact_id)
-
-    # Legacy-format: ``art_<id>.json`` (single combined payload). The glob also
-    # matches new-format meta sidecars (``art_*.meta.json`` ends in ``.json``);
-    # filter those out by suffix exactness.
-    for legacy_path in storage_dir.glob(f"art_*{LEGACY_SUFFIX}"):
-        if legacy_path.name.endswith(META_SIDECAR_SUFFIX):
-            continue
-        artifact_id = legacy_path.stem
-        try:
-            created_at = legacy_path.stat().st_mtime
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            logger.warning("artifact cleanup failed id=%s error=%r", artifact_id, exc)
-            continue
-        if not _is_expired(created_at, now, ttl_seconds):
-            continue
-        try:
-            (storage_dir / f"{artifact_id}{LEGACY_SUFFIX}").unlink()
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            logger.warning("artifact cleanup failed id=%s error=%r", artifact_id, exc)
-            continue
-        removed.append(artifact_id)
+        content_path = storage_dir / f"{artifact_id}{CONTENT_UNIT_SUFFIX}"
+        with file_mutation_locks([meta_path, content_path]):
+            # Re-read and re-check under the same lock as deletion. A fresh
+            # save or an owner-scope update must not be deleted based on a
+            # stale pre-lock directory scan.
+            sidecar = _read_meta_sidecar(meta_path)
+            if sidecar is None:
+                # Parse helper already logged when applicable; skip the artifact.
+                continue
+            if not _is_expired(sidecar.created_at, now, ttl_seconds):
+                continue
+            try:
+                meta_path.unlink()
+                # The content unit may legitimately be missing if the prior write
+                # rolled back after the sidecar landed.
+                content_path.unlink(missing_ok=True)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise ArtifactPersistenceError(
+                    meta_path,
+                    "cleanup_failed",
+                    f"{type(exc).__name__}: {exc}",
+                ) from exc
+            removed.append(artifact_id)
 
     return removed
 
@@ -650,6 +576,8 @@ class ArtifactStore:
         self._preview_lines_index: dict[str, int] = {}
         self._lock = threading.Lock()
         self._cleanup_task: asyncio.Task[None] | None = None
+        self._cleanup_pending = False
+        self._cleanup_error = ""
         self._owner_context: ContextVar[tuple[str, str]] = ContextVar(
             f"artifact_owner_{id(self)}",
             default=("", ""),
@@ -663,16 +591,7 @@ class ArtifactStore:
 
     @staticmethod
     def _owner_matches(meta: ArtifactMeta, conversation_id: str, workspace_root: str) -> bool:
-        if conversation_id and meta.conversation_id != conversation_id:
-            return False
-        if workspace_root:
-            if not meta.workspace_root:
-                return False
-            try:
-                return Path(meta.workspace_root).resolve() == Path(workspace_root).resolve()
-            except OSError:
-                return meta.workspace_root == workspace_root
-        return True
+        return owner_scope_matches(meta.owner_scopes, conversation_id, workspace_root)
 
     # ── Small accessors ───────────────────────────────────────
 
@@ -687,6 +606,105 @@ class ArtifactStore:
             self._metadata_index.clear()
             self._preview_lines_index.clear()
 
+    def delete_for_conversation(self, conversation_id: str) -> int:
+        """Delete durable tool artifacts owned by one conversation."""
+        owner = str(conversation_id or "").strip()
+        if not owner:
+            return 0
+        artifact_ids: list[str] = []
+        for meta_path in self._storage_dir.glob(f"art_*{META_SIDECAR_SUFFIX}"):
+            content_path = self._storage_dir / f"{meta_path.name.removesuffix(META_SIDECAR_SUFFIX)}{CONTENT_UNIT_SUFFIX}"
+            with file_mutation_locks([meta_path, content_path]):
+                # Re-read inside the mutation lock. A concurrent fork/share or
+                # delete may have changed ownership after the directory scan.
+                sidecar = _read_meta_sidecar(meta_path)
+                if sidecar is None:
+                    continue
+                scopes = sidecar.owner_scopes
+                if not any(scope.conversation_id == owner for scope in scopes):
+                    continue
+                remaining_scopes = remove_conversation_scopes(scopes, owner)
+                if remaining_scopes:
+                    remaining = tuple(dict.fromkeys(
+                        scope.conversation_id for scope in remaining_scopes if scope.conversation_id
+                    ))
+                    updated = replace(
+                        sidecar,
+                        schema_version=META_SIDECAR_SCHEMA_VERSION,
+                        conversation_id=remaining[0] if remaining else "",
+                        conversation_ids=remaining,
+                        workspace_root=remaining_scopes[0].workspace_root,
+                        owner_scopes=remaining_scopes,
+                    )
+                    atomic_write_text(
+                        meta_path,
+                        json.dumps(updated.to_json_payload(), ensure_ascii=False, indent=2),
+                    )
+                    with self._lock:
+                        self._metadata_index[updated.artifact_id] = updated.to_meta()
+                    continue
+                try:
+                    meta_path.unlink()
+                    content_path.unlink(missing_ok=True)
+                except FileNotFoundError:
+                    continue
+                artifact_ids.append(sidecar.artifact_id)
+        if artifact_ids:
+            with self._lock:
+                for artifact_id in artifact_ids:
+                    self._content_cache.pop(artifact_id)
+                    self._metadata_index.pop(artifact_id, None)
+                    self._preview_lines_index.pop(artifact_id, None)
+        return len(artifact_ids)
+
+    def share_for_conversation(
+        self,
+        source_conversation_id: str,
+        target_conversation_id: str,
+        workspace_root: str | Path | None = None,
+    ) -> int:
+        """Grant a cloned/forked transcript access to immutable tool artifacts."""
+
+        source = str(source_conversation_id or "").strip()
+        target = str(target_conversation_id or "").strip()
+        if not source or not target or source == target:
+            return 0
+        shared = 0
+        for meta_path in self._storage_dir.glob(f"art_*{META_SIDECAR_SUFFIX}"):
+            content_path = self._storage_dir / f"{meta_path.name.removesuffix(META_SIDECAR_SUFFIX)}{CONTENT_UNIT_SUFFIX}"
+            with file_mutation_locks([meta_path, content_path]):
+                sidecar = _read_meta_sidecar(meta_path)
+                if sidecar is None:
+                    continue
+                scopes = sidecar.owner_scopes
+                updated_scopes = grant_owner_scope(
+                    scopes,
+                    source_conversation_id=source,
+                    target_conversation_id=target,
+                    target_workspace_root=workspace_root,
+                )
+                if updated_scopes == scopes:
+                    continue
+                owners = tuple(dict.fromkeys(
+                    scope.conversation_id for scope in updated_scopes if scope.conversation_id
+                ))
+                updated = replace(
+                    sidecar,
+                    schema_version=META_SIDECAR_SCHEMA_VERSION,
+                    conversation_id=owners[0] if owners else "",
+                    conversation_ids=owners,
+                    workspace_root=updated_scopes[0].workspace_root,
+                    owner_scopes=updated_scopes,
+                )
+                atomic_write_text(
+                    meta_path,
+                    json.dumps(updated.to_json_payload(), ensure_ascii=False, indent=2),
+                )
+                with self._lock:
+                    self._metadata_index[updated.artifact_id] = updated.to_meta()
+                shared += 1
+        return shared
+
     # ── Save ──────────────────────────────────────────────────
 
     def save(
@@ -697,6 +715,7 @@ class ArtifactStore:
         preview_lines: int = 5,
         conversation_id: str | None = None,
         workspace_root: str | Path | None = None,
+        media_type: str = "",
     ) -> str:
         # Validate content BEFORE any cache mutation, index mutation, or disk
         # write so a rejection leaves all state untouched.
@@ -712,6 +731,12 @@ class ArtifactStore:
 
         artifact_id = f"art_{uuid.uuid4().hex[:8]}"
         created_at = time.time()
+        normalized_media_type = str(media_type or "").split(";", 1)[0].strip().lower()
+        if normalized_media_type and (
+            len(normalized_media_type) > 127
+            or re.fullmatch(r"[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*", normalized_media_type) is None
+        ):
+            raise ValueError(f"invalid media_type: {media_type!r}")
         bound_conversation, bound_workspace = self._owner_context.get()
         owner_conversation = bound_conversation if conversation_id is None else str(conversation_id or "")
         owner_workspace = bound_workspace if workspace_root is None else str(workspace_root or "")
@@ -722,6 +747,7 @@ class ArtifactStore:
             content=content,
             preview_lines=preview_lines,
             created_at=created_at,
+            media_type=normalized_media_type,
             conversation_id=owner_conversation,
             workspace_root=owner_workspace,
         )
@@ -754,48 +780,76 @@ class ArtifactStore:
         bound_conversation, bound_workspace = self._owner_context.get()
         owner_conversation = bound_conversation if conversation_id is None else str(conversation_id or "")
         owner_workspace = bound_workspace if workspace_root is None else str(workspace_root or "")
-        if owner_conversation or owner_workspace:
-            meta = self.get_meta(artifact_id)
-            if meta is None or not self._owner_matches(meta, owner_conversation, owner_workspace):
-                return None
-        with self._lock:
-            cached = self._content_cache.get(artifact_id)
-        if cached is not None:
-            return cached
-
         meta_path = self._storage_dir / f"{artifact_id}{META_SIDECAR_SUFFIX}"
         content_path = self._storage_dir / f"{artifact_id}{CONTENT_UNIT_SUFFIX}"
         sidecar = _read_meta_sidecar(meta_path)
         if sidecar is not None:
+            meta = sidecar.to_meta()
+            if not self._owner_matches(
+                meta,
+                owner_conversation,
+                owner_workspace,
+            ):
+                return None
+            with self._lock:
+                cached_meta = self._metadata_index.get(artifact_id)
+                cached = self._content_cache.get(artifact_id)
+            if cached is not None and cached_meta == meta:
+                confirmed = _read_meta_sidecar(meta_path)
+                if (
+                    confirmed is not None
+                    and confirmed == sidecar
+                    and self._owner_matches(
+                        confirmed.to_meta(), owner_conversation, owner_workspace
+                    )
+                ):
+                    return cached
+                with self._lock:
+                    self._content_cache.pop(artifact_id)
             content = _read_content_unit(content_path)
             if content is not None:
+                confirmed = _read_meta_sidecar(meta_path)
+                if confirmed is None or confirmed != sidecar:
+                    return None
+                if not self._owner_matches(
+                    confirmed.to_meta(), owner_conversation, owner_workspace
+                ):
+                    return None
                 with self._lock:
-                    self._metadata_index[artifact_id] = sidecar.to_meta()
+                    self._metadata_index[artifact_id] = meta
                     self._preview_lines_index[artifact_id] = sidecar.preview_lines
                     self._content_cache.put(artifact_id, content)
                 return content
 
-        legacy_path = self._storage_dir / f"{artifact_id}{LEGACY_SUFFIX}"
-        legacy = _read_legacy_payload(legacy_path)
-        if legacy is not None:
-            with self._lock:
-                self._metadata_index[artifact_id] = legacy.to_meta()
-                # Legacy payloads have no preview_lines field; default to 5,
-                # which matches the historical save default and makes
-                # ``get_preview`` short-circuit safe.
-                self._preview_lines_index[artifact_id] = 5
-                self._content_cache.put(artifact_id, legacy.content)
-            return legacy.content
-
         return None
 
-    def get_meta(self, artifact_id: str) -> ArtifactMeta | None:
+    def get_meta(
+        self,
+        artifact_id: str,
+        *,
+        refresh: bool = False,
+        conversation_id: str | None = None,
+        workspace_root: str | Path | None = None,
+    ) -> ArtifactMeta | None:
+        bound_conversation, bound_workspace = self._owner_context.get()
+        owner_conversation = bound_conversation if conversation_id is None else str(conversation_id or "")
+        owner_workspace = bound_workspace if workspace_root is None else str(workspace_root or "")
+        meta = self._get_meta_unchecked(
+            artifact_id,
+            refresh=True,
+        )
+        if meta is None or not self._owner_matches(meta, owner_conversation, owner_workspace):
+            return None
+        return meta
+
+    def _get_meta_unchecked(self, artifact_id: str, *, refresh: bool = False) -> ArtifactMeta | None:
         if not _is_safe_artifact_id(artifact_id):
             return None
-        with self._lock:
-            cached = self._metadata_index.get(artifact_id)
-        if cached is not None:
-            return cached
+        if not refresh:
+            with self._lock:
+                cached = self._metadata_index.get(artifact_id)
+            if cached is not None:
+                return cached
 
         meta_path = self._storage_dir / f"{artifact_id}{META_SIDECAR_SUFFIX}"
         sidecar = _read_meta_sidecar(meta_path)
@@ -805,16 +859,6 @@ class ArtifactStore:
                 self._metadata_index[artifact_id] = meta
                 self._preview_lines_index[artifact_id] = sidecar.preview_lines
             return meta
-
-        legacy_path = self._storage_dir / f"{artifact_id}{LEGACY_SUFFIX}"
-        legacy = _read_legacy_payload(legacy_path)
-        if legacy is not None:
-            meta = legacy.to_meta()
-            with self._lock:
-                self._metadata_index[artifact_id] = meta
-                self._preview_lines_index[artifact_id] = 5
-            return meta
-
         return None
 
     def get_preview(
@@ -828,15 +872,16 @@ class ArtifactStore:
         if lines <= 0:
             return ""
 
-        meta = self.get_meta(artifact_id)
-        if meta is None:
-            return None
         bound_conversation, bound_workspace = self._owner_context.get()
         owner_conversation = bound_conversation if conversation_id is None else str(conversation_id or "")
         owner_workspace = bound_workspace if workspace_root is None else str(workspace_root or "")
-        if (owner_conversation or owner_workspace) and not self._owner_matches(
-            meta, owner_conversation, owner_workspace
-        ):
+        meta = self.get_meta(
+            artifact_id,
+            refresh=bool(owner_conversation or owner_workspace),
+            conversation_id=owner_conversation,
+            workspace_root=owner_workspace,
+        )
+        if meta is None:
             return None
 
         with self._lock:
@@ -855,7 +900,12 @@ class ArtifactStore:
             return None
         return _build_preview(content, lines)
 
-    def list_artifacts(self) -> list[ArtifactMeta]:
+    def list_artifacts(
+        self,
+        *,
+        conversation_id: str | None = None,
+        workspace_root: str | Path | None = None,
+    ) -> list[ArtifactMeta]:
         with self._lock:
             seen_metas = list(self._metadata_index.values())
             seen_ids = set(self._metadata_index.keys())
@@ -883,27 +933,6 @@ class ArtifactStore:
                 self._preview_lines_index[artifact_id] = sidecar.preview_lines
             result_by_id[artifact_id] = (sidecar.created_at, sidecar.to_meta())
 
-        # Pass 2: legacy single-file payloads. ``art_*.json`` also matches
-        # ``art_*.meta.json`` so filter by exact suffix. Skip ids already added
-        # by the sidecar pass; sidecar wins on conflict.
-        for path in self._storage_dir.glob(f"art_*{LEGACY_SUFFIX}"):
-            if path.name.endswith(META_SIDECAR_SUFFIX):
-                continue
-            artifact_id = path.stem
-            if artifact_id in seen_ids or artifact_id in result_by_id:
-                continue
-            legacy = _read_legacy_payload(path)
-            if legacy is None:
-                continue
-            try:
-                created_at = path.stat().st_mtime
-            except FileNotFoundError:
-                continue
-            with self._lock:
-                self._metadata_index[artifact_id] = legacy.to_meta()
-                self._preview_lines_index[artifact_id] = 5
-            result_by_id[artifact_id] = (created_at, legacy.to_meta())
-
         # Sort by created_at ascending (stable) — seen_metas with key 0.0 stay
         # at the head; disk-discovered entries are interleaved by their actual
         # created_at / mtime.
@@ -912,7 +941,20 @@ class ArtifactStore:
         # complain about unused locals; the dict was captured for symmetry with
         # the design's "snapshot under the lock" rule.
         del preview_lines_snapshot
-        return [meta for _aid, (_ts, meta) in ordered]
+        bound_conversation, bound_workspace = self._owner_context.get()
+        owner_conversation = bound_conversation if conversation_id is None else str(conversation_id or "")
+        owner_workspace = bound_workspace if workspace_root is None else str(workspace_root or "")
+        visible: list[ArtifactMeta] = []
+        for artifact_id, (_ts, _meta) in ordered:
+            current = self.get_meta(
+                artifact_id,
+                refresh=True,
+                conversation_id=owner_conversation,
+                workspace_root=owner_workspace,
+            )
+            if current is not None:
+                visible.append(current)
+        return visible
 
     # ── Cleanup ──────────────────────────────────────────────
 
@@ -938,9 +980,16 @@ class ArtifactStore:
         return len(removed_ids)
 
     async def _async_cleanup_once(self) -> None:
-        removed = await asyncio.to_thread(
-            _scan_expired, self._storage_dir, self._ttl_seconds, time.time()
-        )
+        try:
+            removed = await asyncio.to_thread(
+                _scan_expired, self._storage_dir, self._ttl_seconds, time.time()
+            )
+        except Exception as exc:
+            self._cleanup_pending = True
+            self._cleanup_error = f"{type(exc).__name__}: {exc}"
+            raise
+        self._cleanup_pending = False
+        self._cleanup_error = ""
         if not removed:
             return
         with self._lock:
@@ -957,9 +1006,14 @@ class ArtifactStore:
             except asyncio.CancelledError:
                 return
             except Exception as exc:
-                logger.warning(
-                    "artifact cleanup loop iteration failed error=%r", exc
-                )
+                logger.error("artifact cleanup pending error=%r", exc)
+                return
+
+    def cleanup_status(self) -> dict[str, object]:
+        return {
+            "cleanup_pending": self._cleanup_pending,
+            "error": self._cleanup_error,
+        }
 
     def _ensure_cleanup_scheduled(self) -> None:
         try:
@@ -985,7 +1039,9 @@ class ArtifactStore:
             self._cleanup_task.cancel()
 
     async def flush(self) -> None:
-        """Compatibility hook; save() is already durable when it returns."""
+        """Session lifecycle fence; save() is durable when it returns."""
+        if self._cleanup_pending:
+            raise RuntimeError(self._cleanup_error or "Artifact cleanup is pending")
         return None
 
 

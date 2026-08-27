@@ -14,6 +14,8 @@ RUNTIME_TOKEN_ENV = "MINICODE_RUNTIME_TOKEN"
 WORKSPACE_RAW_TOKEN_TTL_SECONDS = 300
 SKILL_ASSET_TOKEN_TTL_SECONDS = 300
 PLUGIN_ASSET_TOKEN_TTL_SECONDS = 300
+ATTACHMENT_ASSET_TOKEN_TTL_SECONDS = 300
+ARTIFACT_ASSET_TOKEN_TTL_SECONDS = 300
 
 
 def _runtime_token() -> str:
@@ -209,4 +211,136 @@ def _is_plugin_asset_token_authorized(request: Request) -> bool:
     if expires_at < int(time.time()):
         return False
     expected_signature = _plugin_asset_token_signature(plugin_path, variant, expires_at, secret)
+    return _constant_time_equal(supplied_signature, expected_signature)
+
+
+def _attachment_asset_token_signature(
+    artifact_id: str,
+    session_id: str,
+    conversation_id: str,
+    expires_at: int,
+    secret: str,
+) -> str:
+    payload = (
+        f"attachment_raw:v2:{session_id}:{conversation_id}:{artifact_id}:{expires_at}"
+    ).encode("utf-8")
+    digest = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def _build_attachment_asset_token(
+    artifact_id: str,
+    session_id: str,
+    conversation_id: str,
+    *,
+    now: int | None = None,
+) -> str:
+    secret = _runtime_token()
+    if not secret:
+        return ""
+    current_time = int(time.time() if now is None else now)
+    expires_at = current_time + ATTACHMENT_ASSET_TOKEN_TTL_SECONDS
+    signature = _attachment_asset_token_signature(
+        artifact_id,
+        session_id,
+        conversation_id,
+        expires_at,
+        secret,
+    )
+    return f"{expires_at}.{signature}"
+
+
+def _is_attachment_asset_token_authorized(request: Request) -> bool:
+    secret = _runtime_token()
+    path = request.scope.get("path", "")
+    if not secret or path not in {"/api/attachments/raw", "/api/v1/attachments/raw"}:
+        return False
+    asset_token = request.query_params.get("asset_token", "").strip()
+    artifact_id = request.query_params.get("artifact_id", "").strip()
+    session_id = request.query_params.get("session_id", "").strip()
+    conversation_id = request.query_params.get("conversation_id", "").strip()
+    if not asset_token or not artifact_id or not session_id or not conversation_id:
+        return False
+    expires_at_text, separator, supplied_signature = asset_token.partition(".")
+    if not separator or not supplied_signature:
+        return False
+    try:
+        expires_at = int(expires_at_text)
+    except ValueError:
+        return False
+    if expires_at < int(time.time()):
+        return False
+    expected_signature = _attachment_asset_token_signature(
+        artifact_id,
+        session_id,
+        conversation_id,
+        expires_at,
+        secret,
+    )
+    return _constant_time_equal(supplied_signature, expected_signature)
+
+
+def _artifact_asset_token_signature(
+    artifact_id: str,
+    session_id: str,
+    conversation_id: str,
+    expires_at: int,
+    secret: str,
+) -> str:
+    payload = (
+        f"artifact_raw:v1:{session_id}:{conversation_id}:{artifact_id}:{expires_at}"
+    ).encode("utf-8")
+    digest = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def _build_artifact_asset_token(
+    artifact_id: str,
+    session_id: str,
+    conversation_id: str,
+    *,
+    now: int | None = None,
+) -> str:
+    secret = _runtime_token()
+    if not secret:
+        return ""
+    current_time = int(time.time() if now is None else now)
+    expires_at = current_time + ARTIFACT_ASSET_TOKEN_TTL_SECONDS
+    signature = _artifact_asset_token_signature(
+        artifact_id,
+        session_id,
+        conversation_id,
+        expires_at,
+        secret,
+    )
+    return f"{expires_at}.{signature}"
+
+
+def _is_artifact_asset_token_authorized(request: Request) -> bool:
+    secret = _runtime_token()
+    path = request.scope.get("path", "")
+    if not secret or path not in {"/api/artifacts/raw", "/api/v1/artifacts/raw"}:
+        return False
+    asset_token = request.query_params.get("asset_token", "").strip()
+    artifact_id = request.query_params.get("artifact_id", "").strip()
+    session_id = request.query_params.get("session_id", "").strip()
+    conversation_id = request.query_params.get("conversation_id", "").strip()
+    if not asset_token or not artifact_id or not session_id or not conversation_id:
+        return False
+    expires_at_text, separator, supplied_signature = asset_token.partition(".")
+    if not separator or not supplied_signature:
+        return False
+    try:
+        expires_at = int(expires_at_text)
+    except ValueError:
+        return False
+    if expires_at < int(time.time()):
+        return False
+    expected_signature = _artifact_asset_token_signature(
+        artifact_id,
+        session_id,
+        conversation_id,
+        expires_at,
+        secret,
+    )
     return _constant_time_equal(supplied_signature, expected_signature)

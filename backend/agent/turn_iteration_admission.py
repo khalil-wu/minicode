@@ -21,6 +21,7 @@ from backend.agent.mailbox_delivery import (
     inject_subagent_mailbox_updates,
 )
 from backend.agent.message import AgentEvent
+from backend.agent.terminal_projection import TurnTerminalProjection
 from backend.agent.tool_schema_derivation import TurnToolSchemaDerivation
 from backend.agent.turn_budget import TurnBudgetController
 from backend.agent.turn_context_runtime import prepare_turn_context
@@ -94,7 +95,7 @@ class TurnIterationAdmission:
         previous_tool_schema_state: TurnToolSchemaDerivation,
         initial_turn_pending: bool,
         pending_turn_context: list[str],
-    ) -> AsyncIterator[AgentEvent | IterationAdmissionResult]:
+    ) -> AsyncIterator[AgentEvent | TurnTerminalProjection | IterationAdmissionResult]:
         """Yield admission events and finish with exactly one result sentinel."""
 
         turn_elapsed_seconds = self.deadline_controller.elapsed()
@@ -102,9 +103,11 @@ class TurnIterationAdmission:
             elapsed_seconds=turn_elapsed_seconds,
             iterations=self.state.work_iterations,
             tool_calls=len(self.state.tool_calls) - self.turn_start_tool_call_count,
-            tokens=self.budget_runtime.rollout_tokens_used(),
+            tokens=self.budget_runtime.local_tokens_used(),
             cost_usd=self.budget_runtime.turn_cost_usd(),
         )
+        if budget_boundary is None:
+            budget_boundary = self.budget_runtime.rollout_boundary()
         if budget_boundary is not None:
             logger.warning("%s: %s", budget_boundary.label, budget_boundary.detail)
             _, budget_events = await self.budget_runtime.apply_boundary(budget_boundary)
@@ -126,6 +129,11 @@ class TurnIterationAdmission:
             initial_turn_pending=initial_turn_pending,
             pending_turn_context=pending_turn_context,
         )
+        self.llm = self.iteration_runtime.llm
+        owner = getattr(self.iteration_runtime, "agent_session", None)
+        active_budget = getattr(owner, "token_budget", None)
+        if active_budget is not None:
+            self.token_budget = active_budget
         initial_turn_pending = False
         tool_schema_state = iteration_preparation.tool_schema_state
         tool_schemas = iteration_preparation.tool_schemas

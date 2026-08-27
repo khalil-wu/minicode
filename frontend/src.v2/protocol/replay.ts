@@ -1,4 +1,10 @@
-import { ApiError, apiBase, authHeaders, errorMessageFromResponseText } from "./api";
+import {
+  ApiError,
+  apiBase,
+  authHeaders,
+  errorMessageFromResponseText,
+  fetchWithTimeout,
+} from "./api";
 
 export interface ReplayExportPayload {
   kind: "minicode_ws_replay_export";
@@ -33,7 +39,7 @@ export const fetchReplayExport = async ({
   params.set("limit", String(limit));
   params.set("after_seq", String(afterSeq));
   if (conversationId) params.set("conversation_id", conversationId);
-  const res = await fetch(`${apiBase()}/api/replay/${encodeURIComponent(sessionId)}?${params.toString()}`, {
+  const res = await fetchWithTimeout(`${apiBase()}/api/replay/${encodeURIComponent(sessionId)}?${params.toString()}`, {
     cache: "no-store",
     headers: authHeaders(),
   });

@@ -38,7 +38,7 @@ select {
 
 /* ── Global icon styling (M3 风格，2026-07-25) ────────── */
 svg {
-  stroke-width: 1.8;
+  stroke-width: var(--mc-icon-stroke);
 }
 
 /* ── Keyframe Animations ─────────────────────────────── */
@@ -71,7 +71,7 @@ svg {
 }
 
 @keyframes modal-in {
-  from { opacity: 0; transform: scale(0.95) translateY(8px); }
+  from { opacity: 0; transform: scale(0.98) translateY(6px); }
   to { opacity: 1; transform: scale(1) translateY(0); }
 }
 
@@ -96,13 +96,13 @@ svg {
 }
 
 @keyframes toast-in {
-  from { opacity: 0; transform: translateX(100%) scale(0.9); }
-  to { opacity: 1; transform: translateX(0) scale(1); }
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes toast-out {
-  from { opacity: 1; transform: translateX(0) scale(1); }
-  to { opacity: 0; transform: translateX(100%) scale(0.9); }
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(4px); }
 }
 
 @keyframes progress-indeterminate {
@@ -115,7 +115,10 @@ svg {
   to { transform: rotate(360deg); }
 }
 
-@keyframes shimmer {
+/* 命名为 shimmer-slide：styles/animations.css 另有一个 background-position
+   版的 @keyframes shimmer（.anim-shimmer / .panel-skeleton-shimmer 使用），
+   且加载顺序在其后。同名会让下面这条 42%-宽滑块实现被全局覆盖失效。 */
+@keyframes shimmer-slide {
   0% { transform: translate3d(-120%, 0, 0); }
   100% { transform: translate3d(220%, 0, 0); }
 }
@@ -149,8 +152,11 @@ svg {
   animation: overlay-out var(--transition-fast) both;
 }
 
+/* 入场用标准 enter 缓动，不用回弹(overshoot)曲线：工作台弹窗承载的是
+   确认 / 设置 / 命令这类严肃操作，弹跳会读作"轻浮"，也与 toast、下拉、
+   命令面板已统一的 --easing-enter 不一致。 */
 .modal-content {
-  animation: modal-in var(--duration-slow) cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  animation: modal-in var(--duration-base) var(--easing-enter) both;
 }
 
 /* ── Message Animations ──────────────────────────────── */
@@ -166,7 +172,7 @@ svg {
 /* ── Toast Notifications ─────────────────────────────── */
 
 .toast-enter {
-  animation: toast-in var(--duration-slow) cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  animation: toast-in var(--duration-base) var(--easing-enter) both;
 }
 
 .toast-exit {
@@ -191,18 +197,11 @@ svg {
   animation: progress-indeterminate 1.5s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
 
-.spinner {
-  animation: spin 800ms linear infinite;
-  border: 2px solid var(--border-subtle);
-  border-top-color: var(--accent-primary);
-  border-radius: 50%;
-}
-
 .skeleton {
   position: relative;
   overflow: hidden;
   background: var(--surface-soft);
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--radius-sm);
   contain: paint;
 }
 
@@ -215,7 +214,7 @@ svg {
   background: linear-gradient(90deg, transparent, var(--surface-hover), transparent);
   transform: translate3d(-120%, 0, 0);
   will-change: transform;
-  animation: shimmer 1.7s cubic-bezier(0.22, 0.68, 0.26, 1) infinite;
+  animation: shimmer-slide 1.7s cubic-bezier(0.22, 0.68, 0.26, 1) infinite;
 }
 
 
@@ -346,12 +345,10 @@ button {
               box-shadow var(--transition-micro);
 }
 
-button:active {
-  transform: scale(0.97);
-}
-
-button:hover {
-  box-shadow: 0 1px 3px color-mix(in oklch, var(--surface-base) 20%, transparent);
+/* 按压反馈只作用于主操作按钮；不再全局缩放所有 button ——
+   窗口控制、菜单项、列表行被整体缩放会显得松散，且干扰拖拽区。 */
+.btn:not(:disabled):active {
+  transform: scale(0.98);
 }
 
 /* ── Sidebar & Panel Transitions ─────────────────────── */
@@ -367,39 +364,9 @@ button:hover {
 
 
 
-/* ── Custom scrollbars ───────────────────────────────── */
-
-::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-/* Thumb is nearly invisible at rest so it doesn't read as a full-height
-   line, and only firms up when the user actually hovers the scroll area.
-   The transparent border + background-clip keeps a slim 6px visual thumb
-   inside the 10px track so it never hugs the very edge. */
-::-webkit-scrollbar-thumb {
-  background: transparent;
-  border: 2px solid transparent;
-  border-radius: 999px;
-  background-clip: padding-box;
-  transition: background var(--transition-fast);
-}
-:hover::-webkit-scrollbar-thumb {
-  background: color-mix(in oklch, var(--text-muted) 28%, transparent);
-  background-clip: padding-box;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: color-mix(in oklch, var(--text-muted) 48%, transparent);
-  background-clip: padding-box;
-}
-
-* {
-  scrollbar-width: thin;
-  scrollbar-color: color-mix(in oklch, var(--text-muted) 42%, transparent) transparent;
-}
+/* 滚动条的唯一契约在 styles/ui-polish.css（全局作用域，6px 圆角细轨，
+   无箭头按钮）。此处此前的 10px 轨道 + 静止全透明 thumb 与之重复且更早
+   加载，只会制造两套刻度，已删除。 */
 
 /* ── Focus ring for keyboard navigation ──────────────── */
 

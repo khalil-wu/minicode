@@ -30,7 +30,7 @@ export const canonicalWorkspacePath = (path: string | null | undefined): string 
   const value = (path || "").trim();
   if (!value) return "";
   const normalized = value.replace(/\\/g, "/");
-  const match = normalized.match(/^(.*)\/\.claude\/worktrees\/conv_[a-z0-9_]+$/i);
+  const match = normalized.match(/^(.*)\/\.minicode\/worktrees\/conv_[a-z0-9_]+$/i);
   if (!match) return value;
   const base = match[1] || "";
   if (!base) return value;

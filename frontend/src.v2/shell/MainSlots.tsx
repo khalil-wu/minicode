@@ -31,7 +31,7 @@ export const MainSlots = ({ mode = "split", forceChat = false }: MainSlotsProps)
   const hasOpenEditor = useAppStore((s) => s.editorTabs.length > 0);
   const [compact, setCompact] = useState(isCompactViewport);
 
-  const chatSlot = panelSlots.find((slot) => slot.kind === "chat") ?? { id: "main-chat", kind: "chat" as const, label: "Chat" };
+  const chatSlot = panelSlots.find((slot) => slot.kind === "chat") ?? { id: "main-chat", kind: "chat" as const, label: "对话" };
   const focusedSlot = panelSlots.find((slot) => slot.focused) ?? chatSlot;
   const activeSlot = forceChat
     ? chatSlot
@@ -196,7 +196,7 @@ const ResizeHandle = ({
       aria-valuemin={18}
       aria-valuemax={82}
       aria-valuenow={currentPercent}
-      aria-valuetext={`${currentPercent}% to the left panel`}
+      aria-valuetext={`左侧面板占 ${currentPercent}%`}
       tabIndex={0}
       onPointerDown={startResize}
       onDoubleClick={() => resizeToPercent(50)}
@@ -268,7 +268,7 @@ const PanelContent = ({ slot }: { slot: PanelSlot }) => (
     {slot.kind === "editor" && (
       <ChunkErrorBoundary>
         <Suspense fallback={<PanelSkeleton kind={slot.kind} />}>
-          <SafeBoundary fallback={<PanelErrorFallback panelName="Editor" />}>
+          <SafeBoundary fallback={<PanelErrorFallback panelName="编辑器" />}>
             {/* chrome="full" renders the multi-file tab strip (open many files
                 like VSCode). The store already tracks multiple editorTabs; the
                 strip is what lets the user see and switch between them. */}
@@ -310,7 +310,7 @@ const resizeHandleStyle: React.CSSProperties = {
   position: "absolute",
   top: 0,
   right: -4,
-  zIndex: 2,
+  zIndex: "var(--z-content)",
   width: 8,
   height: "100%",
   cursor: "col-resize",
@@ -348,13 +348,13 @@ const slotSwitcherThumbStyle: React.CSSProperties = {
   height: "calc(100% - 4px)",
   borderRadius: "4px",
   background: "var(--surface-raised)",
-  boxShadow: "0 1px 2px rgba(0,0,0,0.12)",
-  transition: "transform 150ms ease",
+  boxShadow: "var(--shadow-sm)",
+  transition: "transform var(--transition-fast)",
 };
 
 const slotSwitcherButtonStyle: React.CSSProperties = {
   position: "relative",
-  zIndex: 1,
+  zIndex: "var(--z-content)",
   minWidth: 0,
   height: "100%",
   display: "inline-flex",
@@ -367,10 +367,10 @@ const slotSwitcherButtonStyle: React.CSSProperties = {
   background: "transparent",
   font: "inherit",
   fontSize: "var(--text-xs)",
-  fontWeight: 560,
+  fontWeight: "var(--fw-medium)",
   whiteSpace: "nowrap",
   cursor: "pointer",
-  transition: "color 120ms ease",
+  transition: "color var(--transition-fast)",
 };
 
 const slotHeaderIconStyle: React.CSSProperties = {

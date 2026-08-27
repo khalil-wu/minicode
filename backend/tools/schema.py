@@ -46,8 +46,6 @@ def _strip_unavailable_tool_references(description: str, visible: set[str]) -> s
         "web_fetch",
         "read_artifact",
         "tool_search",
-        "tool_describe",
-        "tool_call",
         "ask_user",
         "task_status",
         "task_stop",
@@ -75,7 +73,7 @@ def _availability_hint(visible: set[str]) -> str:
     web = [name for name in ("web_search", "web_fetch") if name in visible]
     if web:
         categories.append("web=" + ",".join(web))
-    deferred = [name for name in ("tool_search", "tool_describe", "tool_call") if name in visible]
+    deferred = [name for name in ("tool_search",) if name in visible]
     if deferred:
         categories.append("deferred=" + ",".join(deferred))
     if not categories:

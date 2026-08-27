@@ -16,23 +16,51 @@ import json
 import logging
 import os
 import re
+from collections.abc import Mapping
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
 import httpx
 
 from backend.agent.prompting import split_sys_prompt_prefix
+from backend.agent.lifecycle_errors import LifecycleStaleError as ExtensionStaleError
 from backend.llm.base import (
+    emit_provider_lifecycle_request,
     LLMAdapter,
     LLMMessage,
+    ProviderActivityEvent,
     StreamEvent,
     StreamEventType,
     ToolCallDeltaEvent,
     ToolCallEvent,
     ToolCallStartEvent,
     UsageInfo,
+    clamp_max_tokens_to_context,
+    emit_provider_lifecycle_headers,
+    emit_provider_lifecycle_response,
     sanitize_llm_request_metadata,
 )
-from backend.llm.capabilities import ProviderCapabilities, capabilities_from_anthropic_adapter
+from backend.llm.provider_contracts import ReasoningPolicy
+from backend.llm.capabilities import (
+    ProviderCapabilities,
+    capabilities_from_anthropic_adapter,
+)
+from backend.llm.errors import (
+    classify_llm_error,
+    llm_error_status_code,
+    llm_error_raw,
+    retry_after_seconds,
+    sanitize_llm_error_message,
+)
+from backend.llm.openai_usage import _get_usage_cost_usd, _get_usage_field
+from backend.llm.proxy_policy import (
+    normalize_provider_proxy_mode,
+    provider_httpx_proxy_kwargs,
+)
+from backend.llm.sse import SSEMalformedBudget, iter_sse_data
+from backend.secret_redaction import redact_secrets
+from backend.tools.catalog import canonicalize_tool_schemas
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +72,47 @@ _ANTHROPIC_PROMPT_CACHE_CONTROL = {"type": "ephemeral"}
 # https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching#1-hour-cache-duration
 _EXTENDED_CACHE_TTL_BETA_HEADER = "extended-cache-ttl-2025-04-11"
 
+# Model families that use Anthropic's adaptive-thinking request shape.
+_ADAPTIVE_THINKING_MODEL_MARKERS = (
+    "opus-4-7",
+    "opus-4-8",
+    "opus-5",
+    "fable",
+    "mythos",
+    "sonnet-5",
+)
+
+
+def _is_adaptive_thinking_model(model_id: str) -> bool:
+    return any(marker in model_id for marker in _ADAPTIVE_THINKING_MODEL_MARKERS)
+
+
+def _adaptive_thinking_effort(thinking_budget: int) -> str:
+    """Map a token budget onto pi's effort ladder (default high).
+
+    pi derives the ladder from its own thinking budgets (minimal 1024 / low
+    2048 / medium 8192 / high 16384); these reverse-engineered thresholds
+    (16000/10000/4000/2000) are MiniCode's approximation, not pi's table.
+    """
+    if thinking_budget >= 16000:
+        return "max"
+    if thinking_budget >= 10000:
+        return "xhigh"
+    if thinking_budget >= 4000:
+        return "high"
+    if thinking_budget >= 2000:
+        return "medium"
+    return "low"
+
+
+@dataclass(slots=True)
+class _CacheEditingState:
+    """Prompt-cache editing state owned by one MiniCode conversation."""
+
+    disabled_reason: str = ""
+    pending_deletions: list[str] = field(default_factory=list)
+    pinned_edits: list[tuple[int, str, dict[str, Any]]] = field(default_factory=list)
+
 
 def _cache_ttl_1h_enabled() -> bool:
     """Whether the 1h prompt-cache TTL is opted in (env MINICODE_CACHE_TTL_1H).
@@ -52,24 +121,915 @@ def _cache_ttl_1h_enabled() -> bool:
     cache_control stays ``{"type": "ephemeral"}`` by default and only gains
     ``"ttl": "1h"`` when explicitly enabled.
     """
-    return os.getenv("MINICODE_CACHE_TTL_1H", "").strip().lower() in {"1", "true", "yes", "on"}
+    return os.getenv("MINICODE_CACHE_TTL_1H", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
-def _cache_control() -> dict[str, Any]:
+def _cache_control(ttl_1h: bool | None = None) -> dict[str, Any]:
     """Build the cache_control marker, cc's ``getCacheControl`` equivalent."""
-    if _cache_ttl_1h_enabled():
+    if _cache_ttl_1h_enabled() if ttl_1h is None else ttl_1h:
         return {"type": "ephemeral", "ttl": "1h"}
     return {"type": "ephemeral"}
 
 
-def _clean_error_message(exc: Exception) -> str:
+def _clean_error_message(exc: Any) -> str:
     """清洗错误消息，移除 HTML 标签。"""
     msg = str(exc)
     msg = re.sub(r"<[^>]+>", " ", msg)
     msg = re.sub(r"\s+", " ", msg).strip()
+    msg = redact_secrets(msg)
     if len(msg) > 300:
         msg = msg[:300] + "..."
     return msg
+
+
+async def _close_async_iterator(iterator: Any) -> None:
+    """Close a provider stream even when parsing exits early or is cancelled.
+
+    Returning from a protocol-error branch (or propagating ``CancelledError``) does not
+    close that object automatically, so a turn could leave the HTTP response
+    and connection alive until garbage collection. Cleanup must never mask the
+    provider error that caused the turn to terminate.
+    """
+
+    close = getattr(iterator, "aclose", None)
+    if not callable(close):
+        return
+    try:
+        result = close()
+        if hasattr(result, "__await__"):
+            await result
+    except (GeneratorExit, KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as exc:  # noqa: BLE001 - cleanup must not mask root error
+        logger.debug(
+            "Anthropic provider async iterator close failed: %s",
+            _clean_error_message(exc),
+        )
+
+
+def _detached_anthropic_tool_input(value: Any) -> dict[str, Any] | None:
+    """Detach a provider-owned tool input without accepting non-object JSON."""
+    if not isinstance(value, Mapping):
+        return None
+    try:
+        cloned = json.loads(json.dumps(dict(value), ensure_ascii=False))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return cloned if isinstance(cloned, dict) else None
+
+
+_ANTHROPIC_REPLAY_CONTENT_TYPES = frozenset(
+    {
+        "text",
+        "thinking",
+        "redacted_thinking",
+        "tool_use",
+        "server_tool_use",
+        "web_search_tool_result",
+        "web_fetch_tool_result",
+        "code_execution_tool_result",
+        "bash_code_execution_tool_result",
+        "text_editor_code_execution_tool_result",
+        "tool_search_tool_result",
+        "container_upload",
+        # Beta Messages output blocks used by hosted/connector tools.
+        "mcp_tool_use",
+        "mcp_tool_result",
+        "advisor_tool_result",
+        "compaction",
+    }
+)
+
+_ANTHROPIC_STREAM_CONTENT_TYPES = _ANTHROPIC_REPLAY_CONTENT_TYPES | {"image"}
+
+_ANTHROPIC_DELTA_CONTENT_TYPES: dict[str, frozenset[str]] = {
+    "text_delta": frozenset({"text"}),
+    "citations_delta": frozenset({"text"}),
+    "thinking_delta": frozenset({"thinking"}),
+    "signature_delta": frozenset({"thinking"}),
+    "input_json_delta": frozenset(
+        {"tool_use", "server_tool_use", "mcp_tool_use"}
+    ),
+    "compaction_delta": frozenset({"compaction"}),
+}
+
+
+def _anthropic_content_delta_protocol_code(
+    content_kind: str,
+    delta_type: str,
+) -> str:
+    allowed_content_types = _ANTHROPIC_DELTA_CONTENT_TYPES.get(delta_type)
+    if allowed_content_types is None:
+        return "unknown_content_delta"
+    if content_kind not in allowed_content_types:
+        return "content_delta_kind_mismatch"
+    return ""
+
+
+def _detached_anthropic_value(value: Any, *, depth: int = 0) -> Any:
+    """Detach a provider value into JSON-compatible provider state."""
+
+    if depth > 10:
+        return None
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Mapping):
+        return {
+            str(key): detached
+            for key, child in value.items()
+            if str(key).strip()
+            and (detached := _detached_anthropic_value(child, depth=depth + 1))
+            is not None
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            detached
+            for child in value
+            if (detached := _detached_anthropic_value(child, depth=depth + 1))
+            is not None
+        ]
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump(mode="json", exclude_none=True)
+        except TypeError:
+            dumped = model_dump(exclude_none=True)
+        return _detached_anthropic_value(dumped, depth=depth + 1)
+    attributes = getattr(value, "__dict__", None)
+    if isinstance(attributes, dict):
+        return _detached_anthropic_value(
+            {
+                key: child
+                for key, child in attributes.items()
+                if not str(key).startswith("_")
+            },
+            depth=depth + 1,
+        )
+    return None
+
+
+def _detached_anthropic_content_block(value: Any) -> dict[str, Any] | None:
+    detached = _detached_anthropic_value(value)
+    if not isinstance(detached, dict):
+        return None
+    block_type = str(detached.get("type") or "").strip()
+    if block_type not in _ANTHROPIC_REPLAY_CONTENT_TYPES:
+        return None
+    detached["type"] = block_type
+    return detached
+
+
+def _anthropic_provider_message_item(
+    content_blocks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not content_blocks:
+        return []
+    return [
+        {
+            "type": "anthropic_message",
+            "content": [dict(block) for block in content_blocks],
+        }
+    ]
+
+
+def _anthropic_replay_content(
+    provider_items: list[dict[str, Any]],
+) -> list[dict[str, Any]] | None:
+    for item in provider_items:
+        if not isinstance(item, dict) or item.get("type") != "anthropic_message":
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        replay: list[dict[str, Any]] = []
+        for block in content:
+            detached = _detached_anthropic_content_block(block)
+            if detached is not None:
+                replay.append(detached)
+        if replay:
+            return replay
+    return None
+
+
+def _anthropic_tool_protocol_error(
+    stop_reason: str,
+    tool_calls: list[ToolCallEvent],
+) -> str:
+    reason = str(stop_reason or "").strip().lower()
+    if tool_calls and reason not in {
+        "tool_use",
+        "max_tokens",
+        "model_context_window_exceeded",
+    }:
+        return (
+            "Anthropic Messages returned executable tool calls with an incompatible "
+            f"stop_reason ({reason or 'missing'})."
+        )
+    if not tool_calls and reason == "tool_use":
+        return "Anthropic Messages ended with stop_reason=tool_use but returned no complete tool calls."
+    return ""
+
+
+def _anthropic_stream_protocol_error(
+    code: str,
+    *,
+    event_type: str,
+    current_index: int | None = None,
+    received_index: int | None = None,
+    current_kind: str = "",
+    delta_type: str = "",
+    provider: str,
+) -> StreamEvent:
+    messages = {
+        "invalid_event_envelope": "the provider returned a non-object stream event",
+        "event_before_message_start": "a stream event arrived before message_start",
+        "duplicate_message_start": "message_start was emitted more than once",
+        "nested_content_block_start": "a new content block started before the previous block ended",
+        "invalid_content_index": "a content event used an invalid block index",
+        "duplicate_content_index": "a content block index was started more than once",
+        "unknown_content_block": "the provider returned an unknown content block type",
+        "missing_tool_call_id": "a tool-use block had no stable identifier",
+        "missing_tool_name": "a tool-use block had no tool name",
+        "duplicate_tool_call_id": "a tool-use identifier was reused in the response",
+        "content_delta_without_start": "a content delta arrived without an open content block",
+        "unknown_content_delta": "the provider returned an unknown content delta type",
+        "content_delta_kind_mismatch": "a content delta did not match its open content block type",
+        "content_stop_without_start": "a content block ended without a matching start",
+        "content_index_mismatch": "a content event targeted the wrong block index",
+        "content_event_after_message_delta": "content arrived after terminal message metadata",
+        "message_delta_with_open_block": "message metadata arrived before the open content block ended",
+        "duplicate_message_delta": "message_delta was emitted more than once",
+        "message_stop_with_open_block": "the message ended while a content block was still open",
+        "message_stop_without_delta": "message_stop arrived before message_delta",
+        "late_event_after_message_stop": "an event arrived after message_stop",
+        "unknown_stream_event": "the provider returned an unknown stream event type",
+    }
+    raw: dict[str, Any] = {
+        "provider": provider,
+        "provider_error_type": "protocol",
+        "error_type": "api",
+        "event_type": event_type,
+        "protocol_error_code": code,
+    }
+    if current_index is not None:
+        raw["current_content_index"] = current_index
+    if received_index is not None:
+        raw["received_content_index"] = received_index
+    if current_kind:
+        raw["current_content_kind"] = current_kind[:80]
+    if delta_type:
+        raw["received_delta_type"] = delta_type[:80]
+    return StreamEvent(
+        type=StreamEventType.ERROR,
+        content=f"MiniCode Anthropic Messages 协议错误：{messages.get(code, code)}。",
+        raw=raw,
+    )
+
+
+def _anthropic_error_fields(value: Any) -> tuple[str, str]:
+    """Extract provider code/type without projecting a response body to users."""
+
+    payload: Any = value
+    if isinstance(value, BaseException):
+        response = getattr(value, "response", None)
+        if response is None:
+            return "", ""
+        try:
+            payload = response.json()
+        except Exception:
+            text = getattr(response, "text", None)
+            if not text:
+                content = getattr(response, "content", None)
+                text = (
+                    content.decode("utf-8", errors="replace")
+                    if isinstance(content, bytes)
+                    else str(content or "")
+                )
+            try:
+                payload = json.loads(str(text or ""))
+            except (TypeError, ValueError):
+                return "", ""
+    if not isinstance(payload, Mapping):
+        return "", ""
+    error = payload.get("error")
+    if isinstance(error, Mapping):
+        payload = error
+    code = str(payload.get("code") or "").strip()
+    schema_type = str(payload.get("type") or "").strip()
+    return code[:80], schema_type[:80]
+
+
+def _anthropic_error_message(value: Any) -> str:
+    """Extract the provider's safe human-readable error message."""
+    if isinstance(value, BaseException):
+        message = str(
+            llm_error_raw(value, "anthropic").get("provider_error_message") or ""
+        ).strip()
+        if message:
+            return _clean_error_message(message)
+    if isinstance(value, Mapping):
+        error = value.get("error") if isinstance(value.get("error"), Mapping) else value
+        message = str(error.get("message") or value.get("message") or "").strip()
+        if message:
+            return _clean_error_message(message)
+    return _clean_error_message(value)
+
+
+def _anthropic_error_hint(
+    classification: Any,
+    *,
+    status_code: int | None = None,
+    code: str = "",
+    schema_type: str = "",
+) -> str:
+    parts: list[str] = []
+    provider_error_type = str(
+        getattr(classification, "provider_error_type", "") or ""
+    ).strip()
+    if provider_error_type and provider_error_type != "unknown":
+        parts.append(f"provider_error_type={provider_error_type}")
+    if status_code is not None:
+        parts.append(f"status={status_code}")
+    if code:
+        parts.append(f"provider_error_code={code}")
+    if schema_type:
+        parts.append(f"provider_error_schema_type={schema_type}")
+    return " ".join(parts)
+
+
+def _anthropic_exception_error_event(
+    exc: Exception,
+    *,
+    provider: str,
+) -> StreamEvent:
+    classification = classify_llm_error(exc)
+    status_code = llm_error_status_code(exc)
+    code, schema_type = _anthropic_error_fields(exc)
+    provider_message = _anthropic_error_message(exc)
+    hint = _anthropic_error_hint(
+        classification,
+        status_code=status_code,
+        code=code,
+        schema_type=schema_type,
+    )
+    suffix = f" ({hint})" if hint else ""
+    raw: dict[str, Any] = {
+        "provider": provider,
+        "provider_error_type": classification.provider_error_type,
+        "error_type": classification.error_type,
+    }
+    raw.update(llm_error_raw(exc, provider))
+    if status_code is not None:
+        raw["status_code"] = status_code
+    if code:
+        raw["provider_error_code"] = code
+    if schema_type:
+        raw["provider_error_schema_type"] = schema_type
+    if provider_message:
+        raw["provider_error_message"] = provider_message
+    retry_after = retry_after_seconds(exc)
+    if retry_after > 0:
+        raw["retry_after_seconds"] = retry_after
+    return StreamEvent(
+        type=StreamEventType.ERROR,
+        content=(
+            f"MiniCode Anthropic Messages 请求失败：{provider_message}{suffix}"
+            if provider_message
+            else "MiniCode Anthropic Messages 请求失败："
+            f"{sanitize_llm_error_message(exc, classification, include_provider_details=False)}{suffix}"
+        ),
+        raw=raw,
+    )
+
+
+def _anthropic_declared_error_event(
+    event: Mapping[str, Any],
+    *,
+    provider: str,
+) -> StreamEvent:
+    error = event.get("error") if isinstance(event.get("error"), Mapping) else {}
+    message = str(
+        error.get("message")
+        or event.get("message")
+        or "Anthropic stream error"
+    )
+    code, schema_type = _anthropic_error_fields(error)
+    provider_message = _anthropic_error_message(error)
+    classification = classify_llm_error(
+        " ".join(part for part in (schema_type, code, message) if part)
+    )
+    status_code: int | None = None
+    for candidate in (error.get("status_code"), event.get("status_code")):
+        try:
+            if candidate is not None:
+                status_code = int(candidate)
+                break
+        except (TypeError, ValueError):
+            continue
+    hint = _anthropic_error_hint(
+        classification,
+        status_code=status_code,
+        code=code,
+        schema_type=schema_type,
+    )
+    suffix = f" ({hint})" if hint else ""
+    raw: dict[str, Any] = {
+        "provider": provider,
+        "provider_error_type": classification.provider_error_type,
+        "error_type": classification.error_type,
+    }
+    if status_code is not None:
+        raw["status_code"] = status_code
+    if code:
+        raw["provider_error_code"] = code
+    if schema_type:
+        raw["provider_error_schema_type"] = schema_type
+    if provider_message:
+        raw["provider_error_message"] = provider_message
+    for candidate in (
+        error.get("retry_after_seconds"),
+        event.get("retry_after_seconds"),
+        error.get("retry_after"),
+        event.get("retry_after"),
+    ):
+        try:
+            delay = max(0.0, min(float(candidate), 300.0))
+        except (TypeError, ValueError):
+            continue
+        if delay > 0:
+            raw["retry_after_seconds"] = delay
+            break
+    return StreamEvent(
+        type=StreamEventType.ERROR,
+        content=f"MiniCode Anthropic Messages 请求失败：{provider_message or _clean_error_message(message)}{suffix}",
+        raw=raw,
+    )
+
+
+def _anthropic_web_search_sources(block: Any) -> list[tuple[str, str]]:
+    """Extract Claude hosted-search result URLs from one content block."""
+
+    block_type = (
+        str(block.get("type") or "")
+        if isinstance(block, Mapping)
+        else str(getattr(block, "type", "") or "")
+    )
+    if block_type != "web_search_tool_result":
+        return []
+    content = (
+        block.get("content")
+        if isinstance(block, Mapping)
+        else getattr(block, "content", None)
+    )
+    if not isinstance(content, list):
+        return []
+    sources: list[tuple[str, str]] = []
+    for item in content:
+        title = (
+            str(item.get("title") or "").strip()
+            if isinstance(item, Mapping)
+            else str(getattr(item, "title", "") or "").strip()
+        )
+        url = (
+            str(item.get("url") or "").strip()
+            if isinstance(item, Mapping)
+            else str(getattr(item, "url", "") or "").strip()
+        )
+        if url and (title, url) not in sources:
+            sources.append((title, url))
+    return sources
+
+
+def _anthropic_refusal_metadata(value: Any) -> dict[str, str]:
+    """Detach the structured refusal fields without retaining arbitrary data."""
+
+    if value is None:
+        return {}
+    refusal_type = str(_anthropic_field(value, "type", "") or "").strip()
+    if refusal_type and refusal_type != "refusal":
+        return {}
+    metadata: dict[str, str] = {"type": "refusal"}
+    category = str(_anthropic_field(value, "category", "") or "").strip()
+    explanation = re.sub(
+        r"\s+",
+        " ",
+        str(_anthropic_field(value, "explanation", "") or ""),
+    ).strip()
+    if category:
+        metadata["category"] = category[:80]
+    if explanation:
+        metadata["explanation"] = explanation[:4_096]
+    return metadata
+
+
+def _anthropic_container_metadata(value: Any) -> dict[str, str]:
+    """Return the operationally useful, non-content container envelope."""
+
+    if value is None:
+        return {}
+    container_id = str(_anthropic_field(value, "id", "") or "").strip()
+    expires_at_value = _anthropic_field(value, "expires_at", None)
+    if hasattr(expires_at_value, "isoformat"):
+        try:
+            expires_at = str(expires_at_value.isoformat())
+        except Exception:
+            expires_at = ""
+    else:
+        expires_at = str(expires_at_value or "").strip()
+    metadata: dict[str, str] = {}
+    if container_id:
+        metadata["id"] = container_id[:256]
+    if expires_at:
+        metadata["expires_at"] = expires_at[:80]
+    return metadata
+
+
+def _anthropic_public_citation(value: Any) -> dict[str, Any] | None:
+    """Normalize Anthropic citations without retaining cited source text.
+
+    Web citations remain linkable. Document/page/block citations intentionally
+    use an opaque, stable source key: the provider's ``cited_text`` and raw
+    file id must not become a second content-delivery path into the renderer.
+    """
+
+    citation_type = str(_anthropic_field(value, "type", "") or "").strip()
+    if citation_type == "web_search_result_location":
+        url = str(_anthropic_field(value, "url", "") or "").strip()
+        title = str(_anthropic_field(value, "title", "") or "").strip()
+        if not re.match(r"^https?://", url, flags=re.IGNORECASE):
+            return None
+        return {
+            "url": url,
+            "title": re.sub(r"\s+", " ", title).strip()[:512],
+            "range": [0, 0],
+        }
+
+    def location_index(field_name: str) -> int:
+        try:
+            return max(0, int(_anthropic_field(value, field_name, 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def bounded_text(field_name: str, maximum: int = 512) -> str:
+        return re.sub(
+            r"\s+",
+            " ",
+            str(_anthropic_field(value, field_name, "") or ""),
+        ).strip()[:maximum]
+
+    if citation_type == "search_result_location":
+        raw_source = bounded_text("source", 2_048)
+        title = bounded_text("title")
+        start = location_index("start_block_index")
+        end = max(start, location_index("end_block_index"))
+        if re.match(r"^https?://", raw_source, flags=re.IGNORECASE):
+            return {
+                "url": raw_source,
+                "title": title,
+                "range": [start, end],
+            }
+        identity = json.dumps(
+            [citation_type, raw_source, title, location_index("search_result_index")],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+        return {
+            "source": f"anthropic:search-result:{digest}",
+            "title": title or "Search result",
+            "label": f"Blocks {start}–{end}",
+            "range": [start, end],
+            "location_type": citation_type,
+        }
+
+    location_fields = {
+        "char_location": ("start_char_index", "end_char_index", "Characters"),
+        "page_location": ("start_page_number", "end_page_number", "Pages"),
+        "content_block_location": (
+            "start_block_index",
+            "end_block_index",
+            "Blocks",
+        ),
+    }
+    field_names = location_fields.get(citation_type)
+    if field_names is None:
+        return None
+    start_field, end_field, range_label = field_names
+    start = location_index(start_field)
+    end = max(start, location_index(end_field))
+    document_index = location_index("document_index")
+    document_title = bounded_text("document_title")
+    file_id = bounded_text("file_id", 512)
+    identity = json.dumps(
+        [citation_type, document_index, document_title, file_id],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return {
+        "source": f"anthropic:document:{digest}",
+        "title": document_title or f"Document {document_index + 1}",
+        "label": f"{range_label} {start}–{end}",
+        "range": [start, end],
+        "location_type": citation_type,
+    }
+
+
+def _anthropic_public_citations(value: Any) -> list[dict[str, Any]]:
+    values = value if isinstance(value, (list, tuple)) else [value]
+    citations: list[dict[str, Any]] = []
+    for item in values:
+        citation = _anthropic_public_citation(item)
+        if citation is not None and citation not in citations:
+            citations.append(citation)
+    return citations
+
+
+_ANTHROPIC_RESULT_ACTIVITY_NAMES = {
+    "web_search_tool_result": "web_search",
+    "web_fetch_tool_result": "web_fetch",
+    "code_execution_tool_result": "code_execution",
+    "bash_code_execution_tool_result": "bash_code_execution",
+    "text_editor_code_execution_tool_result": "text_editor_code_execution",
+    "tool_search_tool_result": "tool_search",
+    "mcp_tool_result": "mcp",
+    "advisor_tool_result": "advisor",
+}
+
+
+def _anthropic_activity_label(name: str) -> str:
+    normalized = str(name or "").strip().lower()
+    if normalized == "web_search":
+        return "Web search"
+    if normalized == "web_fetch":
+        return "Web fetch"
+    if normalized in {
+        "code_execution",
+        "bash_code_execution",
+        "text_editor_code_execution",
+    }:
+        return "Code execution"
+    if normalized.startswith("tool_search") or normalized == "tool_search":
+        return "Tool search"
+    if normalized == "mcp":
+        return "MCP tool"
+    if normalized == "advisor":
+        return "Advisor"
+    return str(name or "Provider tool").replace("_", " ").strip().title()
+
+
+def _anthropic_input_character_count(value: Any) -> int:
+    """Count normalized JSON characters without exposing provider input."""
+
+    detached = _detached_anthropic_value(value)
+    if detached in (None, {}, []):
+        return 0
+    try:
+        serialized = json.dumps(
+            detached,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return len(serialized)
+
+
+def _anthropic_result_error_code(value: Any, *, depth: int = 0) -> str:
+    if depth > 6:
+        return ""
+    values = value if isinstance(value, (list, tuple)) else [value]
+    for item in values:
+        error_code = str(_anthropic_field(item, "error_code", "") or "").strip()
+        if error_code:
+            # Provider error identifiers are useful operational metadata, but
+            # raw error text can contain query/input content. Keep only
+            # identifier-safe characters and never project a message/body.
+            return re.sub(r"[^A-Za-z0-9._:-]+", "_", error_code)[:128]
+        for child_name in ("content", "error", "result"):
+            child = _anthropic_field(item, child_name, None)
+            if child is None or child is item:
+                continue
+            nested = _anthropic_result_error_code(child, depth=depth + 1)
+            if nested:
+                return nested
+    return ""
+
+
+def _anthropic_result_failed(value: Any, *, depth: int = 0) -> bool:
+    """Fail closed for scalar, list, and nested provider-result envelopes."""
+
+    if depth > 6:
+        return False
+    values = value if isinstance(value, (list, tuple)) else [value]
+    for item in values:
+        if bool(_anthropic_field(item, "is_error", False)):
+            return True
+        content_type = str(_anthropic_field(item, "type", "") or "").lower()
+        if "error" in content_type or _anthropic_field(item, "error_code", None):
+            return True
+        for child_name in ("content", "error", "result"):
+            child = _anthropic_field(item, child_name, None)
+            if child is None or child is item:
+                continue
+            if _anthropic_result_failed(child, depth=depth + 1):
+                return True
+    return False
+
+
+def _anthropic_provider_activity(
+    block: Any,
+    *,
+    activity_id: str = "",
+    terminal: bool = False,
+) -> ProviderActivityEvent | None:
+    block_type = str(_anthropic_field(block, "type", "") or "").strip()
+    if block_type in {"server_tool_use", "mcp_tool_use"}:
+        block_activity_id = str(_anthropic_field(block, "id", "") or "").strip()
+        tool_name = str(_anthropic_field(block, "name", "") or "").strip()
+        label = _anthropic_activity_label(tool_name)
+        detail_parts: list[str] = []
+        if block_type == "mcp_tool_use":
+            server_name = str(
+                _anthropic_field(block, "server_name", "") or ""
+            ).strip()
+            if server_name:
+                detail_parts.append(f"Server: {server_name[:256]}")
+            if tool_name:
+                detail_parts.append(f"Tool: {tool_name[:256]}")
+        input_characters = _anthropic_input_character_count(
+            _anthropic_field(block, "input", None)
+        )
+        if input_characters:
+            input_label = "Arguments" if block_type == "mcp_tool_use" else "Input"
+            detail_parts.append(f"{input_label}: {input_characters} characters")
+        running_messages = {
+            "web_search": "Searching the web",
+            "web_fetch": "Fetching a web page",
+            "code_execution": "Running provider code",
+            "bash_code_execution": "Running provider code",
+            "text_editor_code_execution": "Editing files in the provider container",
+        }
+        message = running_messages.get(
+            tool_name,
+            f"Using {label.lower()}",
+        )
+        return ProviderActivityEvent(
+            id=(
+                block_activity_id
+                or activity_id
+                or f"anthropic:{block_type}:{tool_name}"
+            ),
+            kind=block_type,
+            name=label,
+            status="running",
+            message=message,
+            detail=" · ".join(detail_parts),
+        )
+
+    if block_type == "container_upload":
+        file_id = str(_anthropic_field(block, "file_id", "") or "").strip()
+        fingerprint = (
+            hashlib.sha256(file_id.encode("utf-8")).hexdigest()[:12]
+            if file_id
+            else ""
+        )
+        return ProviderActivityEvent(
+            id=(
+                activity_id
+                or f"anthropic:container-upload:{fingerprint or 'unknown'}"
+            ),
+            kind=block_type,
+            name="Container upload",
+            status="completed",
+            message="Container file uploaded",
+            detail=f"File ID: {fingerprint}" if fingerprint else "",
+            count=1,
+        )
+
+    if block_type == "compaction":
+        stable_id = activity_id or "anthropic:provider-compaction"
+        if not terminal:
+            return ProviderActivityEvent(
+                id=stable_id,
+                kind=block_type,
+                name="Provider compaction",
+                status="running",
+                message="Provider context compaction in progress",
+            )
+        content = _anthropic_field(block, "content", None)
+        has_summary = isinstance(content, str) and bool(content.strip())
+        return ProviderActivityEvent(
+            id=stable_id,
+            kind=block_type,
+            name="Provider compaction",
+            status="completed" if has_summary else "failed",
+            message=(
+                "Provider context compaction completed"
+                if has_summary
+                else "Provider context compaction produced no summary"
+            ),
+        )
+
+    tool_name = _ANTHROPIC_RESULT_ACTIVITY_NAMES.get(block_type)
+    if not tool_name:
+        return None
+    block_activity_id = str(
+        _anthropic_field(block, "tool_use_id", "") or ""
+    ).strip()
+    content = _anthropic_field(block, "content", None)
+    failed = bool(_anthropic_field(block, "is_error", False)) or (
+        _anthropic_result_failed(content)
+    )
+    error_code = _anthropic_result_error_code(content)
+    label = _anthropic_activity_label(tool_name)
+    count: int | None = None
+    if tool_name == "web_search":
+        count = len(_anthropic_web_search_sources(block))
+    message = (
+        f"{label} failed"
+        if failed
+        else (
+            f"{label} completed — {count} source{'s' if count != 1 else ''}"
+            if count is not None
+            else f"{label} completed"
+        )
+    )
+    return ProviderActivityEvent(
+        id=block_activity_id or activity_id or f"anthropic:{block_type}",
+        kind=block_type,
+        name=label,
+        status="failed" if failed else "completed",
+        message=message,
+        detail=f"Error code: {error_code}" if error_code else "",
+        count=count,
+    )
+
+
+def _anthropic_field(value: Any, name: str, default: Any = None) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
+def _anthropic_usage_value_or_existing(
+    usage_obj: Any,
+    field_name: str,
+    existing: int,
+) -> int:
+    if _anthropic_field(usage_obj, field_name, None) is None:
+        return existing
+    return _get_usage_field(usage_obj, field_name)
+
+
+def _anthropic_usage_metadata(usage_obj: Any) -> dict[str, Any]:
+    """Return strict, non-content Anthropic usage diagnostics."""
+
+    if usage_obj is None:
+        return {}
+    metadata: dict[str, Any] = {}
+    for field_name in (
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "cache_deleted_input_tokens",
+    ):
+        if _anthropic_field(usage_obj, field_name, None) is not None:
+            metadata[field_name] = _get_usage_field(usage_obj, field_name)
+    for field_name in ("service_tier", "inference_geo"):
+        value = str(_anthropic_field(usage_obj, field_name, "") or "").strip()
+        if value:
+            metadata[field_name] = value[:80]
+    for container_name, counter_names in (
+        (
+            "server_tool_use",
+            ("web_search_requests", "web_fetch_requests"),
+        ),
+        (
+            "cache_creation",
+            ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"),
+        ),
+    ):
+        container = _anthropic_field(usage_obj, container_name, None)
+        if container is None:
+            continue
+        counters = {
+            counter_name: _get_usage_field(container, counter_name)
+            for counter_name in counter_names
+            if _anthropic_field(container, counter_name, None) is not None
+        }
+        if counters:
+            metadata[container_name] = counters
+    cost_usd = _get_usage_cost_usd(usage_obj)
+    if cost_usd > 0:
+        metadata["cost_usd"] = cost_usd
+    return metadata
 
 
 def _anthropic_request_metadata(metadata: dict[str, Any] | None) -> dict[str, str]:
@@ -84,28 +1044,6 @@ def _anthropic_request_metadata(metadata: dict[str, Any] | None) -> dict[str, st
         return {}
     digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:32]
     return {"user_id": f"minicode-{digest}"}
-
-
-def _is_cache_control_unsupported_error(exc: Exception) -> bool:
-    text = _clean_error_message(exc).lower()
-    status_code = getattr(exc, "status_code", None)
-    mentions_cache_control = "cache_control" in text or "cache control" in text
-    mentions_incompatibility = any(
-        token in text
-        for token in (
-            "invalid",
-            "unsupported",
-            "not supported",
-            "not support",
-            "unrecognized",
-            "unknown parameter",
-            "unknown field",
-            "extra inputs",
-            "badrequest",
-            "bad request",
-        )
-    )
-    return bool(status_code in {400, 422} and mentions_cache_control and mentions_incompatibility)
 
 
 def _short_sha256(value: str, length: int = 12) -> str:
@@ -183,7 +1121,11 @@ def _anthropic_input_size_summary(messages: list[dict[str, Any]]) -> dict[str, A
             raw = repr(message)
         chars = len(raw)
         total_chars += chars
-        content_hash = _json_fingerprint(message.get("content")) if message.get("content") not in (None, "", [], {}) else ""
+        content_hash = (
+            _json_fingerprint(message.get("content"))
+            if message.get("content") not in (None, "", [], {})
+            else ""
+        )
         role = str(message.get("role") or "message")[:80]
         largest.append(
             {
@@ -209,13 +1151,90 @@ def _anthropic_input_size_summary(messages: list[dict[str, Any]]) -> dict[str, A
             group["count"] = int(group["count"]) + 1
             group["chars"] = int(group["chars"]) + chars
     largest.sort(key=lambda item: (-int(item["chars"]), int(item["index"])))
-    duplicates = [group for group in duplicate_groups.values() if int(group.get("count") or 0) > 1]
-    duplicates.sort(key=lambda item: (-int(item.get("chars") or 0), str(item.get("role") or "")))
+    duplicates = [
+        group for group in duplicate_groups.values() if int(group.get("count") or 0) > 1
+    ]
+    duplicates.sort(
+        key=lambda item: (-int(item.get("chars") or 0), str(item.get("role") or ""))
+    )
     return {
         "input_chars": total_chars,
         "largest_input_items": largest[:5],
         "duplicate_input_content": duplicates[:5],
     }
+
+
+def _strip_excess_anthropic_media(
+    messages: list[dict[str, Any]],
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    media_types = {"image", "document"}
+    media_count = 0
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") in media_types:
+                media_count += 1
+            if block.get("type") == "tool_result":
+                nested = block.get("content")
+                if isinstance(nested, list):
+                    media_count += sum(
+                        1
+                        for item in nested
+                        if isinstance(item, dict)
+                        and item.get("type") in media_types
+                    )
+    to_remove = media_count - max(0, int(limit))
+    if to_remove <= 0:
+        return messages
+
+    # Dropping attachments changes what the model sees. Say so: an answer that
+    # ignores an image the user attached is otherwise inexplicable.
+    logger.warning(
+        "Anthropic request carries %d media blocks over the %d-block limit; "
+        "dropping the %d oldest image/document blocks from this request",
+        to_remove,
+        max(0, int(limit)),
+        to_remove,
+    )
+
+    stripped_messages: list[dict[str, Any]] = []
+    for message in messages:
+        if to_remove <= 0 or not isinstance(message.get("content"), list):
+            stripped_messages.append(message)
+            continue
+        next_content: list[Any] = []
+        for raw_block in message["content"]:
+            if not isinstance(raw_block, dict):
+                next_content.append(raw_block)
+                continue
+            block = dict(raw_block)
+            if block.get("type") == "tool_result" and isinstance(
+                block.get("content"), list
+            ):
+                nested_content: list[Any] = []
+                for nested in block["content"]:
+                    if (
+                        to_remove > 0
+                        and isinstance(nested, dict)
+                        and nested.get("type") in media_types
+                    ):
+                        to_remove -= 1
+                        continue
+                    nested_content.append(nested)
+                block["content"] = nested_content
+            if to_remove > 0 and block.get("type") in media_types:
+                to_remove -= 1
+                continue
+            next_content.append(block)
+        next_message = dict(message)
+        next_message["content"] = next_content
+        stripped_messages.append(next_message)
+    return stripped_messages
 
 
 def _contains_turn_aborted_marker(value: Any) -> bool:
@@ -258,9 +1277,14 @@ def _safe_anthropic_request_params(kwargs: dict[str, Any]) -> dict[str, Any]:
                     for block in content:
                         if isinstance(block, dict) and "cache_control" in block:
                             cache_breakpoints += 1
-                        if isinstance(block, dict) and block.get("type") == "cache_edits":
+                        if (
+                            isinstance(block, dict)
+                            and block.get("type") == "cache_edits"
+                        ):
                             edits = block.get("edits")
-                            cache_edit_count += len(edits) if isinstance(edits, list) else 0
+                            cache_edit_count += (
+                                len(edits) if isinstance(edits, list) else 0
+                            )
     params["cache_control_present"] = cache_breakpoints > 0 or "cache_control" in kwargs
     params["cache_breakpoints"] = cache_breakpoints
     params["cache_edit_count"] = cache_edit_count
@@ -270,8 +1294,12 @@ def _safe_anthropic_request_params(kwargs: dict[str, Any]) -> dict[str, Any]:
         and kwargs["extra_headers"].get("anthropic-beta")
     )
     params["metadata_present"] = "metadata" in kwargs
-    params["system_blocks"] = len(kwargs.get("system") or []) if isinstance(kwargs.get("system"), list) else 0
-    params["tools_len"] = len(kwargs.get("tools") or []) if isinstance(kwargs.get("tools"), list) else 0
+    params["system_blocks"] = (
+        len(kwargs.get("system") or []) if isinstance(kwargs.get("system"), list) else 0
+    )
+    params["tools_len"] = (
+        len(kwargs.get("tools") or []) if isinstance(kwargs.get("tools"), list) else 0
+    )
     return params
 
 
@@ -279,13 +1307,18 @@ def _anthropic_safe_request_summary(
     *,
     model: str,
     system_text: str,
+    stable_system_text: str | None,
     api_messages: list[dict[str, Any]],
     anthropic_tools: list[dict[str, Any]],
     metadata: dict[str, Any] | None,
     kwargs: dict[str, Any],
 ) -> dict[str, Any]:
     clean_metadata = sanitize_llm_request_metadata(metadata)
-    stable_system = split_sys_prompt_prefix(system_text).stable_prefix if system_text else ""
+    stable_system = (
+        stable_system_text
+        if stable_system_text is not None
+        else (split_sys_prompt_prefix(system_text).stable_prefix if system_text else "")
+    )
     input_counts: dict[str, int] = {}
     for message in api_messages:
         role = str(message.get("role") or "message")
@@ -296,8 +1329,6 @@ def _anthropic_safe_request_summary(
         "metadata_keys": sorted(clean_metadata.keys()),
         "prompt_cache_key_present": False,
         "prompt_cache_key_hash": "",
-        "previous_response_id_present": False,
-        "previous_response_id_hash": "",
         "request_params": _safe_anthropic_request_params(kwargs),
         "turn_aborted_marker_present": _contains_turn_aborted_marker(api_messages),
         "instructions_len": len(system_text),
@@ -312,6 +1343,60 @@ def _anthropic_safe_request_summary(
         **_anthropic_input_size_summary(api_messages),
         "input_item_counts": input_counts,
     }
+
+
+def _anthropic_system_text_from_payload(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list):
+        return ""
+    parts: list[str] = []
+    for block in value:
+        if isinstance(block, dict) and isinstance(block.get("text"), str):
+            parts.append(str(block.get("text") or ""))
+    return "".join(parts)
+
+
+def _anthropic_stable_system_text_from_payload(value: Any) -> str:
+    """Return the first cache segment from an assembled Anthropic payload."""
+
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list):
+        return ""
+    for block in value:
+        if isinstance(block, dict) and isinstance(block.get("text"), str):
+            return str(block.get("text") or "")
+    return ""
+
+
+def _anthropic_safe_request_summary_from_payload(
+    payload: dict[str, Any],
+    metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    messages = payload.get("messages")
+    tools = payload.get("tools")
+    api_messages = (
+        [dict(item) for item in messages if isinstance(item, dict)]
+        if isinstance(messages, list)
+        else []
+    )
+    anthropic_tools = (
+        [dict(item) for item in tools if isinstance(item, dict)]
+        if isinstance(tools, list)
+        else []
+    )
+    return _anthropic_safe_request_summary(
+        model=str(payload.get("model") or ""),
+        system_text=_anthropic_system_text_from_payload(payload.get("system")),
+        stable_system_text=_anthropic_stable_system_text_from_payload(
+            payload.get("system")
+        ),
+        api_messages=api_messages,
+        anthropic_tools=anthropic_tools,
+        metadata=metadata,
+        kwargs=payload,
+    )
 
 
 class AnthropicAdapter(LLMAdapter):
@@ -338,82 +1423,150 @@ class AnthropicAdapter(LLMAdapter):
         self,
         api_key: str,
         model: str = "",
+        small_fast_model: str = "",
         base_url: str | None = None,
-        max_tokens: int = 8_000,
+        max_tokens: int | float = 8_000,
+        context_window: int | float = 0,
         thinking_budget: int | None = None,
         use_auth_token: bool = False,
-        use_raw_http: bool = False,
         cache_editing_beta_header: str = "",
+        default_headers: Mapping[str, str] | None = None,
+        provider_id: str = "anthropic",
+        proxy_mode: str = "inherit",
     ) -> None:
         self._api_key = api_key
+        self._provider_id = str(provider_id or "anthropic").strip() or "anthropic"
+        self._proxy_mode = normalize_provider_proxy_mode(proxy_mode)
         self._model = model
+        self._small_fast_model = str(small_fast_model or "").strip()
         self._base_url = base_url
-        self._max_tokens = max(1, int(max_tokens or 8_000))
+        self._max_tokens = max(1, max_tokens or 8_000)
+        self._context_window = context_window
         self._thinking_budget = thinking_budget
+        self._configured_thinking_budget = thinking_budget
         self._use_auth_token = use_auth_token
-        self._use_raw_http = use_raw_http
-        # Cache editing is a private provider capability. It is disabled unless
-        # the caller supplies the exact provider-declared beta header; MiniCode
-        # never guesses or enables it from a generic feature flag.
+        self._default_headers = {
+            str(key): str(value)
+            for key, value in dict(default_headers or {}).items()
+            if str(key).strip()
+        }
+        # Cache editing is enabled only when the caller supplies the exact
+        # provider-declared beta header; MiniCode never guesses it.
         self._cache_editing_beta_header = str(cache_editing_beta_header or "").strip()
-        self._cache_editing_disabled_reason = ""
-        self._pending_cache_deletions: list[str] = []
-        self._pinned_cache_edits: list[tuple[int, str, dict[str, Any]]] = []
-        self._client = None
+        self._cache_editing_states: dict[str, _CacheEditingState] = {}
+        # Latch 1h-cache eligibility per conversation so configuration reloads
+        # cannot change cache-control bytes in the middle of a session.
+        self._cache_ttl_1h_latches: dict[str, bool] = {}
+        self._http_client: httpx.AsyncClient | None = None
         self._tool_schema_cache = {}
+        self._simple_max_tokens: ContextVar[int | None] = ContextVar(
+            "anthropic_simple_max_tokens",
+            default=None,
+        )
+
+    def supports_hosted_web_search(self) -> bool:
+        # Hosted search is part of the Anthropic provider contract. A custom
+        # Messages endpoint does not inherit it from a matching JSON shape.
+        return self._provider_id == "anthropic"
+
+    def hosted_web_search_supports_blocked_domains(self) -> bool:
+        return self.supports_hosted_web_search()
+
+    def supported_reasoning_efforts(self) -> tuple[str, ...]:
+        return ("off", "high")
+
+    def apply_reasoning_policy(self, policy: ReasoningPolicy) -> None:
+        super().apply_reasoning_policy(policy)
+        self._thinking_budget = (
+            self._configured_thinking_budget
+            if policy.level not in {"", "off"}
+            else None
+        )
 
     async def aclose(self) -> None:
-        client = self._client
-        self._client = None
-        close = getattr(client, "close", None)
-        if callable(close):
-            await close()
+        self._cache_editing_states.clear()
+        self._cache_ttl_1h_latches.clear()
+        http_client = self._http_client
+        self._http_client = None
+        if http_client is not None:
+            await http_client.aclose()
 
     @property
     def capabilities(self) -> ProviderCapabilities:
         return capabilities_from_anthropic_adapter(self)
 
-    def queue_cache_deletions(self, tool_call_ids: list[str] | tuple[str, ...]) -> bool:
+    @staticmethod
+    def _cache_editing_scope_key(
+        metadata: dict[str, Any] | None = None,
+        *,
+        conversation_id: str = "",
+    ) -> str:
+        clean = sanitize_llm_request_metadata(metadata)
+        key = str(
+            conversation_id
+            or clean.get("conversation_id")
+            or clean.get("minicode_session_id")
+            or clean.get("session_id")
+            or "adapter-default"
+        ).strip()
+        return key or "adapter-default"
+
+    def _cache_editing_state(
+        self,
+        metadata: dict[str, Any] | None = None,
+        *,
+        conversation_id: str = "",
+    ) -> _CacheEditingState:
+        key = self._cache_editing_scope_key(
+            metadata,
+            conversation_id=conversation_id,
+        )
+        state = self._cache_editing_states.get(key)
+        if state is None:
+            state = _CacheEditingState()
+            self._cache_editing_states[key] = state
+        return state
+
+    def _cache_ttl_1h_for_metadata(self, metadata: dict[str, Any] | None) -> bool:
+        key = self._cache_editing_scope_key(metadata)
+        latched = self._cache_ttl_1h_latches.get(key)
+        if latched is None:
+            latched = _cache_ttl_1h_enabled()
+            self._cache_ttl_1h_latches[key] = latched
+        return latched
+
+    def queue_cache_deletions(
+        self,
+        tool_call_ids: list[str] | tuple[str, ...],
+        *,
+        conversation_id: str = "",
+    ) -> bool:
         """Queue provider-native deletions when the configured provider supports them."""
-        if not self._cache_editing_beta_header or self._cache_editing_disabled_reason:
+        if not self._cache_editing_beta_header:
             return False
-        known = set(self._pending_cache_deletions)
+        state = self._cache_editing_state(conversation_id=conversation_id)
+        if state.disabled_reason:
+            return False
+        known = set(state.pending_deletions)
         known.update(
             str(edit.get("cache_reference") or "")
-            for _, _, block in self._pinned_cache_edits
+            for _, _, block in state.pinned_edits
             for edit in block.get("edits", [])
             if isinstance(edit, dict)
         )
         for raw_id in tool_call_ids:
             call_id = str(raw_id or "").strip()
             if call_id and call_id not in known:
-                self._pending_cache_deletions.append(call_id)
+                state.pending_deletions.append(call_id)
                 known.add(call_id)
         return True
 
-    def _get_client(self):
-        """懒初始化 Anthropic 客户端。"""
-        if self._client is not None:
-            return self._client
+    def reset_prompt_cache_editing(self, *, conversation_id: str = "") -> None:
+        """Drop cache-edit pins after a local cold-cache prefix rewrite."""
 
-        try:
-            from anthropic import AsyncAnthropic
-        except ImportError:
-            raise RuntimeError("需要安装 anthropic: pip install anthropic")
-
-        kwargs: dict[str, Any] = {
-            "auth_token" if self._use_auth_token else "api_key": self._api_key,
-        }
-        if self._base_url:
-            kwargs["base_url"] = self._base_url
-
-        self._client = AsyncAnthropic(**kwargs)
-        return self._client
-
-    async def _call_with_retry(self, **kwargs: Any):
-        """Create one message through the official Anthropic SDK policy."""
-        client = self._get_client()
-        return await client.messages.create(**kwargs)
+        key = self._cache_editing_scope_key(conversation_id=conversation_id)
+        self._cache_editing_states.pop(key, None)
+        self._cache_ttl_1h_latches.pop(key, None)
 
     async def stream_chat(
         self,
@@ -424,26 +1577,76 @@ class AnthropicAdapter(LLMAdapter):
         """流式调用 Claude Messages API。"""
         # 分离 system prompt + 消息交替保证
         system_text, api_messages = self._convert_messages(messages)
-        anthropic_tools = self._convert_tools_cached(tools or []) if tools else []
+        side_options = self.current_side_query_options()
+        prompt_cache_enabled = (
+            side_options is None or side_options.enable_prompt_cache
+        )
+        model = (
+            self.small_fast_model_id()
+            if side_options is not None and side_options.use_small_fast_model
+            else self._model
+        )
+        requested_max_tokens = self._simple_max_tokens.get()
+        if requested_max_tokens is None and side_options is not None:
+            requested_max_tokens = side_options.max_tokens
+        max_output_tokens = (
+            min(self._max_tokens, max(1, requested_max_tokens))
+            if requested_max_tokens is not None
+            else self._max_tokens
+        )
+        max_output_tokens = clamp_max_tokens_to_context(
+            context_window=self._context_window,
+            messages=messages,
+            tools=tools,
+            max_tokens=max_output_tokens,
+        )
 
-        # Add cache_control breakpoints to last message and last tool.
-        # System blocks get cache_control from _build_system_blocks.
-        pending_cache_deletions = tuple(self._pending_cache_deletions)
+        anthropic_tools = self._convert_tools_cached(tools or []) if tools else []
+        cache_editing_state = (
+            self._cache_editing_state(metadata)
+            if prompt_cache_enabled and self._cache_editing_beta_header
+            else _CacheEditingState()
+        )
+        cache_ttl_1h = (
+            self._cache_ttl_1h_for_metadata(metadata)
+            if prompt_cache_enabled
+            else False
+        )
+
+        # Add cache-control breakpoints only for requests that explicitly keep
+        # prompt caching enabled.
+        pending_cache_deletions = (
+            tuple(cache_editing_state.pending_deletions)
+            if prompt_cache_enabled
+            else ()
+        )
         cache_editing_enabled = bool(
-            self._cache_editing_beta_header and not self._cache_editing_disabled_reason
+            prompt_cache_enabled
+            and self._cache_editing_beta_header
+            and not cache_editing_state.disabled_reason
         )
-        cached_messages, cached_tools, new_cache_edit_pin = self._add_cache_breakpoints(
-            api_messages,
-            anthropic_tools if tools else None,
-            cache_editing=cache_editing_enabled,
-            new_cache_deletions=pending_cache_deletions,
-            pinned_cache_edits=tuple(self._pinned_cache_edits),
-            skip_cache_write=bool((metadata or {}).get("prompt_cache_skip_write")),
-        )
+        if prompt_cache_enabled:
+            cached_messages, cached_tools, new_cache_edit_pin = (
+                self._add_cache_breakpoints(
+                    api_messages,
+                    anthropic_tools if tools else None,
+                    cache_editing=cache_editing_enabled,
+                    new_cache_deletions=pending_cache_deletions,
+                    pinned_cache_edits=tuple(cache_editing_state.pinned_edits),
+                    skip_cache_write=bool(
+                        (metadata or {}).get("prompt_cache_skip_write")
+                    ),
+                    ttl_1h=cache_ttl_1h,
+                )
+            )
+        else:
+            cached_messages = api_messages
+            cached_tools = anthropic_tools if tools else None
+            new_cache_edit_pin = None
 
         kwargs: dict[str, Any] = {
-            "model": self._model,
-            "max_tokens": self._max_tokens,
+            "model": model,
+            "max_tokens": max_output_tokens,
             "messages": cached_messages,
             "stream": True,
         }
@@ -451,296 +1654,144 @@ class AnthropicAdapter(LLMAdapter):
         if request_metadata:
             kwargs["metadata"] = request_metadata
 
-        # 1h cache TTL requires the extended-cache-ttl beta header. The SDK
-        # accepts extra_headers on messages.create; the raw-HTTP path pops it
-        # into HTTP headers. _strip_all_cache_control removes it on fallback.
-        if _cache_ttl_1h_enabled():
-            kwargs["extra_headers"] = {"anthropic-beta": _EXTENDED_CACHE_TTL_BETA_HEADER}
+        # 1h cache TTL requires the provider's extended-cache beta header.
+        if prompt_cache_enabled and cache_ttl_1h:
+            kwargs["extra_headers"] = {
+                "anthropic-beta": _EXTENDED_CACHE_TTL_BETA_HEADER
+            }
         if cache_editing_enabled:
             extra_headers = dict(kwargs.get("extra_headers") or {})
             existing_beta = str(extra_headers.get("anthropic-beta") or "").strip()
-            beta_values = [value for value in (existing_beta, self._cache_editing_beta_header) if value]
+            beta_values = [
+                value
+                for value in (existing_beta, self._cache_editing_beta_header)
+                if value
+            ]
             extra_headers["anthropic-beta"] = ",".join(dict.fromkeys(beta_values))
             kwargs["extra_headers"] = extra_headers
 
         # System prompt: split stable/dynamic blocks with cache_control on
         # the stable prefix so Anthropic caches it across turns.
         if system_text:
-            kwargs["system"] = self._build_system_blocks(system_text)
+            kwargs["system"] = (
+                    self._build_system_blocks(system_text, ttl_1h=cache_ttl_1h)
+                if prompt_cache_enabled
+                else system_text
+            )
 
         # Extended thinking（Claude 4+）
-        if self._should_enable_thinking(messages, anthropic_tools):
-            # Anthropic hard-rejects budget_tokens >= max_tokens. Clamp exactly
-            # like Claude Code (claude.ts: thinkingBudget = min(maxOutputTokens-1,
-            # requestedBudget)) so a user setting thinking_budget >= max_tokens
-            # does not produce a 400.
-            budget_tokens = min(self._thinking_budget, self._max_tokens - 1)
-            kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget_tokens}
+        if not (
+            side_options is not None and side_options.disable_reasoning
+        ) and max_output_tokens > 1 and self._should_enable_thinking(
+            messages, anthropic_tools
+        ):
+            # Anthropic rejects budget_tokens >= max_tokens. Keep the requested
+            # budget inside the wire contract instead of retrying a modified
+            # request after rejection. Newer model families use adaptive
+            # thinking plus output_config.effort instead of a token budget.
+            # Capability decisions must follow the model actually placed on
+            # the wire. Side queries may select small_fast_model, which can be
+            # a different Claude generation from the primary model.
+            model_id = str(model or "").lower()
+            if _is_adaptive_thinking_model(model_id):
+                kwargs["thinking"] = {"type": "adaptive"}
+                effort = _adaptive_thinking_effort(self._thinking_budget)
+                if effort:
+                    kwargs["output_config"] = {"effort": effort}
+            else:
+                budget_tokens = min(self._thinking_budget, max_output_tokens - 1)
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget_tokens}
+            if anthropic_tools:
+                # Interleaved thinking is required for tool-use turns with
+                # thinking enabled (cc betas.ts INTERLEAVED_THINKING_BETA_HEADER).
+                extra_headers = dict(kwargs.get("extra_headers") or {})
+                existing_beta = str(extra_headers.get("anthropic-beta") or "").strip()
+                beta_values = [
+                    value
+                    for value in (existing_beta, "interleaved-thinking-2025-05-14")
+                    if value
+                ]
+                extra_headers["anthropic-beta"] = ",".join(dict.fromkeys(beta_values))
+                kwargs["extra_headers"] = extra_headers
 
         if tools and cached_tools:
             kwargs["tools"] = cached_tools
             kwargs["tool_choice"] = {"type": "auto"}
 
-        request_summary = _anthropic_safe_request_summary(
-            model=self._model,
-            system_text=system_text,
-            api_messages=api_messages,
-            anthropic_tools=anthropic_tools,
-            metadata=metadata,
-            kwargs=kwargs,
-        )
-
-        if self._use_raw_http:
-            async for event in self._stream_chat_raw_http(kwargs, request_summary=request_summary):
-                if event.type == StreamEventType.DONE:
-                    self._commit_cache_edit_request(pending_cache_deletions, new_cache_edit_pin)
-                yield event
-            return
-
-        # 带重试的流式调用
-        try:
-            stream = await self._call_with_retry(**kwargs)
-        except Exception as exc:
-            retry_without_cache = _is_cache_control_unsupported_error(exc)
-            if retry_without_cache:
-                logger.warning(
-                    "Anthropic gateway rejected cache_control; retrying without all cache markers: %s",
-                    _clean_error_message(exc),
+        if side_options is not None and side_options.output_schema is not None:
+            output_config = dict(kwargs.get("output_config") or {})
+            output_config["format"] = {
+                "type": "json_schema",
+                "schema": side_options.output_schema,
+            }
+            kwargs["output_config"] = output_config
+            extra_headers = dict(kwargs.get("extra_headers") or {})
+            existing_beta = str(extra_headers.get("anthropic-beta") or "").strip()
+            beta_values = [
+                value
+                for value in (
+                    existing_beta,
+                    "structured-outputs-2025-12-15",
                 )
-                retry_kwargs = self._strip_all_cache_control(
-                    kwargs,
-                    cache_editing_beta_header=self._cache_editing_beta_header,
-                )
-                if cache_editing_enabled:
-                    self._cache_editing_disabled_reason = "provider_rejected_cache_editing_request"
-                    pending_cache_deletions = ()
-                    new_cache_edit_pin = None
-                request_summary = _anthropic_safe_request_summary(
-                    model=self._model,
-                    system_text=system_text,
-                    api_messages=api_messages,
-                    anthropic_tools=anthropic_tools,
-                    metadata=metadata,
-                    kwargs=retry_kwargs,
-                )
-                try:
-                    stream = await self._call_with_retry(**retry_kwargs)
-                except Exception as retry_exc:
-                    logger.error("Anthropic API 调用失败: %s", retry_exc)
-                    yield StreamEvent(
-                        type=StreamEventType.ERROR,
-                        content=f"Claude API 调用失败: {_clean_error_message(retry_exc)}",
-                    )
-                    return
-            else:
-                logger.error("Anthropic API 调用失败: %s", exc)
-                yield StreamEvent(type=StreamEventType.ERROR, content=f"Claude API 调用失败: {_clean_error_message(exc)}")
-                return
-
-        # 解析流式事件
-        pending_tool_calls: list[ToolCallEvent] = []
-        current_tool_id = ""
-        current_tool_name = ""
-        current_tool_args = ""
-        usage = UsageInfo()
-        stop_reason = ""
-        saw_message_stop = False
-        provider_items: list[dict[str, Any]] = []
-        current_reasoning_item: dict[str, Any] | None = None
-
-        try:
-            async for event in stream:
-                event_type = getattr(event, "type", "")
-
-                if event_type == "message_start":
-                    msg = getattr(event, "message", None)
-                    if msg:
-                        usage_obj = getattr(msg, "usage", None)
-                        if usage_obj:
-                            usage = UsageInfo(
-                                input_tokens=getattr(usage_obj, "input_tokens", 0),
-                                output_tokens=getattr(usage_obj, "output_tokens", 0),
-                                cache_creation_input_tokens=getattr(usage_obj, "cache_creation_input_tokens", 0),
-                                cache_read_input_tokens=getattr(usage_obj, "cache_read_input_tokens", 0),
-                                cache_deleted_input_tokens=getattr(usage_obj, "cache_deleted_input_tokens", 0),
-                                # Anthropic reports cache reads separately from input_tokens.
-                                input_includes_cache_read=False,
-                            )
-                        stop_reason = getattr(msg, "stop_reason", "") or ""
-
-                elif event_type == "content_block_start":
-                    content_block = getattr(event, "content_block", None)
-                    if content_block:
-                        cb_type = getattr(content_block, "type", "")
-                        if cb_type == "tool_use":
-                            current_tool_id = getattr(content_block, "id", "")
-                            current_tool_name = getattr(content_block, "name", "")
-                            current_tool_args = ""
-                            _delta_bytes_since_emit = 0
-                            yield StreamEvent(
-                                type=StreamEventType.TOOL_CALL_START,
-                                tool_call_start=ToolCallStartEvent(
-                                    id=current_tool_id,
-                                    name=current_tool_name,
-                                    index=len(pending_tool_calls),
-                                ),
-                            )
-                        elif cb_type in {"thinking", "redacted_thinking"}:
-                            current_reasoning_item = {"type": cb_type}
-                            initial_thinking = str(getattr(content_block, "thinking", "") or "")
-                            initial_signature = str(getattr(content_block, "signature", "") or "")
-                            initial_data = str(getattr(content_block, "data", "") or "")
-                            if initial_thinking:
-                                current_reasoning_item["thinking"] = initial_thinking
-                            if initial_signature:
-                                current_reasoning_item["signature"] = initial_signature
-                            if initial_data:
-                                current_reasoning_item["data"] = initial_data
-                        elif cb_type == "image":
-                            source = getattr(content_block, "source", None)
-                            if source:
-                                media_type = getattr(source, "media_type", "image/png")
-                                data = getattr(source, "data", "")
-                                if data:
-                                    yield StreamEvent(
-                                        type=StreamEventType.IMAGE_CHUNK,
-                                        image_data=data,
-                                        image_media_type=media_type,
-                                    )
-
-                elif event_type == "content_block_delta":
-                    delta = getattr(event, "delta", None)
-                    if not delta:
-                        continue
-                    delta_type = getattr(delta, "type", "")
-                    if delta_type == "text_delta":
-                        text = getattr(delta, "text", "")
-                        if text:
-                            yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content=text)
-                    elif delta_type in {"thinking_delta", "signature_delta"}:
-                        thinking = getattr(delta, "thinking", "") or getattr(delta, "text", "")
-                        signature = getattr(delta, "signature", "")
-                        if current_reasoning_item is not None:
-                            if thinking:
-                                current_reasoning_item["thinking"] = (
-                                    str(current_reasoning_item.get("thinking") or "") + str(thinking)
-                                )
-                            if signature:
-                                current_reasoning_item["signature"] = (
-                                    str(current_reasoning_item.get("signature") or "") + str(signature)
-                                )
-                        if thinking:
-                            yield StreamEvent(
-                                type=StreamEventType.THINKING_CHUNK,
-                                content=thinking,
-                                raw={"provider_reasoning_type": delta_type},
-                            )
-                    elif delta_type == "input_json_delta":
-                        partial = getattr(delta, "partial_json", "")
-                        if partial:
-                            current_tool_args += partial
-                            _delta_bytes_since_emit += len(partial)
-                            if _delta_bytes_since_emit >= _DELTA_DEBOUNCE_BYTES:
-                                _delta_bytes_since_emit = 0
-                                yield StreamEvent(
-                                    type=StreamEventType.TOOL_CALL_DELTA,
-                                    tool_call_delta=ToolCallDeltaEvent(
-                                        id=current_tool_id,
-                                        partial_arguments=current_tool_args,
-                                    ),
-                                )
-
-                elif event_type == "content_block_stop":
-                    if current_reasoning_item is not None:
-                        provider_items.append(current_reasoning_item)
-                        current_reasoning_item = None
-                    if current_tool_id and current_tool_name:
-                        try:
-                            arguments = json.loads(current_tool_args) if current_tool_args else {}
-                        except (json.JSONDecodeError, TypeError):
-                            from backend.llm.json_repair import repair_tool_json
-                            arguments = repair_tool_json(current_tool_args) or {"_raw": current_tool_args}
-                            arguments_repaired = True
-                        else:
-                            arguments_repaired = False
-                        completed_tool_call = ToolCallEvent(id=current_tool_id, name=current_tool_name, arguments=arguments, arguments_repaired=arguments_repaired)
-                        pending_tool_calls.append(completed_tool_call)
-                        yield StreamEvent(
-                            type=StreamEventType.TOOL_CALL,
-                            tool_calls=[completed_tool_call],
-                            tool_calls_final=False,
-                        )
-                        current_tool_id = ""
-                        current_tool_name = ""
-                        current_tool_args = ""
-
-                elif event_type == "message_delta":
-                    delta_obj = getattr(event, "delta", None)
-                    if delta_obj:
-                        sr = getattr(delta_obj, "stop_reason", None)
-                        if sr:
-                            stop_reason = sr
-                    usage_obj = getattr(event, "usage", None)
-                    if usage_obj:
-                        out_tokens = getattr(usage_obj, "output_tokens", 0)
-                        if out_tokens:
-                            usage = UsageInfo(
-                                input_tokens=usage.input_tokens,
-                                output_tokens=out_tokens,
-                                cache_creation_input_tokens=usage.cache_creation_input_tokens,
-                                cache_read_input_tokens=usage.cache_read_input_tokens,
-                                cache_deleted_input_tokens=max(
-                                    usage.cache_deleted_input_tokens,
-                                    int(getattr(usage_obj, "cache_deleted_input_tokens", 0) or 0),
-                                ),
-                                input_includes_cache_read=False,
-                            )
-
-                elif event_type == "message_stop":
-                    saw_message_stop = True
-
-                elif event_type == "ping":
-                    pass
-
-        except Exception as exc:
-            logger.error("Anthropic 流式解析异常: %s", exc)
-            yield StreamEvent(type=StreamEventType.ERROR, content=f"Claude 流式响应异常: {_clean_error_message(exc)}")
-            return
-
-        if not saw_message_stop:
-            logger.error("Anthropic 流在 message_stop 之前结束")
-            yield StreamEvent(
-                type=StreamEventType.ERROR,
-                content="Claude 流式响应在完成前中断",
-                raw={"provider": "anthropic", "event_type": "eof_without_message_stop"},
+                if value
+            ]
+            extra_headers["anthropic-beta"] = ",".join(
+                dict.fromkeys(beta_values)
             )
-            return
+            kwargs["extra_headers"] = extra_headers
 
-        if pending_tool_calls:
-            yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=pending_tool_calls)
+        if side_options is not None and side_options.hosted_web_search:
+            if not self.supports_hosted_web_search():
+                raise RuntimeError(
+                    "Hosted web search is unavailable for this Anthropic-compatible provider"
+                )
+            if (
+                side_options.web_search_allowed_domains
+                and side_options.web_search_blocked_domains
+            ):
+                raise ValueError("Cannot combine allowed_domains and blocked_domains")
+            hosted_tool: dict[str, Any] = {
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": 8,
+            }
+            if side_options.web_search_allowed_domains:
+                hosted_tool["allowed_domains"] = list(
+                    side_options.web_search_allowed_domains
+                )
+            if side_options.web_search_blocked_domains:
+                hosted_tool["blocked_domains"] = list(
+                    side_options.web_search_blocked_domains
+                )
+            request_tools = list(kwargs.get("tools") or [])
+            request_tools.append(hosted_tool)
+            kwargs["tools"] = request_tools
 
-        if stop_reason == "max_tokens":
-            logger.warning("Claude 响应因 max_tokens 截断")
-
-        self._commit_cache_edit_request(pending_cache_deletions, new_cache_edit_pin)
-        yield StreamEvent(
-            type=StreamEventType.DONE,
-            usage=usage,
-            finish_reason=stop_reason,
-            raw={
-                "provider": "anthropic",
-                "stop_reason": stop_reason,
-                "usage": {
-                    "input_tokens": usage.input_tokens,
-                    "output_tokens": usage.output_tokens,
-                    "cache_creation_input_tokens": usage.cache_creation_input_tokens,
-                    "cache_read_input_tokens": usage.cache_read_input_tokens,
-                    "cache_deleted_input_tokens": usage.cache_deleted_input_tokens,
-                },
-                "request_summary": request_summary,
-            },
-            provider_items=provider_items,
+        request_summary = _anthropic_safe_request_summary_from_payload(
+            kwargs,
+            metadata,
         )
+
+        try:
+            async for event in self._stream_messages(
+                kwargs, request_summary=request_summary, metadata=metadata
+            ):
+                if event.type == StreamEventType.DONE:
+                    self._commit_cache_edit_request(
+                        cache_editing_state,
+                        pending_cache_deletions,
+                        new_cache_edit_pin,
+                    )
+                yield event
+        except ExtensionStaleError:
+            raise
+        except Exception as exc:
+            logger.error("Anthropic Messages transport failed: %s", exc)
+            yield _anthropic_exception_error_event(
+                exc,
+                provider=self._provider_id,
+            )
+        return
 
     def _messages_url(self) -> str:
         endpoint = (self._base_url or "https://api.anthropic.com/v1").rstrip("/")
@@ -748,57 +1799,123 @@ class AnthropicAdapter(LLMAdapter):
             endpoint = f"{endpoint}/v1"
         return f"{endpoint}/messages"
 
-    def _raw_headers(self) -> dict[str, str]:
+    def _request_headers(self) -> dict[str, str]:
+        headers = self._transport_headers()
+        headers.update(self._default_headers)
+        return headers
+
+    def _transport_headers(self) -> dict[str, str]:
         headers = {
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         }
-        if self._use_auth_token:
+        if self._use_auth_token and self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
-        else:
+        elif self._api_key:
             headers["x-api-key"] = self._api_key
         return headers
 
-    async def _stream_chat_raw_http(
+    def _get_http_client(self) -> httpx.AsyncClient:
+        if self._http_client is None:
+            # Provider request liveness is owned by the turn/stream policy;
+            # this transport must not introduce a second idle timeout.
+            self._http_client = httpx.AsyncClient(
+                timeout=None,
+                follow_redirects=False,
+                **provider_httpx_proxy_kwargs(
+                    self._messages_url(),
+                    proxy_mode=self._proxy_mode,
+                ),
+            )
+        return self._http_client
+
+    async def _prepare_message_request(
+        self,
+        payload: dict[str, Any],
+        *,
+        metadata: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        transformed_payload = await emit_provider_lifecycle_request(
+            metadata,
+            dict(payload),
+        )
+        wire_payload = dict(transformed_payload)
+        body = dict(wire_payload)
+        extra_headers = body.pop("extra_headers", None)
+        headers: dict[str, Any] = dict(self._request_headers())
+        if isinstance(extra_headers, dict):
+            headers.update(
+                {
+                    str(key): value
+                    for key, value in extra_headers.items()
+                }
+            )
+        headers = await emit_provider_lifecycle_headers(metadata, headers)
+        return wire_payload, body, headers
+
+    async def _stream_messages(
         self,
         kwargs: dict[str, Any],
         *,
         request_summary: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        """Stream Anthropic Messages over plain HTTP for custom gateways that block the SDK."""
+        """Stream the MiniCode Anthropic Messages wire protocol."""
         pending_tool_calls: list[ToolCallEvent] = []
         current_tool_id = ""
         current_tool_name = ""
         current_tool_args = ""
+        current_tool_initial_input: dict[str, Any] | None = None
+        _delta_bytes_since_emit = 0
         usage = UsageInfo()
+        provider_usage_metadata: dict[str, Any] = {}
         stop_reason = ""
+        saw_message_start = False
+        saw_message_delta = False
         saw_message_stop = False
-        provider_items: list[dict[str, Any]] = []
+        seen_content_indices: set[int] = set()
+        seen_tool_ids: set[str] = set()
+        provider_content_blocks: list[dict[str, Any]] = []
+        current_provider_block: dict[str, Any] | None = None
+        current_provider_input_json = ""
         current_reasoning_item: dict[str, Any] | None = None
+        current_message_id = ""
+        current_content_index: int | None = None
+        current_content_kind = ""
+        current_content_item_id = ""
+        search_sources: list[tuple[str, str]] = []
+        public_citations: list[dict[str, Any]] = []
+        refusal_metadata: dict[str, str] = {}
+        container_metadata: dict[str, str] = {}
 
         try:
-            # extra_headers is an SDK-level convention — move it to HTTP
-            # headers so it doesn't leak into the JSON body.
-            body = dict(kwargs)
-            extra_headers = body.pop("extra_headers", None)
-            headers = self._raw_headers()
-            if isinstance(extra_headers, dict):
-                headers.update({str(k): str(v) for k, v in extra_headers.items()})
-            # Provider stream liveness is owned by the turn/stream wait
-            # policy; the raw transport must not add a second idle timeout.
-            async with httpx.AsyncClient(timeout=None, follow_redirects=True) as client:
-                async with client.stream(
-                    "POST",
-                    self._messages_url(),
-                    headers=headers,
-                    json=body,
-                ) as response:
-                    response.raise_for_status()
-                    async for raw_line in response.aiter_lines():
-                        line = raw_line.strip()
-                        if not line.startswith("data:"):
-                            continue
-                        payload_text = line[5:].strip()
+            # extra_headers belongs to the request envelope, not the JSON body.
+            wire_payload, body, headers = await self._prepare_message_request(
+                kwargs,
+                metadata=metadata,
+            )
+            request_summary = _anthropic_safe_request_summary_from_payload(
+                wire_payload,
+                metadata,
+            )
+            async with self._get_http_client().stream(
+                "POST",
+                self._messages_url(),
+                headers=headers,
+                json=body,
+            ) as response:
+                if response is not None:
+                    await emit_provider_lifecycle_response(
+                        metadata,
+                        int(getattr(response, "status_code", 200) or 200),
+                        getattr(response, "headers", {}),
+                    )
+                    if int(getattr(response, "status_code", 200) or 200) >= 400:
+                        await response.aread()
+                        response.raise_for_status()
+                    malformed_budget = SSEMalformedBudget()
+                    async for raw_payload in iter_sse_data(response):
+                        payload_text = raw_payload.strip()
                         if not payload_text:
                             continue
                         if payload_text == "[DONE]":
@@ -808,36 +1925,215 @@ class AnthropicAdapter(LLMAdapter):
                         try:
                             event = json.loads(payload_text)
                         except json.JSONDecodeError:
+                            malformed_budget.reject(payload_text)
                             continue
+                        malformed_budget.accept()
+
+                        if not isinstance(event, dict):
+                            yield _anthropic_stream_protocol_error(
+                                "invalid_event_envelope",
+                                event_type="invalid",
+                                provider=self._provider_id,
+                            )
+                            return
 
                         event_type = str(event.get("type") or "")
+                        if event_type == "ping":
+                            continue
+                        if saw_message_stop:
+                            yield _anthropic_stream_protocol_error(
+                                "late_event_after_message_stop",
+                                event_type=event_type,
+                                provider=self._provider_id,
+                            )
+                            return
                         if event_type == "error":
-                            error = event.get("error") if isinstance(event.get("error"), dict) else {}
-                            message = str(error.get("message") or event.get("message") or "Anthropic stream error")
-                            yield StreamEvent(type=StreamEventType.ERROR, content=f"Claude API 调用失败: {message}")
+                            yield _anthropic_declared_error_event(
+                                event,
+                                provider=self._provider_id,
+                            )
+                            return
+                        if event_type != "message_start" and not saw_message_start:
+                            yield _anthropic_stream_protocol_error(
+                                "event_before_message_start",
+                                event_type=event_type,
+                                provider=self._provider_id,
+                            )
+                            return
+                        if saw_message_delta and event_type in {
+                            "content_block_start",
+                            "content_block_delta",
+                            "content_block_stop",
+                        }:
+                            yield _anthropic_stream_protocol_error(
+                                "content_event_after_message_delta",
+                                event_type=event_type,
+                                provider=self._provider_id,
+                            )
                             return
 
                         if event_type == "message_start":
-                            message = event.get("message") if isinstance(event.get("message"), dict) else {}
-                            usage_obj = message.get("usage") if isinstance(message, dict) else {}
+                            if saw_message_start:
+                                yield _anthropic_stream_protocol_error(
+                                    "duplicate_message_start",
+                                    event_type=event_type,
+                                    provider=self._provider_id,
+                                )
+                                return
+                            saw_message_start = True
+                            message = (
+                                event.get("message")
+                                if isinstance(event.get("message"), dict)
+                                else {}
+                            )
+                            current_message_id = (
+                                str(message.get("id") or "")
+                                if isinstance(message, dict)
+                                else ""
+                            )
+                            if isinstance(message, dict):
+                                refusal_metadata.update(
+                                    _anthropic_refusal_metadata(
+                                        message.get("stop_details")
+                                    )
+                                )
+                                container_metadata.update(
+                                    _anthropic_container_metadata(
+                                        message.get("container")
+                                    )
+                                )
+                            usage_obj = (
+                                message.get("usage")
+                                if isinstance(message, dict)
+                                else {}
+                            )
                             if isinstance(usage_obj, dict):
+                                provider_usage_metadata.update(
+                                    _anthropic_usage_metadata(usage_obj)
+                                )
                                 usage = UsageInfo(
-                                    input_tokens=int(usage_obj.get("input_tokens") or 0),
-                                    output_tokens=int(usage_obj.get("output_tokens") or 0),
-                                    cache_creation_input_tokens=int(usage_obj.get("cache_creation_input_tokens") or 0),
-                                    cache_read_input_tokens=int(usage_obj.get("cache_read_input_tokens") or 0),
-                                    cache_deleted_input_tokens=int(usage_obj.get("cache_deleted_input_tokens") or 0),
+                                    input_tokens=_get_usage_field(
+                                        usage_obj, "input_tokens"
+                                    ),
+                                    output_tokens=_get_usage_field(
+                                        usage_obj, "output_tokens"
+                                    ),
+                                    cache_creation_input_tokens=_get_usage_field(
+                                        usage_obj, "cache_creation_input_tokens"
+                                    ),
+                                    cache_read_input_tokens=_get_usage_field(
+                                        usage_obj, "cache_read_input_tokens"
+                                    ),
+                                    cache_deleted_input_tokens=_get_usage_field(
+                                        usage_obj, "cache_deleted_input_tokens"
+                                    ),
                                     # Anthropic reports cache reads separately from input_tokens.
                                     input_includes_cache_read=False,
+                                    input_includes_cache_write=False,
+                                    cost_usd=_get_usage_cost_usd(usage_obj),
                                 )
-                            stop_reason = str(message.get("stop_reason") or "") if isinstance(message, dict) else ""
+                            stop_reason = (
+                                str(message.get("stop_reason") or "")
+                                if isinstance(message, dict)
+                                else ""
+                            )
 
                         elif event_type == "content_block_start":
-                            block = event.get("content_block") if isinstance(event.get("content_block"), dict) else {}
+                            raw_received_index = event.get("index")
+                            received_index = (
+                                raw_received_index
+                                if isinstance(raw_received_index, int)
+                                and not isinstance(raw_received_index, bool)
+                                and raw_received_index >= 0
+                                else None
+                            )
+                            if current_content_kind:
+                                yield _anthropic_stream_protocol_error(
+                                    "nested_content_block_start",
+                                    event_type=event_type,
+                                    current_index=current_content_index,
+                                    received_index=received_index,
+                                    current_kind=current_content_kind,
+                                    provider=self._provider_id,
+                                )
+                                return
+                            if received_index is None:
+                                yield _anthropic_stream_protocol_error(
+                                    "invalid_content_index",
+                                    event_type=event_type,
+                                    provider=self._provider_id,
+                                )
+                                return
+                            if received_index in seen_content_indices:
+                                yield _anthropic_stream_protocol_error(
+                                    "duplicate_content_index",
+                                    event_type=event_type,
+                                    received_index=received_index,
+                                    provider=self._provider_id,
+                                )
+                                return
+                            seen_content_indices.add(received_index)
+                            block = (
+                                event.get("content_block")
+                                if isinstance(event.get("content_block"), dict)
+                                else {}
+                            )
+                            block_type = str(block.get("type") or "")
+                            if block_type not in _ANTHROPIC_STREAM_CONTENT_TYPES:
+                                yield _anthropic_stream_protocol_error(
+                                    "unknown_content_block",
+                                    event_type=event_type,
+                                    received_index=received_index,
+                                    current_kind=block_type,
+                                    provider=self._provider_id,
+                                )
+                                return
+                            current_content_index = received_index
+                            current_content_kind = str(block.get("type") or "")
+                            current_provider_block = (
+                                _detached_anthropic_content_block(block)
+                            )
+                            current_provider_input_json = ""
+                            index_label = (
+                                current_content_index
+                                if current_content_index is not None
+                                else "unknown"
+                            )
+                            current_content_item_id = f"{current_message_id or 'anthropic'}:content:{index_label}"
                             if block.get("type") == "tool_use":
                                 current_tool_id = str(block.get("id") or "")
                                 current_tool_name = str(block.get("name") or "")
+                                current_tool_id = current_tool_id.strip()
+                                current_tool_name = current_tool_name.strip()
+                                if not current_tool_id:
+                                    yield _anthropic_stream_protocol_error(
+                                        "missing_tool_call_id",
+                                        event_type=event_type,
+                                        received_index=received_index,
+                                        provider=self._provider_id,
+                                    )
+                                    return
+                                if not current_tool_name:
+                                    yield _anthropic_stream_protocol_error(
+                                        "missing_tool_name",
+                                        event_type=event_type,
+                                        received_index=received_index,
+                                        provider=self._provider_id,
+                                    )
+                                    return
+                                if current_tool_id in seen_tool_ids:
+                                    yield _anthropic_stream_protocol_error(
+                                        "duplicate_tool_call_id",
+                                        event_type=event_type,
+                                        received_index=received_index,
+                                        provider=self._provider_id,
+                                    )
+                                    return
+                                seen_tool_ids.add(current_tool_id)
                                 current_tool_args = ""
+                                current_tool_initial_input = (
+                                    _detached_anthropic_tool_input(block.get("input"))
+                                )
                                 _delta_bytes_since_emit = 0
                                 yield StreamEvent(
                                     type=StreamEventType.TOOL_CALL_START,
@@ -848,62 +2144,295 @@ class AnthropicAdapter(LLMAdapter):
                                     ),
                                 )
                             elif block.get("type") in {"thinking", "redacted_thinking"}:
-                                current_reasoning_item = {
+                                current_reasoning_item = current_provider_block or {
                                     key: value
                                     for key, value in block.items()
-                                    if key in {"type", "thinking", "signature", "data"}
+                                    if key in {
+                                        "type",
+                                        "thinking",
+                                        "signature",
+                                        "data",
+                                    }
                                 }
+                                current_provider_block = current_reasoning_item
+                                yield StreamEvent(
+                                    type=StreamEventType.THINKING_CHUNK,
+                                    content=(
+                                        str(block.get("thinking") or "")
+                                        if block.get("type") == "thinking"
+                                        else ""
+                                    ),
+                                    item_id=current_content_item_id,
+                                    content_index=current_content_index,
+                                    content_kind="thinking",
+                                    lifecycle="start",
+                                )
+                            elif block.get("type") == "text":
+                                yield StreamEvent(
+                                    type=StreamEventType.TEXT_CHUNK,
+                                    content=str(block.get("text") or ""),
+                                    item_id=current_content_item_id,
+                                    content_index=current_content_index,
+                                    content_kind="text",
+                                    lifecycle="start",
+                                )
+                            elif block.get("type") == "web_search_tool_result":
+                                for source in _anthropic_web_search_sources(block):
+                                    if source not in search_sources:
+                                        search_sources.append(source)
+                            for citation in _anthropic_public_citations(
+                                block.get("citations")
+                            ):
+                                if citation not in public_citations:
+                                    public_citations.append(citation)
+                            activity = _anthropic_provider_activity(
+                                block,
+                                activity_id=current_content_item_id,
+                            )
+                            if activity is not None:
+                                yield StreamEvent(
+                                    type=StreamEventType.PROVIDER_ACTIVITY,
+                                    provider_activity=activity,
+                                )
 
                         elif event_type == "content_block_delta":
-                            delta = event.get("delta") if isinstance(event.get("delta"), dict) else {}
+                            raw_received_index = event.get("index")
+                            received_index = (
+                                raw_received_index
+                                if isinstance(raw_received_index, int)
+                                and not isinstance(raw_received_index, bool)
+                                and raw_received_index >= 0
+                                else None
+                            )
+                            if received_index is None:
+                                yield _anthropic_stream_protocol_error(
+                                    "invalid_content_index",
+                                    event_type=event_type,
+                                    current_index=current_content_index,
+                                    current_kind=current_content_kind,
+                                    provider=self._provider_id,
+                                )
+                                return
+                            if not current_content_kind:
+                                yield _anthropic_stream_protocol_error(
+                                    "content_delta_without_start",
+                                    event_type=event_type,
+                                    received_index=received_index,
+                                    provider=self._provider_id,
+                                )
+                                return
+                            if (
+                                current_content_index is not None
+                                and received_index is not None
+                                and received_index != current_content_index
+                            ):
+                                yield _anthropic_stream_protocol_error(
+                                    "content_index_mismatch",
+                                    event_type=event_type,
+                                    current_index=current_content_index,
+                                    received_index=received_index,
+                                    current_kind=current_content_kind,
+                                    provider=self._provider_id,
+                                )
+                                return
+                            delta = (
+                                event.get("delta")
+                                if isinstance(event.get("delta"), dict)
+                                else {}
+                            )
                             delta_type = str(delta.get("type") or "")
+                            delta_protocol_code = (
+                                _anthropic_content_delta_protocol_code(
+                                    current_content_kind,
+                                    delta_type,
+                                )
+                            )
+                            if delta_protocol_code:
+                                yield _anthropic_stream_protocol_error(
+                                    delta_protocol_code,
+                                    event_type=event_type,
+                                    current_index=current_content_index,
+                                    received_index=received_index,
+                                    current_kind=current_content_kind,
+                                    delta_type=delta_type,
+                                    provider=self._provider_id,
+                                )
+                                return
                             if delta_type == "text_delta":
                                 text = str(delta.get("text") or "")
                                 if text:
-                                    yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content=text)
+                                    if current_provider_block is not None:
+                                        current_provider_block["text"] = str(
+                                            current_provider_block.get("text") or ""
+                                        ) + text
+                                    yield StreamEvent(
+                                        type=StreamEventType.TEXT_CHUNK,
+                                        content=text,
+                                        item_id=current_content_item_id,
+                                        content_index=current_content_index,
+                                        content_kind="text",
+                                    )
                             elif delta_type in {"thinking_delta", "signature_delta"}:
-                                thinking = str(delta.get("thinking") or delta.get("text") or "")
+                                thinking = str(
+                                    delta.get("thinking") or delta.get("text") or ""
+                                )
                                 signature = str(delta.get("signature") or "")
                                 if current_reasoning_item is not None:
                                     if thinking:
-                                        current_reasoning_item["thinking"] = str(current_reasoning_item.get("thinking") or "") + thinking
+                                        current_reasoning_item["thinking"] = (
+                                            str(
+                                                current_reasoning_item.get("thinking")
+                                                or ""
+                                            )
+                                            + thinking
+                                        )
                                     if signature:
-                                        current_reasoning_item["signature"] = str(current_reasoning_item.get("signature") or "") + signature
+                                        current_reasoning_item["signature"] = (
+                                            str(
+                                                current_reasoning_item.get("signature")
+                                                or ""
+                                            )
+                                            + signature
+                                        )
                                 if thinking:
                                     yield StreamEvent(
                                         type=StreamEventType.THINKING_CHUNK,
                                         content=thinking,
                                         raw={"provider_reasoning_type": delta_type},
+                                        item_id=current_content_item_id,
+                                        content_index=current_content_index,
+                                        content_kind="thinking",
                                     )
                             elif delta_type == "input_json_delta":
                                 partial = str(delta.get("partial_json") or "")
-                                current_tool_args += partial
-                                _delta_bytes_since_emit += len(partial)
-                                if _delta_bytes_since_emit >= _DELTA_DEBOUNCE_BYTES:
-                                    _delta_bytes_since_emit = 0
-                                    yield StreamEvent(
-                                        type=StreamEventType.TOOL_CALL_DELTA,
-                                        tool_call_delta=ToolCallDeltaEvent(
-                                            id=current_tool_id,
-                                            partial_arguments=current_tool_args,
-                                        ),
+                                current_provider_input_json += partial
+                                if current_tool_id:
+                                    current_tool_args += partial
+                                    _delta_bytes_since_emit += len(partial)
+                                    if _delta_bytes_since_emit >= _DELTA_DEBOUNCE_BYTES:
+                                        _delta_bytes_since_emit = 0
+                                        yield StreamEvent(
+                                            type=StreamEventType.TOOL_CALL_DELTA,
+                                            tool_call_delta=ToolCallDeltaEvent(
+                                                id=current_tool_id,
+                                                partial_arguments=current_tool_args,
+                                            ),
+                                        )
+                            elif delta_type == "citations_delta":
+                                citation = _detached_anthropic_value(
+                                    delta.get("citation")
+                                )
+                                if current_provider_block is not None and isinstance(
+                                    citation, dict
+                                ):
+                                    citations = current_provider_block.setdefault(
+                                        "citations", []
                                     )
+                                    if isinstance(citations, list):
+                                        citations.append(citation)
+                                for public_citation in _anthropic_public_citations(
+                                    delta.get("citation")
+                                ):
+                                    if public_citation not in public_citations:
+                                        public_citations.append(public_citation)
+                            elif delta_type == "compaction_delta":
+                                if current_provider_block is not None:
+                                    for field_name in (
+                                        "content",
+                                        "encrypted_content",
+                                    ):
+                                        fragment = delta.get(field_name)
+                                        if isinstance(fragment, str) and fragment:
+                                            current_provider_block[field_name] = str(
+                                                current_provider_block.get(
+                                                    field_name
+                                                )
+                                                or ""
+                                            ) + fragment
 
                         elif event_type == "content_block_stop":
-                            if current_reasoning_item is not None:
-                                provider_items.append(current_reasoning_item)
-                                current_reasoning_item = None
+                            raw_received_index = event.get("index")
+                            received_index = (
+                                raw_received_index
+                                if isinstance(raw_received_index, int)
+                                and not isinstance(raw_received_index, bool)
+                                and raw_received_index >= 0
+                                else None
+                            )
+                            if received_index is None:
+                                yield _anthropic_stream_protocol_error(
+                                    "invalid_content_index",
+                                    event_type=event_type,
+                                    current_index=current_content_index,
+                                    current_kind=current_content_kind,
+                                    provider=self._provider_id,
+                                )
+                                return
+                            if not current_content_kind:
+                                yield _anthropic_stream_protocol_error(
+                                    "content_stop_without_start",
+                                    event_type=event_type,
+                                    received_index=received_index,
+                                    provider=self._provider_id,
+                                )
+                                return
+                            if (
+                                current_content_index is not None
+                                and received_index is not None
+                                and received_index != current_content_index
+                            ):
+                                yield _anthropic_stream_protocol_error(
+                                    "content_index_mismatch",
+                                    event_type=event_type,
+                                    current_index=current_content_index,
+                                    received_index=received_index,
+                                    current_kind=current_content_kind,
+                                    provider=self._provider_id,
+                                )
+                                return
+                            if current_content_kind in {
+                                "text",
+                                "thinking",
+                                "redacted_thinking",
+                            }:
+                                yield StreamEvent(
+                                    type=(
+                                        StreamEventType.TEXT_CHUNK
+                                        if current_content_kind == "text"
+                                        else StreamEventType.THINKING_CHUNK
+                                    ),
+                                    item_id=current_content_item_id,
+                                    content_index=current_content_index,
+                                    content_kind=(
+                                        "text"
+                                        if current_content_kind == "text"
+                                        else "thinking"
+                                    ),
+                                    lifecycle="end",
+                                )
                             if current_tool_id and current_tool_name:
                                 try:
-                                    arguments = json.loads(current_tool_args) if current_tool_args else {}
+                                    arguments = (
+                                        json.loads(current_tool_args)
+                                        if current_tool_args
+                                        else dict(current_tool_initial_input or {})
+                                    )
                                 except (json.JSONDecodeError, TypeError):
                                     from backend.llm.json_repair import repair_tool_json
-                                    arguments = repair_tool_json(current_tool_args) or {"_raw": current_tool_args}
+
+                                    arguments = repair_tool_json(current_tool_args) or {
+                                        "_raw": current_tool_args
+                                    }
                                     arguments_repaired = True
                                 else:
                                     arguments_repaired = False
                                 pending_tool_calls.append(
-                                    ToolCallEvent(id=current_tool_id, name=current_tool_name, arguments=arguments, arguments_repaired=arguments_repaired)
+                                    ToolCallEvent(
+                                        id=current_tool_id,
+                                        name=current_tool_name,
+                                        arguments=arguments,
+                                        arguments_repaired=arguments_repaired,
+                                    )
                                 )
                                 yield StreamEvent(
                                     type=StreamEventType.TOOL_CALL,
@@ -913,61 +2442,253 @@ class AnthropicAdapter(LLMAdapter):
                                 current_tool_id = ""
                                 current_tool_name = ""
                                 current_tool_args = ""
+                                current_tool_initial_input = None
+                            if current_provider_block is not None:
+                                block_type = str(
+                                    current_provider_block.get("type") or ""
+                                )
+                                if block_type in {
+                                    "tool_use",
+                                    "server_tool_use",
+                                    "mcp_tool_use",
+                                } and current_provider_input_json:
+                                    try:
+                                        provider_input = json.loads(
+                                            current_provider_input_json
+                                        )
+                                    except (json.JSONDecodeError, TypeError):
+                                        provider_input = None
+                                    if isinstance(provider_input, dict):
+                                        current_provider_block["input"] = provider_input
+                                if (
+                                    block_type in {"server_tool_use", "mcp_tool_use"}
+                                    and current_provider_input_json
+                                ):
+                                    activity = _anthropic_provider_activity(
+                                        current_provider_block,
+                                        activity_id=current_content_item_id,
+                                    )
+                                    if activity is not None:
+                                        yield StreamEvent(
+                                            type=StreamEventType.PROVIDER_ACTIVITY,
+                                            provider_activity=activity,
+                                        )
+                                if block_type == "compaction":
+                                    activity = _anthropic_provider_activity(
+                                        current_provider_block,
+                                        activity_id=current_content_item_id,
+                                        terminal=True,
+                                    )
+                                    if activity is not None:
+                                        yield StreamEvent(
+                                            type=StreamEventType.PROVIDER_ACTIVITY,
+                                            provider_activity=activity,
+                                        )
+                                provider_content_blocks.append(
+                                    current_provider_block
+                                )
+                            current_provider_block = None
+                            current_provider_input_json = ""
+                            current_reasoning_item = None
+                            current_content_index = None
+                            current_content_kind = ""
+                            current_content_item_id = ""
 
                         elif event_type == "message_delta":
-                            delta = event.get("delta") if isinstance(event.get("delta"), dict) else {}
+                            if current_content_kind:
+                                yield _anthropic_stream_protocol_error(
+                                    "message_delta_with_open_block",
+                                    event_type=event_type,
+                                    current_index=current_content_index,
+                                    current_kind=current_content_kind,
+                                    provider=self._provider_id,
+                                )
+                                return
+                            if saw_message_delta:
+                                yield _anthropic_stream_protocol_error(
+                                    "duplicate_message_delta",
+                                    event_type=event_type,
+                                    provider=self._provider_id,
+                                )
+                                return
+                            saw_message_delta = True
+                            delta = (
+                                event.get("delta")
+                                if isinstance(event.get("delta"), dict)
+                                else {}
+                            )
                             if isinstance(delta, dict) and delta.get("stop_reason"):
                                 stop_reason = str(delta.get("stop_reason") or "")
-                            usage_obj = event.get("usage") if isinstance(event.get("usage"), dict) else {}
-                            if isinstance(usage_obj, dict) and usage_obj.get("output_tokens") is not None:
+                            if isinstance(delta, dict):
+                                refusal_metadata.update(
+                                    _anthropic_refusal_metadata(
+                                        delta.get("stop_details")
+                                    )
+                                )
+                                container_metadata.update(
+                                    _anthropic_container_metadata(
+                                        delta.get("container")
+                                    )
+                                )
+                            usage_obj = (
+                                event.get("usage")
+                                if isinstance(event.get("usage"), dict)
+                                else {}
+                            )
+                            if (
+                                isinstance(usage_obj, dict)
+                                and usage_obj.get("output_tokens") is not None
+                            ):
+                                provider_usage_metadata.update(
+                                    _anthropic_usage_metadata(usage_obj)
+                                )
                                 usage = UsageInfo(
-                                    input_tokens=usage.input_tokens,
-                                    output_tokens=int(usage_obj.get("output_tokens") or 0),
-                                    cache_creation_input_tokens=usage.cache_creation_input_tokens,
-                                    cache_read_input_tokens=usage.cache_read_input_tokens,
-                                    cache_deleted_input_tokens=max(
-                                        usage.cache_deleted_input_tokens,
-                                        int(usage_obj.get("cache_deleted_input_tokens") or 0),
+                                    input_tokens=_anthropic_usage_value_or_existing(
+                                        usage_obj,
+                                        "input_tokens",
+                                        usage.input_tokens,
+                                    ),
+                                    output_tokens=_anthropic_usage_value_or_existing(
+                                        usage_obj,
+                                        "output_tokens",
+                                        usage.output_tokens,
+                                    ),
+                                    cache_creation_input_tokens=(
+                                        _anthropic_usage_value_or_existing(
+                                            usage_obj,
+                                            "cache_creation_input_tokens",
+                                            usage.cache_creation_input_tokens,
+                                        )
+                                    ),
+                                    cache_read_input_tokens=(
+                                        _anthropic_usage_value_or_existing(
+                                            usage_obj,
+                                            "cache_read_input_tokens",
+                                            usage.cache_read_input_tokens,
+                                        )
+                                    ),
+                                    cache_deleted_input_tokens=(
+                                        _anthropic_usage_value_or_existing(
+                                            usage_obj,
+                                            "cache_deleted_input_tokens",
+                                            usage.cache_deleted_input_tokens,
+                                        )
                                     ),
                                     input_includes_cache_read=False,
+                                    input_includes_cache_write=False,
+                                    cost_usd=max(
+                                        usage.cost_usd,
+                                        _get_usage_cost_usd(usage_obj),
+                                    ),
                                 )
                         elif event_type == "message_stop":
+                            if current_content_kind:
+                                yield _anthropic_stream_protocol_error(
+                                    "message_stop_with_open_block",
+                                    event_type=event_type,
+                                    current_index=current_content_index,
+                                    current_kind=current_content_kind,
+                                    provider=self._provider_id,
+                                )
+                                return
+                            if not saw_message_delta:
+                                yield _anthropic_stream_protocol_error(
+                                    "message_stop_without_delta",
+                                    event_type=event_type,
+                                    provider=self._provider_id,
+                                )
+                                return
                             saw_message_stop = True
+                        else:
+                            yield _anthropic_stream_protocol_error(
+                                "unknown_stream_event",
+                                event_type=event_type,
+                                provider=self._provider_id,
+                            )
+                            return
+        except ExtensionStaleError:
+            raise
         except Exception as exc:
-            logger.error("Anthropic raw HTTP 调用失败: %s", exc)
-            yield StreamEvent(type=StreamEventType.ERROR, content=f"Claude API 调用失败: {_clean_error_message(exc)}")
+            logger.error("Anthropic Messages transport failed: %s", exc)
+            yield _anthropic_exception_error_event(
+                exc,
+                provider=self._provider_id,
+            )
             return
 
         if not saw_message_stop:
-            logger.error("Anthropic raw HTTP 流在 message_stop 之前结束")
+            logger.error("Anthropic Messages stream ended before message_stop")
             yield StreamEvent(
                 type=StreamEventType.ERROR,
-                content="Claude 流式响应在完成前中断",
-                raw={"provider": "anthropic", "event_type": "eof_without_message_stop"},
+                content="MiniCode Anthropic Messages 流式响应在完成前中断",
+                raw={
+                    "provider": self._provider_id,
+                    "event_type": "eof_without_message_stop",
+                    "provider_error_type": "network",
+                    "error_type": "api",
+                },
+            )
+            return
+
+        protocol_error = _anthropic_tool_protocol_error(
+            stop_reason,
+            pending_tool_calls,
+        )
+        if protocol_error:
+            yield StreamEvent(
+                type=StreamEventType.ERROR,
+                content=protocol_error,
+                raw={
+                    "provider": self._provider_id,
+                    "event_type": "tool_stop_reason_mismatch",
+                    "stop_reason": stop_reason,
+                    "tool_call_count": len(pending_tool_calls),
+                    "provider_error_type": "protocol",
+                    "error_type": "api",
+                },
             )
             return
 
         if pending_tool_calls:
-            yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=pending_tool_calls)
+            yield StreamEvent(
+                type=StreamEventType.TOOL_CALL, tool_calls=pending_tool_calls
+            )
         if stop_reason == "max_tokens":
             logger.warning("Claude 响应因 max_tokens 截断")
+        usage_metadata = dict(provider_usage_metadata)
+        usage_metadata.update(
+            {
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "cache_creation_input_tokens": usage.cache_creation_input_tokens,
+                "cache_read_input_tokens": usage.cache_read_input_tokens,
+                "cache_deleted_input_tokens": usage.cache_deleted_input_tokens,
+            }
+        )
+        done_raw: dict[str, Any] = {
+            "provider": self._provider_id,
+            "stop_reason": stop_reason,
+            "usage": usage_metadata,
+            "request_summary": request_summary or {},
+            "search_sources": [
+                {"title": title, "url": url}
+                for title, url in search_sources
+            ],
+        }
+        if public_citations:
+            done_raw["citations"] = public_citations
+        if refusal_metadata:
+            done_raw["refusal"] = refusal_metadata
+        if container_metadata:
+            done_raw["container"] = container_metadata
         yield StreamEvent(
             type=StreamEventType.DONE,
             usage=usage,
             finish_reason=stop_reason,
-            raw={
-                "provider": "anthropic",
-                "stop_reason": stop_reason,
-                "usage": {
-                    "input_tokens": usage.input_tokens,
-                    "output_tokens": usage.output_tokens,
-                    "cache_creation_input_tokens": usage.cache_creation_input_tokens,
-                    "cache_read_input_tokens": usage.cache_read_input_tokens,
-                    "cache_deleted_input_tokens": usage.cache_deleted_input_tokens,
-                },
-                "request_summary": request_summary or {},
-            },
-            provider_items=provider_items,
+            raw=done_raw,
+            provider_items=_anthropic_provider_message_item(
+                provider_content_blocks
+            ),
         )
 
     async def simple_chat(
@@ -976,51 +2697,67 @@ class AnthropicAdapter(LLMAdapter):
         *,
         max_tokens: int | None = None,
     ) -> str:
-        """非流式调用。"""
-        system_text, api_messages = self._convert_messages(messages)
-
-        cached_messages, _, _ = self._add_cache_breakpoints(api_messages)
-        kwargs: dict[str, Any] = {
-            "model": self._model,
-            "max_tokens": min(self._max_tokens, max(1, int(max_tokens))) if max_tokens else self._max_tokens,
-            "messages": cached_messages,
-        }
-
-        if system_text:
-            kwargs["system"] = self._build_system_blocks(system_text)
-
+        """Consume the normal Messages stream and return its completed text."""
+        side_options = self.current_side_query_options()
+        model = (
+            self.small_fast_model_id()
+            if side_options is not None and side_options.use_small_fast_model
+            else self._model
+        )
+        self.annotate_side_call(provider=self._provider_id, model_id=model)
+        max_tokens_token = self._simple_max_tokens.set(max_tokens)
+        text_parts: list[str] = []
+        search_sources: list[tuple[str, str]] = []
+        usage = UsageInfo()
+        saw_done = False
         try:
-            response = await self._call_with_retry(**kwargs)
-        except Exception as exc:
-            if _is_cache_control_unsupported_error(exc):
-                logger.warning(
-                    "Anthropic gateway rejected cache_control; retrying without it: %s",
-                    _clean_error_message(exc),
-                )
-                retry_kwargs = self._strip_all_cache_control(kwargs)
-                try:
-                    response = await self._call_with_retry(**retry_kwargs)
-                except Exception as retry_exc:
-                    logger.error("Anthropic simple_chat 失败: %s", retry_exc)
-                    raise RuntimeError(f"Claude 调用失败: {retry_exc}") from retry_exc
-            else:
-                logger.error("Anthropic simple_chat 失败: %s", exc)
-                raise RuntimeError(f"Claude 调用失败: {exc}") from exc
+            async for event in self.stream_chat(messages):
+                if event.type == StreamEventType.TEXT_CHUNK and event.content:
+                    text_parts.append(event.content)
+                elif event.type == StreamEventType.DONE:
+                    usage = event.usage
+                    saw_done = True
+                    raw_sources = event.raw.get("search_sources")
+                    if isinstance(raw_sources, list):
+                        for source in raw_sources:
+                            if not isinstance(source, Mapping):
+                                continue
+                            title = str(source.get("title") or "").strip()
+                            url = str(source.get("url") or "").strip()
+                            if url and (title, url) not in search_sources:
+                                search_sources.append((title, url))
+                elif event.type == StreamEventType.ERROR:
+                    failure = RuntimeError(event.content or "Claude stream failed")
+                    for key in (
+                        "status_code",
+                        "retry_after_seconds",
+                        "provider_error_type",
+                        "provider_error_code",
+                        "provider_error_schema_type",
+                    ):
+                        value = event.raw.get(key)
+                        if value is not None:
+                            setattr(failure, key, value)
+                    raise failure
+        finally:
+            self._simple_max_tokens.reset(max_tokens_token)
 
-        text_parts = []
-        for block in getattr(response, "content", []):
-            block_type = getattr(block, "type", "")
-            if block_type == "text":
-                text_parts.append(getattr(block, "text", ""))
+        if not saw_done:
+            raise RuntimeError("Claude stream ended before message_stop")
 
-        text = "\n".join(text_parts).strip()
-        # Side calls (compaction/recovery) must still be counted toward
-        # cost/token totals — the streaming DONE path doesn't see them.
+        text = "".join(text_parts).strip()
+        if search_sources:
+            source_lines = ["Sources:"]
+            source_lines.extend(
+                f"- {title or url}: {url}" for title, url in search_sources
+            )
+            text = f"{text}\n\n{chr(10).join(source_lines)}".strip()
         self.record_non_stream_usage(
-            getattr(response, "usage", None),
-            provider="anthropic",
-            model_id=self._model,
+            usage,
+            provider=self._provider_id,
+            model_id=model,
             input_includes_cache_read=False,
+            input_includes_cache_write=False,
         )
         if not text:
             raise RuntimeError("Claude 返回空内容")
@@ -1030,45 +2767,67 @@ class AnthropicAdapter(LLMAdapter):
     # ── 消息格式转换 ──────────────────────────────────────
 
     @staticmethod
-    def _build_system_blocks(system_text: str) -> list[dict[str, Any]]:
+    def _build_system_blocks(
+        system_text: str,
+        *,
+        ttl_1h: bool | None = None,
+    ) -> list[dict[str, Any]]:
         """Split system prompt into cache-stable and dynamic blocks.
 
-        The stable prefix gets a ``cache_control`` breakpoint so Anthropic
-        caches the byte-stable identity/rules/tools contract across turns.
-        The dynamic suffix (workspace, skills, memory) is not cached because
-        it changes between turns.
+        The stable prefix gets a ``cache_control`` breakpoint. Dynamic
+        workspace, skill, and memory context stays unmarked so changes there
+        do not create repeated cache writes.
+        Claude Code marks the stable system prefix only. Workspace, skill,
+        memory, and other request-scoped context remain an unmarked suffix so a
+        change there does not create a repeated cache write. Tool definitions
+        and the conversation checkpoint are marked separately by
+        ``_add_cache_breakpoints``.
         """
         split = split_sys_prompt_prefix(system_text)
-        cache_control = _cache_control()
+        cache_control = _cache_control(ttl_1h)
         blocks: list[dict[str, Any]] = []
         if split.stable_prefix.strip():
-            blocks.append({
-                "type": "text",
-                "text": split.stable_prefix,
-                "cache_control": dict(cache_control),
-            })
+            blocks.append(
+                {
+                    "type": "text",
+                    "text": split.stable_prefix,
+                    "cache_control": dict(cache_control),
+                }
+            )
         if split.dynamic_suffix.strip():
-            blocks.append({"type": "text", "text": split.dynamic_suffix})
+            blocks.append(
+                {
+                    "type": "text",
+                    "text": split.dynamic_suffix,
+                }
+            )
         if not blocks:
-            blocks.append({
-                "type": "text",
-                "text": system_text,
-                "cache_control": dict(cache_control),
-            })
+            blocks.append(
+                {
+                    "type": "text",
+                    "text": system_text,
+                    "cache_control": dict(cache_control),
+                }
+            )
         return blocks
 
     def _commit_cache_edit_request(
         self,
+        state: _CacheEditingState,
         consumed_ids: tuple[str, ...],
         new_pin: tuple[int, str, dict[str, Any]] | None,
     ) -> None:
         if consumed_ids:
             consumed = set(consumed_ids)
-            self._pending_cache_deletions = [
-                call_id for call_id in self._pending_cache_deletions if call_id not in consumed
+            state.pending_deletions = [
+                call_id
+                for call_id in state.pending_deletions
+                if call_id not in consumed
             ]
-        if new_pin is not None and all(existing[2] != new_pin[2] for existing in self._pinned_cache_edits):
-            self._pinned_cache_edits.append(new_pin)
+        if new_pin is not None and all(
+            existing[2] != new_pin[2] for existing in state.pinned_edits
+        ):
+            state.pinned_edits.append(new_pin)
 
     @staticmethod
     def _add_cache_breakpoints(
@@ -1079,7 +2838,12 @@ class AnthropicAdapter(LLMAdapter):
         new_cache_deletions: tuple[str, ...] = (),
         pinned_cache_edits: tuple[tuple[int, str, dict[str, Any]], ...] = (),
         skip_cache_write: bool = False,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], tuple[int, str, dict[str, Any]] | None]:
+        ttl_1h: bool | None = None,
+    ) -> tuple[
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        tuple[int, str, dict[str, Any]] | None,
+    ]:
         """Add cache_control breakpoints to messages and tools.
 
         Mirrors cc's ``addCacheBreakpoints``:
@@ -1087,13 +2851,14 @@ class AnthropicAdapter(LLMAdapter):
         2. One cache_control marker on the last tool definition.
         3. tool_result blocks strictly before the last cache_control marker get
            ``cache_reference: tool_use_id`` to improve cache-hit tracking.
-        Combined with the system-block breakpoint from
-        ``_build_system_blocks``, this gives Anthropic three cache segments:
+        Combined with the two system-block breakpoints from
+        ``_build_system_blocks``, this gives Anthropic four cache segments:
           1. Stable system prefix (identity, rules, contracts)
           2. Tool definitions (stable across turns)
           3. Conversation history prefix (grows turn-by-turn)
         """
-        cache_control = _cache_control()
+        cache_control = _cache_control(ttl_1h)
+
         def message_anchor(message: dict[str, Any]) -> str:
             raw = json.dumps(
                 message,
@@ -1116,7 +2881,11 @@ class AnthropicAdapter(LLMAdapter):
                 marker["content"] = blocks
             elif isinstance(content, str):
                 marker["content"] = [
-                    {"type": "text", "text": content, "cache_control": dict(cache_control)}
+                    {
+                        "type": "text",
+                        "text": content,
+                        "cache_control": dict(cache_control),
+                    }
                 ]
 
             # Add cache_reference to tool_result blocks strictly before the
@@ -1163,16 +2932,26 @@ class AnthropicAdapter(LLMAdapter):
                     content = [{"type": "text", "text": str(content or "")}]
                 edits = []
                 for edit in block.get("edits", []):
-                    reference = str(edit.get("cache_reference") or "") if isinstance(edit, dict) else ""
+                    reference = (
+                        str(edit.get("cache_reference") or "")
+                        if isinstance(edit, dict)
+                        else ""
+                    )
                     if reference and reference not in seen_references:
                         edits.append({"type": "delete", "cache_reference": reference})
                         seen_references.add(reference)
                 if not edits:
                     return
                 insert_at = 0
-                while insert_at < len(content) and isinstance(content[insert_at], dict) and content[insert_at].get("type") == "tool_result":
+                while (
+                    insert_at < len(content)
+                    and isinstance(content[insert_at], dict)
+                    and content[insert_at].get("type") == "tool_result"
+                ):
                     insert_at += 1
-                next_content = [dict(item) if isinstance(item, dict) else item for item in content]
+                next_content = [
+                    dict(item) if isinstance(item, dict) else item for item in content
+                ]
                 next_content.insert(insert_at, {"type": "cache_edits", "edits": edits})
                 message["content"] = next_content
 
@@ -1183,7 +2962,11 @@ class AnthropicAdapter(LLMAdapter):
                     and message_anchors[resolved_index] == anchor
                 ):
                     resolved_index = next(
-                        (index for index, candidate in enumerate(message_anchors) if candidate == anchor),
+                        (
+                            index
+                            for index, candidate in enumerate(message_anchors)
+                            if candidate == anchor
+                        ),
                         -1,
                     )
                 if resolved_index >= 0 and isinstance(block, dict):
@@ -1209,91 +2992,6 @@ class AnthropicAdapter(LLMAdapter):
             tools[-1]["cache_control"] = dict(cache_control)
 
         return messages, tools, new_pin
-
-    @staticmethod
-    def _strip_all_cache_control(
-        kwargs: dict[str, Any],
-        *,
-        cache_editing_beta_header: str = "",
-    ) -> dict[str, Any]:
-        """Remove all cache_control and cache_reference markers for gateway fallback.
-
-        Strips cache_control from system blocks, tool definitions, and
-        message content blocks, and cache_reference from tool_result blocks.
-        Used when a gateway rejects cache_control.
-        """
-        cleaned = dict(kwargs)
-        cleaned.pop("cache_control", None)
-        cleaned.pop("cache_edits", None)
-
-        # Drop the extended-cache-ttl beta header along with the markers —
-        # sending it without any cache_control is pointless and some gateways
-        # reject unknown beta headers.
-        extra_headers = cleaned.get("extra_headers")
-        if isinstance(extra_headers, dict) and extra_headers.get("anthropic-beta"):
-            extra_headers = dict(extra_headers)
-            beta_values = [
-                value.strip()
-                for value in str(extra_headers.get("anthropic-beta") or "").split(",")
-                if value.strip()
-            ]
-            removed = {
-                _EXTENDED_CACHE_TTL_BETA_HEADER,
-                str(cache_editing_beta_header or "").strip(),
-            }
-            remaining = [value for value in beta_values if value not in removed]
-            if remaining:
-                extra_headers["anthropic-beta"] = ",".join(remaining)
-            else:
-                extra_headers.pop("anthropic-beta", None)
-            if extra_headers:
-                cleaned["extra_headers"] = extra_headers
-            else:
-                cleaned.pop("extra_headers", None)
-
-        _strip_keys = {"cache_control", "cache_reference"}
-
-        system = cleaned.get("system")
-        if isinstance(system, list):
-            cleaned["system"] = [
-                {k: v for k, v in dict(block).items() if k not in _strip_keys}
-                if isinstance(block, dict)
-                else block
-                for block in system
-            ]
-
-        tools_list = cleaned.get("tools")
-        if isinstance(tools_list, list):
-            cleaned["tools"] = [
-                {k: v for k, v in dict(tool).items() if k not in _strip_keys}
-                if isinstance(tool, dict)
-                else tool
-                for tool in tools_list
-            ]
-
-        messages_list = cleaned.get("messages")
-        if isinstance(messages_list, list):
-            new_messages: list[dict[str, Any]] = []
-            for msg in messages_list:
-                if not isinstance(msg, dict):
-                    new_messages.append(msg)
-                    continue
-                content = msg.get("content")
-                if isinstance(content, list):
-                    new_msg = dict(msg)
-                    new_msg["content"] = [
-                        {k: v for k, v in dict(block).items() if k not in _strip_keys}
-                        if isinstance(block, dict)
-                        else block
-                        for block in content
-                        if not (isinstance(block, dict) and block.get("type") == "cache_edits")
-                    ]
-                    new_messages.append(new_msg)
-                else:
-                    new_messages.append(msg)
-            cleaned["messages"] = new_messages
-
-        return cleaned
 
     @staticmethod
     def _convert_messages(
@@ -1328,60 +3026,83 @@ class AnthropicAdapter(LLMAdapter):
                         data = img.get("data") or ""
                         if not data:
                             continue
-                        parts.append({
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": media_type,
-                                "data": data,
-                            },
-                        })
+                        parts.append(
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": data,
+                                },
+                            }
+                        )
                     for doc in msg.documents:
                         media_type = doc.get("media_type") or "application/pdf"
                         data = doc.get("data") or ""
                         if not data:
                             continue
-                        parts.append({
-                            "type": "document",
-                            "source": {
-                                "type": "base64",
-                                "media_type": media_type,
-                                "data": data,
-                            },
-                        })
-                    raw_messages.append({"role": "user", "content": parts or msg.content})
+                        parts.append(
+                            {
+                                "type": "document",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": data,
+                                },
+                            }
+                        )
+                    raw_messages.append(
+                        {"role": "user", "content": parts or msg.content}
+                    )
                 else:
                     raw_messages.append({"role": "user", "content": msg.content})
 
             elif msg.role == "assistant":
-                content_parts: list[dict[str, Any]] = []
-                for item in msg.provider_items:
-                    item_type = str(item.get("type") or "")
-                    if item_type in {"thinking", "redacted_thinking"}:
-                        content_parts.append(dict(item))
-                if msg.content:
-                    content_parts.append({"type": "text", "text": msg.content})
-                if msg.tool_calls:
-                    for tc in msg.tool_calls:
-                        content_parts.append({
-                            "type": "tool_use",
-                            "id": tc.id,
-                            "name": tc.name,
-                            "input": tc.arguments,
-                        })
-                raw_messages.append({
-                    "role": "assistant",
-                    "content": content_parts if content_parts else [{"type": "text", "text": ""}],
-                })
+                native_content = _anthropic_replay_content(msg.provider_items)
+                if native_content is not None:
+                    # pause_turn and ordinary tool trajectories replay the exact
+                    # provider assistant content, preserving interleaved text,
+                    # thinking signatures and hosted server-tool blocks. The
+                    # provider-neutral content/tool_calls fields are projections
+                    # of this same item and must not be appended a second time.
+                    content_parts = native_content
+                else:
+                    content_parts = []
+                    for item in msg.provider_items:
+                        item_type = str(item.get("type") or "")
+                        if item_type in {"thinking", "redacted_thinking"}:
+                            content_parts.append(dict(item))
+                    if msg.content:
+                        content_parts.append({"type": "text", "text": msg.content})
+                    if msg.tool_calls:
+                        for tc in msg.tool_calls:
+                            content_parts.append(
+                                {
+                                    "type": "tool_use",
+                                    "id": tc.id,
+                                    "name": tc.name,
+                                    "input": tc.arguments,
+                                }
+                            )
+                raw_messages.append(
+                    {
+                        "role": "assistant",
+                        "content": content_parts
+                        if content_parts
+                        else [{"type": "text", "text": ""}],
+                    }
+                )
 
             elif msg.role == "tool":
-                raw_messages.append({
-                    "role": "tool_result",
-                    "tool_use_id": msg.tool_call_id or "",
-                    "content": msg.content,
-                    "is_error": bool(getattr(msg, "is_error", False)),
-                    "images": list(getattr(msg, "images", []) or []),
-                })
+                raw_messages.append(
+                    {
+                        "role": "tool_result",
+                        "tool_use_id": msg.tool_call_id or "",
+                        "content": msg.content,
+                        "is_error": bool(getattr(msg, "is_error", False)),
+                        "images": list(getattr(msg, "images", []) or []),
+                    }
+                )
 
         # 第二遍：保证 user/assistant 交替 + 合并连续 tool_result
         api_messages: list[dict[str, Any]] = []
@@ -1401,14 +3122,17 @@ class AnthropicAdapter(LLMAdapter):
                         blocks: list[dict[str, Any]] = []
                         for img in images:
                             if img.get("data"):
-                                blocks.append({
-                                    "type": "image",
-                                    "source": {
-                                        "type": "base64",
-                                        "media_type": img.get("media_type") or "image/png",
-                                        "data": img["data"],
-                                    },
-                                })
+                                blocks.append(
+                                    {
+                                        "type": "image",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": img.get("media_type")
+                                            or "image/png",
+                                            "data": img["data"],
+                                        },
+                                    }
+                                )
                         if m["content"]:
                             blocks.append({"type": "text", "text": m["content"]})
                         content: Any = blocks or m["content"]
@@ -1426,7 +3150,9 @@ class AnthropicAdapter(LLMAdapter):
 
                 tool_results: list[dict[str, Any]] = [_tool_result_block(msg)]
                 j = i + 1
-                while j < len(raw_messages) and raw_messages[j]["role"] == "tool_result":
+                while (
+                    j < len(raw_messages) and raw_messages[j]["role"] == "tool_result"
+                ):
                     tool_results.append(_tool_result_block(raw_messages[j]))
                     j += 1
                 api_messages.append({"role": "user", "content": tool_results})
@@ -1436,11 +3162,21 @@ class AnthropicAdapter(LLMAdapter):
                 if api_messages and api_messages[-1]["role"] == "user":
                     # 合并连续 user 消息
                     prev = api_messages[-1]
-                    if isinstance(prev["content"], str) and isinstance(msg["content"], str):
+                    if isinstance(prev["content"], str) and isinstance(
+                        msg["content"], str
+                    ):
                         prev["content"] += "\n\n" + msg["content"]
                     else:
-                        prev_blocks = prev["content"] if isinstance(prev["content"], list) else [{"type": "text", "text": prev["content"]}]
-                        curr_blocks = msg["content"] if isinstance(msg["content"], list) else [{"type": "text", "text": msg["content"]}]
+                        prev_blocks = (
+                            prev["content"]
+                            if isinstance(prev["content"], list)
+                            else [{"type": "text", "text": prev["content"]}]
+                        )
+                        curr_blocks = (
+                            msg["content"]
+                            if isinstance(msg["content"], list)
+                            else [{"type": "text", "text": msg["content"]}]
+                        )
                         prev["content"] = prev_blocks + curr_blocks
                 else:
                     api_messages.append(msg)
@@ -1450,8 +3186,16 @@ class AnthropicAdapter(LLMAdapter):
                 if api_messages and api_messages[-1]["role"] == "assistant":
                     # 合并连续 assistant 消息
                     prev = api_messages[-1]
-                    prev_content = prev["content"] if isinstance(prev["content"], list) else [{"type": "text", "text": prev["content"]}]
-                    curr_content = msg["content"] if isinstance(msg["content"], list) else [{"type": "text", "text": msg["content"]}]
+                    prev_content = (
+                        prev["content"]
+                        if isinstance(prev["content"], list)
+                        else [{"type": "text", "text": prev["content"]}]
+                    )
+                    curr_content = (
+                        msg["content"]
+                        if isinstance(msg["content"], list)
+                        else [{"type": "text", "text": msg["content"]}]
+                    )
                     prev["content"] = prev_content + curr_content
                 else:
                     api_messages.append(msg)
@@ -1464,37 +3208,7 @@ class AnthropicAdapter(LLMAdapter):
             api_messages.insert(0, {"role": "user", "content": "(conversation start)"})
 
         system_text = "\n\n".join(system_parts)
-        return system_text, api_messages
-
-    @staticmethod
-    def _apply_prompt_cache_controls(
-        api_messages: list[dict[str, Any]],
-        recent_count: int = 3,
-        max_breakpoints: int | None = None,
-        scan_all: bool = False,
-    ) -> list[dict[str, Any]]:
-        """Return messages with stale Anthropic cache_control markers removed.
-
-        The signature is kept for older tests/extensions, but MiniCode now relies
-        on provider automatic prefix caching instead of sending vendor-specific
-        cache_control markers.
-        """
-        _ = (recent_count, max_breakpoints, scan_all)
-
-        cloned_messages: list[dict[str, Any]] = []
-        for message in api_messages:
-            cloned = dict(message)
-            content = cloned.get("content")
-
-            if isinstance(content, list):
-                cloned["content"] = [
-                    {key: value for key, value in dict(block).items() if key != "cache_control"}
-                    for block in content
-                ]
-
-            cloned_messages.append(cloned)
-
-        return cloned_messages
+        return system_text, _strip_excess_anthropic_media(api_messages)
 
     def _should_enable_thinking(
         self,
@@ -1516,6 +3230,7 @@ class AnthropicAdapter(LLMAdapter):
           {"name": ..., "description": ..., "input_schema": ...}
         """
         anthropic_tools = []
+        tools = canonicalize_tool_schemas(tools)
         for tool in tools:
             func = tool.get("function", {})
             if not func:
@@ -1524,13 +3239,17 @@ class AnthropicAdapter(LLMAdapter):
             at: dict[str, Any] = {
                 "name": func.get("name", ""),
                 "description": func.get("description", ""),
-                "input_schema": func.get("parameters", {"type": "object", "properties": {}}),
+                "input_schema": func.get(
+                    "parameters", {"type": "object", "properties": {}}
+                ),
             }
             anthropic_tools.append(at)
 
         return anthropic_tools
 
-    def _convert_tools_cached(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _convert_tools_cached(
+        self, tools: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         """Convert tools with session-level schema caching.
 
         Mirrors current Claude Code's ``toolSchemaCache``: description drift is
@@ -1538,6 +3257,7 @@ class AnthropicAdapter(LLMAdapter):
         receives a distinct cache entry.
         """
         result: list[dict[str, Any]] = []
+        tools = canonicalize_tool_schemas(tools)
         for tool in tools:
             func = tool.get("function", {})
             if not func:
@@ -1563,4 +3283,3 @@ class AnthropicAdapter(LLMAdapter):
     def clear_tool_schema_cache(self) -> None:
         """Clear the session-scoped tool schema cache (on /clear, /compact)."""
         self._tool_schema_cache.clear()
-

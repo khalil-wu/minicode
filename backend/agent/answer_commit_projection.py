@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, cast, get_args
 
 from backend.agent.message import AgentEvent
+from backend.agent.provider_protocol import provider_raw_for_projection
 from backend.agent.state import TerminalReason, TerminalStatus
 from backend.agent.stream_attempt import StreamTextState
 
@@ -31,15 +32,23 @@ def build_answer_commit_projection(
 
     text_events: list[AgentEvent] = []
     if final_text:
-        started = stream_text.start_agent_message()
+        active_item_text = (
+            stream_text.active_agent_message_text
+            if stream_text.agent_message_started
+            else final_text
+        )
+        started = stream_text.start_agent_message(
+            source="model_final",
+            item_id=stream_text.final_candidate_item_id,
+        )
         if started is not None:
             text_events.append(started)
         completed = stream_text.complete_active_agent_message(
-            final_text,
+            active_item_text,
             source="model_final",
             status="completed" if not degraded_reason else "partial",
             finish_reason=finish_reason,
-            provider_raw=provider_raw,
+            provider_raw=provider_raw_for_projection(provider_raw),
         )
         if completed is not None:
             text_events.append(completed)

@@ -101,12 +101,11 @@ def build_capability_status_payload(
     return snapshot
 
 
-def build_capability_fallback_payload() -> dict[str, Any]:
+def build_capability_unavailable_payload() -> dict[str, Any]:
+    """Return known independent settings without inventing an inventory."""
+
     return {
-        "version": 0,
-        "tools": [],
-        "commands": [],
-        "skills": [],
+        "available": False,
         "composer_commands": get_enabled_composer_command_catalog(),
         "feature_flags": feature_flags_payload(),
     }

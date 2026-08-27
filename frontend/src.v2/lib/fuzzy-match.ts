@@ -4,7 +4,8 @@
  */
 
 export function fuzzyScore(query: string, target: string): number | null {
-  const q = query.toLowerCase();
+  const q = query.trim().toLowerCase();
+  const raw = query.trim();
   const t = target.toLowerCase();
 
   if (!q) return 0;
@@ -21,7 +22,7 @@ export function fuzzyScore(query: string, target: string): number | null {
       // Start-of-word bonus (after separator or at position 0)
       if (ti === 0 || /[\s\-_/\\.]/.test(t[ti - 1])) score += 3;
       // Exact case match bonus
-      if (target[ti] === query[qi]) score += 0.5;
+      if (target[ti] === raw[qi]) score += 0.5;
       lastMatchIdx = ti;
       qi++;
     }
@@ -41,11 +42,14 @@ export function fuzzyFilter<T>(
   query: string,
   getText: (item: T) => string,
 ): T[] {
-  if (!query) return items;
+  // Treat leading/trailing whitespace as a no-op: trim only the query,
+  // never the target text or the caller's items array.
+  const trimmed = query.trim();
+  if (!trimmed) return items;
 
   const scored: { item: T; score: number }[] = [];
   for (const item of items) {
-    const s = fuzzyScore(query, getText(item));
+    const s = fuzzyScore(trimmed, getText(item));
     if (s !== null) scored.push({ item, score: s });
   }
 

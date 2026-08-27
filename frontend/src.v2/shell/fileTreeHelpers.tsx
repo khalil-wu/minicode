@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { safeJsonParse } from "../lib/safe-parse";
 import { Icon } from "@iconify/react";
 import type { IconifyIcon } from "@iconify/types";
 import defaultFileIcon from "@iconify-icons/vscode-icons/default-file";
@@ -26,9 +27,18 @@ import wordIcon from "@iconify-icons/vscode-icons/file-type-word";
 import yamlIcon from "@iconify-icons/vscode-icons/file-type-yaml";
 import zipIcon from "@iconify-icons/vscode-icons/file-type-zip";
 import type { WorkspaceTreeNode } from "../protocol/workspace";
-import { isDesktop, type FsEntry } from "../desktop/runtime";
-import { workspaceRawResourceUrlWithToken } from "../protocol/api";
+import { type FsEntry } from "../desktop/runtime";
 import { workspaceDisplayName } from "../lib/workspace-display";
+import {
+  isWindowsLikeWorkspacePath,
+  normalizeWorkspacePath,
+  normalizeWorkspaceRoot,
+} from "../lib/workspace-path";
+import {
+  isImagePath,
+  isPreviewableMediaPath,
+  mediaTypeForPath,
+} from "../lib/media-types";
 import {
   type FileSearchResult,
   type ExplorerDensity,
@@ -65,13 +75,23 @@ export const filteredChildren = (node: WorkspaceTreeNode, query: string): Worksp
   visibleChildren(node).filter((child) => nodeMatchesQuery(child, query));
 
 export const expandedStorageKey = (workspace: string): string =>
+  `minicode.files.expanded:${normalizeWorkspaceRoot(workspace) || "."}`;
+
+const legacyExpandedStorageKey = (workspace: string): string =>
   `minicode.files.expanded:${workspace || "."}`;
 
 export const readExpandedPaths = (workspace: string): Set<string> => {
   if (typeof localStorage === "undefined") return new Set();
   try {
-    const raw = localStorage.getItem(expandedStorageKey(workspace));
-    const items = raw ? JSON.parse(raw) : [];
+    const storageKey = expandedStorageKey(workspace);
+    const legacyStorageKey = legacyExpandedStorageKey(workspace);
+    const canonicalRaw = localStorage.getItem(storageKey);
+    const raw = canonicalRaw
+      ?? (legacyStorageKey !== storageKey ? localStorage.getItem(legacyStorageKey) : null);
+    if (canonicalRaw == null && raw != null) {
+      localStorage.setItem(storageKey, raw);
+    }
+    const items = raw ? safeJsonParse<unknown>(raw, []) : [];
     return new Set(Array.isArray(items) ? items.filter((item) => typeof item === "string") : []);
   } catch {
     return new Set();
@@ -129,11 +149,17 @@ export const joinWorkspacePath = (root: string, path: string): string => {
   return `${root.replace(/[\\/]+$/, "")}/${path.replace(/^[\\/]+/, "")}`;
 };
 
-const treePathKey = (path: string): string => {
-  const normalized = normalizeTreePath(path).replace(/\\/g, "/").replace(/\/+/g, "/");
+const treePathKey = (path: string, workspaceRoot = ""): string => {
+  const normalized = normalizeWorkspacePath(path);
   const driveMatch = normalized.match(/^([A-Za-z]:)(?:\/|$)/);
-  const prefix = driveMatch ? `${driveMatch[1]}/` : normalized.startsWith("/") ? "/" : "";
-  const body = driveMatch ? normalized.slice(driveMatch[0].length) : normalized.replace(/^\/+/, "");
+  const prefix = driveMatch
+    ? `${driveMatch[1]}/`
+    : normalized.startsWith("//")
+      ? "//"
+      : normalized.startsWith("/")
+        ? "/"
+        : "";
+  const body = driveMatch ? normalized.slice(driveMatch[0].length) : normalized.slice(prefix.length);
   const parts: string[] = [];
   for (const part of body.split("/")) {
     if (!part || part === ".") continue;
@@ -144,7 +170,10 @@ const treePathKey = (path: string): string => {
     }
     parts.push(part);
   }
-  return `${prefix}${parts.join("/")}`.replace(/\/+$/, "").toLowerCase();
+  const canonical = `${prefix}${parts.join("/")}`.replace(/\/+$/, "");
+  return isWindowsLikeWorkspacePath(canonical) || isWindowsLikeWorkspacePath(workspaceRoot)
+    ? canonical.toLowerCase()
+    : canonical;
 };
 
 export const isPathInsideTreeRoot = (root: string, path: string): boolean => {
@@ -180,8 +209,11 @@ export const parentTreePath = (path: string, workingDirectory: string): string =
 
 export const normalizeTreePath = (path: string): string => path.replace(/\\/g, "/").replace(/\/+$/, "");
 
-export const isSameTreePath = (left?: string | null, right?: string | null): boolean =>
-  Boolean(left && right && treePathKey(left) === treePathKey(right));
+export const isSameTreePath = (
+  left?: string | null,
+  right?: string | null,
+  workspaceRoot = "",
+): boolean => Boolean(left && right && treePathKey(left, workspaceRoot) === treePathKey(right, workspaceRoot));
 
 export const findTreeNode = (
   node: WorkspaceTreeNode | null | undefined,
@@ -206,26 +238,10 @@ export const hasLoadedDirectoryNode = (
 
 // ── Search / preview helpers ────────────────────────────────────────────
 
-export const mediaTypeForPath = (path: string): string => {
-  const ext = path.split(".").pop()?.toLowerCase() ?? "";
-  if (ext === "pdf") return "application/pdf";
-  if (ext === "png") return "image/png";
-  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
-  if (ext === "gif") return "image/gif";
-  if (ext === "webp") return "image/webp";
-  if (ext === "svg") return "image/svg+xml";
-  return "application/octet-stream";
-};
+export { mediaTypeForPath };
 
 export const isPreviewableFile = (path: string): boolean =>
-  /(\.png|\.jpe?g|\.gif|\.webp|\.svg|\.pdf)$/i.test(path);
-
-export const previewUrlForPath = (path: string, workspaceRoot = ""): string => {
-  if (!isDesktop()) return workspaceRawResourceUrlWithToken(path, workspaceRoot);
-  const normalized = path.replace(/\\/g, "/");
-  const withLeadingSlash = /^[a-zA-Z]:\//.test(normalized) ? `/${normalized}` : normalized;
-  return encodeURI(`file://${withLeadingSlash}`);
-};
+  isPreviewableMediaPath(path);
 
 export const isHiddenSearchResult = (result: FileSearchResult): boolean => {
   const parts = result.path.split(/[/\\]/).filter(Boolean);
@@ -294,7 +310,6 @@ const CODE_EXTENSIONS = new Set([
 const DATA_EXTENSIONS = new Set(["csv", "ini", "json", "toml", "xml", "yaml", "yml"]);
 const DATABASE_EXTENSIONS = new Set(["db", "sqlite", "sqlite3", "sql"]);
 const DOCUMENT_EXTENSIONS = new Set(["doc", "docx", "md", "mdx", "rst", "txt"]);
-const IMAGE_EXTENSIONS = new Set(["gif", "ico", "jpeg", "jpg", "png", "svg", "webp", "bmp"]);
 const ARCHIVE_EXTENSIONS = new Set(["7z", "gz", "rar", "tar", "tgz", "zip"]);
 const FONT_EXTENSIONS = new Set(["otf", "ttf", "woff", "woff2"]);
 const STYLE_EXTENSIONS = new Set(["css", "less", "sass", "scss"]);
@@ -328,7 +343,7 @@ export const fileGlyphKind = (name: string): FileGlyphKind => {
   if (DATA_EXTENSIONS.has(ext)) return "data";
   if (DATABASE_EXTENSIONS.has(ext)) return "database";
   if (DOCUMENT_EXTENSIONS.has(ext)) return "document";
-  if (IMAGE_EXTENSIONS.has(ext)) return "image";
+  if (isImagePath(base)) return "image";
   if (ARCHIVE_EXTENSIONS.has(ext)) return "archive";
   if (FONT_EXTENSIONS.has(ext)) return "font";
   if (TERMINAL_EXTENSIONS.has(ext)) return "terminal";

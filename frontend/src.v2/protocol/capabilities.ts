@@ -40,10 +40,23 @@ export interface AgentProviderCapabilities {
   json_mode?: unknown;
   reasoning_effort?: unknown;
   reasoning_effort_levels?: unknown;
+  configured_reasoning_effort?: unknown;
+  effective_reasoning_effort?: unknown;
+  reasoning_effort_supported?: unknown;
+  context_window?: unknown;
+  context_window_source?: unknown;
+  context_window_verified?: unknown;
+  max_context_window?: unknown;
+  max_context_window_source?: unknown;
+  max_context_window_verified?: unknown;
+  max_output_tokens?: unknown;
+  max_output_tokens_source?: unknown;
+  max_output_tokens_verified?: unknown;
+  default_reasoning_effort?: unknown;
+  default_reasoning_summary?: unknown;
   vision?: unknown;
   native_pdf?: unknown;
   image_generation?: unknown;
-  stateful_continuation?: unknown;
   confidence?: unknown;
   limitations?: unknown;
   adapters?: unknown;
@@ -62,6 +75,26 @@ export interface AgentCapabilityPermission {
   sandbox_status?: {
     os?: string;
     network?: string;
+    policy_configured?: boolean;
+    probe_status?: string;
+    enforcement?: string;
+    requested?: {
+      filesystem?: boolean;
+      network?: boolean;
+      deny_read?: boolean;
+      protected_paths?: boolean;
+    };
+    backend_available?: boolean | null;
+    backend?: string;
+    filesystem_isolated?: boolean | null;
+    network_isolated?: boolean | null;
+    deny_read_isolated?: boolean | null;
+    protected_paths_isolated?: boolean | null;
+    fail_closed?: boolean;
+    unavailable_action?: string;
+    reason?: string;
+    policy_limitations?: string[];
+    probed_at?: number;
   };
 }
 
@@ -114,6 +147,7 @@ export interface AgentCapabilityNamedItem {
   version?: unknown;
   mcp_dependencies?: unknown;
   allow_implicit_invocation?: unknown;
+  user_invocable?: unknown;
   default_prompt?: unknown;
   source_level?: unknown;
   level?: unknown;
@@ -319,17 +353,35 @@ export const providerCapabilityRows = (
     supported,
     ...providerCapabilityValue(supported, required),
   });
-  return [
+  const reasoningSupported = capabilityBool(capabilities.reasoning_effort_supported)
+    ?? capabilityBool(capabilities.reasoning_effort);
+  const reasoningRow = row("Reasoning effort", reasoningSupported);
+  const effectiveEffort = capabilityText(capabilities.effective_reasoning_effort);
+  const configuredEffort = capabilityText(capabilities.configured_reasoning_effort);
+  if (effectiveEffort) reasoningRow.value = `Active: ${effectiveEffort}`;
+  else if (configuredEffort) reasoningRow.value = `Saved, inactive: ${configuredEffort}`;
+  const rows = [
     row("Streaming", capabilityBool(capabilities.streaming), true),
     row("Tool calling", capabilityBool(capabilities.tool_calling), true),
     row("Parallel tools", capabilityBool(capabilities.parallel_tool_calls)),
-    row("Stateful", capabilityBool(capabilities.stateful_continuation)),
-    row("Reasoning effort", capabilityBool(capabilities.reasoning_effort)),
+    reasoningRow,
     row("JSON mode", capabilityBool(capabilities.json_mode)),
     row("Vision", capabilityBool(capabilities.vision)),
     row("Native PDF", capabilityBool(capabilities.native_pdf)),
     row("Image generation", capabilityBool(capabilities.image_generation)),
   ];
+  const contextWindow = finiteNumber(capabilities.context_window);
+  if (contextWindow != null && contextWindow > 0) {
+    const verified = capabilityBool(capabilities.context_window_verified);
+    const source = capabilityText(capabilities.context_window_source);
+    rows.push({
+      label: "Context window",
+      value: `${contextWindow.toLocaleString("en-US")} tokens${source ? ` · ${source}` : ""}`,
+      supported: verified,
+      tone: verified === true ? "ready" : "unknown",
+    });
+  }
+  return rows;
 };
 
 export const providerCapabilityLimitations = (
@@ -343,14 +395,14 @@ export const providerCapabilityLimitations = (
 };
 
 const formatProviderCapabilityLimitation = (value: string): string => {
-  if (value === "stateful_continuation_requires_responses_api") {
-    return "Stateful continuation requires Responses API";
+  if (value === "dedicated_image_model_requires_images_api") {
+    return "GPT Image models use the Images API and cannot be selected as the text/agent model";
   }
-  if (value === "gpt_like_chat_completions_no_stateful_continuation") {
-    return "GPT-like models on Chat Completions cannot use stateful continuation; use Responses to enable previous_response_id";
+  if (value === "dedicated_image_model_uses_images_api") {
+    return "GPT Image models use the Images API directly and do not receive function tools";
   }
   if (value === "image_generation_model_requires_responses_api") {
-    return "Image generation models require Responses API";
+    return "Image generation models require a dedicated image provider";
   }
   if (value === "known_text_only_image_provider") {
     return "This provider/model is text-only for image inputs";

@@ -1,8 +1,7 @@
-import { ArrowUp, Check, ChevronDown, Plus, ShieldCheck, Square } from "lucide-react";
+import { ArrowUp, BrainCircuit, Check, ChevronDown, Plus, ShieldCheck, Square } from "lucide-react";
 import { memo, useEffect, useId, useRef, useState } from "react";
 import type { SendButtonState } from "../lib/send-state";
 import { useAppStore } from "../stores";
-import { getWebSocket } from "../hooks/useWebSocket";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { uploadComposerFiles } from "./uploads";
 import type { EffortLevel, PermissionMode } from "../stores/types";
@@ -26,32 +25,39 @@ interface Props {
 }
 
 const PERMISSION_MODES: { id: PermissionMode; label: string }[] = [
-  { id: "ask_permissions", label: "询问" },
+  { id: "confirm", label: "询问" },
+  { id: "plan", label: "规划" },
   { id: "auto", label: "自动" },
   { id: "bypass", label: "完全访问" },
 ];
 
-const EFFORT_OPTIONS: { id: EffortLevel; label: string; desc: string }[] = [
-  { id: "none", label: "none", desc: "Provider effort: none" },
-  { id: "minimal", label: "minimal", desc: "Provider effort: minimal" },
-  { id: "low", label: "low", desc: "Provider effort: low" },
-  { id: "medium", label: "medium", desc: "Provider effort: medium" },
-  { id: "high", label: "high", desc: "Provider effort: high" },
-  { id: "xhigh", label: "xhigh", desc: "Provider effort: xhigh" },
-  { id: "max", label: "max", desc: "Provider effort: max" },
-];
+type EffortOption = {
+  id: EffortLevel;
+  label: string;
+  description: string;
+};
 
-const EFFORT_OPTION_BY_ID = new Map<EffortLevel, { id: EffortLevel; label: string; desc: string }>(
-  EFFORT_OPTIONS.map((option) => [option.id, option]),
-);
+const KNOWN_EFFORT_OPTIONS: Record<string, Omit<EffortOption, "id">> = {
+  none: { label: "关闭", description: "关闭模型推理" },
+  minimal: { label: "最低", description: "最低推理强度" },
+  low: { label: "低", description: "低推理强度" },
+  medium: { label: "中", description: "中等推理强度" },
+  high: { label: "高", description: "高推理强度" },
+  xhigh: { label: "极高", description: "极高推理强度" },
+  max: { label: "最大", description: "最大推理强度" },
+  ultra: { label: "Ultra", description: "Ultra 推理强度" },
+};
+
+const STANDARD_EFFORT_LEVELS: EffortLevel[] = ["low", "medium", "high"];
+const EXTREME_EFFORT_LEVELS: EffortLevel[] = ["xhigh", "max", "ultra"];
 
 export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, minimal = false }: Props) => {
   const permissionMode = useAppStore((s) => s.permissionMode);
   const effortLevel = useAppStore((s) => s.effortLevel);
   const currentModel = useAppStore((s) => s.currentModel);
   const currentProvider = useAppStore((s) => s.currentProvider);
-  const currentProviderBaseUrl = useAppStore((s) => s.currentProviderBaseUrl);
   const availableModels = useAppStore((s) => s.availableModels);
+  const availableModelLabels = useAppStore((s) => s.availableModelLabels);
   const modelsSource = useAppStore((s) => s.modelsSource);
   const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities);
   const prMonitor = useAppStore((s) => s.prMonitor);
@@ -74,6 +80,48 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
     };
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
+  }, [modelOpen, permissionOpen, effortOpen]);
+
+  useEffect(() => {
+    const root = modelOpen
+      ? dropdownRef.current
+      : permissionOpen
+        ? permissionRef.current
+        : effortOpen
+          ? effortRef.current
+          : null;
+    if (!root) return;
+    const trigger = root.querySelector<HTMLButtonElement>(':scope > button[aria-expanded]');
+    const options = () => Array.from(root.querySelectorAll<HTMLButtonElement>('[role="option"]:not(:disabled)'));
+    queueMicrotask(() => {
+      const items = options();
+      (items.find((item) => item.getAttribute("aria-selected") === "true") ?? items[0])?.focus();
+    });
+    const handleMenuKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setModelOpen(false);
+        setPermissionOpen(false);
+        setEffortOpen(false);
+        queueMicrotask(() => trigger?.focus());
+        return;
+      }
+      const items = options();
+      if (!items.length) return;
+      const current = items.indexOf(document.activeElement as HTMLButtonElement);
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const next = event.key === "ArrowDown"
+          ? (current + 1 + items.length) % items.length
+          : (current - 1 + items.length) % items.length;
+        items[next].focus();
+      } else if (event.key === "Home" || event.key === "End") {
+        event.preventDefault();
+        items[event.key === "Home" ? 0 : items.length - 1].focus();
+      }
+    };
+    root.addEventListener("keydown", handleMenuKeyDown);
+    return () => root.removeEventListener("keydown", handleMenuKeyDown);
   }, [modelOpen, permissionOpen, effortOpen]);
 
   useEffect(() => {
@@ -111,11 +159,13 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
   const switchModel = (model: string) => {
     sendClientCommand({ type: "llm.model.set", model });
     setModelOpen(false);
+    queueMicrotask(() => dropdownRef.current?.querySelector<HTMLButtonElement>(':scope > button')?.focus());
   };
 
   const switchEffort = (level: EffortLevel) => {
     setEffortLevel(level);
     setEffortOpen(false);
+    queueMicrotask(() => effortRef.current?.querySelector<HTMLButtonElement>(':scope > button')?.focus());
   };
 
   const switchPermissionMode = async (mode: PermissionMode) => {
@@ -138,6 +188,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
     }
     setPermissionMode(mode);
     setPermissionOpen(false);
+    queueMicrotask(() => permissionRef.current?.querySelector<HTMLButtonElement>(':scope > button')?.focus());
   };
 
   const togglePRAutomation = async (key: "autoFix" | "autoMerge") => {
@@ -158,29 +209,40 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
     useAppStore.getState().setPRMonitor({ ...prMonitor, [key]: next });
   };
 
-  const modelLabel = formatModelLabel(currentModel, "选择模型");
+  const modelLabel = availableModelLabels[currentModel] || formatModelLabel(currentModel, "选择模型");
   const selectableModels = selectableModelsForProvider(
     availableModels,
     currentModel,
     currentProvider,
     modelsSource,
   );
-  const disabledReason = !currentModel.trim() ? "Select a model before sending" : undefined;
+  const disabledReason = !currentModel.trim() ? "请先选择模型再发送" : undefined;
 
   const permLabel = permissionLabel(permissionMode);
   const providerCapabilities = runtimeCapabilities?.provider_capabilities;
-  const capabilityEffortLevels = normalizeCapabilityEffortLevels(providerCapabilities?.reasoning_effort_levels);
-  const supportsReasoningEffort = capabilityBool(providerCapabilities?.reasoning_effort) && capabilityEffortLevels.length > 0;
-  const availableEffortLevels = capabilityEffortLevels;
+  const capabilityEffortLevels = normalizeCapabilityEffortLevels(
+    providerCapabilities?.reasoning_effort_levels,
+  );
+  const supportsReasoningEffort = capabilityBool(
+    providerCapabilities?.reasoning_effort_supported ?? providerCapabilities?.reasoning_effort,
+  ) && capabilityEffortLevels.length > 0;
+  const composerEffortLevels = standardComposerEffortLevels(capabilityEffortLevels, effortLevel);
   const effortOptions = supportsReasoningEffort
-    ? availableEffortLevels.map((level) => EFFORT_OPTION_BY_ID.get(level)).filter(Boolean) as typeof EFFORT_OPTIONS
+    ? composerEffortLevels.map(effortOption)
     : [];
+  // The pill must show the level the user is actually on. Substituting a
+  // declared default (the old `?? medium` fallback) reported 中 for a session
+  // configured at `minimal`, put the checkmark on the wrong row, and left the
+  // real level unreachable from the menu.
+  const effortIsDeclared = capabilityEffortLevels.includes(effortLevel);
   const selectedEffort = effortOptions.find((option) => option.id === effortLevel)
-    ?? (effortLevel === "max" ? effortOptions.find((option) => option.id === "xhigh") : undefined)
-    ?? effortOptions[0]
     ?? effortOption(effortLevel);
-  const effortLabel = selectedEffort.label;
-  const effortTitle = `Reasoning effort: ${selectedEffort.desc}`;
+  const effortTitle = supportsReasoningEffort && !effortIsDeclared
+    ? `模型推理强度：${selectedEffort.description}。当前 Provider 未声明支持该强度，请改选下方受支持的档位。`
+    : `模型推理强度：${selectedEffort.description}。仅在当前 Provider/模型支持时生效，不改变工具迭代预算。`;
+  const effortLabel = supportsReasoningEffort && !effortIsDeclared
+    ? `${selectedEffort.label}（不支持）`
+    : selectedEffort.label;
 
   return (
     <div className="flex flex-col gap-0">
@@ -188,9 +250,9 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
         <div style={prMonitorStyle(prMonitor.ciStatus)}>
           <span className={prMonitor.ciStatus === "running" ? "thinking-pulse-dot" : undefined} style={prDotStyle(prMonitor.ciStatus)} />
           <span className="font-semibold" style={{ color: "var(--text-primary)" }}>PR #{prMonitor.prNumber}</span>
-          <span style={{ color: "var(--text-muted)" }}>检查：{prMonitor.ciStatus}</span>
+          <span style={{ color: "var(--text-muted)" }}>检查：{ciStatusLabel(prMonitor.ciStatus)}</span>
           {prMonitor.failedChecks && prMonitor.failedChecks.length > 0 && (
-            <span style={{ color: "var(--state-danger)" }}>{prMonitor.failedChecks.length} failed</span>
+            <span style={{ color: "var(--state-danger)" }}>{prMonitor.failedChecks.length} 项失败</span>
           )}
           <span className="flex-1" />
           <ToggleChip
@@ -225,8 +287,8 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
           onChange={handleFileChange}
         />
         <div className="composer-footer-primary" style={footerLeftStyle}>
-          <button
-            type="button"
+            <button
+              type="button"
             title="添加附件"
             className="composer-attach-btn"
             style={iconBtn(compact)}
@@ -287,11 +349,12 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
             }}
             label={effortLabel}
             title={effortTitle}
+            icon={<BrainCircuit size={14} />}
           >
             {effortOptions.map((option) => (
               <MenuChoice
                 key={option.id}
-                active={effortLevel === option.id}
+                active={selectedEffort.id === option.id}
                 label={option.label}
                 onClick={() => switchEffort(option.id)}
               />
@@ -301,6 +364,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
 
         <div ref={dropdownRef} className="composer-model-picker relative">
           <button
+            type="button"
             onClick={() => {
               setPermissionOpen(false);
               setEffortOpen(false);
@@ -317,16 +381,19 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
             <ChevronDown size={14} className="opacity-55 ml-0.5 flex-shrink-0" />
           </button>
           {modelOpen && selectableModels.length > 0 && (
-            <div style={dropdownStyle("right")}>
+            <div className="mc-dropdown-menu composer-picker-menu" role="listbox" aria-label="选择模型" style={dropdownStyle("right")}>
               {selectableModels.map((m) => (
-                <button key={m} onClick={() => switchModel(m)} style={{ ...dropdownItem, background: m === currentModel ? dropdownActiveBg : "transparent" }}>
+                  <button key={m} type="button" role="option" aria-selected={m === currentModel} onClick={() => switchModel(m)} style={{ ...dropdownItem, background: m === currentModel ? dropdownActiveBg : "transparent" }}>
                   <ModelBrandIcon model={m} size={16} />
-                  <span className="flex-1">{m}</span>
+                  <span className="flex-1">{availableModelLabels[m] || m}</span>
                   {m === currentModel && <Check size={14} style={{ color: "var(--accent-primary)" }} />}
                 </button>
               ))}
               <div className="mt-1 pt-1" style={{ borderTop: "1px solid var(--border-subtle)" }}>
                 <button
+                  type="button"
+                  role="option"
+                  aria-selected="false"
                   onClick={() => {
                     setModelOpen(false);
                     openSettings("provider");
@@ -348,7 +415,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
              aria-label="停止当前回复"
             className="composer-stop-current-btn w-7 h-7 border-0 inline-flex items-center justify-center"
           >
-            <Square size={14} fill="currentColor" />
+            <Square size={14} fill="currentColor" className="anim-icon-swap" />
           </button>
         ) : null}
         <SendIconBtn sendState={sendState} onSend={onSend} disabledReason={disabledReason} />
@@ -395,7 +462,7 @@ const Picker = ({
       {label}
       <ChevronDown size={14} className="opacity-55 ml-0.5" />
     </button>
-    {open && <div style={dropdownStyle(align)}>{children}</div>}
+    {open && <div className="mc-dropdown-menu composer-picker-menu" role="listbox" aria-label={title} style={dropdownStyle(align)}>{children}</div>}
   </div>
 );
 
@@ -409,6 +476,9 @@ const MenuChoice = ({
   onClick: () => void;
 }) => (
   <button
+    type="button"
+    role="option"
+    aria-selected={active}
     onClick={onClick}
     className="composer-menu-choice"
     style={{
@@ -427,6 +497,45 @@ const MenuChoice = ({
     <span style={{ minWidth: 0, color: "var(--text-primary)", fontWeight: active ? 600 : 500 }}>{label}</span>
   </button>
 );
+
+const effortOption = (level: EffortLevel): EffortOption => {
+  const normalized = String(level || "").trim().toLowerCase() as EffortLevel;
+  const known = KNOWN_EFFORT_OPTIONS[normalized];
+  if (known) return { id: normalized, ...known };
+  return {
+    id: normalized,
+    label: normalized,
+    description: `Provider 声明的推理强度：${normalized}`,
+  };
+};
+
+const capabilityBool = (value: unknown): boolean =>
+  value === true || (typeof value === "string" && value.trim().toLowerCase() === "true");
+
+const normalizeCapabilityEffortLevels = (value: unknown): EffortLevel[] => {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(
+    value
+      .map((item) => String(item || "").trim().toLowerCase())
+      .filter(Boolean),
+  )) as EffortLevel[];
+};
+
+const standardComposerEffortLevels = (
+  levels: EffortLevel[],
+  current: EffortLevel,
+): EffortLevel[] => {
+  const declared = new Set(levels);
+  if (!STANDARD_EFFORT_LEVELS.every((level) => declared.has(level))) return levels;
+  const keep = new Set<EffortLevel>(STANDARD_EFFORT_LEVELS);
+  const extreme = EXTREME_EFFORT_LEVELS.find((level) => declared.has(level));
+  if (extreme) keep.add(extreme);
+  // Narrowing the menu must never hide the level the session is actually using:
+  // that is what made a `minimal` configuration unreselectable while the pill
+  // claimed 中. Provider order is preserved so the menu reads low → high.
+  if (declared.has(current)) keep.add(current);
+  return levels.filter((level) => keep.has(level));
+};
 
 const ContextUsageRing = memo(() => {
   const contextUsage = useAppStore((s) => s.contextUsage);
@@ -449,7 +558,11 @@ const ContextUsageRing = memo(() => {
   return (
     <button
       type="button"
-      onClick={() => getWebSocket()?.send({ type: "session.usage.inspect", source: "usage_ring" })}
+      onClick={() => sendClientCommand({
+        type: "session.usage.inspect",
+        conversation_id: conversationId || undefined,
+        source: "usage_ring",
+      })}
        title="上下文用量，点击查看详情（/usage）"
        aria-label="显示上下文和令牌用量"
       className="composer-context-usage"
@@ -468,9 +581,9 @@ const ToggleChip = ({ label, active, onClick }: { label: string; active: boolean
     style={{
       borderRadius: "var(--radius-sm, 4px)",
       borderColor: "var(--border-subtle)",
-      background: active ? "var(--accent-soft)" : "var(--surface-soft)",
-      color: active ? "var(--accent-primary)" : "var(--text-muted)",
-      fontSize: "var(--text-xs)",
+      background: active ? "var(--surface-active)" : "var(--surface-soft)",
+      color: active ? "var(--text-primary)" : "var(--text-muted)",
+      fontSize: "var(--mc-font-secondary)",
     }}
   >
     {label}
@@ -478,33 +591,18 @@ const ToggleChip = ({ label, active, onClick }: { label: string; active: boolean
 );
 
 const permissionLabel = (mode: PermissionMode): string => {
-  if (mode === "ask_permissions") return "询问";
+  if (mode === "confirm") return "询问";
   if (mode === "plan") return "规划";
   if (mode === "auto") return "自动";
   if (mode === "bypass") return "完全访问";
   return "自动";
 };
 
-const effortOption = (level: EffortLevel) =>
-  EFFORT_OPTIONS.find((option) => option.id === level) ?? EFFORT_OPTIONS[2];
-
-const capabilityBool = (value: unknown): boolean =>
-  value === true || (typeof value === "string" && value.trim().toLowerCase() === "true");
-
-const normalizeCapabilityEffortLevels = (value: unknown): EffortLevel[] => {
-  if (!Array.isArray(value)) return [];
-  return value
-    .map((item) => String(item || "").trim().toLowerCase())
-    .filter((item): item is EffortLevel =>
-      item === "none" ||
-      item === "minimal" ||
-      item === "low" ||
-      item === "medium" ||
-      item === "high" ||
-      item === "xhigh" ||
-      item === "max"
-    );
-};
+const ciStatusLabel = (status: string): string => ({
+  running: "运行中",
+  passed: "已通过",
+  failed: "失败",
+}[status] ?? status);
 
 const prMonitorStyle = (status: string): React.CSSProperties => ({
   display: "flex",
@@ -574,7 +672,7 @@ const dropdownStyle = (align: "left" | "right" = "left"): React.CSSProperties =>
   borderRadius: "var(--radius-md, 8px)",
   boxShadow: "var(--shadow-soft)",
   padding: 6,
-  zIndex: 10,
+  zIndex: "var(--z-sticky)",
   maxHeight: 260,
   overflowY: "auto",
 });
@@ -599,15 +697,15 @@ const dropdownItem: React.CSSProperties = {
 const SendIconBtn = memo(({ sendState, onSend, disabledReason }: { sendState: SendButtonState; onSend: () => void; disabledReason?: string }) => {
   const disabled = sendState === "disabled";
   const label = sendState === "stop"
-    ? "Stop"
+    ? "停止当前回复"
     : sendState === "queue"
-      ? "Queue message"
+      ? "将消息加入队列"
       : sendState === "offline-queue"
          ? "连接恢复后发送"
          : "发送";
   return (
     <button onClick={onSend} disabled={disabled} title={disabledReason || label} aria-label={label} className="btn-send composer-send-btn w-7 h-7 border-0 inline-flex items-center justify-center" style={sendIconButtonStyle(sendState, disabled)}>
-      {sendState === "stop" ? <Square size={14} fill="currentColor" /> : <ArrowUp size={16} strokeWidth={1.8} />}
+      {sendState === "stop" ? <Square size={14} fill="currentColor" className="anim-icon-swap" /> : <ArrowUp size={16} strokeWidth={1.8} className="anim-icon-swap" />}
     </button>
   );
 });

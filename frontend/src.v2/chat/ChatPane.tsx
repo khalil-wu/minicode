@@ -6,10 +6,15 @@ import { SafeBoundary } from "../shell/ChunkErrorBoundary";
 import { ComposerErrorFallback } from "../components/ComposerErrorFallback";
 import { ChatErrorFallback } from "../components/ChatErrorFallback";
 import { ChatContextCard } from "./ChatContextCard";
+import { useAppStore } from "../stores";
 
 export const ChatPane = () => {
   const [showSearch, setShowSearch] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const conversationId = useAppStore((state) => state.conversationId);
+  const isHydrating = useAppStore((state) => Boolean(
+    conversationId && state.conversationHydration[conversationId]?.isHydrating,
+  ));
 
   const handleCloseSearch = useCallback(() => {
     setShowSearch(false);
@@ -63,12 +68,37 @@ export const ChatPane = () => {
           {showSearch && (
             <ChatSearch onClose={handleCloseSearch} containerRef={containerRef} />
           )}
-          <SafeBoundary fallback={<ChatErrorFallback />}>
-            <MessageList />
-          </SafeBoundary>
-          <SafeBoundary fallback={<ComposerErrorFallback />}>
-            <Composer />
-          </SafeBoundary>
+          {isHydrating && (
+            <div
+              className="chat-pane-hydration-status"
+              role="status"
+              aria-live="polite"
+              style={{
+                position: "absolute",
+                width: 1,
+                height: 1,
+                margin: -1,
+                padding: 0,
+                overflow: "hidden",
+                clip: "rect(0 0 0 0)",
+                clipPath: "inset(50%)",
+                whiteSpace: "nowrap",
+                border: 0,
+              }}
+            >
+              正在恢复会话上下文、运行状态和工具记录…
+            </div>
+          )}
+          <div className="chat-pane-message-transition" data-hydrating={isHydrating ? "true" : "false"}>
+            <SafeBoundary fallback={<ChatErrorFallback />}>
+              <MessageList />
+            </SafeBoundary>
+          </div>
+          <div className="chat-pane-composer-region">
+            <SafeBoundary fallback={<ComposerErrorFallback />}>
+              <Composer />
+            </SafeBoundary>
+          </div>
         </div>
         <ChatContextCard />
       </div>

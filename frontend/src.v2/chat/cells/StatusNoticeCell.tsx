@@ -7,27 +7,27 @@ const TONE_STYLES: Record<
   { border: string; bg: string; color: string; icon: LucideIcon }
 > = {
   info: {
-    border: "var(--state-info, #4a9eff)",
-    bg: "color-mix(in oklch, var(--state-info, #4a9eff) 8%, var(--surface-soft))",
-    color: "var(--state-info, #4a9eff)",
+    border: "var(--state-info)",
+    bg: "color-mix(in oklch, var(--state-info) 8%, var(--surface-soft))",
+    color: "var(--state-info)",
     icon: Info,
   },
   warning: {
-    border: "var(--state-warning, #f0a030)",
-    bg: "color-mix(in oklch, var(--state-warning, #f0a030) 8%, var(--surface-soft))",
-    color: "var(--state-warning, #f0a030)",
+    border: "var(--state-warning)",
+    bg: "color-mix(in oklch, var(--state-warning) 8%, var(--surface-soft))",
+    color: "var(--state-warning)",
     icon: TriangleAlert,
   },
   success: {
-    border: "var(--state-success, #2ea043)",
-    bg: "color-mix(in oklch, var(--state-success, #2ea043) 8%, var(--surface-soft))",
-    color: "var(--state-success, #2ea043)",
+    border: "var(--state-success)",
+    bg: "color-mix(in oklch, var(--state-success) 8%, var(--surface-soft))",
+    color: "var(--state-success)",
     icon: CheckCircle2,
   },
   danger: {
-    border: "var(--state-danger, #f85149)",
-    bg: "color-mix(in oklch, var(--state-danger, #f85149) 8%, var(--surface-soft))",
-    color: "var(--state-danger, #f85149)",
+    border: "var(--state-danger)",
+    bg: "color-mix(in oklch, var(--state-danger) 8%, var(--surface-soft))",
+    color: "var(--state-danger)",
     icon: CircleAlert,
   },
 };
@@ -57,9 +57,15 @@ export function StatusNoticeCell({
     >
       <NoticeIcon size={14} strokeWidth={1.75} aria-hidden="true" style={{ flexShrink: 0, marginTop: 1 }} />
       <div style={{ minWidth: 0 }}>
-        <div style={{ fontWeight: 650 }}>{cell.title}</div>
+        <div style={{ fontWeight: "var(--fw-semibold)" }}>{cell.title}</div>
         {cell.message && (
-          <div style={{ marginTop: 2, opacity: 0.85 }}>{cell.message}</div>
+          <div style={{
+            marginTop: 2,
+            opacity: 0.85,
+            whiteSpace: "pre-wrap",
+            overflowWrap: "anywhere",
+            fontFamily: cell.title === "命令执行记录" ? "var(--font-mono)" : undefined,
+          }}>{cell.message}</div>
         )}
       </div>
     </div>

@@ -18,7 +18,7 @@ from backend.agent.swarm_migrations import (
     SchemaMigrationRunner,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 SCHEMA_MIGRATIONS = (
     SchemaMigration(1, """
         CREATE TABLE IF NOT EXISTS metadata (
@@ -156,6 +156,29 @@ SCHEMA_MIGRATIONS = (
         CREATE INDEX IF NOT EXISTS idx_mailbox_deliveries_owner
             ON mailbox_deliveries(claim_owner, claim_token);
     """),
+    SchemaMigration(6, """
+        CREATE TABLE IF NOT EXISTS lifecycle_response_fences (
+            response_kind TEXT NOT NULL,
+            participant_id TEXT NOT NULL,
+            mailbox_epoch INTEGER NOT NULL,
+            request_id TEXT NOT NULL,
+            target_id TEXT NOT NULL DEFAULT '',
+            reservation_token TEXT NOT NULL,
+            status TEXT NOT NULL,
+            reserved_at INTEGER NOT NULL,
+            lease_expires_at INTEGER NOT NULL,
+            delivered_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (response_kind, participant_id, mailbox_epoch, request_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_lifecycle_response_fences_lease
+            ON lifecycle_response_fences(status, lease_expires_at);
+    """),
+    SchemaMigration(7, """
+        ALTER TABLE messages ADD COLUMN message_kind TEXT NOT NULL DEFAULT '';
+        ALTER TABLE messages ADD COLUMN correlation_id TEXT NOT NULL DEFAULT '';
+        CREATE INDEX IF NOT EXISTS idx_messages_lifecycle
+            ON messages(conversation_id, message_kind, correlation_id, seq DESC);
+    """),
 )
 
 
@@ -182,7 +205,23 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
+def _message_lifecycle_index(content: Any) -> tuple[str, str]:
+    try:
+        payload = json.loads(str(content or ""))
+    except (TypeError, ValueError):
+        return "", ""
+    if not isinstance(payload, dict):
+        return "", ""
+    kind = str(payload.get("type") or "").strip()
+    correlation_id = str(
+        payload.get("requestId") or payload.get("request_id") or ""
+    ).strip()
+    return kind, correlation_id
+
+
 logger = logging.getLogger(__name__)
+
+MAILBOX_MESSAGE_LEASE_MS = 30_000
 
 
 class FileSwarmStore:
@@ -218,19 +257,19 @@ class FileSwarmStore:
         connection = self._connect()
         self._write_count += 1
         max_retries = 3
-        for attempt in range(max_retries + 1):
-            try:
-                connection.execute("BEGIN IMMEDIATE")
-                break
-            except sqlite3.OperationalError as exc:
-                if attempt < max_retries and "locked" in str(exc).lower():
-                    self._busy_retries += 1
-                    logger.debug("SQLite busy retry %d: %s", attempt + 1, exc)
-                    time.sleep(0.05 * (attempt + 1))
-                    continue
-                connection.rollback()
-                raise
         try:
+            for attempt in range(max_retries + 1):
+                try:
+                    connection.execute("BEGIN IMMEDIATE")
+                    break
+                except sqlite3.OperationalError as exc:
+                    if attempt < max_retries and "locked" in str(exc).lower():
+                        self._busy_retries += 1
+                        logger.debug("SQLite busy retry %d: %s", attempt + 1, exc)
+                        time.sleep(0.05 * (attempt + 1))
+                        continue
+                    connection.rollback()
+                    raise
             yield connection
             connection.commit()
         except Exception:
@@ -248,6 +287,22 @@ class FileSwarmStore:
             if version != SCHEMA_VERSION:
                 raise RuntimeError(f"schema migration stopped at v{version}, expected v{SCHEMA_VERSION}")
             SchemaMigrationRunner.record_or_verify(connection, SCHEMA_VERSION)
+            rows = connection.execute(
+                "SELECT message_id, payload_json FROM messages WHERE message_kind = ''"
+            ).fetchall()
+            for row in rows:
+                try:
+                    payload = json.loads(row["payload_json"])
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                kind, correlation_id = _message_lifecycle_index(
+                    payload.get("content") if isinstance(payload, dict) else ""
+                )
+                if kind:
+                    connection.execute(
+                        "UPDATE messages SET message_kind = ?, correlation_id = ? WHERE message_id = ?",
+                        (kind, correlation_id, row["message_id"]),
+                    )
             connection.commit()
         finally:
             connection.close()
@@ -614,6 +669,20 @@ class FileSwarmStore:
             ).fetchall()
         return [json.loads(row["payload_json"]) for row in rows]
 
+    def get_subagent(self, subagent_id: str) -> dict[str, Any] | None:
+        clean_id = str(subagent_id or "").strip()
+        if not clean_id:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM subagent_runs WHERE subagent_id = ?",
+                (clean_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(row["payload_json"])
+        return payload if isinstance(payload, dict) else None
+
     def upsert_subagent_result(
         self,
         payload: dict[str, Any],
@@ -713,11 +782,28 @@ class FileSwarmStore:
         current_process_id: int,
         current_process_start_identity: str,
         active_owner_tokens: set[str],
+        hydration_limit: int = 1000,
     ) -> dict[str, list[dict[str, Any]]]:
         with self._write() as connection:
-            run_rows = connection.execute(
-                "SELECT run_id, owner_token, payload_json FROM agent_runs"
-            ).fetchall()
+            retained_limit = max(1, min(int(hydration_limit), 10_000))
+            run_rows = [
+                *connection.execute(
+                    """
+                    SELECT run_id, owner_token, payload_json FROM agent_runs
+                    WHERE status = 'running'
+                    ORDER BY updated_at DESC, run_id
+                    """
+                ).fetchall(),
+                *connection.execute(
+                    """
+                    SELECT run_id, owner_token, payload_json FROM agent_runs
+                    WHERE status != 'running'
+                    ORDER BY updated_at DESC, run_id
+                    LIMIT ?
+                    """,
+                    (retained_limit,),
+                ).fetchall(),
+            ]
             runs: list[dict[str, Any]] = []
             for row in run_rows:
                 payload = json.loads(row["payload_json"])
@@ -735,6 +821,10 @@ class FileSwarmStore:
                         "runtime_process_id": int(current_process_id),
                         "runtime_process_start_identity": current_process_start_identity,
                         "runtime_owner_token": current_owner_token,
+                        "cleanup_pending": True,
+                        "cleanup_reason": "runtime_interrupted",
+                        "cleanup_requested_at": interrupted_at,
+                        "cleanup_completed_at": None,
                     })
                     cursor = connection.execute(
                         """
@@ -759,12 +849,26 @@ class FileSwarmStore:
                         payload = json.loads(latest["payload_json"])
                 runs.append(payload)
 
-            subagent_rows = connection.execute(
-                """
-                SELECT subagent_id, owner_token, agent_path, mailbox_epoch, payload_json
-                FROM subagent_runs
-                """
-            ).fetchall()
+            subagent_rows = [
+                *connection.execute(
+                    """
+                    SELECT subagent_id, owner_token, agent_path, mailbox_epoch, payload_json
+                    FROM subagent_runs
+                    WHERE status = 'running'
+                    ORDER BY updated_at DESC, subagent_id
+                    """
+                ).fetchall(),
+                *connection.execute(
+                    """
+                    SELECT subagent_id, owner_token, agent_path, mailbox_epoch, payload_json
+                    FROM subagent_runs
+                    WHERE status != 'running'
+                    ORDER BY updated_at DESC, subagent_id
+                    LIMIT ?
+                    """,
+                    (retained_limit,),
+                ).fetchall(),
+            ]
             subagents: list[dict[str, Any]] = []
             for row in subagent_rows:
                 payload = json.loads(row["payload_json"])
@@ -781,6 +885,10 @@ class FileSwarmStore:
                         "runtime_process_id": int(current_process_id),
                         "runtime_process_start_identity": current_process_start_identity,
                         "runtime_owner_token": current_owner_token,
+                        "cleanup_pending": True,
+                        "cleanup_reason": "runtime_interrupted",
+                        "cleanup_requested_at": interrupted_at,
+                        "cleanup_completed_at": None,
                     })
                     agent_path = str(payload.get("agent_path") or row["agent_path"] or "")
                     mailbox_epoch = max(
@@ -812,9 +920,20 @@ class FileSwarmStore:
                         payload = json.loads(latest["payload_json"])
                 subagents.append(payload)
 
-            result_rows = connection.execute(
-                "SELECT payload_json FROM subagent_results"
-            ).fetchall()
+            hydrated_subagent_ids = [
+                str(row["subagent_id"] or "")
+                for row in subagent_rows
+                if str(row["subagent_id"] or "")
+            ]
+            result_rows: list[sqlite3.Row] = []
+            for offset in range(0, len(hydrated_subagent_ids), 500):
+                chunk = hydrated_subagent_ids[offset : offset + 500]
+                result_rows.extend(
+                    connection.execute(
+                        f"SELECT payload_json FROM subagent_results WHERE subagent_id IN ({','.join('?' for _ in chunk)})",
+                        chunk,
+                    ).fetchall()
+                )
             results = [json.loads(row["payload_json"]) for row in result_rows]
         return {"runs": runs, "subagents": subagents, "results": results}
 
@@ -874,14 +993,154 @@ class FileSwarmStore:
             self._insert_message(connection, message)
             return dict(message)
 
+    def reserve_lifecycle_response(
+        self,
+        *,
+        response_kind: str,
+        participant_id: str,
+        mailbox_epoch: int,
+        request_id: str,
+        target_id: str = "",
+        expected_active_plan_request_id: str | None = None,
+        lease_ms: int = 30_000,
+    ) -> str:
+        """Atomically reserve a one-shot lifecycle response.
+
+        The fence is keyed by the child incarnation and protocol request id.
+        A crashed sender may retry after the short reservation lease, while a
+        delivered response remains permanently sealed for that incarnation.
+        Plan responses additionally compare the active request inside this
+        same SQLite write transaction so approve/reject cannot race.
+        """
+
+        kind = str(response_kind or "").strip()
+        participant = str(participant_id or "").strip()
+        request = str(request_id or "").strip()
+        target = str(target_id or "").strip()
+        epoch = max(0, int(mailbox_epoch or 0))
+        if not kind or not participant or not request or epoch <= 0:
+            return ""
+        now = _epoch_ms()
+        expires_at = now + max(1_000, int(lease_ms or 0))
+        token = _new_id("lifecycle")
+        with self._write() as connection:
+            if expected_active_plan_request_id is not None:
+                row = connection.execute(
+                    """
+                    SELECT payload_json, status, mailbox_epoch
+                    FROM subagent_runs WHERE subagent_id = ?
+                    """,
+                    (participant,),
+                ).fetchone()
+                if row is None or str(row["status"] or "") != "running":
+                    return ""
+                if int(row["mailbox_epoch"] or 0) != epoch:
+                    return ""
+                payload = json.loads(row["payload_json"])
+                if not isinstance(payload, dict):
+                    return ""
+                if str(payload.get("active_plan_request_id") or "").strip() != str(
+                    expected_active_plan_request_id or ""
+                ).strip():
+                    return ""
+                if not bool(payload.get("awaiting_plan_approval")):
+                    return ""
+            existing = connection.execute(
+                """
+                SELECT status, lease_expires_at
+                FROM lifecycle_response_fences
+                WHERE response_kind = ? AND participant_id = ?
+                  AND mailbox_epoch = ? AND request_id = ?
+                """,
+                (kind, participant, epoch, request),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["status"] or "") == "delivered":
+                    return ""
+                if int(existing["lease_expires_at"] or 0) > now:
+                    return ""
+            connection.execute(
+                """
+                INSERT INTO lifecycle_response_fences(
+                    response_kind, participant_id, mailbox_epoch, request_id,
+                    target_id, reservation_token, status, reserved_at,
+                    lease_expires_at, delivered_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'reserved', ?, ?, 0)
+                ON CONFLICT(response_kind, participant_id, mailbox_epoch, request_id)
+                DO UPDATE SET
+                    target_id = excluded.target_id,
+                    reservation_token = excluded.reservation_token,
+                    status = 'reserved',
+                    reserved_at = excluded.reserved_at,
+                    lease_expires_at = excluded.lease_expires_at,
+                    delivered_at = 0
+                """,
+                (kind, participant, epoch, request, target, token, now, expires_at),
+            )
+        return token
+
+    def commit_lifecycle_response(
+        self,
+        *,
+        response_kind: str,
+        participant_id: str,
+        mailbox_epoch: int,
+        request_id: str,
+        reservation_token: str,
+    ) -> bool:
+        with self._write() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE lifecycle_response_fences
+                SET status = 'delivered', delivered_at = ?, lease_expires_at = 0
+                WHERE response_kind = ? AND participant_id = ?
+                  AND mailbox_epoch = ? AND request_id = ?
+                  AND status = 'reserved' AND reservation_token = ?
+                """,
+                (
+                    _epoch_ms(), str(response_kind or "").strip(),
+                    str(participant_id or "").strip(),
+                    max(0, int(mailbox_epoch or 0)), str(request_id or "").strip(),
+                    str(reservation_token or "").strip(),
+                ),
+            )
+        return cursor.rowcount == 1
+
+    def release_lifecycle_response(
+        self,
+        *,
+        response_kind: str,
+        participant_id: str,
+        mailbox_epoch: int,
+        request_id: str,
+        reservation_token: str,
+    ) -> bool:
+        with self._write() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM lifecycle_response_fences
+                WHERE response_kind = ? AND participant_id = ?
+                  AND mailbox_epoch = ? AND request_id = ?
+                  AND status = 'reserved' AND reservation_token = ?
+                """,
+                (
+                    str(response_kind or "").strip(),
+                    str(participant_id or "").strip(),
+                    max(0, int(mailbox_epoch or 0)), str(request_id or "").strip(),
+                    str(reservation_token or "").strip(),
+                ),
+            )
+        return cursor.rowcount == 1
+
     @staticmethod
     def _insert_message(connection: sqlite3.Connection, message: dict[str, Any]) -> None:
+        message_kind, correlation_id = _message_lifecycle_index(message.get("content"))
         connection.execute(
             """
             INSERT INTO messages(
                 message_id, conversation_id, sender_id, recipient_id,
-                created_at, seq, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                created_at, seq, payload_json, message_kind, correlation_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 message["message_id"],
@@ -891,6 +1150,8 @@ class FileSwarmStore:
                 message["created_at"],
                 message["seq"],
                 _json(message),
+                message_kind,
+                correlation_id,
             ),
         )
 
@@ -901,6 +1162,8 @@ class FileSwarmStore:
         conversation_id: str = "",
         since_seq: int = 0,
         limit: int = 20,
+        message_kind: str = "",
+        correlation_id: str = "",
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
         values: list[Any] = []
@@ -913,8 +1176,14 @@ class FileSwarmStore:
         if since_seq > 0:
             clauses.append("seq > ?")
             values.append(since_seq)
+        if message_kind:
+            clauses.append("message_kind = ?")
+            values.append(message_kind)
+        if correlation_id:
+            clauses.append("correlation_id = ?")
+            values.append(correlation_id)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        bounded_limit = max(1, min(limit, 100))
+        bounded_limit = max(1, min(limit, 1000 if message_kind else 100))
         with self._connect() as connection:
             rows = connection.execute(
                 f"""
@@ -955,7 +1224,7 @@ class FileSwarmStore:
         since_seq: int = 0,
         limit: int = 100,
         now_ms: int | None = None,
-        lease_ms: int = 30_000,
+        lease_ms: int = MAILBOX_MESSAGE_LEASE_MS,
     ) -> list[dict[str, Any]]:
         """Atomically claim incoming messages for one agent incarnation.
 
@@ -983,68 +1252,91 @@ class FileSwarmStore:
 
         claimed: list[dict[str, Any]] = []
         with self._write() as connection:
-            rows = connection.execute(
-                f"""
-                SELECT message_id, payload_json
-                FROM messages
-                WHERE {where}
-                ORDER BY seq ASC, created_at ASC, message_id ASC
-                LIMIT 1000
-                """,
-                tuple(values),
-            ).fetchall()
-            for row in rows:
-                message = json.loads(row["payload_json"])
-                if not self._message_targets_incarnation(
-                    message,
-                    participant_id=participant,
-                    mailbox_epoch=epoch,
-                ):
-                    continue
-                delivery = connection.execute(
-                    """
-                    SELECT status, claim_owner, claim_token, lease_expires_at
-                    FROM mailbox_deliveries
-                    WHERE message_id = ? AND participant_id = ? AND mailbox_epoch = ?
+            # Do not apply the old LIMIT 1000 once and then filter epochs in
+            # Python: a broadcast can leave an arbitrarily long prefix of
+            # stale-incarnation rows and permanently hide the current row.
+            # Keyset pages keep the ordering stable without OFFSET scans while
+            # allowing us to walk past that stale prefix in the same write
+            # transaction that creates the claims.
+            cursor_key: tuple[int, int, str] | None = None
+            while len(claimed) < bounded_limit:
+                page_clauses = list(clauses)
+                page_values = list(values)
+                if cursor_key is not None:
+                    page_clauses.append("(seq, created_at, message_id) > (?, ?, ?)")
+                    page_values.extend(cursor_key)
+                page_where = " AND ".join(page_clauses)
+                rows = connection.execute(
+                    f"""
+                    SELECT message_id, payload_json, seq, created_at
+                    FROM messages
+                    WHERE {page_where}
+                    ORDER BY seq ASC, created_at ASC, message_id ASC
+                    LIMIT 1000
                     """,
-                    (row["message_id"], participant, epoch),
-                ).fetchone()
-                if delivery is not None:
-                    status = str(delivery["status"] or "")
-                    if status == "acked":
+                    tuple(page_values),
+                ).fetchall()
+                if not rows:
+                    break
+                for row in rows:
+                    cursor_key = (
+                        int(row["seq"] or 0),
+                        int(row["created_at"] or 0),
+                        str(row["message_id"] or ""),
+                    )
+                    message = json.loads(row["payload_json"])
+                    if not self._message_targets_incarnation(
+                        message,
+                        participant_id=participant,
+                        mailbox_epoch=epoch,
+                    ):
                         continue
-                    if status == "claimed" and int(delivery["lease_expires_at"] or 0) > now:
-                        continue
+                    delivery = connection.execute(
+                        """
+                        SELECT status, claim_owner, claim_token, lease_expires_at
+                        FROM mailbox_deliveries
+                        WHERE message_id = ? AND participant_id = ? AND mailbox_epoch = ?
+                        """,
+                        (row["message_id"], participant, epoch),
+                    ).fetchone()
+                    if delivery is not None:
+                        status = str(delivery["status"] or "")
+                        if status == "acked":
+                            continue
+                        if status == "claimed" and int(delivery["lease_expires_at"] or 0) > now:
+                            continue
 
-                claim_token = _new_id("claim")
-                connection.execute(
-                    """
-                    INSERT INTO mailbox_deliveries(
-                        message_id, participant_id, mailbox_epoch, status,
-                        claim_owner, claim_token, claimed_at, lease_expires_at, acked_at
-                    ) VALUES (?, ?, ?, 'claimed', ?, ?, ?, ?, 0)
-                    ON CONFLICT(message_id, participant_id, mailbox_epoch) DO UPDATE SET
-                        status = 'claimed',
-                        claim_owner = excluded.claim_owner,
-                        claim_token = excluded.claim_token,
-                        claimed_at = excluded.claimed_at,
-                        lease_expires_at = excluded.lease_expires_at,
-                        acked_at = 0
-                    """,
-                    (
-                        row["message_id"], participant, epoch, owner,
-                        claim_token, now, expires_at,
-                    ),
-                )
-                claimed.append({
-                    "message": message,
-                    "participant_id": participant,
-                    "mailbox_epoch": epoch,
-                    "claim_owner": owner,
-                    "claim_token": claim_token,
-                    "lease_expires_at": expires_at,
-                })
-                if len(claimed) >= bounded_limit:
+                    claim_token = _new_id("claim")
+                    connection.execute(
+                        """
+                        INSERT INTO mailbox_deliveries(
+                            message_id, participant_id, mailbox_epoch, status,
+                            claim_owner, claim_token, claimed_at, lease_expires_at, acked_at
+                        ) VALUES (?, ?, ?, 'claimed', ?, ?, ?, ?, 0)
+                        ON CONFLICT(message_id, participant_id, mailbox_epoch) DO UPDATE SET
+                            status = 'claimed',
+                            claim_owner = excluded.claim_owner,
+                            claim_token = excluded.claim_token,
+                            claimed_at = excluded.claimed_at,
+                            lease_expires_at = excluded.lease_expires_at,
+                            acked_at = 0
+                        """,
+                        (
+                            row["message_id"], participant, epoch, owner,
+                            claim_token, now, expires_at,
+                        ),
+                    )
+                    claimed.append({
+                        "message": message,
+                        "participant_id": participant,
+                        "mailbox_epoch": epoch,
+                        "claim_owner": owner,
+                        "claim_token": claim_token,
+                        "lease_expires_at": expires_at,
+                    })
+                    if len(claimed) >= bounded_limit:
+                        break
+                if len(rows) < 1000:
                     break
         return claimed
 
@@ -1071,6 +1363,43 @@ class FileSwarmStore:
                     """,
                     (
                         now,
+                        str(claim.get("message_id") or ""),
+                        str(claim.get("participant_id") or ""),
+                        max(0, int(claim.get("mailbox_epoch") or 0)),
+                        owner,
+                        str(claim.get("claim_token") or ""),
+                    ),
+                )
+                count += max(0, int(cursor.rowcount or 0))
+        return count
+
+    def renew_message_claims(
+        self,
+        claims: list[dict[str, Any]],
+        *,
+        claim_owner: str,
+        lease_ms: int = MAILBOX_MESSAGE_LEASE_MS,
+        now_ms: int | None = None,
+    ) -> int:
+        """Extend only still-owned claims while their provider request is live."""
+
+        owner = str(claim_owner or "").strip()
+        if not owner or not claims:
+            return 0
+        now = int(now_ms if now_ms is not None else _epoch_ms())
+        expires_at = now + max(1_000, int(lease_ms))
+        count = 0
+        with self._write() as connection:
+            for claim in claims:
+                cursor = connection.execute(
+                    """
+                    UPDATE mailbox_deliveries
+                    SET lease_expires_at = ?
+                    WHERE message_id = ? AND participant_id = ? AND mailbox_epoch = ?
+                      AND status = 'claimed' AND claim_owner = ? AND claim_token = ?
+                    """,
+                    (
+                        expires_at,
                         str(claim.get("message_id") or ""),
                         str(claim.get("participant_id") or ""),
                         max(0, int(claim.get("mailbox_epoch") or 0)),
@@ -1118,6 +1447,7 @@ class FileSwarmStore:
             self._replace_dependencies(
                 connection,
                 task["task_id"],
+                conversation_id=task["conversation_id"],
                 blocks=task["blocks"],
                 blocked_by=task["blocked_by"],
             )
@@ -1178,11 +1508,26 @@ class FileSwarmStore:
             ),
         )
 
-    def get_task(self, task_id: str) -> dict[str, Any] | None:
+    def get_task(
+        self,
+        task_id: str,
+        *,
+        conversation_id: str = "",
+    ) -> dict[str, Any] | None:
         with self._connect() as connection:
-            return self._get_task(connection, task_id)
+            return self._get_task(
+                connection,
+                task_id,
+                conversation_id=conversation_id,
+            )
 
-    def _get_task(self, connection: sqlite3.Connection, task_id: str) -> dict[str, Any] | None:
+    def _get_task(
+        self,
+        connection: sqlite3.Connection,
+        task_id: str,
+        *,
+        conversation_id: str = "",
+    ) -> dict[str, Any] | None:
         row = connection.execute(
             "SELECT payload_json FROM tasks WHERE task_id = ?",
             (task_id,),
@@ -1190,6 +1535,15 @@ class FileSwarmStore:
         if row is None:
             return None
         task = json.loads(row["payload_json"])
+        owner = str(conversation_id or "").strip()
+        # A task id is only globally unique inside the durable store.  All
+        # user-facing TaskTool operations carry the current conversation owner
+        # and must reject a record from another thread before exposing its
+        # description or outputs.  Empty owner keeps the low-level migration
+        # and embedding API backwards compatible for callers that explicitly
+        # operate outside a conversation.
+        if owner and str(task.get("conversation_id") or "").strip() != owner:
+            return None
         task["outputs"] = [
             json.loads(output["payload_json"])
             for output in connection.execute(
@@ -1197,6 +1551,17 @@ class FileSwarmStore:
                 (task_id,),
             ).fetchall()
         ]
+        def visible_dependency(candidate_id: str) -> bool:
+            candidate = connection.execute(
+                "SELECT conversation_id FROM tasks WHERE task_id = ?",
+                (candidate_id,),
+            ).fetchone()
+            return (
+                candidate is None
+                or not owner
+                or str(candidate["conversation_id"] or "").strip() == owner
+            )
+
         task["blocks"] = [
             row["blocked_task_id"]
             for row in connection.execute(
@@ -1206,6 +1571,7 @@ class FileSwarmStore:
                 """,
                 (task_id,),
             ).fetchall()
+            if visible_dependency(str(row["blocked_task_id"]))
         ]
         task["blocked_by"] = [
             row["blocker_task_id"]
@@ -1216,6 +1582,7 @@ class FileSwarmStore:
                 """,
                 (task_id,),
             ).fetchall()
+            if visible_dependency(str(row["blocker_task_id"]))
         ]
         return task
 
@@ -1260,9 +1627,19 @@ class FileSwarmStore:
                 if (task := self._get_task(connection, row["task_id"])) is not None
             ]
 
-    def update_task(self, task_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
+    def update_task(
+        self,
+        task_id: str,
+        patch: dict[str, Any],
+        *,
+        conversation_id: str = "",
+    ) -> dict[str, Any] | None:
         with self._write() as connection:
-            task = self._get_task(connection, task_id)
+            task = self._get_task(
+                connection,
+                task_id,
+                conversation_id=conversation_id,
+            )
             if task is None:
                 return None
             for key in (
@@ -1312,16 +1689,22 @@ class FileSwarmStore:
             self._replace_dependencies(
                 connection,
                 task_id,
+                conversation_id=task["conversation_id"],
                 blocks=task["blocks"],
                 blocked_by=task["blocked_by"],
             )
-            return self._get_task(connection, task_id)
+            return self._get_task(
+                connection,
+                task_id,
+                conversation_id=conversation_id,
+            )
 
     @staticmethod
     def _replace_dependencies(
         connection: sqlite3.Connection,
         task_id: str,
         *,
+        conversation_id: str,
         blocks: list[str],
         blocked_by: list[str],
     ) -> None:
@@ -1332,15 +1715,33 @@ class FileSwarmStore:
             """,
             (task_id, task_id),
         )
+
+        owner = str(conversation_id or "").strip()
+
+        def same_owner(candidate_id: str) -> bool:
+            candidate = str(candidate_id or "").strip()
+            if not candidate or candidate == task_id:
+                return False
+            if not owner:
+                return True
+            row = connection.execute(
+                "SELECT conversation_id FROM tasks WHERE task_id = ?",
+                (candidate,),
+            ).fetchone()
+            # Dependencies may point forward to a task that is not created
+            # yet. Once an id exists, the owner check below/at read time keeps
+            # edges from crossing conversation boundaries.
+            return row is None or str(row["conversation_id"] or "").strip() == owner
+
         edges = {
             (task_id, blocked_id)
             for blocked_id in _string_list(blocks)
-            if blocked_id != task_id
+            if same_owner(blocked_id)
         }
         edges.update(
             (blocker_id, task_id)
             for blocker_id in _string_list(blocked_by)
-            if blocker_id != task_id
+            if same_owner(blocker_id)
         )
         connection.executemany(
             """
@@ -1350,9 +1751,19 @@ class FileSwarmStore:
             sorted(edges),
         )
 
-    def append_output(self, task_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    def append_output(
+        self,
+        task_id: str,
+        payload: dict[str, Any],
+        *,
+        conversation_id: str = "",
+    ) -> dict[str, Any] | None:
         with self._write() as connection:
-            task = self._get_task(connection, task_id)
+            task = self._get_task(
+                connection,
+                task_id,
+                conversation_id=conversation_id,
+            )
             if task is None:
                 return None
             output = {
@@ -1389,17 +1800,25 @@ class FileSwarmStore:
                     task_id,
                 ),
             )
-            return self._get_task(connection, task_id)
+            return self._get_task(
+                connection,
+                task_id,
+                conversation_id=conversation_id,
+            )
 
     def create_team(self, payload: dict[str, Any]) -> dict[str, Any]:
         conversation_id = str(payload.get("conversation_id") or "").strip()
         team_name = str(payload.get("team_name") or "").strip()
         with self._write() as connection:
-            connection.execute(
-                "DELETE FROM teams WHERE conversation_id = ? AND team_name = ?",
-                (conversation_id, team_name),
-            )
             now = _epoch_ms()
+            existing = connection.execute(
+                "SELECT team_id FROM teams WHERE conversation_id = ? AND team_name = ?",
+                (conversation_id, team_name),
+            ).fetchone()
+            if existing is not None:
+                # TeamCreate replaces a same-name live team while advancing
+                # the conversation event sequence for the replacement.
+                connection.execute("DELETE FROM teams WHERE team_id = ?", (existing["team_id"],))
             team = {
                 "team_id": str(payload.get("team_id") or _new_id("team")),
                 "team_name": team_name,
@@ -1413,6 +1832,42 @@ class FileSwarmStore:
             }
             self._insert_team(connection, team)
             return dict(team)
+
+    def add_team_member(
+        self,
+        *,
+        conversation_id: str,
+        team_name: str,
+        member: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        with self._write() as connection:
+            row = connection.execute(
+                "SELECT team_id, payload_json FROM teams WHERE conversation_id = ? AND team_name = ?",
+                (str(conversation_id or "").strip(), str(team_name or "").strip()),
+            ).fetchone()
+            if row is None:
+                return None
+            team = json.loads(row["payload_json"])
+            members = self._normalize_members(team.get("members"))
+            candidate = self._normalize_members([member])
+            if not candidate:
+                raise ValueError("team member requires a stable id/name")
+            new_member = candidate[0]
+            if any(
+                str(existing.get("id") or "").casefold()
+                == str(new_member.get("id") or "").casefold()
+                for existing in members
+            ):
+                raise ValueError(f"team member already exists: {new_member['id']}")
+            members.append(new_member)
+            team["members"] = members
+            team["updated_at"] = _epoch_ms()
+            team["seq"] = self._next_seq(connection, team["conversation_id"])
+            connection.execute(
+                "UPDATE teams SET updated_at = ?, seq = ?, payload_json = ? WHERE team_id = ?",
+                (team["updated_at"], team["seq"], _json(team), row["team_id"]),
+            )
+            return team
 
     @staticmethod
     def _insert_team(connection: sqlite3.Connection, team: dict[str, Any]) -> None:
@@ -1480,6 +1935,238 @@ class FileSwarmStore:
             removed["deleted_at"] = _epoch_ms()
             connection.execute("DELETE FROM teams WHERE team_id = ?", (row["team_id"],))
             return removed
+
+    def purge_conversation(
+        self,
+        conversation_id: str,
+        *,
+        allowed_active_owner_tokens: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """Delete every durable swarm/runtime record owned by a conversation."""
+        owner = str(conversation_id or "").strip()
+        empty = {"run_ids": [], "subagent_ids": [], "task_ids": [], "message_ids": [], "team_ids": []}
+        if not owner:
+            return empty
+
+        with self._write() as connection:
+            if allowed_active_owner_tokens is not None:
+                active_owner_tokens = {
+                    str(row["owner_token"] or "")
+                    for row in connection.execute(
+                        "SELECT owner_token FROM runtime_leases WHERE expires_at > ?",
+                        (_epoch_ms(),),
+                    ).fetchall()
+                    if str(row["owner_token"] or "")
+                }
+                protected_owner_tokens = active_owner_tokens - {
+                    str(token or "").strip()
+                    for token in allowed_active_owner_tokens
+                    if str(token or "").strip()
+                }
+                if protected_owner_tokens:
+                    conversation_owner_tokens = {
+                        str(row["owner_token"] or "")
+                        for row in connection.execute(
+                            """
+                            SELECT owner_token FROM agent_runs
+                            WHERE conversation_id = ? AND owner_token != ''
+                            UNION
+                            SELECT owner_token FROM subagent_runs
+                            WHERE owner_token != '' AND (
+                                parent_run_id IN (
+                                    SELECT run_id FROM agent_runs WHERE conversation_id = ?
+                                ) OR task_id IN (
+                                    SELECT task_id FROM tasks WHERE conversation_id = ?
+                                )
+                            )
+                            """,
+                            (owner, owner, owner),
+                        ).fetchall()
+                        if str(row["owner_token"] or "")
+                    }
+                    if conversation_owner_tokens & protected_owner_tokens:
+                        raise RuntimeError(
+                            "conversation runtime is still owned by another live process"
+                        )
+            run_ids = [
+                str(row["run_id"])
+                for row in connection.execute(
+                    "SELECT run_id FROM agent_runs WHERE conversation_id = ?", (owner,)
+                ).fetchall()
+            ]
+            task_ids = [
+                str(row["task_id"])
+                for row in connection.execute(
+                    "SELECT task_id FROM tasks WHERE conversation_id = ?", (owner,)
+                ).fetchall()
+            ]
+            message_ids = [
+                str(row["message_id"])
+                for row in connection.execute(
+                    "SELECT message_id FROM messages WHERE conversation_id = ?", (owner,)
+                ).fetchall()
+            ]
+            team_ids = [
+                str(row["team_id"])
+                for row in connection.execute(
+                    "SELECT team_id FROM teams WHERE conversation_id = ?", (owner,)
+                ).fetchall()
+            ]
+
+            subagent_ids = [
+                str(row["subagent_id"])
+                for row in connection.execute(
+                    """
+                    WITH RECURSIVE owned_subagents(subagent_id) AS (
+                        SELECT subagent_id FROM subagent_runs
+                        WHERE parent_run_id IN (
+                            SELECT run_id FROM agent_runs WHERE conversation_id = ?
+                        ) OR task_id IN (
+                            SELECT task_id FROM tasks WHERE conversation_id = ?
+                        )
+                        UNION
+                        SELECT child.subagent_id
+                        FROM subagent_runs AS child
+                        JOIN owned_subagents AS parent
+                          ON child.parent_run_id = parent.subagent_id
+                    )
+                    SELECT subagent_id FROM owned_subagents
+                    """,
+                    (owner, owner),
+                ).fetchall()
+            ]
+
+            connection.execute(
+                """
+                WITH RECURSIVE owned_subagents(subagent_id) AS (
+                    SELECT subagent_id FROM subagent_runs
+                    WHERE parent_run_id IN (
+                        SELECT run_id FROM agent_runs WHERE conversation_id = ?
+                    ) OR task_id IN (
+                        SELECT task_id FROM tasks WHERE conversation_id = ?
+                    )
+                    UNION
+                    SELECT child.subagent_id
+                    FROM subagent_runs AS child
+                    JOIN owned_subagents AS parent
+                      ON child.parent_run_id = parent.subagent_id
+                )
+                DELETE FROM subagent_results
+                WHERE subagent_id IN (SELECT subagent_id FROM owned_subagents)
+                """,
+                (owner, owner),
+            )
+            connection.execute(
+                """
+                WITH RECURSIVE owned_subagents(subagent_id) AS (
+                    SELECT subagent_id FROM subagent_runs
+                    WHERE parent_run_id IN (
+                        SELECT run_id FROM agent_runs WHERE conversation_id = ?
+                    ) OR task_id IN (
+                        SELECT task_id FROM tasks WHERE conversation_id = ?
+                    )
+                    UNION
+                    SELECT child.subagent_id
+                    FROM subagent_runs AS child
+                    JOIN owned_subagents AS parent
+                      ON child.parent_run_id = parent.subagent_id
+                )
+                DELETE FROM subagent_runs
+                WHERE subagent_id IN (SELECT subagent_id FROM owned_subagents)
+                """,
+                (owner, owner),
+            )
+            connection.execute("DELETE FROM agent_runs WHERE conversation_id = ?", (owner,))
+            connection.execute(
+                """
+                DELETE FROM mailbox_deliveries
+                WHERE message_id IN (
+                    SELECT message_id FROM messages WHERE conversation_id = ?
+                )
+                """,
+                (owner,),
+            )
+            connection.execute("DELETE FROM messages WHERE conversation_id = ?", (owner,))
+            connection.execute(
+                """
+                DELETE FROM task_dependencies
+                WHERE blocker_task_id IN (
+                    SELECT task_id FROM tasks WHERE conversation_id = ?
+                ) OR blocked_task_id IN (
+                    SELECT task_id FROM tasks WHERE conversation_id = ?
+                )
+                """,
+                (owner, owner),
+            )
+            connection.execute(
+                """
+                DELETE FROM task_outputs
+                WHERE task_id IN (
+                    SELECT task_id FROM tasks WHERE conversation_id = ?
+                )
+                """,
+                (owner,),
+            )
+            connection.execute("DELETE FROM tasks WHERE conversation_id = ?", (owner,))
+            connection.execute("DELETE FROM teams WHERE conversation_id = ?", (owner,))
+            connection.execute("DELETE FROM scope_counters WHERE conversation_id = ?", (owner,))
+
+        return {
+            "run_ids": run_ids,
+            "subagent_ids": subagent_ids,
+            "task_ids": task_ids,
+            "message_ids": message_ids,
+            "team_ids": team_ids,
+        }
+
+    def conversation_agent_ids(self, conversation_id: str) -> dict[str, list[str]]:
+        """Read durable run/task/subagent ownership without mutating records."""
+
+        owner = str(conversation_id or "").strip()
+        if not owner:
+            return {"run_ids": [], "task_ids": [], "subagent_ids": []}
+        with self._connect() as connection:
+            run_ids = [
+                str(row["run_id"])
+                for row in connection.execute(
+                    "SELECT run_id FROM agent_runs WHERE conversation_id = ?",
+                    (owner,),
+                ).fetchall()
+            ]
+            task_ids = [
+                str(row["task_id"])
+                for row in connection.execute(
+                    "SELECT task_id FROM tasks WHERE conversation_id = ?",
+                    (owner,),
+                ).fetchall()
+            ]
+            subagent_ids = [
+                str(row["subagent_id"])
+                for row in connection.execute(
+                    """
+                    WITH RECURSIVE owned_subagents(subagent_id) AS (
+                        SELECT subagent_id FROM subagent_runs
+                        WHERE parent_run_id IN (
+                            SELECT run_id FROM agent_runs WHERE conversation_id = ?
+                        ) OR task_id IN (
+                            SELECT task_id FROM tasks WHERE conversation_id = ?
+                        )
+                        UNION
+                        SELECT child.subagent_id
+                        FROM subagent_runs AS child
+                        JOIN owned_subagents AS parent
+                          ON child.parent_run_id = parent.subagent_id
+                    )
+                    SELECT subagent_id FROM owned_subagents
+                    """,
+                    (owner, owner),
+                ).fetchall()
+            ]
+        return {
+            "run_ids": run_ids,
+            "task_ids": task_ids,
+            "subagent_ids": subagent_ids,
+        }
 
     @staticmethod
     def _normalize_members(value: Any) -> list[dict[str, str]]:

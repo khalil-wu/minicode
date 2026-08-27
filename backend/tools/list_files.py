@@ -10,7 +10,12 @@ from backend.tools.file_tools_common import (
     _lookup_list_files_cache_result,
     _put_list_files_cache,
 )
-from backend.tools.path_resolution import PathTraversalError, _is_bypass_mode, _resolve_path
+from backend.tools.path_resolution import (
+    PathTraversalError,
+    _is_bypass_mode,
+    _resolve_path,
+    denied_path_patterns,
+)
 from backend.workspace.path_filters import is_windows_reserved_path
 
 class ListFilesTool(BaseTool):
@@ -62,7 +67,12 @@ class ListFilesTool(BaseTool):
             exposure="core",
         )
 
-    def streamed_input_preview(self, args: dict[str, Any]) -> dict[str, Any]:
+    def streamed_input_preview(
+        self,
+        args: dict[str, Any],
+        context: Any | None = None,
+        prior: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         preview: dict[str, Any] = {}
         if isinstance(args.get("path"), str):
             preview["path"] = args["path"]
@@ -121,10 +131,24 @@ class ListFilesTool(BaseTool):
         if not path.is_dir():
             return self._error_result(f"Not a directory: {directory}")
 
+        # A listing is a read of the workspace surface, so it must hide whatever
+        # read_file/grep_files/glob_files hide. Names alone still disclose
+        # secrets (.env.production, secrets/api.txt, deploy.pem).
+        denied_patterns = denied_path_patterns(context)
+        checker = getattr(context, "permission_checker", None) if context is not None else None
+        permission = getattr(context, "permission", None) if context is not None else None
+        is_allowed = (
+            (lambda candidate: checker.is_path_allowed(str(candidate), context=permission))
+            if checker is not None and denied_patterns
+            else None
+        )
+        policy_key = "\n".join(denied_patterns) if is_allowed is not None else ""
+
         cached_result, cache_hit = _lookup_list_files_cache_result(
             path,
             bool(recursive),
             limit=limit,
+            policy_key=policy_key,
         )
         if cache_hit:
             return self._success_result(cached_result or "")
@@ -148,6 +172,8 @@ class ListFilesTool(BaseTool):
                     rel = item.relative_to(path)
                     if is_windows_reserved_path(rel):
                         continue
+                    if is_allowed is not None and not is_allowed(item):
+                        continue
                     if len(entries) >= limit:
                         entry_limit_reached = True
                         break
@@ -159,6 +185,8 @@ class ListFilesTool(BaseTool):
             else:
                 for item in sorted(path.iterdir(), key=lambda candidate: candidate.name.lower()):
                     if is_windows_reserved_path(item.name):
+                        continue
+                    if is_allowed is not None and not is_allowed(item):
                         continue
                     if len(entries) >= limit:
                         entry_limit_reached = True
@@ -179,6 +207,7 @@ class ListFilesTool(BaseTool):
                 result,
                 limit=limit,
                 dependencies=tuple(dependencies),
+                policy_key=policy_key,
             )
             return self._success_result(result)
 
@@ -191,5 +220,6 @@ class ListFilesTool(BaseTool):
             result,
             limit=limit,
             dependencies=tuple(dependencies),
+            policy_key=policy_key,
         )
         return self._success_result(result)

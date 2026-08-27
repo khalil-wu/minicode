@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 import logging
-import uuid
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from backend.agent.message import AgentEvent
-from backend.tools.base import PermissionLevel
 from backend.ws.command_results import emit_command_error
+from backend.ws.command_scope import CommandScope, resolve_command_scope
 
 if TYPE_CHECKING:
     from backend.ws.handler import WebSocketSession
@@ -46,19 +44,28 @@ def _known_conversation(session: "WebSocketSession", conversation_id: str) -> bo
     return bool(conversation_id and session.conversation_repo.get_conversation(conversation_id) is not None)
 
 
+async def _resolve_terminal_scope(
+    session: "WebSocketSession",
+    data: dict[str, Any],
+    command: str,
+) -> CommandScope | None:
+    try:
+        return resolve_command_scope(session, data)
+    except ValueError as exc:
+        await emit_command_error(session, command, exc)
+        return None
+
+
 async def handle_terminal_create(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     from backend.services.terminal_service import terminal_created_payload
 
-    conversation_id = _active_conversation_id(session)
-    if not conversation_id:
-        await emit_command_error(session, "terminal.create", "Select a conversation before creating a terminal")
+    scope = await _resolve_terminal_scope(session, data, "terminal.create")
+    if scope is None:
         return True
+    conversation_id = scope.conversation_id
     cwd = str(data.get("cwd", "")).strip() or None
     if not cwd:
-        workspace_context = getattr(session, "_workspace_context", None)
-        workspace_root = getattr(workspace_context, "root_path", None)
-        if workspace_root is not None:
-            cwd = str(workspace_root)
+        cwd = scope.workspace_root
     try:
         cwd_path = session._resolve_workspace_cwd(cwd)
         terminal_session = await session.terminal_manager.create_session(
@@ -68,7 +75,18 @@ async def handle_terminal_create(session: "WebSocketSession", data: dict[str, An
             conversation_id=conversation_id,
         )
         session.active_terminal_session_id = terminal_session.session_id
-        await session._send_ws_payload(terminal_created_payload(terminal_session), log_context="terminal.created")
+        payload = terminal_created_payload(terminal_session)
+        scope.apply(payload)
+        await session._send_ws_payload(payload, log_context="terminal.created")
+        await session._emit_command_result(
+            "terminal.create",
+            "",
+            data={
+                "session_id": terminal_session.session_id,
+                "conversation_id": scope.conversation_id,
+                "workspace_root": scope.workspace_root,
+            },
+        )
     except Exception as exc:
         logger.error("Terminal creation failed: %s", exc, exc_info=True)
         await emit_command_error(session, "terminal.create", f"Terminal creation failed: {exc}")
@@ -140,23 +158,104 @@ async def handle_terminal_kill(session: "WebSocketSession", data: dict[str, Any]
     if destroyed:
         if getattr(session, "active_terminal_session_id", None) == session_id:
             session.active_terminal_session_id = None
+        conversation_id = _active_conversation_id(session)
         await session._send_ws_payload(
-            terminal_killed_payload(session_id, conversation_id=_active_conversation_id(session)),
+            terminal_killed_payload(session_id, conversation_id=conversation_id),
             log_context="terminal.killed",
+        )
+        await session._emit_command_result(
+            "terminal.kill",
+            "Terminal stopped",
+            data={"session_id": session_id, "conversation_id": conversation_id},
         )
     else:
         await emit_command_error(session, "terminal.kill", f"Terminal session '{session_id}' not found")
     return True
 
 
+async def handle_terminal_restart(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    """Replace one owned web terminal only after its deletion is confirmed."""
+    from backend.services.terminal_service import terminal_created_payload, terminal_killed_payload
+
+    session_id = str(data.get("session_id", "")).strip()
+    conversation_id = _active_conversation_id(session)
+    terminal_session = _terminal_owned_by_conversation(session, session_id, conversation_id)
+    if terminal_session is None:
+        await emit_command_error(session, "terminal.restart", f"Terminal session '{session_id}' not found")
+        return True
+
+    cwd = str(getattr(terminal_session, "cwd", "") or "").strip() or None
+    try:
+        destroyed = await session.terminal_manager.destroy_session(
+            session_id,
+            conversation_id=conversation_id,
+        )
+        if not destroyed:
+            await emit_command_error(session, "terminal.restart", f"Terminal session '{session_id}' was not removed")
+            return True
+
+        if getattr(session, "active_terminal_session_id", None) == session_id:
+            session.active_terminal_session_id = None
+        await session._send_ws_payload(
+            terminal_killed_payload(session_id, conversation_id=conversation_id),
+            log_context="terminal.killed",
+        )
+
+        replacement = await session.terminal_manager.create_session(
+            cwd=cwd,
+            on_output=lambda sid, chunk: session._on_terminal_output(sid, chunk, conversation_id),
+            on_exit=lambda sid, code: session._on_terminal_exit(sid, code, conversation_id),
+            conversation_id=conversation_id,
+        )
+        session.active_terminal_session_id = replacement.session_id
+        await session._send_ws_payload(
+            terminal_created_payload(replacement),
+            log_context="terminal.created",
+        )
+        await session._send_event(
+            AgentEvent.command_result(
+                "terminal.restart",
+                "Terminal restarted",
+                level="success",
+                data={
+                    "old_session_id": session_id,
+                    "session_id": replacement.session_id,
+                    "conversation_id": conversation_id,
+                },
+            )
+        )
+    except Exception as exc:
+        logger.error("Terminal restart failed: %s", exc, exc_info=True)
+        await emit_command_error(
+            session,
+            "terminal.restart",
+            f"Terminal restart failed: {exc}",
+            data={"old_session_id": session_id, "conversation_id": conversation_id},
+        )
+    return True
+
+
 async def handle_terminal_list(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     from backend.services.terminal_service import terminal_list_payload
 
-    conversation_id = _active_conversation_id(session)
-    sessions = session.terminal_manager.list_sessions_for_conversation(conversation_id)
+    scope = await _resolve_terminal_scope(session, data, "terminal.list")
+    if scope is None:
+        return True
+    sessions = session.terminal_manager.list_sessions_for_conversation(scope.conversation_id)
+    payload = terminal_list_payload(sessions, conversation_id=scope.conversation_id)
+    scope.apply(payload)
     await session._send_ws_payload(
-        terminal_list_payload(sessions, conversation_id=conversation_id),
+        payload,
         log_context="terminal.list",
+    )
+    await session._emit_command_result(
+        "terminal.list",
+        "",
+        data={
+            "conversation_id": scope.conversation_id,
+            "workspace_root": scope.workspace_root,
+            "session_count": len(sessions),
+        },
     )
     return True
 
@@ -168,7 +267,10 @@ async def handle_terminal_snapshot_request(session: "WebSocketSession", data: di
         terminal_snapshot_payload,
     )
 
-    conversation_id = _active_conversation_id(session)
+    scope = await _resolve_terminal_scope(session, data, "terminal.snapshot.request")
+    if scope is None:
+        return True
+    conversation_id = scope.conversation_id
     session_id = resolve_terminal_session_id(
         data,
         active_session_id=str(getattr(session, "active_terminal_session_id", "") or ""),
@@ -176,36 +278,33 @@ async def handle_terminal_snapshot_request(session: "WebSocketSession", data: di
     if session_id and _terminal_owned_by_conversation(session, session_id, conversation_id) is None:
         explicitly_requested = bool(str(data.get("session_id") or data.get("sessionId") or "").strip())
         if explicitly_requested:
-            await session._send_ws_payload(
-                terminal_snapshot_payload(
-                    None,
-                    session_id=session_id,
-                    conversation_id=conversation_id,
-                ),
-                log_context="terminal.snapshot",
+            payload = terminal_snapshot_payload(
+                None,
+                session_id=session_id,
+                conversation_id=conversation_id,
             )
+            scope.apply(payload)
+            await session._send_ws_payload(payload, log_context="terminal.snapshot")
             return True
         session_id = ""
     if not session_id:
         sessions = session.terminal_manager.list_sessions_for_conversation(conversation_id)
         session_id = sessions[-1].session_id if sessions else ""
     if not session_id:
-        await session._send_ws_payload(
-            terminal_snapshot_payload(None, conversation_id=conversation_id),
-            log_context="terminal.snapshot",
-        )
+        payload = terminal_snapshot_payload(None, conversation_id=conversation_id)
+        scope.apply(payload)
+        await session._send_ws_payload(payload, log_context="terminal.snapshot")
         return True
 
     max_chars = normalize_snapshot_max_chars(data)
-    if _owned_terminal(session, session_id) is None:
-        await session._send_ws_payload(
-            terminal_snapshot_payload(
+    if _terminal_owned_by_conversation(session, session_id, conversation_id) is None:
+        payload = terminal_snapshot_payload(
                 None,
                 session_id=session_id,
                 conversation_id=conversation_id,
-            ),
-            log_context="terminal.snapshot",
-        )
+            )
+        scope.apply(payload)
+        await session._send_ws_payload(payload, log_context="terminal.snapshot")
         return True
     snapshot = session.terminal_manager.snapshot(
         session_id,
@@ -213,17 +312,61 @@ async def handle_terminal_snapshot_request(session: "WebSocketSession", data: di
         conversation_id=conversation_id,
     )
     if snapshot is None:
-        await session._send_ws_payload(
-            terminal_snapshot_payload(
+        payload = terminal_snapshot_payload(
                 None,
                 session_id=session_id,
                 conversation_id=conversation_id,
-            ),
-            log_context="terminal.snapshot",
-        )
+            )
+        scope.apply(payload)
+        await session._send_ws_payload(payload, log_context="terminal.snapshot")
         return True
     session.active_terminal_session_id = session_id
-    await session._send_ws_payload(terminal_snapshot_payload(snapshot), log_context="terminal.snapshot")
+    payload = terminal_snapshot_payload(snapshot)
+    scope.apply(payload)
+    await session._send_ws_payload(payload, log_context="terminal.snapshot")
+    return True
+
+
+async def handle_terminal_clear(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    """Clear owned reconnectable scrollback while leaving the shell alive."""
+    from backend.services.terminal_service import (
+        resolve_terminal_session_id,
+        terminal_snapshot_payload,
+    )
+
+    scope = await _resolve_terminal_scope(session, data, "terminal.clear")
+    if scope is None:
+        return True
+    session_id = resolve_terminal_session_id(
+        data,
+        active_session_id=str(getattr(session, "active_terminal_session_id", "") or ""),
+    )
+    if not session_id:
+        await emit_command_error(session, "terminal.clear", "No terminal session to clear")
+        return True
+    if not session.terminal_manager.clear_output(
+        session_id,
+        conversation_id=scope.conversation_id,
+    ):
+        await emit_command_error(session, "terminal.clear", f"Terminal session '{session_id}' not found")
+        return True
+
+    snapshot = session.terminal_manager.snapshot(
+        session_id,
+        conversation_id=scope.conversation_id,
+    )
+    payload = terminal_snapshot_payload(snapshot)
+    scope.apply(payload)
+    await session._send_ws_payload(payload, log_context="terminal.snapshot")
+    await session._emit_command_result(
+        "terminal.clear",
+        "Terminal scrollback cleared",
+        data={
+            "session_id": session_id,
+            "conversation_id": scope.conversation_id,
+            "workspace_root": scope.workspace_root,
+        },
+    )
     return True
 
 
@@ -311,22 +454,22 @@ async def handle_terminal_mirror_exit(session: "WebSocketSession", data: dict[st
         session_id,
         conversation_id=conversation_id,
     )
-    if (
-        conversation_id == _active_conversation_id(session)
-        and getattr(session, "active_terminal_session_id", None) == session_id
-    ):
-        session.active_terminal_session_id = session_id
+    # The mirror record survives the exit (mark_external_exit only flips
+    # is_alive), so the implicit terminal target must be released the same way
+    # terminal.kill/terminal.restart release it. Leaving it set makes
+    # terminal.resize / terminal.clear / terminal.snapshot.request keep
+    # addressing the exited terminal instead of falling back to the newest one.
+    if getattr(session, "active_terminal_session_id", None) == session_id:
+        session.active_terminal_session_id = None
     return True
 
 
 async def handle_terminal_exec(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     from backend.permissions.context import ToolExecutionContext
-    from backend.tools.base import validate_tool_input
+    from backend.sandbox.policy import sandbox_policy_for_permission_context
     from backend.services.terminal_service import (
         parse_terminal_exec_command,
         run_terminal_exec_command,
-        terminal_exec_approval_event,
-        terminal_exec_rejected_payload,
         terminal_output_payload,
     )
 
@@ -336,13 +479,37 @@ async def handle_terminal_exec(session: "WebSocketSession", data: dict[str, Any]
         return True
     command = command_request.command
 
-    conversation_id = _active_conversation_id(session)
-    if not conversation_id:
-        await emit_command_error(session, "terminal.exec", "Select a conversation before running a command")
+    scope = await _resolve_terminal_scope(session, data, "terminal.exec")
+    if scope is None:
         return True
-    workspace_root = session._current_workspace_root().resolve()
-    cwd = str(session._resolve_workspace_cwd(str(data.get("cwd", "")).strip() or None))
+    conversation_id = scope.conversation_id
+    from backend.services.workspace_service import resolve_workspace_cwd
+
+    workspace_root = Path(scope.workspace_root).resolve()
+    cwd = str(resolve_workspace_cwd(workspace_root, str(data.get("cwd", "")).strip() or None))
     checker = session.permission_checker.with_workspace_root(workspace_root)
+    target_conversation = session.conversation_repo.get_conversation(conversation_id)
+    if target_conversation is None:
+        await emit_command_error(
+            session,
+            "terminal.exec",
+            "terminal.exec requires an existing conversation owner",
+        )
+        return True
+    from dataclasses import replace
+
+    target_permission = replace(
+        session._permission_context_for_conversation(
+            target_conversation,
+            source="terminal.exec",
+        ),
+        conversation_id=conversation_id,
+        workspace_root=workspace_root,
+    )
+    sandbox_policy = sandbox_policy_for_permission_context(
+        workspace_root,
+        target_permission,
+    )
     tool = session.tool_registry.get_tool("run_command")
     if tool is None:
         await session._send_ws_payload(
@@ -355,67 +522,33 @@ async def handle_terminal_exec(session: "WebSocketSession", data: dict[str, Any]
             log_context="terminal.output",
         )
         return True
-    command_args = {"command": command, "cwd": cwd}
-    validation = validate_tool_input(tool, command_args)
-    if validation:
-        await session._send_ws_payload(
-            terminal_output_payload(command, validation, -1, conversation_id=conversation_id),
-            log_context="terminal.output",
-        )
-        return True
-    perm_level = checker.check(
-        "run_command", command_args, context=session.permission_context, tool=tool
-    )
-    denial = checker.get_denial_reason(
-        "run_command", command_args, context=session.permission_context, tool=tool
-    )
-    if denial or perm_level == PermissionLevel.ALWAYS_DENY:
-        await session._send_ws_payload(
-            terminal_output_payload(
-                command,
-                denial or "terminal.exec is blocked by the current permission policy.",
-                -1,
-                conversation_id=conversation_id,
-            ),
-            log_context="terminal.output",
-        )
-        return True
-    if perm_level in {PermissionLevel.CONFIRM, PermissionLevel.DIFF_REVIEW}:
-        request_id = f"terminal_exec_{uuid.uuid4().hex}"
-        event = terminal_exec_approval_event(
-            request_id=request_id,
-            command_args=command_args,
-            conversation_id=conversation_id,
-        )
+    async def emit_tool_event(event: AgentEvent) -> None:
+        if event.type != "approval_request":
+            return
+        event.data["conversation_id"] = conversation_id
         payload = session._build_approval_request_payload(event)
         await session._send_ws_payload(payload, log_context="terminal.approval_request")
-        approval = await session._approval_handler(request_id)
-        if not isinstance(approval, dict) or approval.get("action") != "approve":
-            await session._send_ws_payload(
-                terminal_exec_rejected_payload(
-                    command,
-                    approval,
-                    conversation_id=conversation_id,
-                ),
-                log_context="terminal.output",
-            )
-            return True
+
     await session._send_ws_payload(
         await run_terminal_exec_command(
             command,
             cwd,
             tool=tool,
             context=ToolExecutionContext(
-                permission=session.permission_context,
+                permission=target_permission,
                 session_id=session.session_id,
                 conversation_id=conversation_id,
                 workspace_root=workspace_root,
+                allow_network=sandbox_policy.allow_network,
+                sandbox_policy=sandbox_policy,
                 permission_checker=checker,
                 artifact_store=session.artifact_store,
                 background_manager=session.background_manager,
                 terminal_manager=session.terminal_manager,
             ),
             conversation_id=conversation_id,
+            approval_handler=session._approval_handler,
+            event_handler=emit_tool_event,
         ),
         log_context="terminal.output",
     )
@@ -427,8 +560,10 @@ HANDLERS: dict[str, Any] = {
     "terminal.input": handle_terminal_input,
     "terminal.resize": handle_terminal_resize,
     "terminal.kill": handle_terminal_kill,
+    "terminal.restart": handle_terminal_restart,
     "terminal.list": handle_terminal_list,
     "terminal.snapshot.request": handle_terminal_snapshot_request,
+    "terminal.clear": handle_terminal_clear,
     "terminal.mirror.created": handle_terminal_mirror_created,
     "terminal.mirror.output": handle_terminal_mirror_output,
     "terminal.mirror.exit": handle_terminal_mirror_exit,

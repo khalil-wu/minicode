@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import shlex
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -10,26 +11,11 @@ if TYPE_CHECKING:
     from backend.ws.handler import WebSocketSession
 
 
+logger = logging.getLogger(__name__)
+
 SlashHandler = Callable[["WebSocketSession", str, Any], Awaitable[tuple[bool, str]]]
 
-_PERMISSION_MODE_ALIASES = {
-    "auto": "auto",
-    "default": "default",
-    "confirm": "confirm",
-    "ask": "confirm",
-    "ask_permissions": "confirm",
-    "off": "default",
-    "full_access": "bypass",
-    "full-access": "bypass",
-    "fullaccess": "bypass",
-    "full access": "bypass",
-    "danger_full_access": "bypass",
-    "danger-full-access": "bypass",
-    "dangerfullaccess": "bypass",
-    "bypass": "bypass",
-    "bypasspermissions": "bypass",
-    "bypass_permissions": "bypass",
-}
+_PERMISSION_MODE_TOKENS = {"plan", "confirm", "auto", "bypass"}
 
 _EFFORT_ALIASES = {
     "none": "none",
@@ -45,6 +31,7 @@ _EFFORT_ALIASES = {
     "extra_high": "xhigh",
     "max": "max",
     "maximum": "max",
+    "ultra": "ultra",
 }
 
 _PERMISSION_LEVEL_ALIASES = {
@@ -58,9 +45,12 @@ _PERMISSION_LEVEL_ALIASES = {
 }
 
 _MEMORY_MODE_ALIASES = {
-    "none": "none",
-    "summary": "summary",
-    "profile": "profile",
+    "enabled": "enabled",
+    "enable": "enabled",
+    "on": "enabled",
+    "disabled": "disabled",
+    "disable": "disabled",
+    "off": "disabled",
 }
 
 
@@ -78,7 +68,8 @@ def _split_args(arg: str) -> list[str]:
 
 
 def _normalize_permission_mode(token: str) -> str | None:
-    return _PERMISSION_MODE_ALIASES.get(str(token or "").strip().lower())
+    normalized = str(token or "").strip().lower()
+    return normalized if normalized in _PERMISSION_MODE_TOKENS else None
 
 
 def _normalize_permission_level(token: str) -> str | None:
@@ -90,7 +81,25 @@ def _normalize_memory_mode(token: str) -> str | None:
 
 
 def _normalize_effort(token: str) -> str | None:
-    return _EFFORT_ALIASES.get(str(token or "").strip().lower())
+    normalized = str(token or "").strip().lower()
+    if not normalized:
+        return None
+    # Codex accepts model-defined effort strings. The config service still
+    # rejects any value the active model did not explicitly advertise.
+    return _EFFORT_ALIASES.get(normalized, normalized)
+
+
+async def _handle_conversation_export(
+    ws: "WebSocketSession", arg: str, attachments: Any
+) -> tuple[bool, str]:
+    _ = arg, attachments
+    from backend.ws.handlers.conversation import handle_conversation_export
+
+    await handle_conversation_export(
+        ws,
+        {"conversation_id": ws.active_conversation_id},
+    )
+    return True, ""
 
 
 def _active_conversation_id(ws: "WebSocketSession") -> str | None:
@@ -148,20 +157,15 @@ async def _handle_new(
     ws: "WebSocketSession", arg: str, attachments: Any
 ) -> tuple[bool, str]:
     _ = attachments
-    memory_mode = "none"
     tokens = _split_args(arg)
     if tokens:
-        normalized = _normalize_memory_mode(tokens[0])
-        if normalized is None:
-            await _emit_usage_warning(ws, "new", "Usage: /new [none|summary|profile]")
-            return True, ""
-        memory_mode = normalized
+        await _emit_usage_warning(ws, "new", "Usage: /new")
+        return True, ""
 
     handled = await _dispatch_command(
         ws,
         "conversation.create",
         {
-            "memory_mode": memory_mode,
             "source": "slash:/new",
         },
     )
@@ -171,8 +175,7 @@ async def _handle_new(
 
     await ws._emit_command_result(
         "new",
-        f"Started a new conversation (memory mode: '{memory_mode}').",
-        data={"memory_mode": memory_mode},
+        "Started a new conversation.",
     )
     return True, ""
 
@@ -194,10 +197,10 @@ async def _handle_clear(
         await _emit_command_unavailable(ws, "clear")
         return True, ""
 
-    await ws._emit_command_result(
-        "clear",
-        "Conversation history cleared.",
-    )
+    # handle_conversation_clear owns the outcome: it emits its own success and
+    # returns True on five distinct failure branches too. Emitting success here
+    # overwrote a refusal in the durable activity trace (both entries share the
+    # id "command-result-clear", and appendAgentProgress replaces in place).
     return True, ""
 
 
@@ -358,12 +361,12 @@ async def _handle_memory(
         await _emit_command_unavailable(ws, "memory")
         return True, ""
 
-    memory_mode = "none"
+    memory_mode = "enabled"
     tokens = _split_args(arg)
     if tokens:
         normalized = _normalize_memory_mode(tokens[0])
         if normalized is None:
-            await _emit_usage_warning(ws, "memory", "Usage: /memory [none|summary|profile]")
+            await _emit_usage_warning(ws, "memory", "Usage: /memory [enabled|disabled]")
             return True, ""
         memory_mode = normalized
 
@@ -476,15 +479,16 @@ async def _handle_effort(
     _ = attachments
     tokens = _split_args(arg)
     if not tokens:
-        await _emit_usage_warning(ws, "effort", "Usage: /effort [none|minimal|low|medium|high|xhigh|max]")
+        await _emit_usage_warning(ws, "effort", "Usage: /effort [none|minimal|low|medium|high|xhigh|max|ultra]")
         return True, ""
     effort = _normalize_effort(tokens[0])
     if effort is None:
-        await _emit_usage_warning(ws, "effort", "Usage: /effort [none|minimal|low|medium|high|xhigh|max]")
+        await _emit_usage_warning(ws, "effort", "Usage: /effort [none|minimal|low|medium|high|xhigh|max|ultra]")
         return True, ""
-    from backend.config import active_provider_supports_reasoning_effort
+    from backend.config import active_provider_reasoning_effort_levels
 
-    if not active_provider_supports_reasoning_effort():
+    declared_levels = active_provider_reasoning_effort_levels()
+    if effort not in declared_levels:
         await _dispatch_command(
             ws,
             "llm.config.set",
@@ -495,7 +499,8 @@ async def _handle_effort(
         )
         await ws._emit_command_result(
             "effort",
-            "Reasoning effort is not applied by the active Chat Completions provider.",
+            "Reasoning effort was not applied because the active model "
+            f"did not declare the '{effort}' level.",
             level="warning",
             data={"reasoning_effort": effort, "applied": False},
         )
@@ -627,6 +632,18 @@ async def _handle_skills(
     return True, ""
 
 
+async def _handle_skill(
+    ws: "WebSocketSession", arg: str, attachments: Any
+) -> tuple[bool, str]:
+    _ = attachments
+    skill_name = str(arg or "").strip()
+    if skill_name:
+        return False, f"${skill_name}"
+    await _dispatch_command(ws, "skills.list", {"source": "slash:/skill"})
+    await ws._emit_command_result("skill", "Choose a skill from the composer menu.")
+    return True, ""
+
+
 async def _handle_plan(
     ws: "WebSocketSession", arg: str, attachments: Any
 ) -> tuple[bool, str]:
@@ -663,76 +680,11 @@ async def _handle_compact(
     ws: "WebSocketSession", arg: str, attachments: Any
 ) -> tuple[bool, str]:
     _ = attachments
-    builder = getattr(ws, "context_builder", None)
-    if builder is None or not hasattr(builder, "compact"):
-        await _emit_command_unavailable(ws, "compact")
-        return True, ""
-    before_used = 0
-    before_total = 0
-    try:
-        before_snapshot = _build_compact_budget_snapshot(ws, builder)
-        before_used = int(before_snapshot.get("used") or 0)
-        before_total = int(before_snapshot.get("total") or 0)
-    except Exception:
-        before_snapshot = None
-    try:
-        summary = await builder.compact(focus=arg.strip() if arg else "")
-    except Exception as exc:
-        await ws._emit_command_result(
-            "compact",
-            f"Compaction failed: {exc}",
-            level="error",
-        )
-        return True, ""
-    from backend.agent.message import AgentEvent
-    short = (summary or "").strip()
-    if len(short) > 240:
-        short = short[:237] + "..."
-    await ws._send_event(
-        AgentEvent(
-            type="context_compacted",
-            data={
-                "summary": short or "Context compacted.",
-                **({"conversation_id": ws.active_conversation_id} if ws.active_conversation_id else {}),
-            },
-        )
-    )
-    after_used = before_used
-    after_total = before_total
-    try:
-        budget_snapshot = _build_compact_budget_snapshot(ws, builder)
-        after_used = int(budget_snapshot.get("used") or 0)
-        after_total = int(budget_snapshot.get("total") or 0)
-        if ws.active_conversation_id:
-            budget_snapshot = {**budget_snapshot, "conversation_id": ws.active_conversation_id}
-        await ws._send_event(AgentEvent(type="budget_update", data=budget_snapshot))
-        await ws._send_event(
-            AgentEvent(
-                type="context_usage",
-                data={
-                    "used": after_used,
-                    "limit": after_total,
-                    **({"conversation_id": ws.active_conversation_id} if ws.active_conversation_id else {}),
-                },
-            )
-        )
-    except Exception:
-        if before_snapshot:
-            if ws.active_conversation_id:
-                before_snapshot = {**before_snapshot, "conversation_id": ws.active_conversation_id}
-            await ws._send_event(AgentEvent(type="budget_update", data=before_snapshot))
-    saved = max(0, before_used - after_used)
-    suffix = f" Saved about {saved} tokens." if saved > 0 else " No measurable reduction; recent context was already compact."
-    await ws._emit_command_result(
-        "compact",
-        f"Context manually compacted.{suffix}",
-        data={
-            "summary": short,
-            "before_used": before_used,
-            "after_used": after_used,
-            "saved_tokens": saved,
-            "total": after_total or before_total,
-        },
+    from backend.ws.handlers.conversation import handle_context_compact
+
+    await handle_context_compact(
+        ws,
+        {"focus": str(arg or "").strip(), "source": "slash:/compact"},
     )
     return True, ""
 
@@ -778,31 +730,26 @@ async def _handle_resume(
 ) -> tuple[bool, str]:
     """Resume from the latest checkpoint (if any)."""
     _ = arg, attachments
-    from backend.agent.checkpoint import load_latest_checkpoint
-
-    session_id = ws.session_id
-    if not session_id:
-        await ws._emit_command_result(
-            "resume",
-            "No active session ID. Cannot resume.",
-            level="error",
-        )
-        return True, ""
-
-    conversation_id = _active_conversation_id(ws)
-    if not conversation_id:
-        await ws._emit_command_result(
-            "resume",
-            "No active conversation. Cannot resume.",
-            level="error",
-        )
-        return True, ""
-
-    checkpoint = load_latest_checkpoint(
-        session_id,
-        conversation_id=conversation_id,
+    from backend.services.checkpoint_service import (
+        CheckpointServiceError,
+        prepare_run_checkpoint_resume,
     )
-    if checkpoint is None:
+
+    try:
+        resume = prepare_run_checkpoint_resume(
+            session_id=str(ws.session_id or ""),
+            requested_conversation_id=_active_conversation_id(ws),
+            active_conversation_id=_active_conversation_id(ws),
+        )
+    except (CheckpointServiceError, ValueError) as exc:
+        await ws._emit_command_result(
+            "resume",
+            str(exc),
+            level="error",
+        )
+        return True, ""
+
+    if resume is None:
         await ws._emit_command_result(
             "resume",
             "No incomplete checkpoint found for this conversation. The last task completed successfully or no checkpoint exists yet.",
@@ -812,38 +759,24 @@ async def _handle_resume(
 
     await ws._emit_command_result(
         "resume",
-        f"Resuming from iteration {checkpoint.iterations}. Previous stop: {checkpoint.stopped_reason}",
+        f"Resuming from iteration {resume.iteration}. Previous stop: {resume.stopped_reason}",
         level="success",
     )
 
-    # Trigger agent run with resume_from_checkpoint metadata
-    await ws._run_agent(
-        user_message=checkpoint.user_message,
-        conversation_id=conversation_id,
-        metadata={"resume_from_checkpoint": True},
+    await ws._start_agent_run(
+        resume.user_message,
+        conversation_id=resume.conversation_id,
+        metadata={
+            "resume_from_checkpoint": True,
+            "resume_checkpoint_run_id": resume.run_id,
+            "conversation_id": resume.conversation_id,
+        },
     )
     return True, ""
 
 
-def _build_compact_budget_snapshot(ws: "WebSocketSession", builder: Any) -> dict[str, Any]:
-    state = getattr(ws, "_last_agent_state", None)
-    if state is None:
-        from backend.agent.state import AgentState
-
-        state = AgentState(user_message="")
-    tool_schemas = None
-    try:
-        tool_schemas = ws.tool_registry.get_schemas(
-            budget=getattr(ws.config.token_budget, "tool_schemas", 6000),
-            permission_checker=ws.permission_checker,
-            permission_context=ws.permission_context,
-        )
-    except Exception:
-        tool_schemas = None
-    return builder.get_budget_snapshot(state=state, tool_schemas=tool_schemas)
-
-
 _LOCAL_COMMAND_HANDLERS: dict[str, SlashHandler] = {
+    "export": _handle_conversation_export,
     "plan": _handle_plan,
     "new": _handle_new,
     "clear": _handle_clear,
@@ -858,6 +791,7 @@ _LOCAL_COMMAND_HANDLERS: dict[str, SlashHandler] = {
     "context": _handle_context,
     "cost": _handle_cost,
     "help": _handle_help,
+    "skill": _handle_skill,
     "skills": _handle_skills,
     "model": _settings_handler("model", "provider"),
     "mcp": _settings_handler("mcp", "connectors"),
@@ -866,12 +800,6 @@ _LOCAL_COMMAND_HANDLERS: dict[str, SlashHandler] = {
     "goal": _handle_goal,
     "resume": _handle_resume,
 }
-
-_PERMISSION_MODE_ALIAS_COMMANDS = {
-    "default": "default",
-    "confirm": "confirm",
-}
-
 
 def _build_local_handler(command_name: str) -> SlashHandler:
     async def _handler(
@@ -886,6 +814,10 @@ def _build_local_handler(command_name: str) -> SlashHandler:
     return _handler
 
 
+# MiniCode's own token for the directory a SKILL.md was loaded from. This is the
+# only spelling MiniCode emits or documents.
+SKILL_DIR_TOKEN = "${MINICODE_SKILL_DIR}"
+
 def _build_template_handler(
     command_name: str,
     template: str,
@@ -896,15 +828,14 @@ def _build_template_handler(
 ) -> SlashHandler:
     base_template = str(template or "").strip()
     skill_dir = str(base_dir or "").strip()
-    # Claude Code renders skill directories with POSIX separators even on
-    # Windows so relative references in SKILL.md remain portable to the
-    # model/tool boundary.
+    # Skill directories are rendered with POSIX separators even on Windows so
+    # relative references in SKILL.md stay portable across the model/tool
+    # boundary.
     if is_skill_file:
         skill_dir = skill_dir.replace("\\", "/")
     if is_skill_file and skill_dir:
         base_template = f"Base directory for this skill: {skill_dir}\n\n{base_template}"
     named_arguments = [str(name) for name in (argument_names or []) if str(name)]
-
     async def _handler(
         ws: "WebSocketSession", arg: str, attachments: Any
     ) -> tuple[bool, str]:
@@ -919,7 +850,7 @@ def _build_template_handler(
             argument_names=named_arguments,
         )
         if skill_dir:
-            prompt = prompt.replace("${CLAUDE_SKILL_DIR}", skill_dir)
+            prompt = _substitute_skill_dir(prompt, skill_dir)
         await ws._emit_command_result(
             command_name,
             f"Prepared template prompt for '/{command_name}'.",
@@ -927,6 +858,11 @@ def _build_template_handler(
         return False, prompt
 
     return _handler
+
+
+def _substitute_skill_dir(prompt: str, skill_dir: str) -> str:
+    """Expand MiniCode's canonical skill-directory token."""
+    return prompt.replace(SKILL_DIR_TOKEN, skill_dir)
 
 
 def _substitute_command_arguments(
@@ -1008,28 +944,6 @@ def _build_protocol_handler(entry: dict[str, Any]) -> SlashHandler:
     return _handler
 
 
-def _build_permission_mode_alias_handler(
-    command_name: str, mode: str
-) -> SlashHandler:
-    async def _handler(
-        ws: "WebSocketSession", arg: str, attachments: Any
-    ) -> tuple[bool, str]:
-        remainder = str(arg or "").strip()
-        success = await _apply_permission_mode(
-            ws,
-            command=command_name,
-            mode=mode,
-            source=f"slash:/{command_name}",
-        )
-        if not success:
-            return True, ""
-        if remainder or attachments:
-            return False, remainder
-        return True, ""
-
-    return _handler
-
-
 def register_all_slash_commands(registry: Any) -> None:
     """Register slash commands from the composer command catalog."""
 
@@ -1064,12 +978,6 @@ def register_all_slash_commands(registry: Any) -> None:
         if command_type == "protocol":
             registry.register_slash(slash_name, _build_protocol_handler(entry))
 
-    # Keep legacy aliases that map cleanly to catalog-backed permission modes.
-    for command_name, mode in _PERMISSION_MODE_ALIAS_COMMANDS.items():
-        registry.register_slash(
-            f"/{command_name}",
-            _build_permission_mode_alias_handler(command_name, mode),
-        )
 
 
 def refresh_slash_commands(registry: Any) -> None:

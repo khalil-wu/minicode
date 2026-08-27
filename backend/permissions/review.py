@@ -71,6 +71,8 @@ def generate_edit_diff(
     old_string: str,
     new_string: str,
     context_lines: int = 3,
+    *,
+    replace_all: bool = False,
 ) -> str:
     """
     为 edit_file 操作生成 diff。
@@ -86,7 +88,12 @@ def generate_edit_diff(
     except (UnicodeDecodeError, PermissionError):
         return f"--- 无法读取文件: {file_path}\n"
 
-    new_content = current_content.replace(old_string, new_string, 1)
+    # cc's diff preview honors replaceAll (diff.ts): what the user approves
+    # must match what lands on disk.
+    if replace_all:
+        new_content = current_content.replace(old_string, new_string)
+    else:
+        new_content = current_content.replace(old_string, new_string, 1)
     return generate_unified_diff(file_path, current_content, new_content, context_lines)
 
 
@@ -165,8 +172,12 @@ def generate_edit_diff_payload(
     old_string: str,
     new_string: str,
     context_lines: int = 3,
+    *,
+    replace_all: bool = False,
 ) -> dict[str, Any]:
-    patch = generate_edit_diff(file_path, old_string, new_string, context_lines)
+    patch = generate_edit_diff(
+        file_path, old_string, new_string, context_lines, replace_all=replace_all
+    )
     size_bytes: int | None = None
     path = Path(file_path)
     if path.exists():
@@ -175,7 +186,10 @@ def generate_edit_diff_payload(
         except (UnicodeDecodeError, PermissionError):
             current_content = None
         if current_content is not None:
-            next_content = current_content.replace(old_string, new_string, 1)
+            if replace_all:
+                next_content = current_content.replace(old_string, new_string)
+            else:
+                next_content = current_content.replace(old_string, new_string, 1)
             size_bytes = len(next_content.encode("utf-8"))
 
     return build_structured_diff_payload(

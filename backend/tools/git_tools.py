@@ -1,5 +1,7 @@
 """
-Git 工具集（参考 Claude Code 的 Git 集成）。
+Git 工具集。cc 不提供同构的用户级 git 工具（其 Git 能力依托 Bash、
+checkpoint 与 worktree 基础设施）；本工具集为 MiniCode 自有设计，
+checkpoint/worktree 相关机制另见对应模块的上游标注。
 
 提供常用 Git 操作：
   - git_status: 查看工作区状态
@@ -17,9 +19,30 @@ from pathlib import Path
 from typing import Any
 
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
-from backend.subprocesses import communicate, spawn_exec
+from backend.subprocesses import (
+    SubprocessOutputLimitError,
+    communicate_bounded,
+    spawn_exec,
+)
 
 logger = logging.getLogger(__name__)
+_GIT_TRANSPORT_LIMIT_BYTES = 20 * 1024 * 1024
+
+
+async def _communicate_git(
+    proc: asyncio.subprocess.Process,
+) -> tuple[bytes, bytes]:
+    return await communicate_bounded(
+        proc,
+        stdout_limit_bytes=_GIT_TRANSPORT_LIMIT_BYTES,
+        stderr_limit_bytes=_GIT_TRANSPORT_LIMIT_BYTES,
+    )
+
+
+def _raise_if_cancelled(context: Any) -> None:
+    cancel_event = getattr(context, "cancel_event", None) if context is not None else None
+    if cancel_event is not None and cancel_event.is_set():
+        raise asyncio.CancelledError
 
 
 def _decode_process_output(data: bytes | None) -> str:
@@ -44,50 +67,6 @@ def _resolve_work_dir(root: Path, path_value: Any) -> Path:
     except ValueError:
         return root_resolved
     return resolved
-
-
-def _secret_exclude_pathspecs(context: Any) -> list[str]:
-    """Git pathspecs that keep secret contents out of diff output.
-
-    ``git diff`` with no path argument prints the before/after text of every
-    changed file, so an AUTO read-only tool would otherwise echo .env and
-    secrets/ in full — contents the file tools refuse to read.
-    """
-    from backend.security.sensitive_files import (
-        SENSITIVE_FILE_NAMES,
-        SENSITIVE_FILE_PREFIXES,
-        SENSITIVE_FILE_SUFFIXES,
-        SENSITIVE_PATH_PARTS,
-    )
-
-    patterns: list[str] = []
-    patterns.extend(sorted(SENSITIVE_FILE_NAMES))
-    patterns.extend(f"{prefix}*" for prefix in sorted(SENSITIVE_FILE_PREFIXES))
-    patterns.extend(f"*{suffix}" for suffix in sorted(SENSITIVE_FILE_SUFFIXES))
-    patterns.extend(f"{part}/" for part in sorted(SENSITIVE_PATH_PARTS))
-
-    checker = getattr(context, "permission_checker", None) if context is not None else None
-    if checker is not None:
-        permission = getattr(context, "permission", None)
-        constraints = getattr(permission, "filesystem_constraints", None) or {}
-        if "denylist" in constraints:
-            configured = list(constraints["denylist"])
-        else:
-            settings = getattr(checker, "_settings", None)
-            configured = list(getattr(settings, "path_denylist", ()) or ())
-        patterns.extend(str(pattern) for pattern in configured)
-
-    specs: list[str] = []
-    for pattern in patterns:
-        cleaned = str(pattern or "").replace("\\", "/").strip()
-        if not cleaned:
-            continue
-        if cleaned.endswith("/"):
-            cleaned = f"{cleaned.rstrip('/')}/**"
-        spec = f":(exclude,glob)**/{cleaned}" if "/" not in cleaned else f":(exclude,glob){cleaned}"
-        if spec not in specs:
-            specs.append(spec)
-    return specs
 
 
 def _is_denied_path(context: Any, file_path: str) -> bool:
@@ -164,7 +143,7 @@ class GitStatusTool(BaseTool):
                 stderr=asyncio.subprocess.PIPE,
             )
 
-            stdout, stderr = await communicate(proc)
+            stdout, stderr = await _communicate_git(proc)
 
             if proc.returncode != 0:
                 error_msg = _decode_process_output(stderr).strip()
@@ -180,6 +159,8 @@ class GitStatusTool(BaseTool):
 
         except FileNotFoundError:
             return self._error_result("Git 未安装或不在 PATH 中")
+        except SubprocessOutputLimitError:
+            return self._error_result("Git status 输出超过 20 MB；请缩小仓库范围后重试")
         except Exception as e:
             logger.error(f"Git status 执行失败: {e}", exc_info=True)
             return self._error_result(f"执行失败: {e}")
@@ -246,22 +227,26 @@ class GitDiffTool(BaseTool):
         if staged:
             cmd.append("--staged")
 
-        if file_path:
-            if _is_denied_path(context, str(file_path)):
-                return self._error_result(
-                    f"路径 '{file_path}' 属于受保护的敏感路径，git_diff 不会输出其内容。"
-                )
-            # "--" terminates option parsing so a path like "--output=..." is
-            # treated as a pathspec, not a git flag (which could write files).
-            # Mirrors git_log below, which already separates with "--".
-            cmd.extend(["--", file_path])
-        else:
-            # A bare diff would print secret contents verbatim; exclude them the
-            # same way read_file and grep_files do.
-            cmd.append("--")
-            cmd.extend(_secret_exclude_pathspecs(context))
-
         try:
+            if file_path:
+                if _is_denied_path(context, str(file_path)):
+                    return self._error_result(
+                        f"路径 '{file_path}' 属于受保护的敏感路径，git_diff 不会输出其内容。"
+                    )
+                # "--" terminates option parsing so a path like "--output=..." is
+                # treated as a pathspec, not a git flag (which could write files).
+                cmd.extend(["--", file_path])
+            else:
+                # A bare diff would print denylisted contents verbatim. Ask the
+                # permission checker about each concretely changed path and
+                # exclude only those, so a denylist entry that is re-allowed by a
+                # negation rule (".env.example") is not silently hidden.
+                denied_or_result = await self._denied_changed_paths(root, staged, context)
+                if isinstance(denied_or_result, ToolResult):
+                    return denied_or_result
+                cmd.append("--")
+                cmd.extend(f":(exclude,literal){path}" for path in denied_or_result)
+
             proc = await spawn_exec(
                 *cmd,
                 cwd=str(root),
@@ -269,7 +254,7 @@ class GitDiffTool(BaseTool):
                 stderr=asyncio.subprocess.PIPE,
             )
 
-            stdout, stderr = await communicate(proc)
+            stdout, stderr = await _communicate_git(proc)
 
             if proc.returncode != 0:
                 error_msg = _decode_process_output(stderr).strip()
@@ -286,8 +271,46 @@ class GitDiffTool(BaseTool):
 
         except FileNotFoundError:
             return self._error_result("Git 未安装")
+        except SubprocessOutputLimitError:
+            return self._error_result("Git diff 输出超过 20 MB；请指定 file_path 缩小范围")
         except Exception as e:
             return self._error_result(f"执行失败: {e}")
+
+    async def _denied_changed_paths(
+        self,
+        root: Path,
+        staged: bool,
+        context: Any,
+    ) -> list[str] | ToolResult:
+        """Return changed paths the permission checker refuses, or a ToolResult.
+
+        Listing names first keeps the exclusion argv bounded by the number of
+        *denied* files rather than by the denylist's pattern count, and makes the
+        checker the single authority on whether a path is readable.
+        """
+
+        cmd = ["git", "diff", "--name-only"]
+        if staged:
+            cmd.append("--staged")
+        proc = await spawn_exec(
+            *cmd,
+            cwd=str(root),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await _communicate_git(proc)
+        if proc.returncode != 0:
+            error_msg = _decode_process_output(stderr).strip()
+            if "not a git repository" in error_msg.lower():
+                return self._success_result("当前工作区不是 Git 仓库；没有 Git diff。")
+            return self._error_result(f"Git 命令失败: {error_msg}")
+
+        denied: list[str] = []
+        for line in _decode_process_output(stdout).splitlines():
+            candidate = line.strip()
+            if candidate and _is_denied_path(context, candidate) and candidate not in denied:
+                denied.append(candidate)
+        return denied
 
 
 class GitLogTool(BaseTool):
@@ -365,7 +388,7 @@ class GitLogTool(BaseTool):
                 stderr=asyncio.subprocess.PIPE,
             )
 
-            stdout, stderr = await communicate(proc)
+            stdout, stderr = await _communicate_git(proc)
 
             if proc.returncode != 0:
                 error_msg = _decode_process_output(stderr).strip()
@@ -381,6 +404,8 @@ class GitLogTool(BaseTool):
 
         except FileNotFoundError:
             return self._error_result("Git 未安装")
+        except SubprocessOutputLimitError:
+            return self._error_result("Git log 输出超过 20 MB；请降低 limit 或指定 file_path")
         except Exception as e:
             return self._error_result(f"执行失败: {e}")
 
@@ -450,7 +475,14 @@ class GitCommitTool(BaseTool):
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
-                await communicate(add_proc)
+                _add_stdout, add_stderr = await _communicate_git(add_proc)
+                if add_proc.returncode != 0:
+                    error_msg = _decode_process_output(add_stderr).strip()
+                    return self._error_result(f"暂存失败，未创建提交: {error_msg}")
+
+                # git add and git commit are one user-approved operation. An
+                # interrupt between the two phases must not start phase two.
+                _raise_if_cancelled(context)
 
             # 创建提交
             proc = await spawn_exec(
@@ -463,7 +495,7 @@ class GitCommitTool(BaseTool):
                 stderr=asyncio.subprocess.PIPE,
             )
 
-            stdout, stderr = await communicate(proc)
+            stdout, stderr = await _communicate_git(proc)
 
             if proc.returncode != 0:
                 error_msg = _decode_process_output(stderr).strip()
@@ -477,5 +509,7 @@ class GitCommitTool(BaseTool):
 
         except FileNotFoundError:
             return self._error_result("Git 未安装")
+        except SubprocessOutputLimitError:
+            return self._error_result("Git commit 输出超过 20 MB；提交结果无法可靠确认")
         except Exception as e:
             return self._error_result(f"执行失败: {e}")

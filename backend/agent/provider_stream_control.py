@@ -12,6 +12,7 @@ from backend.agent.loop_runtime_helpers import epoch_ms
 from backend.agent.message import AgentEvent
 from backend.agent.response_utils import append_assistant_history
 from backend.agent.stream_sanitizer import ThinkingStreamSanitizer, scrub_thinking_tags
+from backend.agent.tool_events import abandoned_tool_announcement_events
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,7 +21,7 @@ class ProviderSteerResult:
 
 
 @dataclass(frozen=True, slots=True)
-class ProviderFallbackReset:
+class ProviderRetryReset:
     usage: Any
     visible_text_sanitizer: ThinkingStreamSanitizer
 
@@ -91,21 +92,28 @@ async def apply_provider_chunk_steer(
     yield ProviderSteerResult(True)
 
 
-async def reset_for_provider_fallback(
+async def reset_for_provider_retry(
     *,
     stream_text: Any,
     stream_state: Any,
     tool_executor: Any,
-) -> AsyncIterator[AgentEvent | ProviderFallbackReset]:
-    """Discard speculative output before a backup provider continues."""
+) -> AsyncIterator[AgentEvent | ProviderRetryReset]:
+    """Discard speculative output before replaying on the same provider."""
 
     tool_executor.cancel_remaining()
     completed = stream_text.cancel_active_agent_message()
     if completed is not None:
         yield completed
-    stream_text.reset_for_provider_fallback()
+    # reset_provider_payload() forgets the announced tool blocks, so settle
+    # them first or the discarded attempt's pending cards never close.
+    for abandoned in abandoned_tool_announcement_events(
+        stream_state,
+        iteration_id=str(getattr(stream_text, "iteration_id", "") or ""),
+    ):
+        yield abandoned
+    stream_text.reset_for_provider_retry()
     stream_state.reset_provider_payload()
-    yield ProviderFallbackReset(
+    yield ProviderRetryReset(
         usage=stream_state.usage,
         visible_text_sanitizer=ThinkingStreamSanitizer(),
     )

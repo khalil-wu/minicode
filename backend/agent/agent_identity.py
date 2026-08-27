@@ -24,6 +24,10 @@ class AgentPath:
         value = str(subagent_id or "").strip()
         if not value:
             raise ValueError("subagent_id is required for an AgentPath child")
+        if value in {".", ".."} or any(character in value for character in "/\\"):
+            raise ValueError("AgentPath child must be one canonical path segment")
+        if any(ord(character) < 32 for character in value):
+            raise ValueError("AgentPath child cannot contain control characters")
         return AgentPath((*self.segments, value))
 
     @property

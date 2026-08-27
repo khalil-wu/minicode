@@ -16,16 +16,13 @@ from backend.runtime_env import sanitized_subprocess_env
 from backend.subprocesses import spawn_exec, terminate_process_tree
 from backend.terminal.shell_commands import windows_powershell_native_tool_alias_prelude
 from backend.tools.output_limits import (
-    CLAUDE_BASH_OUTPUT_DEFAULT_CHARS,
-    CLAUDE_BASH_OUTPUT_MAX_CHARS,
+    TERMINAL_OUTPUT_DEFAULT_CHARS,
+    TERMINAL_OUTPUT_MAX_CHARS,
 )
 
 logger = logging.getLogger(__name__)
 
 
-MAX_OUTPUT_LENGTH = CLAUDE_BASH_OUTPUT_MAX_CHARS
-DEFAULT_TIMEOUT_MS = 0
-MAX_TIMEOUT_MS = 2_147_483_647
 MAX_SESSIONS = 5
 
 
@@ -77,15 +74,19 @@ class TerminalSession:
         self._shell_cmd: list[str] = []
         self._started_at = 0.0
         self._output_buffer: list[str] = []
-        self._MAX_OUTPUT_BUFFER_CHARS = CLAUDE_BASH_OUTPUT_MAX_CHARS
-        self._cmd_lock = asyncio.Lock()
+        self._MAX_OUTPUT_BUFFER_CHARS = TERMINAL_OUTPUT_MAX_CHARS
         self._stdout_reader_task: asyncio.Task[None] | None = None
         self._stderr_reader_task: asyncio.Task[None] | None = None
         self._waiter_task: asyncio.Task[None] | None = None
         self._is_windows = platform.system() == "Windows"
         self._exit_notified = False
+        self._exit_notification_error: dict[str, str] = {}
         self._external_pid: int | None = None
         self._external_alive: bool | None = None
+        # Set when a kill could not prove the shell tree exited. The session
+        # then stays registered as the recovery handle for that process.
+        self.cleanup_pending = False
+        self.cleanup_reason = ""
 
     @property
     def is_alive(self) -> bool:
@@ -118,7 +119,7 @@ class TerminalSession:
             terminal_mode=self.terminal_mode,
         )
 
-    def snapshot(self, *, max_chars: int = CLAUDE_BASH_OUTPUT_DEFAULT_CHARS) -> dict[str, Any]:
+    def snapshot(self, *, max_chars: int = TERMINAL_OUTPUT_DEFAULT_CHARS) -> dict[str, Any]:
         limit = max(0, min(int(max_chars or 0), self._MAX_OUTPUT_BUFFER_CHARS))
         output = "".join(self._output_buffer)
         truncated = limit > 0 and len(output) > limit
@@ -136,6 +137,9 @@ class TerminalSession:
             "output_chars": len(bounded_output),
             "total_output_chars": len(output),
             "truncated": truncated,
+            "exit_notification_error": dict(self._exit_notification_error),
+            "cleanup_pending": bool(self.cleanup_pending),
+            "cleanup_reason": self.cleanup_reason,
         }
 
     def update_external_metadata(
@@ -162,6 +166,10 @@ class TerminalSession:
             return
         self._output_buffer.append(str(data))
         self._trim_output_buffer()
+
+    def clear_output(self) -> None:
+        """Forget reconnectable scrollback without stopping the shell."""
+        self._output_buffer.clear()
 
     async def start(self) -> None:
         if self.is_alive:
@@ -222,125 +230,57 @@ class TerminalSession:
             self._process.stdin.write(payload.encode("utf-8"))
             await self._process.stdin.drain()
         except (BrokenPipeError, ConnectionResetError) as exc:
+            # The is_alive check above cannot close the race: the shell can shut
+            # its stdin (or die) before drain() completes while returncode is
+            # still None. Swallowing that dropped the user's keystroke with no
+            # client-visible signal, so surface it through the same RuntimeError
+            # contract the caller already reports.
             logger.warning("Terminal %s stdin is unavailable: %s", self.session_id, exc)
+            raise RuntimeError(
+                f"Terminal session {self.session_id} stdin is unavailable: {exc}"
+            ) from exc
 
-    async def execute_command(
-        self,
-        command: str,
-        timeout_ms: int = DEFAULT_TIMEOUT_MS,
-    ) -> tuple[str, int]:
-        async with self._cmd_lock:
-            return await self._execute_command_locked(command, timeout_ms)
+    async def kill(self) -> bool:
+        """Terminate the shell and report whether its exit is proven.
 
-    async def _execute_command_locked(
-        self,
-        command: str,
-        timeout_ms: int,
-    ) -> tuple[str, int]:
-        if not self.is_alive:
-            await self.start()
-
-        if not self._process or not self._process.stdin:
-            raise RuntimeError("Terminal is not available")
-
-        marker = f"__MINICODE_CMD_END_{uuid.uuid4().hex[:8]}__"
-        exit_code_marker = f"__MINICODE_EXIT_{uuid.uuid4().hex[:8]}__"
-
-        if self._is_windows:
-            full_cmd = (
-                "$global:LASTEXITCODE = $null\n"
-                f"{command}\n"
-                "$minicodeCommandSucceeded = $?\n"
-                "$minicodeNativeExit = $global:LASTEXITCODE\n"
-                "$minicodeExitCode = if ($null -ne $minicodeNativeExit) { $minicodeNativeExit } "
-                "elseif ($minicodeCommandSucceeded) { 0 } else { 1 }\n"
-                f'Write-Output "{exit_code_marker}$minicodeExitCode"\n'
-                f'Write-Output "{marker}"\n'
-            )
-        else:
-            full_cmd = (
-                f"{command}\n"
-                f'echo "{exit_code_marker}$?"\n'
-                f'echo "{marker}"\n'
-            )
-
-        start_index = len(self._output_buffer)
-
-        try:
-            self._process.stdin.write(full_cmd.encode("utf-8"))
-            await self._process.stdin.drain()
-        except (BrokenPipeError, ConnectionResetError):
-            return "Terminal input channel is unavailable", -1
-
-        timeout_sec = max(0, min(int(timeout_ms or 0), MAX_TIMEOUT_MS)) / 1000.0
-        deadline = time.monotonic() + timeout_sec if timeout_sec > 0 else None
-
-        while deadline is None or time.monotonic() < deadline:
-            await asyncio.sleep(0.05)
-
-            new_output = "".join(self._output_buffer[start_index:])
-            if marker not in new_output:
-                if not self.is_alive and self._process and self._process.returncode is not None:
-                    break
-                continue
-
-            output, exit_code = self._extract_command_result(
-                new_output,
-                marker=marker,
-                exit_code_marker=exit_code_marker,
-            )
-            return output, exit_code
-
-        return f"Command timed out after {timeout_sec:.0f}s", -1
-
-    async def kill(self) -> None:
+        ``False`` means the shell may still be running: ``cleanup_pending``
+        stays set and the readers keep mirroring output, so the caller must
+        retain this session as the recovery handle instead of dropping it.
+        """
         if self._process is None:
             # Electron/node-pty is the sole owner of desktop terminals.  The
             # backend stores only a reconnectable mirror and must never kill
             # that process when a WebSocket session expires.
             self._external_alive = False
-            return
+            return True
 
+        reaped = False
+        reason = "terminal_tree_survived_kill"
         try:
-            await terminate_process_tree(self._process)
+            reaped = await terminate_process_tree(self._process)
+            reason = "" if reaped else "terminal_tree_survived_kill"
         except ProcessLookupError:
-            pass
+            reaped = True
+            reason = ""
         except Exception as exc:
+            reason = f"terminal_kill_failed: {exc}"
             logger.warning("Error killing terminal %s: %s", self.session_id, exc)
+
+        self.cleanup_pending = not reaped
+        self.cleanup_reason = reason
+        if not reaped:
+            # The readers are this session's only view of a shell that is still
+            # alive; cancelling them would blind the recovery handle.
+            logger.warning(
+                "Terminal session %s could not be proven stopped (%s)",
+                self.session_id,
+                reason,
+            )
+            return False
 
         await self._cancel_reader_tasks()
         logger.info("Terminal session %s killed", self.session_id)
-
-    def _extract_command_result(
-        self,
-        output: str,
-        *,
-        marker: str,
-        exit_code_marker: str,
-    ) -> tuple[str, int]:
-        exit_code = -1
-        output_lines: list[str] = []
-
-        for line in output.splitlines():
-            if marker in line:
-                break
-            if exit_code_marker in line:
-                raw_code = line.replace(exit_code_marker, "", 1).strip()
-                try:
-                    exit_code = int(raw_code)
-                except (TypeError, ValueError):
-                    exit_code = -1
-                continue
-            output_lines.append(line)
-
-        final_output = "\n".join(output_lines).strip()
-        if len(final_output) > MAX_OUTPUT_LENGTH:
-            total_length = len(final_output)
-            final_output = (
-                final_output[:MAX_OUTPUT_LENGTH]
-                + f"\n\n[output truncated: showing first {MAX_OUTPUT_LENGTH} of {total_length} chars]"
-            )
-        return final_output, exit_code
+        return True
 
     async def _cancel_reader_tasks(self) -> None:
         for task in (self._stdout_reader_task, self._stderr_reader_task, self._waiter_task):
@@ -355,7 +295,11 @@ class TerminalSession:
             except asyncio.CancelledError:
                 pass
             except Exception:
-                pass
+                logger.warning(
+                    "Terminal %s reader task failed while being cancelled",
+                    self.session_id,
+                    exc_info=True,
+                )
 
         self._stdout_reader_task = None
         self._stderr_reader_task = None
@@ -370,7 +314,18 @@ class TerminalSession:
             try:
                 await self._on_exit(self.session_id, self._process.returncode)
             except Exception:
-                logger.debug("Terminal %s exit callback failed", self.session_id, exc_info=True)
+                # This callback is the only emitter of terminal.exit; swallowing
+                # it leaves the panel showing a shell that already died.
+                self._exit_notification_error = {
+                    "kind": "terminal_exit_projection_failed",
+                    "message": "terminal.exit callback failed",
+                }
+                logger.error(
+                    "Terminal %s exit callback failed; the client was never told the "
+                    "shell exited",
+                    self.session_id,
+                    exc_info=True,
+                )
 
     async def _wait_for_exit(self) -> None:
         if not self._process:
@@ -416,7 +371,15 @@ class TerminalSession:
         except asyncio.CancelledError:
             return
         except Exception as exc:
-            logger.debug("Terminal %s stdout reader error: %s", self.session_id, exc)
+            # This task is the only mirror of the shell's stdout. If it dies the
+            # terminal appears frozen for the rest of the session, so the reason
+            # must not sit at debug level.
+            logger.error(
+                "Terminal %s stdout reader stopped; output is no longer mirrored: %s",
+                self.session_id,
+                exc,
+                exc_info=True,
+            )
 
     async def _read_stderr(self) -> None:
         if not self._process or not self._process.stderr:
@@ -441,7 +404,12 @@ class TerminalSession:
         except asyncio.CancelledError:
             return
         except Exception as exc:
-            logger.debug("Terminal %s stderr reader error: %s", self.session_id, exc)
+            logger.error(
+                "Terminal %s stderr reader stopped; output is no longer mirrored: %s",
+                self.session_id,
+                exc,
+                exc_info=True,
+            )
 
 
 class TerminalSessionManager:
@@ -470,7 +438,10 @@ class TerminalSessionManager:
             cwd=cwd,
             on_output=on_output,
             on_exit=on_exit,
-            conversation_id=conversation_id,
+            # Store the validated/stripped owner: every ownership check compares
+            # against a stripped id, so storing the raw value made a padded
+            # conversation_id produce a session nothing could address or kill.
+            conversation_id=owner,
         )
         await session.start()
         self._sessions[session_id] = session
@@ -484,7 +455,14 @@ class TerminalSessionManager:
         owner = str(conversation_id or "").strip()
         if session is None or not owner or session.conversation_id != owner:
             return False
-        await session.kill()
+        if not await session.kill():
+            # The shell may still be running, so the registry entry is the only
+            # handle left for reaping it. Report the unfinished teardown instead
+            # of dropping the handle and calling the terminal stopped.
+            raise RuntimeError(
+                f"Terminal session '{session_id}' could not be proven stopped "
+                f"({session.cleanup_reason or 'terminal_cleanup_pending'})"
+            )
         if self._sessions.get(session_id) is session:
             self._sessions.pop(session_id, None)
         return True
@@ -498,18 +476,41 @@ class TerminalSessionManager:
             sid for sid, session in self._sessions.items()
             if session.conversation_id == owner
         ]
+        unproven: list[str] = []
         for sid in to_kill:
             session = self._sessions.get(sid)
-            if session is not None:
-                await session.kill()
-                if self._sessions.get(sid) is session:
-                    self._sessions.pop(sid, None)
+            if session is None:
+                continue
+            if not await session.kill():
+                unproven.append(sid)
+                continue
+            if self._sessions.get(sid) is session:
+                self._sessions.pop(sid, None)
+        if unproven:
+            # Callers gate workspace deletion on this cleanup; a surviving shell
+            # must not be reported as a completed teardown.
+            raise RuntimeError(
+                "Terminal sessions could not be proven stopped: "
+                + ", ".join(sorted(unproven))
+            )
         return len(to_kill)
 
     async def destroy_all(self) -> None:
+        unproven: list[str] = []
         for session in list(self._sessions.values()):
-            await session.kill()
-        self._sessions.clear()
+            if not await session.kill():
+                unproven.append(session.session_id)
+                continue
+            # Deregister by identity, one at a time. Rebuilding the whole dict
+            # after the awaits above dropped any session registered during them
+            # without ever killing it.
+            if self._sessions.get(session.session_id) is session:
+                self._sessions.pop(session.session_id, None)
+        if unproven:
+            raise RuntimeError(
+                "Terminal sessions could not be proven stopped: "
+                + ", ".join(sorted(unproven))
+            )
 
     def list_sessions(self, conversation_id: str = "") -> list[TerminalSessionInfo]:
         """List only terminal sessions owned by the requested conversation."""
@@ -529,7 +530,7 @@ class TerminalSessionManager:
         self,
         session_id: str,
         *,
-        max_chars: int = CLAUDE_BASH_OUTPUT_DEFAULT_CHARS,
+        max_chars: int = TERMINAL_OUTPUT_DEFAULT_CHARS,
         conversation_id: str = "",
     ) -> dict[str, Any] | None:
         session = self.get_session(session_id)
@@ -537,6 +538,14 @@ class TerminalSessionManager:
         if session is None or not owner or session.conversation_id != owner:
             return None
         return session.snapshot(max_chars=max_chars)
+
+    def clear_output(self, session_id: str, *, conversation_id: str = "") -> bool:
+        session = self.get_session(session_id)
+        owner = str(conversation_id or "").strip()
+        if session is None or not owner or session.conversation_id != owner:
+            return False
+        session.clear_output()
+        return True
 
     def upsert_external_session(
         self,

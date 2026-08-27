@@ -5,6 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+def provider_progress_id(iteration_id: str) -> str:
+    """Return the single provider-progress identity for one loop iteration."""
+
+    return f"provider:connection:{iteration_id}"
+
+
 @dataclass(slots=True)
 class ProviderAttempt:
     iteration_id: str

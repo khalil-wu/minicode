@@ -6,4 +6,5 @@ export { DiffCell } from "./DiffCell";
 export { ErrorCell } from "./ErrorCell";
 export { AssistantMarkdownCell } from "./AssistantMarkdownCell";
 export { ThinkingCell } from "./ThinkingCell";
+export { CollaborationCell } from "./CollaborationCell";
 export type * from "./cellTypes";

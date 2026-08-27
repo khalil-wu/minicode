@@ -8,6 +8,8 @@ let token = "";
 let appendDesktopLog = () => {};
 let server = null;
 let endpoint = "";
+let accepting = false;
+const inFlight = new Set();
 
 function init(deps = {}) {
   manager = deps.manager || null;
@@ -46,6 +48,7 @@ function sendJson(response, status, payload) {
 }
 
 async function handleRequest(request, response) {
+  if (!accepting) return sendJson(response, 503, { ok: false, error: "Embedded browser bridge is stopping" });
   const auth = String(request.headers.authorization || "");
   const suppliedToken = auth.startsWith("Bearer ") ? auth.slice(7) : "";
   if (!tokenMatches(suppliedToken)) return sendJson(response, 401, { ok: false, error: "Unauthorized" });
@@ -69,7 +72,12 @@ async function handleRequest(request, response) {
 
 async function start() {
   if (server) return endpoint;
-  server = http.createServer((request, response) => void handleRequest(request, response));
+  accepting = true;
+  server = http.createServer((request, response) => {
+    const operation = handleRequest(request, response);
+    inFlight.add(operation);
+    void operation.finally(() => inFlight.delete(operation));
+  });
   await new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {
@@ -83,11 +91,13 @@ async function start() {
 }
 
 async function stop() {
+  accepting = false;
   const active = server;
   server = null;
   endpoint = "";
   if (!active) return;
   await new Promise((resolve) => active.close(() => resolve()));
+  if (inFlight.size) await Promise.allSettled(Array.from(inFlight));
 }
 
 module.exports = { init, start, stop };

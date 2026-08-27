@@ -3,6 +3,7 @@ import { useAppStore } from "../stores";
 interface BrowserOpenRequest {
   id: number;
   url: string;
+  conversationId: string;
 }
 
 type BrowserOpenListener = (request: BrowserOpenRequest) => void;
@@ -11,7 +12,7 @@ const BROWSER_NAVIGATE_DEDUPE_MS = 750;
 const listeners = new Set<BrowserOpenListener>();
 let requestSequence = 0;
 let pendingRequest: BrowserOpenRequest | null = null;
-let lastNavigate: { url: string; at: number } | null = null;
+let lastNavigate: { url: string; conversationId: string; at: number } | null = null;
 
 function normalizeBrowserUrl(value: string): string | null {
   try {
@@ -26,17 +27,23 @@ function normalizeBrowserUrl(value: string): string | null {
 export function openWebInBrowser(url: string): boolean {
   const normalizedUrl = normalizeBrowserUrl(url);
   if (!normalizedUrl) return false;
+  const conversationId = String(useAppStore.getState().conversationId || "").trim();
+  if (!conversationId) return false;
 
   useAppStore.getState().setRightStackTab("browser");
 
   const now = Date.now();
-  if (lastNavigate?.url === normalizedUrl && now - lastNavigate.at < BROWSER_NAVIGATE_DEDUPE_MS) {
+  if (
+    lastNavigate?.url === normalizedUrl
+    && lastNavigate.conversationId === conversationId
+    && now - lastNavigate.at < BROWSER_NAVIGATE_DEDUPE_MS
+  ) {
     return true;
   }
 
-  const request = { id: ++requestSequence, url: normalizedUrl };
+  const request = { id: ++requestSequence, url: normalizedUrl, conversationId };
   pendingRequest = request;
-  lastNavigate = { url: normalizedUrl, at: now };
+  lastNavigate = { url: normalizedUrl, conversationId, at: now };
   listeners.forEach((listener) => listener(request));
   return true;
 }

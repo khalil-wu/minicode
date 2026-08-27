@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import shutil
 import mimetypes
 import hashlib
-import threading
+import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -12,8 +12,9 @@ from urllib.parse import quote
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
 
-from backend.atomic_io import atomic_write_bytes
+from backend.atomic_io import atomic_write_bytes, file_mutation_locks
 from backend.security.sensitive_files import is_protected_write_path, is_sensitive_file
+from backend.documents.service import parse_document_preview
 
 from .models import (
     WorkspaceDeleteResponse,
@@ -36,6 +37,7 @@ WORKSPACE_IGNORED_NAMES = {
 }
 WORKSPACE_IGNORED_SUFFIXES = {".pyc", ".pyo", ".pyd"}
 WORKSPACE_MAX_FILE_BYTES = 2 * 1024 * 1024
+WORKSPACE_MAX_PREVIEW_BYTES = 50 * 1024 * 1024
 
 
 class WorkspaceService:
@@ -46,7 +48,29 @@ class WorkspaceService:
     ) -> None:
         self._get_workspace_root = get_workspace_root
         self._max_file_bytes = max_file_bytes
-        self._write_lock = threading.Lock()
+
+    @staticmethod
+    def _invalidate_derived_caches(*, file_tree_changed: bool) -> None:
+        """Keep model-side workspace views coherent after API mutations.
+
+        The HTTP workspace editor and the agent file tools share the same
+        process, but they do not share an execution path.  The file watcher
+        eventually catches most changes; invalidating synchronously here makes
+        an immediate read/list/search after a UI save deterministic as well.
+        Cache state is derived and must never turn a successful disk mutation
+        into a failed API response.
+        """
+        try:
+            from backend.tools.file_tools_common import invalidate_workspace_file_caches
+
+            invalidate_workspace_file_caches(
+                file_tree_changed=file_tree_changed,
+                clear_file_state=True,
+            )
+        except Exception:
+            # Cache invalidation is best-effort.  The filesystem write already
+            # succeeded and the watcher remains a second-line invalidation.
+            pass
 
     def list_tree(self, path: str) -> WorkspaceTreeResponse:
         root = self.workspace_root_path()
@@ -58,27 +82,34 @@ class WorkspaceService:
         if not target.is_dir():
             raise HTTPException(status_code=400, detail="Path must point to a directory.")
 
+        # os.scandir caches is_dir/is_file from the directory entry itself, so
+        # a full listing costs one dirent walk instead of two stat calls per
+        # child (iterdir + is_dir + lstat). On Windows this halves the syscalls
+        # for large workspaces, which dominates the /tree latency.
         entries: list[WorkspaceTreeEntry] = []
         try:
-            for item in sorted(
-                target.iterdir(),
+            scanned = sorted(
+                os.scandir(target),
                 key=lambda candidate: (
-                    not (candidate.is_dir() and not candidate.is_symlink()),
+                    not candidate.is_dir(follow_symlinks=False),
                     candidate.name.lower(),
                 ),
-            ):
-                if self.should_skip_entry(item):
+            )
+            for item in scanned:
+                if self.should_skip_scandir_entry(item):
                     continue
-                stat = item.lstat()
-                is_dir = item.is_dir() and not item.is_symlink()
+                stat = item.stat(follow_symlinks=False)
+                is_dir = item.is_dir(follow_symlinks=False)
                 entries.append(
                     WorkspaceTreeEntry(
                         name=item.name,
-                        path=self.to_workspace_relative(item, follow_symlinks=False),
+                        path=self.to_workspace_relative(
+                            Path(item.path), follow_symlinks=False
+                        ),
                         is_dir=is_dir,
                         size_bytes=None if is_dir else stat.st_size,
                         modified_at=self.iso_timestamp(stat.st_mtime),
-                        has_children=is_dir and self.directory_has_visible_children(item),
+                        has_children=is_dir and self.directory_has_visible_children(Path(item.path)),
                     )
                 )
         except PermissionError as exc:
@@ -148,20 +179,89 @@ class WorkspaceService:
         disposition = f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(target.name)}"
         return FileResponse(target, media_type=media_type, headers={"Content-Disposition": disposition})
 
+    def preview_file(self, path: str) -> dict[str, object]:
+        """Build the same bounded preview payload used for uploaded files.
+
+        This keeps generated workspace deliverables in the application preview
+        surface as well; the raw endpoint remains the native image/PDF stream.
+        """
+        self.ensure_not_sensitive_file(
+            self.resolve_workspace_path(path, follow_final_symlink=False)
+        )
+        target = self.resolve_workspace_path(path)
+        if not target.exists():
+            raise HTTPException(status_code=404, detail=f"Path not found: {path}")
+        if not target.is_file():
+            raise HTTPException(status_code=400, detail="Path must point to a file.")
+        self.ensure_not_sensitive_file(target)
+
+        try:
+            stat = target.stat()
+            if stat.st_size > WORKSPACE_MAX_PREVIEW_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        f"File is too large ({stat.st_size} bytes). "
+                        "Max supported preview size is 50 MB."
+                    ),
+                )
+            raw_content = target.read_bytes()
+        except HTTPException:
+            raise
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=f"Permission denied: {path}") from exc
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to read file: {exc}") from exc
+
+        parsed = parse_document_preview(target.name, raw_content)
+        content = str(parsed.get("full_text") or "")
+        # Match uploaded-attachment preview bounds so a large workspace file
+        # cannot flood the right rail or the clipboard.
+        visible_content = content[: 2 * 1024 * 1024]
+        media_type = str(parsed.get("media_type") or mimetypes.guess_type(target.name)[0] or "application/octet-stream")
+        kind = str(parsed.get("kind") or "document")
+        return {
+            "file_name": target.name,
+            "path": self.to_workspace_relative(target),
+            "media_type": media_type,
+            "kind": kind,
+            "size_bytes": int(stat.st_size),
+            "summary": str(parsed.get("summary") or ""),
+            "parse_error": str(parsed.get("parse_error") or ""),
+            "content": visible_content,
+            "content_chars": len(content),
+            "truncated": len(visible_content) < len(content),
+            "has_native": kind == "image" or media_type == "application/pdf",
+        }
+
     def write_file(self, path: str, content: str) -> WorkspaceFileResponse:
         self.ensure_write_allowed(self.resolve_workspace_path(path, follow_final_symlink=False))
         target = self.resolve_workspace_path(path)
         self.ensure_write_allowed(target)
-        if target.exists() and target.is_dir():
-            raise HTTPException(status_code=400, detail="Cannot write content into a directory path.")
-
         try:
-            atomic_write_bytes(target, content.encode("utf-8"))
-            stat = target.stat()
+            with file_mutation_locks([target]):
+                if target.exists() and target.is_dir():
+                    raise HTTPException(status_code=400, detail="Cannot write content into a directory path.")
+                if target.exists():
+                    raise HTTPException(
+                        status_code=409,
+                        detail="File already exists. Use compare-write with the latest content hash.",
+                    )
+                atomic_write_bytes(target, content.encode("utf-8"), overwrite=False)
+                stat = target.stat()
+        except HTTPException:
+            raise
+        except FileExistsError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="File was created concurrently. Use compare-write with the latest content hash.",
+            ) from exc
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=f"Permission denied: {path}") from exc
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"Failed to write file: {exc}") from exc
+
+        self._invalidate_derived_caches(file_tree_changed=True)
 
         return WorkspaceFileResponse(
             workspace_root=str(self.workspace_root_path()),
@@ -178,12 +278,12 @@ class WorkspaceService:
         self.ensure_write_allowed(self.resolve_workspace_path(path, follow_final_symlink=False))
         target = self.resolve_workspace_path(path)
         self.ensure_write_allowed(target)
-        if target.exists() and target.is_dir():
-            raise HTTPException(status_code=400, detail="Cannot write content into a directory path.")
-
         normalized_expected = (expected_hash or "").strip().lower()
         try:
-            with self._write_lock:
+            with file_mutation_locks([target]):
+                if target.exists() and target.is_dir():
+                    raise HTTPException(status_code=400, detail="Cannot write content into a directory path.")
+                file_existed_before_write = target.exists()
                 if target.exists():
                     raw = target.read_bytes()
                     try:
@@ -214,6 +314,8 @@ class WorkspaceService:
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"Failed to write file: {exc}") from exc
 
+        self._invalidate_derived_caches(file_tree_changed=not file_existed_before_write)
+
         return WorkspaceFileResponse(
             workspace_root=str(self.workspace_root_path()),
             path=self.to_workspace_relative(target),
@@ -228,15 +330,19 @@ class WorkspaceService:
     def create_directory(self, path: str) -> WorkspacePathResponse:
         self.ensure_write_allowed(self.resolve_workspace_path(path, follow_final_symlink=False))
         target = self.resolve_workspace_path(path)
-        if target.exists():
-            raise HTTPException(status_code=409, detail=f"Path already exists: {path}")
-
         try:
-            target.mkdir(parents=True, exist_ok=False)
+            with file_mutation_locks([target]):
+                if target.exists():
+                    raise HTTPException(status_code=409, detail=f"Path already exists: {path}")
+                target.mkdir(parents=True, exist_ok=False)
+        except HTTPException:
+            raise
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=f"Permission denied: {path}") from exc
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"Failed to create directory: {exc}") from exc
+
+        self._invalidate_derived_caches(file_tree_changed=True)
 
         return self.workspace_path_payload(target)
 
@@ -250,18 +356,22 @@ class WorkspaceService:
         self.ensure_not_workspace_root(source)
         self.ensure_not_workspace_root(destination)
 
-        if not source.exists() and not source.is_symlink():
-            raise HTTPException(status_code=404, detail=f"Path not found: {path}")
-        if destination.exists() or destination.is_symlink():
-            raise HTTPException(status_code=409, detail=f"Target already exists: {new_path}")
-
         try:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            source.rename(destination)
+            with file_mutation_locks([source, destination]):
+                if not source.exists() and not source.is_symlink():
+                    raise HTTPException(status_code=404, detail=f"Path not found: {path}")
+                if destination.exists() or destination.is_symlink():
+                    raise HTTPException(status_code=409, detail=f"Target already exists: {new_path}")
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                source.rename(destination)
+        except HTTPException:
+            raise
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=f"Permission denied: {path}") from exc
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"Failed to rename path: {exc}") from exc
+
+        self._invalidate_derived_caches(file_tree_changed=True)
 
         return self.workspace_path_payload(destination)
 
@@ -270,22 +380,25 @@ class WorkspaceService:
         self.ensure_not_workspace_root(target)
         self.ensure_write_allowed(target)
 
-        if not target.exists() and not target.is_symlink():
-            raise HTTPException(status_code=404, detail=f"Path not found: {path}")
-
-        relative_path = self.to_workspace_relative(target, follow_symlinks=False)
-        is_dir = target.is_dir() and not target.is_symlink()
-
+        is_dir = False
         try:
-            if target.is_symlink():
-                target.unlink()
-            elif is_dir:
-                if recursive:
-                    shutil.rmtree(target)
+            with file_mutation_locks([target]):
+                if not target.exists() and not target.is_symlink():
+                    raise HTTPException(status_code=404, detail=f"Path not found: {path}")
+
+                relative_path = self.to_workspace_relative(target, follow_symlinks=False)
+                is_dir = target.is_dir() and not target.is_symlink()
+                if target.is_symlink():
+                    target.unlink()
+                elif is_dir:
+                    if recursive:
+                        shutil.rmtree(target)
+                    else:
+                        target.rmdir()
                 else:
-                    target.rmdir()
-            else:
-                target.unlink()
+                    target.unlink()
+        except HTTPException:
+            raise
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=f"Permission denied: {path}") from exc
         except OSError as exc:
@@ -295,6 +408,8 @@ class WorkspaceService:
                     detail="Directory is not empty. Retry with recursive=true.",
                 ) from exc
             raise HTTPException(status_code=500, detail=f"Failed to delete path: {exc}") from exc
+
+        self._invalidate_derived_caches(file_tree_changed=True)
 
         return WorkspaceDeleteResponse(
             workspace_root=str(self.workspace_root_path()),
@@ -350,6 +465,25 @@ class WorkspaceService:
         return False
 
     @staticmethod
+    def should_skip_scandir_entry(entry: os.DirEntry[str]) -> bool:
+        """Name-first twin of :meth:`should_skip_entry` for scandir walks.
+
+        Uses the DirEntry's cached ``is_file`` so the compiled-suffix rule does
+        not cost an extra stat per child on Windows.
+        """
+        name = entry.name
+        if name in WORKSPACE_IGNORED_NAMES:
+            return True
+        if name.startswith(".") and name not in {".env.example"}:
+            return True
+        try:
+            if entry.is_file(follow_symlinks=False) and os.path.splitext(name)[1].lower() in WORKSPACE_IGNORED_SUFFIXES:
+                return True
+        except OSError:
+            return False
+        return False
+
+    @staticmethod
     def iso_timestamp(epoch_seconds: float) -> str:
         return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc).isoformat()
 
@@ -357,9 +491,12 @@ class WorkspaceService:
         if path.is_symlink():
             return False
         try:
-            for child in path.iterdir():
-                if not self.should_skip_entry(child):
-                    return True
+            # Early-exit scandir walk: stops at the first visible child and
+            # reuses cached dirent flags instead of statting every entry.
+            with os.scandir(path) as it:
+                for entry in it:
+                    if not self.should_skip_scandir_entry(entry):
+                        return True
         except Exception:
             return False
         return False

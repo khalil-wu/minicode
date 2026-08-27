@@ -16,7 +16,7 @@ import {
 } from "../protocol/workspace";
 import { useAppStore } from "../stores";
 import type { FileTreeRevealRequest } from "../stores/types";
-import { isDesktop, fsListTree, fsSearchFiles, desktop, trustWorkspace } from "../desktop/runtime";
+import { isDesktop, fsListTree, fsSearchFiles, trustWorkspace } from "../desktop/runtime";
 import { openWorkspaceFolder } from "../workspace/openWorkspaceFolder";
 import {
   type GitStatus,
@@ -59,14 +59,31 @@ import {
 import { TreeNode } from "./FileTreeNode";
 import { FileContextMenu } from "./FileTreeContextMenu";
 import { SearchResultRow } from "./FileTreeSearchResult";
+import {
+  normalizeWorkspaceRoot,
+  workspaceFilePathComparisonKey,
+  workspaceRootsEqual,
+} from "../lib/workspace-path";
 
 export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   const [tree, setTree] = useState<WorkspaceTreeNode | null>(null);
   const [isListScrolling, setIsListScrolling] = useState(false);
   const scrollFadeTimerRef = useRef<number | null>(null);
+  const scrollPersistTimerRef = useRef<number | null>(null);
+  const scrollPersistValueRef = useRef(0);
+  const scrollPersistKeyRef = useRef("");
 
   useEffect(() => () => {
     if (scrollFadeTimerRef.current !== null) window.clearTimeout(scrollFadeTimerRef.current);
+    // Flush a pending scroll-position write so a fast unmount cannot lose the
+    // last scroll offset for the workspace it belongs to.
+    if (scrollPersistTimerRef.current !== null) {
+      window.clearTimeout(scrollPersistTimerRef.current);
+      scrollPersistTimerRef.current = null;
+      try {
+        localStorage.setItem(scrollPersistKeyRef.current, String(scrollPersistValueRef.current));
+      } catch { /* noop */ }
+    }
   }, []);
   const [loading, setLoading] = useState(false);
   const [slowLoading, setSlowLoading] = useState(false);
@@ -77,6 +94,8 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   const [searchLoading, setSearchLoading] = useState(false);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [toolbarMenuOpen, setToolbarMenuOpen] = useState(false);
+  const toolbarTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const toolbarMenuRef = useRef<HTMLDivElement | null>(null);
   const density = "compact" as const;
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const fileTreeVersion = useAppStore((s) => s.fileTreeVersion);
@@ -85,7 +104,9 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   const activeEditorPath = useAppStore((s) => s.activeEditorPath);
   const listRef = useRef<HTMLDivElement | null>(null);
   const restoredScrollKeyRef = useRef<string | null>(null);
-  const scrollKey = `minicode.file-tree.scroll:${workingDirectory || "."}`;
+  const scrollWorkspaceKey = normalizeWorkspaceRoot(workingDirectory) || ".";
+  const scrollKey = `minicode.file-tree.scroll:${scrollWorkspaceKey}`;
+  const legacyScrollKey = `minicode.file-tree.scroll:${workingDirectory || "."}`;
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => {
     const stored = readExpandedPaths(workingDirectory || ".");
     return isDesktop() && workingDirectory ? normalizeDesktopExpandedPaths(workingDirectory, stored) : stored;
@@ -98,7 +119,10 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   const searchEpochRef = useRef(0);
   const gitMap = useMemo(() => {
     const next = new Map<string, GitStatus>();
-    const treePath = (path: string) => isDesktop() ? joinWorkspacePath(workingDirectory, path) : path;
+    const treePath = (path: string) => workspaceFilePathComparisonKey(
+      isDesktop() ? joinWorkspacePath(workingDirectory, path) : path,
+      workingDirectory,
+    );
     for (const file of gitChanges.workingTree) {
       const patch = file.patch ?? "";
       next.set(treePath(file.path), patch.includes("deleted file mode") ? "deleted" : "modified");
@@ -111,7 +135,9 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   const refresh = useCallback(async () => {
     const epoch = ++refreshEpochRef.current;
     const directory = workingDirectory;
-    const isCurrent = () => epoch === refreshEpochRef.current && directory === useAppStore.getState().workingDirectory;
+    const isCurrent = () =>
+      epoch === refreshEpochRef.current
+      && workspaceRootsEqual(directory, useAppStore.getState().workingDirectory);
     if (!workingDirectory) {
       setTree(null);
       setError("");
@@ -128,17 +154,25 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
         const entries = await fsListTree(rootPath);
         let nextTree = entriesToTree(entries, rootPath, workspaceLabel(rootPath));
         const persistedExpanded = Array.from(normalizeDesktopExpandedPaths(rootPath, readExpandedPaths(rootPath)))
-          .filter((path) => path !== rootPath)
+          .filter((path) => !isSameTreePath(path, rootPath, rootPath))
           .sort((a, b) => a.split(/[/\\]/).length - b.split(/[/\\]/).length);
+        // Fetch every persisted expanded directory concurrently; the sequential
+        // loop used to serialize N+1 round trips on the startup path.
+        const settled = await Promise.all(
+          persistedExpanded.map((path) =>
+            hasLoadedDirectoryNode(nextTree, path)
+              ? fsListTree(path)
+                .then((children): [string, WorkspaceTreeNode] => [path, { name: path, path, is_dir: true, children: nodesFromEntries(children) }])
+                .catch(() => null)
+              : Promise.resolve(null),
+          ),
+        );
         const retainedExpanded = new Set<string>();
-        for (const path of persistedExpanded) {
-          if (!hasLoadedDirectoryNode(nextTree, path)) continue;
-          try {
-            nextTree = replaceNodeChildren(nextTree, path, nodesFromEntries(await fsListTree(path)));
-            retainedExpanded.add(path);
-          } catch {
-            /* Ignore folders that disappeared since the last session. */
-          }
+        for (const loaded of settled) {
+          if (!loaded) continue;
+          const [path, node] = loaded;
+          nextTree = replaceNodeChildren(nextTree, path, node.children ?? []);
+          retainedExpanded.add(path);
         }
         if (retainedExpanded.size !== persistedExpanded.length) {
           writeExpandedPaths(rootPath, retainedExpanded);
@@ -150,15 +184,19 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
         if (result) {
           let nextTree: WorkspaceTreeNode = { ...result, children: sortNodes(result.children ?? []) };
           const persistedExpanded = Array.from(readExpandedPaths(workingDirectory || "."))
-            .filter((path) => path !== "." && path !== workingDirectory)
+            .filter((path) => path !== "." && !isSameTreePath(path, workingDirectory, workingDirectory))
             .sort((a, b) => a.split(/[/\\]/).length - b.split(/[/\\]/).length);
-          for (const path of persistedExpanded) {
-            try {
-              const node = await listWorkspaceTree(workingDirectory, path);
-              if (node) nextTree = replaceNodeChildren(nextTree, path, sortNodes(node.children ?? []));
-            } catch {
-              /* Ignore folders that disappeared since the last session. */
-            }
+          const settled = await Promise.all(
+            persistedExpanded.map((path) =>
+              listWorkspaceTree(workingDirectory, path)
+                .then((node): [string, WorkspaceTreeNode] | null => (node ? [path, node] : null))
+                .catch(() => null),
+            ),
+          );
+          for (const loaded of settled) {
+            if (!loaded) continue;
+            const [path, node] = loaded;
+            nextTree = replaceNodeChildren(nextTree, path, sortNodes(node.children ?? []));
           }
           if (isCurrent()) setTree(nextTree);
         } else {
@@ -233,13 +271,19 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
     restoredScrollKeyRef.current = scrollKey;
     let savedScrollTop = 0;
     try {
-      savedScrollTop = Number(localStorage.getItem(scrollKey) || 0);
+      const canonicalValue = localStorage.getItem(scrollKey);
+      const savedValue = canonicalValue
+        ?? (legacyScrollKey !== scrollKey ? localStorage.getItem(legacyScrollKey) : null);
+      savedScrollTop = Number(savedValue || 0);
+      if (canonicalValue == null && savedValue != null) {
+        localStorage.setItem(scrollKey, savedValue);
+      }
     } catch { /* noop */ }
     const frame = window.requestAnimationFrame(() => {
       if (listRef.current) listRef.current.scrollTop = Number.isFinite(savedScrollTop) ? savedScrollTop : 0;
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [loading, scrollKey, tree]);
+  }, [legacyScrollKey, loading, scrollKey, tree]);
 
   const toggleExpanded = useCallback((path: string, shouldLoad = false) => {
     setExpandedPaths((current) => {
@@ -267,7 +311,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
     if (isDesktop()) {
       const root = normalizeChangePath(workingDirectory);
       const normalizedTarget = normalizeChangePath(target);
-      if (!root || !isPathInsideTreeRoot(root, normalizedTarget) || isSameTreePath(root, normalizedTarget)) return [];
+      if (!root || !isPathInsideTreeRoot(root, normalizedTarget) || isSameTreePath(root, normalizedTarget, workingDirectory)) return [];
       const relative = normalizedTarget.slice(root.length).replace(/^\/+/, "");
       const parts = relative.split("/").filter(Boolean);
       const chain: string[] = [];
@@ -290,11 +334,11 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
 
   const scrollToTreePath = useCallback((path: string) => {
     const rows = Array.from(listRef.current?.querySelectorAll<HTMLElement>("[data-tree-path]") ?? []);
-    const row = rows.find((item) => isSameTreePath(item.dataset.treePath, path));
+    const row = rows.find((item) => isSameTreePath(item.dataset.treePath, path, workingDirectory));
     if (!row) return;
     row.scrollIntoView({ block: "center" });
     row.focus({ preventScroll: true });
-  }, []);
+  }, [workingDirectory]);
 
   const revealFolderRequest = useCallback(async (request: FileTreeRevealRequest): Promise<boolean> => {
     const target = normalizeRevealFolderPath(request.path);
@@ -309,7 +353,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
       return next;
     });
     for (const folder of foldersToExpand) {
-      if (!isSameTreePath(folder, workingDirectory)) {
+      if (!isSameTreePath(folder, workingDirectory, workingDirectory)) {
         await loadDirectory(folder);
       }
     }
@@ -347,7 +391,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
         const batch = pendingChangesRef.current;
         pendingChangesRef.current = [];
         void refreshChangedPaths(batch);
-      }, 80);
+      }, 300);
       return () => clearTimeout(timer);
     }
   }, [fileChanges, refreshChangedPaths]);
@@ -356,13 +400,35 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
 
   useEffect(() => {
     if (!toolbarMenuOpen) return;
-    const close = () => setToolbarMenuOpen(false);
+    const toolbarMenu = toolbarMenuRef.current;
+    const close = () => {
+      setToolbarMenuOpen(false);
+      toolbarTriggerRef.current?.focus();
+    };
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") close();
     };
+    const focusFirst = () => {
+      window.setTimeout(() => toolbarMenu?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus(), 0);
+    };
+    focusFirst();
+    const onMenuKeyDown = (event: KeyboardEvent) => {
+      const items = Array.from(toolbarMenu?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []);
+      if (!items.length) return;
+      const current = items.indexOf(document.activeElement as HTMLButtonElement);
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const next = event.key === "ArrowDown" ? (current + 1 + items.length) % items.length : (current - 1 + items.length) % items.length;
+        items[next].focus();
+      } else if (event.key === "Home" || event.key === "End") {
+        event.preventDefault();
+        items[event.key === "Home" ? 0 : items.length - 1].focus();
+      }
+    };
     window.addEventListener("click", close);
     window.addEventListener("keydown", closeOnEscape);
-    return () => { window.removeEventListener("click", close); window.removeEventListener("keydown", closeOnEscape); };
+    toolbarMenu?.addEventListener("keydown", onMenuKeyDown);
+    return () => { window.removeEventListener("click", close); window.removeEventListener("keydown", closeOnEscape); toolbarMenu?.removeEventListener("keydown", onMenuKeyDown); };
   }, [toolbarMenuOpen]);
 
   useEffect(() => {
@@ -377,7 +443,10 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
         : searchWorkspaceFiles(workingDirectory, trimmed, 60, "all");
       search
         .then((results) => {
-          if (epoch === searchEpochRef.current && directory === useAppStore.getState().workingDirectory) {
+          if (
+            epoch === searchEpochRef.current
+            && workspaceRootsEqual(directory, useAppStore.getState().workingDirectory)
+          ) {
             setSearchResults(results.filter((result) => !isHiddenSearchResult(result)));
           }
         })
@@ -397,8 +466,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
     if (!path) return;
     const targetPath = isDesktop() ? joinWorkspacePath(workingDirectory, path) : path;
     try {
-      if (isDesktop()) await desktop()?.fs.writeFile(targetPath, "");
-      else if (!(await writeWorkspaceFile(targetPath, "", workingDirectory))) {
+      if (!(await writeWorkspaceFile(targetPath, "", workingDirectory))) {
         await showAlert({ title: "创建失败", message: `无法创建文件：${path}` });
         return;
       }
@@ -412,8 +480,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
     if (!path) return;
     const targetPath = isDesktop() ? joinWorkspacePath(workingDirectory, path) : path;
     try {
-      if (isDesktop()) await desktop()?.fs.createDirectory(targetPath);
-      else if (!(await createWorkspaceDirectory(targetPath, workingDirectory))) {
+      if (!(await createWorkspaceDirectory(targetPath, workingDirectory))) {
         await showAlert({ title: "创建失败", message: `无法创建文件夹：${path}` });
         return;
       }
@@ -464,22 +531,23 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   const renderToolbarMenu = () => (
     <div style={toolbarMenuWrapStyle}>
       <button type="button" title="更多文件操作" aria-label="更多文件操作"
-        aria-controls="file-tree-actions-menu" aria-expanded={toolbarMenuOpen}
+        ref={toolbarTriggerRef}
+        aria-controls="file-tree-actions-menu" aria-expanded={toolbarMenuOpen} aria-haspopup="menu"
         onClick={(event) => { event.stopPropagation(); setToolbarMenuOpen((open) => !open); }}
         className="mc-icon-button mc-icon-button-compact file-tree-action">
         <MoreHorizontal size={14} />
       </button>
       {toolbarMenuOpen && (
-        <div id="file-tree-actions-menu" style={toolbarMenuStyle} onClick={(event) => event.stopPropagation()}>
+        <div id="file-tree-actions-menu" ref={toolbarMenuRef} className="mc-dropdown-menu" role="menu" style={toolbarMenuStyle} onClick={(event) => event.stopPropagation()}>
           {isDesktop() && (
-            <button type="button" className="btn-ghost" onClick={() => { setToolbarMenuOpen(false); void openWorkspaceFolder(); }} style={toolbarMenuItemStyle}>
+            <button type="button" role="menuitem" className="btn-ghost" onClick={() => { setToolbarMenuOpen(false); void openWorkspaceFolder(); }} style={toolbarMenuItemStyle}>
               <FolderOpen size={14} /><span>打开文件夹</span>
             </button>
           )}
-          <button type="button" className="btn-ghost" onClick={() => { setToolbarMenuOpen(false); void createFile(); }} style={toolbarMenuItemStyle}>
+          <button type="button" role="menuitem" className="btn-ghost" onClick={() => { setToolbarMenuOpen(false); void createFile(); }} style={toolbarMenuItemStyle}>
             <FilePlus2 size={14} /><span>新建文件</span>
           </button>
-          <button type="button" className="btn-ghost" onClick={() => { setToolbarMenuOpen(false); void createFolder(); }} style={toolbarMenuItemStyle}>
+          <button type="button" role="menuitem" className="btn-ghost" onClick={() => { setToolbarMenuOpen(false); void createFolder(); }} style={toolbarMenuItemStyle}>
             <FolderPlus size={14} /><span>新建文件夹</span>
           </button>
         </div>
@@ -514,9 +582,18 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
           setIsListScrolling(true);
           if (scrollFadeTimerRef.current !== null) window.clearTimeout(scrollFadeTimerRef.current);
           scrollFadeTimerRef.current = window.setTimeout(() => setIsListScrolling(false), 650);
-          try {
-            localStorage.setItem(scrollKey, String(event.currentTarget.scrollTop));
-          } catch { /* noop */ }
+          // localStorage writes are synchronous; persist at most once per
+          // 200ms instead of on every scroll tick.
+          scrollPersistValueRef.current = event.currentTarget.scrollTop;
+          scrollPersistKeyRef.current = scrollKey;
+          if (scrollPersistTimerRef.current === null) {
+            scrollPersistTimerRef.current = window.setTimeout(() => {
+              scrollPersistTimerRef.current = null;
+              try {
+                localStorage.setItem(scrollKey, String(scrollPersistValueRef.current));
+              } catch { /* noop */ }
+            }, 200);
+          }
         }}
       >
       {hasQuery ? (

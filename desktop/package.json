@@ -18,16 +18,18 @@
     "test": "npm run test:unit && npm run test:e2e",
     "test:unit": "node --test backend-sidecar.test.js cdp-bridge.test.js crash-reporter.test.js embedded-browser-bridge.test.js embedded-browser-manager.test.js pty-manager.test.js security.test.js updater.test.js utils.test.js window-manager.test.js",
     "test:e2e": "node electron-smoke.test.js",
+    "test:packaged": "node packaged-smoke.test.js",
     "version:check": "python ../scripts/version_sync.py --check",
     "version:sync": "python ../scripts/version_sync.py",
     "runtime:prepare": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-python-runtime.ps1",
-    "pack:dir": "npm run version:check && npm run runtime:prepare && npm run build:frontend:desktop && chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=&& electron-builder --dir",
-    "dist:win": "npm run version:check && npm run runtime:prepare && npm run build:frontend:desktop && chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=&& electron-builder --win nsis"
+    "native:check": "chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=1&& electron scripts/verify-node-pty-runtime.js",
+    "pack:dir": "npm run version:check && npm run runtime:prepare && npm run build:frontend:desktop && npm run native:check && chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=&& electron-builder --dir",
+    "dist:win": "npm run version:check && npm run runtime:prepare && npm run build:frontend:desktop && npm run native:check && chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=&& electron-builder --win nsis"
   },
   "devDependencies": {
     "@divriots/h2d-electron-sdk": "^0.0.4",
-    "electron": "^33.2.0",
-    "electron-builder": "^24.13.3"
+    "electron": "^43.4.0",
+    "electron-builder": "^26.15.3"
   },
   "build": {
     "appId": "com.minicode.desktop",
@@ -36,6 +38,7 @@
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "copyright": "Copyright (c) MiniCode",
     "asar": true,
+    "npmRebuild": false,
     "directories": {
       "output": "release",
       "buildResources": "build"
@@ -62,7 +65,10 @@
       "updater.js",
       "startup-error.html",
       "startup-error-preload.js",
-      "package.json"
+      "package.json",
+      "!node_modules/node-pty/prebuilds/darwin-*/**",
+      "!node_modules/node-pty/prebuilds/win32-arm64/**",
+      "!node_modules/node-pty/third_party/conpty/**/win10-arm64/**"
     ],
     "extraResources": [
       {
@@ -96,16 +102,13 @@
         "filter": [
           "**/*"
         ]
-      },
-      {
-        "from": "node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe",
-        "to": "windows-sandbox/codex.exe"
       }
     ],
     "win": {
       "icon": "build/icon.ico",
-      "publisherName": "MiniCode Team",
-      "signAndEditExecutable": true,
+      "signtoolOptions": {
+        "publisherName": "MiniCode Team"
+      },
       "target": [
         {
           "target": "nsis",
@@ -128,9 +131,11 @@
     }
   },
   "dependencies": {
-    "@openai/codex": "0.144.4",
-    "electron-updater": "^6.6.2",
+    "electron-updater": "^6.8.9",
     "node-pty": "^1.1.0",
     "write-file-atomic": "^7.0.1"
+  },
+  "overrides": {
+    "js-yaml": "^4.3.1"
   }
 }

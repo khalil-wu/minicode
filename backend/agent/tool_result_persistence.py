@@ -17,20 +17,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from backend.config import DATA_ROOT
-from backend.atomic_io import atomic_write_text
-from backend.tools.base import MAX_TOOL_RESULT_BYTES
-
+from backend.atomic_io import atomic_write_text, file_mutation_locks
 logger = logging.getLogger(__name__)
 
 # Directory for persisted tool results
 TOOL_RESULT_DATA_DIR = DATA_ROOT / "tool-results"
 
-# Claude Code's tool-result storage threshold is shared with Pi's 50-KiB
-# model-facing result budget. Keep the legacy name for integrations, but
-# measure UTF-8 bytes rather than Python code points.
-PERSIST_THRESHOLD_BYTES = MAX_TOOL_RESULT_BYTES
-PERSIST_THRESHOLD_CHARS = PERSIST_THRESHOLD_BYTES
-_DEFAULT_PERSIST_THRESHOLD_BYTES = MAX_TOOL_RESULT_BYTES
+# Claude Code persists ordinary text tool results above 50,000 characters
+# (constants/toolLimits.ts DEFAULT_MAX_RESULT_SIZE_CHARS). This is distinct from
+# Pi's 2,000-line / 50-KiB tool-specific truncation contract, which is applied by
+# the tool projection layer before context is built.
+PERSIST_THRESHOLD_CHARS = 50_000
 
 # Claude Code's tool-result storage keeps the first 2 KB inline. This is a
 # preview contract, not a second execution/output limit.
@@ -40,17 +37,35 @@ _LOCK = threading.Lock()
 _INITIALIZED = False
 
 
-def _effective_persist_threshold_bytes() -> int:
-    """Honor the legacy override without replacing the UTF-8 byte contract."""
-    if (
-        PERSIST_THRESHOLD_BYTES == _DEFAULT_PERSIST_THRESHOLD_BYTES
-        and PERSIST_THRESHOLD_CHARS != _DEFAULT_PERSIST_THRESHOLD_BYTES
-    ):
-        return max(0, int(PERSIST_THRESHOLD_CHARS))
-    return max(0, int(PERSIST_THRESHOLD_BYTES))
+def _effective_persist_threshold_chars() -> int:
+    """Return Claude Code's character threshold for persisting tool results."""
+    return max(0, int(PERSIST_THRESHOLD_CHARS))
 
 
-def is_tool_result_path(path: str | Path) -> bool:
+def _owner_fingerprint(
+    conversation_id: str = "",
+    workspace_root: str | Path | None = None,
+) -> str:
+    conversation = str(conversation_id or "").strip()
+    workspace = ""
+    if workspace_root:
+        try:
+            workspace = str(Path(workspace_root).expanduser().resolve())
+        except (OSError, RuntimeError):
+            workspace = str(workspace_root)
+    if not conversation and not workspace:
+        return ""
+    return hashlib.sha256(
+        f"{conversation}\x00{workspace}".encode("utf-8", errors="replace")
+    ).hexdigest()[:16]
+
+
+def is_tool_result_path(
+    path: str | Path,
+    *,
+    conversation_id: str = "",
+    workspace_root: str | Path | None = None,
+) -> bool:
     """Return whether *path* is an existing file in MiniCode's read-only cache.
 
     Resolution is performed before the containment check so junctions and
@@ -63,7 +78,16 @@ def is_tool_result_path(path: str | Path) -> bool:
         resolved = Path(path).expanduser().resolve()
         root = TOOL_RESULT_DATA_DIR.expanduser().resolve()
         resolved.relative_to(root)
-        return resolved.is_file()
+        if not resolved.is_file():
+            return False
+        owner = _owner_fingerprint(conversation_id, workspace_root)
+        if owner:
+            # New persisted results carry an opaque owner fingerprint in the
+            # filename.  A conversation may only dereference files created for
+            # its own conversation/workspace pair; legacy unscoped files are
+            # intentionally not accepted by an owner-scoped read.
+            return resolved.stem.endswith(f"_{owner}")
+        return True
     except (OSError, RuntimeError, ValueError):
         return False
 
@@ -122,6 +146,8 @@ def persist_tool_result(
     tool_name: str,
     *,
     force: bool = False,
+    conversation_id: str = "",
+    workspace_root: str | Path | None = None,
 ) -> PersistedToolResult | None:
     """Persist a large tool result to disk and return metadata + preview.
 
@@ -129,23 +155,33 @@ def persist_tool_result(
     The caller should replace the inline content with ``result.preview``
     when a ``PersistedToolResult`` is returned.
     """
-    content_bytes = len(content.encode("utf-8", errors="replace")) if content else 0
-    if not content or (not force and content_bytes <= _effective_persist_threshold_bytes()):
+    if not content or (not force and len(content) <= _effective_persist_threshold_chars()):
         return None
     _ensure_dir()
 
     # Deterministic filename: hash of content so identical results are deduped.
     content_hash = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()
     safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in (tool_call_id or "unknown"))
-    filename = f"{safe_id}_{content_hash}.txt"
+    owner = _owner_fingerprint(conversation_id, workspace_root)
+    filename = (
+        f"{safe_id}_{content_hash}_{owner}.txt"
+        if owner
+        else f"{safe_id}_{content_hash}.txt"
+    )
     filepath = TOOL_RESULT_DATA_DIR / filename
 
     try:
         # Publish through the shared atomic writer. Identical content hashes
         # make concurrent writers harmless and avoid exposing partial files.
-        with _LOCK:
+        with file_mutation_locks([filepath]):
             if not filepath.exists():
-                atomic_write_text(filepath, content)
+                try:
+                    atomic_write_text(filepath, content, overwrite=False)
+                except FileExistsError:
+                    # Another process won the deterministic content-addressed
+                    # publish. The hash in the filename guarantees the file is
+                    # the same logical result, so reuse it.
+                    pass
     except OSError as exc:
         logger.warning("Failed to persist tool result to %s: %s", filepath, exc)
         return None
@@ -176,6 +212,9 @@ def try_persist_tool_result(
     content: str,
     tool_call_id: str,
     tool_name: str,
+    *,
+    conversation_id: str = "",
+    workspace_root: str | Path | None = None,
 ) -> str:
     """Try to persist a tool result; return the preview or the original content.
 
@@ -183,38 +222,15 @@ def try_persist_tool_result(
     the preview (with disk reference) is returned; otherwise the original
     content is returned unchanged.
     """
-    if not content or len(content.encode("utf-8", errors="replace")) <= _effective_persist_threshold_bytes():
+    if not content or len(content) <= _effective_persist_threshold_chars():
         return content
-    persisted = persist_tool_result(content, tool_call_id, tool_name)
+    persisted = persist_tool_result(
+        content,
+        tool_call_id,
+        tool_name,
+        conversation_id=conversation_id,
+        workspace_root=workspace_root,
+    )
     if persisted is not None:
         return persisted.preview
     return content
-
-
-def cleanup_old_results(max_age_seconds: float = 86400 * 7) -> int:
-    """Remove persisted tool result files older than ``max_age_seconds``.
-
-    Returns the number of files removed.
-    """
-    if not TOOL_RESULT_DATA_DIR.exists():
-        return 0
-    import time
-    now = time.time()
-    removed = 0
-    try:
-        for entry in TOOL_RESULT_DATA_DIR.iterdir():
-            if not entry.is_file():
-                continue
-            try:
-                mtime = entry.stat().st_mtime
-            except OSError:
-                continue
-            if now - mtime > max_age_seconds:
-                try:
-                    entry.unlink()
-                    removed += 1
-                except OSError:
-                    pass
-    except OSError as exc:
-        logger.debug("Tool result cleanup failed: %s", exc)
-    return removed

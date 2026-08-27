@@ -13,21 +13,30 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from backend.atomic_io import canonical_file_path_key, canonical_path_mapping_key
 from backend.artifact.store import ArtifactStore
 from backend.permissions.context import ToolExecutionContext
 from backend.agent.cache_metrics import args_signature, emit_cache_metric
-from backend.security.sensitive_files import is_protected_write_path, is_sensitive_file
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.path_resolution import PathTraversalError, _is_bypass_mode, _resolve_path
 from backend.workspace.file_state_cache import get_global_file_cache
 from backend.workspace.path_filters import is_windows_reserved_path
 
 
-from backend.tools.file_tools_common import *  # shared helpers (validation/diff/cache/etc.)
+from backend.tools.file_tools_common import (
+    MAX_FILE_READ_BYTES,
+    READ_FILE_MAX_BYTES,
+    READ_FILE_MAX_LINES,
+    _add_line_numbers,
+    _coerce_line_number,
+    _path_arg,
+    _read_text_range,
+    content_hash,
+)
 
 
 def _file_version(path: Path, stat_result: os.stat_result) -> str:
-    return f"{path}:{stat_result.st_size}:{stat_result.st_mtime_ns}"
+    return f"{canonical_file_path_key(path)}:{stat_result.st_size}:{stat_result.st_mtime_ns}"
 
 
 def _range_already_returned(
@@ -42,7 +51,7 @@ def _range_already_returned(
     if context is None or end_line < start_line:
         return False
     states = context.metadata.setdefault("_read_file_ranges", {})
-    path_key = str(path)
+    path_key = canonical_path_mapping_key(states, path)
     state = states.get(path_key)
     if not isinstance(state, dict) or state.get("version") != version:
         state = {"version": version, "ranges": []}
@@ -79,8 +88,8 @@ class ReadFileTool(BaseTool):
     result_kind = "file"
     activity_kind = "fileRead"
     display_label = "Read"
-    # Self-bounds via Pi's 2000-line/50-KiB contract and artifacts large files; the global
-    # backstop would only re-truncate an already-compact preview.
+    # Self-bounds via the 2000-line/50-KiB contract and artifacts large files;
+    # the global backstop would only re-truncate an already-compact preview.
     max_result_chars = None
     description = (
         "Read a text file from the workspace. Returns content with line numbers and a content_hash for safe edits. "
@@ -112,8 +121,6 @@ class ReadFileTool(BaseTool):
                         "description": "Optional first line for a focused range. A focused read still returns a current full-file content_hash when available.",
                     },
                     "end_line": {"type": "integer", "description": "Optional inclusive last line."},
-                    "offset": {"type": "integer", "description": "Optional 1-indexed line to start reading from (Claude Code alias for start_line)."},
-                    "limit": {"type": "integer", "description": "Optional number of lines to read (Claude Code alias; derives end_line)."},
                 },
                 "required": ["file_path"],
             },
@@ -148,14 +155,6 @@ class ReadFileTool(BaseTool):
                         "type": "integer",
                         "description": "Optional 1-indexed inclusive end line.",
                     },
-                    "offset": {
-                        "type": "integer",
-                        "description": "Optional 1-indexed line to start reading from (Claude Code alias for start_line).",
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Optional number of lines to read (Claude Code alias; derives end_line).",
-                    },
                 },
                 "required": ["file_path"],
             },
@@ -163,10 +162,10 @@ class ReadFileTool(BaseTool):
         )
 
     def _read_pdf_text(self, path: Path, file_path: str, file_size: int) -> ToolResult:
-        """Extract text from a PDF via PyMuPDF (cc FileReadTool readPDF).
+        """Extract text from a PDF via PyMuPDF.
 
-        cc returns PDF page text capped at PDF_MAX_PAGES_PER_READ. PDFs aren't
-        editable via edit_file, so no content_hash for editing is included.
+        Page text is capped at a fixed page budget. PDFs aren't editable via
+        edit_file, so no content_hash for editing is included.
         """
         try:
             import fitz  # PyMuPDF
@@ -180,7 +179,7 @@ class ReadFileTool(BaseTool):
             return self._error_result(f"Failed to open PDF {file_path}: {exc}")
         try:
             page_count = doc.page_count
-            max_pages = min(page_count, 20)  # cc PDF_MAX_PAGES_PER_READ
+            max_pages = min(page_count, 20)
             pages: list[str] = []
             for index in range(max_pages):
                 text = (doc.load_page(index).get_text("text") or "").rstrip()
@@ -197,10 +196,10 @@ class ReadFileTool(BaseTool):
         )
 
     def _read_image(self, path: Path, file_path: str, file_size: int) -> ToolResult:
-        """Return an image as a base64 tool_result image block (cc FileReadTool).
+        """Return an image as a base64 tool_result image block.
 
-        cc returns an image content block so the model can actually see the
-        image; the adapter renders ToolResult.images as Anthropic image blocks.
+        An image content block lets the model actually see the image; the
+        adapter renders ToolResult.images as provider image blocks.
         """
         ext = path.suffix.lower()
         media_type = {
@@ -230,17 +229,6 @@ class ReadFileTool(BaseTool):
         file_path = _path_arg(args)
         start_line_arg = args.get("start_line")
         end_line_arg = args.get("end_line")
-        # Accept Claude Code's offset (1-indexed line to start from) / limit
-        # (line count) as aliases for start_line/end_line, so a model trained on
-        # cc's FileRead params pages a large file instead of silently receiving
-        # the whole thing. start_line/end_line win if both spellings are given.
-        if start_line_arg is None and args.get("offset") is not None:
-            start_line_arg = args.get("offset")
-        if end_line_arg is None and args.get("limit") is not None:
-            _limit = _coerce_line_number(args.get("limit"))
-            if _limit:
-                _start = _coerce_line_number(start_line_arg, default=1)
-                end_line_arg = _start + _limit - 1
         has_line_range = start_line_arg is not None or end_line_arg is not None
         start_line = _coerce_line_number(start_line_arg, default=1)
         end_line = _coerce_line_number(end_line_arg)
@@ -255,6 +243,7 @@ class ReadFileTool(BaseTool):
                 allow_workspace_escape=_is_bypass_mode(context),
                 allow_tool_result_root=True,
                 allow_declared_read_root=True,
+                allow_current_plan_file=True,
             )
         except PathTraversalError as exc:
             return self._error_result(str(exc))
@@ -265,11 +254,6 @@ class ReadFileTool(BaseTool):
         if not path.is_file():
             return self._error_result(f"Not a file: {file_path}")
 
-        if is_sensitive_file(path) and not _is_bypass_mode(context):
-            return self._error_result(
-                f"Refusing to read sensitive file: {file_path}. "
-                "Open it manually or provide a redacted excerpt if it is needed."
-            )
         # Refuse very large direct reads to avoid memory pressure.
         try:
             stat_result = path.stat()
@@ -281,8 +265,8 @@ class ReadFileTool(BaseTool):
                 f"File is too large ({file_size // 1024 // 1024}MB); limit is {MAX_FILE_READ_BYTES // 1024 // 1024}MB"
             )
 
-        # PDF: extract text via PyMuPDF (cc FileReadTool readPDF). Binary PDFs
-        # cannot be read as UTF-8, so without this read_file errors out.
+        # PDF: extract text via PyMuPDF. Binary PDFs cannot be read as UTF-8,
+        # so without this read_file errors out.
         if path.suffix.lower() == ".pdf":
             return self._read_pdf_text(path, file_path, file_size)
 
@@ -352,7 +336,7 @@ class ReadFileTool(BaseTool):
                 except OSError as exc:
                     return self._error_result(f"Failed to read file: {exc}")
 
-        # Apply Pi's line/UTF-8-byte contract before adding display line numbers.
+        # Apply MiniCode's bounded line/UTF-8-byte contract before display numbering.
         file_hash = content_hash(content)
         returned_line_count = len(content.splitlines())
         returned_start_line = (line_offset + 1) if line_offset else 1
@@ -386,7 +370,7 @@ class ReadFileTool(BaseTool):
 
         if context is not None and write_safe_hash:
             seen = context.metadata.setdefault("_read_file_hashes", {})
-            path_key = str(path)
+            path_key = canonical_path_mapping_key(seen, path)
             seen.pop(path_key, None)
             seen[path_key] = write_safe_hash
 
@@ -397,7 +381,7 @@ class ReadFileTool(BaseTool):
         # state cache already avoids repeat disk I/O.
         if context is not None and not has_line_range:
             seen = context.metadata.setdefault("_read_file_hashes", {})
-            path_key = str(path)
+            path_key = canonical_path_mapping_key(seen, path)
             seen.pop(path_key, None)
             seen[path_key] = file_hash
 
@@ -428,7 +412,7 @@ class ReadFileTool(BaseTool):
             return self._success_result(f"{numbered}\n\n" + "\n".join(hash_lines))
 
         # Preserve the complete file for explicit artifact reads while making
-        # the inline result resumable with offset/limit.
+        # the inline result resumable with start_line/end_line.
         artifact_id = self._artifact_store.save(
             content=content,
             source=f"read_file({file_path})",
@@ -437,7 +421,7 @@ class ReadFileTool(BaseTool):
         if truncation.first_line_exceeds_limit:
             preview = (
                 f"[Line {returned_start_line} exceeds {READ_FILE_MAX_BYTES} byte limit. "
-                f"Use read_artifact('{artifact_id}') or a focused offset/limit read.]"
+                f"Use read_artifact('{artifact_id}') or a focused start_line/end_line read.]"
             )
         else:
             preview = truncation.content
@@ -446,12 +430,12 @@ class ReadFileTool(BaseTool):
             if truncation.truncated_by == "lines":
                 preview += (
                     f"\n\n[Showing lines {returned_start_line}-{end_line} of {returned_end_line}. "
-                    f"Use offset={next_offset} to continue.]"
+                    f"Use start_line={next_offset} to continue.]"
                 )
             else:
                 preview += (
                     f"\n\n[Showing lines {returned_start_line}-{end_line} of {returned_end_line} "
-                    f"({READ_FILE_MAX_BYTES} byte limit). Use offset={next_offset} to continue.]"
+                    f"({READ_FILE_MAX_BYTES} byte limit). Use start_line={next_offset} to continue.]"
                 )
         preview += f"\n\n[Full content available via read_artifact('{artifact_id}').]"
         return self._success_result(
@@ -460,7 +444,12 @@ class ReadFileTool(BaseTool):
             artifact_preview=preview,
         )
 
-    def streamed_input_preview(self, args: dict[str, Any]) -> dict[str, Any]:
+    def streamed_input_preview(
+        self,
+        args: dict[str, Any],
+        context: Any | None = None,
+        prior: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         return {
             key: args[key]
             for key in ("file_path", "start_line", "end_line")

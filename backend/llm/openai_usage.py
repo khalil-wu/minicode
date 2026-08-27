@@ -1,6 +1,25 @@
 from __future__ import annotations
 
+import math
+import re
 from typing import Any
+
+
+_NON_NEGATIVE_INTEGER_RE = re.compile(r"^(?:0|[1-9][0-9]*)$")
+
+
+def _strict_usage_int(value: Any, default: int = 0) -> int:
+    """Accept provider counters only when they are exact non-negative integers."""
+    if isinstance(value, bool) or value is None:
+        return default
+    if isinstance(value, int):
+        return value if value >= 0 else default
+    if isinstance(value, float):
+        return int(value) if math.isfinite(value) and value >= 0 and value.is_integer() else default
+    if isinstance(value, str):
+        stripped = value.strip()
+        return int(stripped) if _NON_NEGATIVE_INTEGER_RE.fullmatch(stripped) else default
+    return default
 
 
 def _get_usage_field(usage_obj: Any, name: str, default: int = 0) -> int:
@@ -10,10 +29,24 @@ def _get_usage_field(usage_obj: Any, name: str, default: int = 0) -> int:
         value = usage_obj.get(name, default)
     else:
         value = getattr(usage_obj, name, default)
-    try:
-        return int(value or 0)
-    except (TypeError, ValueError):
-        return default
+    return _strict_usage_int(value, default)
+
+
+def _get_usage_cost_usd(usage_obj: Any) -> float:
+    """Read an explicit provider/gateway cost without inventing model prices."""
+    if usage_obj is None:
+        return 0.0
+    for name in ("cost_usd", "total_cost_usd", "cost", "total_cost"):
+        value = usage_obj.get(name) if isinstance(usage_obj, dict) else getattr(usage_obj, name, None)
+        if isinstance(value, bool):
+            continue
+        try:
+            parsed = float(value or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(parsed) and parsed > 0:
+            return parsed
+    return 0.0
 
 
 def _first_usage_field(usage_obj: Any, *names: str) -> int:
@@ -51,6 +84,33 @@ def _get_cached_prompt_tokens(usage_obj: Any) -> int:
     return _get_usage_field(details, "cached_tokens", 0)
 
 
+def _get_cache_creation_prompt_tokens(usage_obj: Any) -> int:
+    """Read provider-reported prompt-cache writes when a gateway exposes them."""
+    direct = _first_usage_field(
+        usage_obj,
+        "cache_creation_input_tokens",
+        "cache_creation_tokens",
+        "cache_write_input_tokens",
+        "cache_write_tokens",
+        "prompt_cache_write_tokens",
+        "cache_write",
+    )
+    if direct:
+        return direct
+    details = None
+    if isinstance(usage_obj, dict):
+        details = usage_obj.get("prompt_tokens_details") or usage_obj.get("input_tokens_details")
+    elif usage_obj is not None:
+        details = getattr(usage_obj, "prompt_tokens_details", None) or getattr(usage_obj, "input_tokens_details", None)
+    return _first_usage_field(
+        details,
+        "cache_creation_input_tokens",
+        "cache_creation_tokens",
+        "cache_write_tokens",
+        "cache_write",
+    )
+
+
 def _get_reasoning_output_tokens(usage_obj: Any) -> int:
     direct = _get_usage_field(usage_obj, "reasoning_output_tokens", 0)
     if direct:
@@ -74,6 +134,8 @@ def _raw_usage_metadata(usage_obj: Any) -> dict[str, Any]:
         "output_tokens",
         "prompt_cache_hit_tokens",
         "prompt_cache_miss_tokens",
+        "cache_creation_input_tokens",
+        "cache_write_tokens",
     )
     raw: dict[str, Any] = {}
     for field in fields:
@@ -83,6 +145,9 @@ def _raw_usage_metadata(usage_obj: Any) -> dict[str, Any]:
     cached = _get_cached_prompt_tokens(usage_obj)
     if cached:
         raw["cached_prompt_tokens"] = cached
+    cache_write = _get_cache_creation_prompt_tokens(usage_obj)
+    if cache_write:
+        raw["cache_creation_input_tokens"] = cache_write
     reasoning = _get_reasoning_output_tokens(usage_obj)
     if reasoning:
         raw["reasoning_output_tokens"] = reasoning

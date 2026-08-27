@@ -7,6 +7,7 @@ import subprocess
 from typing import Any
 
 from backend.services.workspace_service import sanitized_git_env
+from backend.workspace.worktree import isolated_worktree_root
 
 
 def _git(root: Path, *args: str) -> tuple[bool, str]:
@@ -58,7 +59,7 @@ def build_handoff_preflight(
     direction = "worktree_to_local" if target == "local" else "local_to_worktree"
     source_path = Path(str(getattr(conversation, "worktree_path", "") or getattr(conversation, "workspace_root", "") or ".")).resolve()
     base_root = main_worktree_root(source_path)
-    worktree_path = (base_root / ".claude" / "worktrees" / conversation_id).resolve()
+    worktree_path = isolated_worktree_root(base_root) / conversation_id
     worktree_branch = str(getattr(conversation, "git_branch", "") or f"minicode/{conversation_id}")
     checks: list[dict[str, Any]] = []
 
@@ -73,6 +74,8 @@ def build_handoff_preflight(
 
     source_status = _status(source_path) if source_path.exists() else "<missing>"
     main_status = _status(base_root) if base_root.exists() else "<missing>"
+    main_head = _head(base_root) if base_root.exists() else ""
+    main_branch = _branch(base_root) if base_root.exists() else ""
     if source_status and source_status != "<missing>" and source_status != "<status unavailable>":
         if dirty_action == "stash":
             checks.append(_check("source.dirty.stash", "warning", "Local changes will be stashed and restored in the destination workspace."))
@@ -114,7 +117,8 @@ def build_handoff_preflight(
         "source_branch": _branch(source_path) if source_path.exists() else "",
         "source_status": source_status,
         "target_path": str(worktree_path if direction == "local_to_worktree" else base_root),
-        "target_head": _head(base_root) if base_root.exists() else "",
+        "target_head": main_head,
+        "target_previous_branch": main_branch,
         "target_branch": worktree_branch,
         "target_status": main_status,
         "dirty_action": dirty_action,
@@ -126,6 +130,11 @@ def build_handoff_preflight(
         "direction": direction,
         "source": {"path": str(source_path), "branch": fingerprint_payload["source_branch"], "head": fingerprint_payload["source_head"]},
         "destination": {"path": fingerprint_payload["target_path"], "branch": worktree_branch},
+        "main_checkout": {
+            "path": str(base_root),
+            "branch": main_branch,
+            "head": main_head,
+        },
         "checks": checks,
         "allowed": not any(check["severity"] == "blocking" for check in checks),
         "fingerprint": fingerprint,
@@ -148,3 +157,25 @@ def restore_workspace_stash(root: Path, stash_ref: str) -> tuple[bool, str]:
 
 def switch_main_checkout(base_root: Path, branch: str) -> tuple[bool, str]:
     return _git(base_root, "switch", branch)
+
+
+def restore_main_checkout(
+    base_root: Path,
+    *,
+    branch: str = "",
+    head: str = "",
+) -> tuple[bool, str]:
+    clean_branch = str(branch or "").strip()
+    if clean_branch:
+        return _git(base_root, "switch", clean_branch)
+    clean_head = str(head or "").strip()
+    if clean_head:
+        return _git(base_root, "switch", "--detach", clean_head)
+    return False, "The previous local checkout could not be identified"
+
+
+def delete_local_branch(base_root: Path, branch: str) -> tuple[bool, str]:
+    clean_branch = str(branch or "").strip()
+    if not clean_branch:
+        return True, ""
+    return _git(base_root, "branch", "-D", clean_branch)

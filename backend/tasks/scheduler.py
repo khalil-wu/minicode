@@ -11,6 +11,7 @@ import inspect
 import json
 import logging
 import re
+import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Coroutine
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from backend.async_cleanup import cancel_and_drain
+from backend.async_cleanup import cancel_and_drain, cancel_and_drain_receipt
 from backend.atomic_io import atomic_write_text
 from backend.config import PROJECT_ROOT
 
@@ -51,6 +52,13 @@ def _registry_file() -> Path:
     return SCHEDULE_FILE.with_name(SCHEDULE_REGISTRY_FILE.name)
 
 
+# cc cron contract (CronCreateTool.ts / cronTasks.ts): at most 50 jobs,
+# recurring tasks auto-expire after 7 days, one-shot jobs auto-delete after
+# their first fire.
+MAX_SCHEDULED_JOBS = 50
+SCHEDULED_TASK_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+
+
 @dataclass
 class ScheduledTask:
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
@@ -58,8 +66,12 @@ class ScheduledTask:
     prompt: str = ""
     schedule: str = "0 * * * *"  # cron expression (min hour dom month dow)
     permission_mode: str = "confirm"
-    timezone: str = "UTC"
+    # cc schedules cron in the process-local timezone by default (cron.ts).
+    timezone: str = ""
     isolation: str = "worktree"
+    # cc recurring flag: false = fire once at the next match, then auto-delete.
+    recurring: bool = True
+    deleted_at: str | None = None
     # Scheduled work is deliberately bound to one workspace.  Keeping the
     # binding on the task makes the process-wide scheduler safe when a user
     # switches projects between two ticks.
@@ -102,6 +114,10 @@ class ScheduledTaskRun:
     workspace_root: str = ""
     result_summary: str = ""
     error: str = ""
+    cleanup_pending: bool = False
+    cleanup_reason: str = ""
+    cleanup_requested_at: str | None = None
+    cleanup_completed_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -122,7 +138,7 @@ class CronFields:
 
 
 def _parse_cron_field(field_str: str, min_val: int, max_val: int, *, dow: bool = False) -> set[int]:
-    """Parse the same bounded 5-field subset used by Claude Code."""
+    """Parse the same bounded 5-field subset used by MiniCode."""
     values: set[int] = set()
     for part in field_str.split(","):
         wildcard = re.fullmatch(r"\*(?:/(\d+))?", part)
@@ -187,11 +203,13 @@ def _cron_parts_match(parts: CronFields, dt: datetime) -> bool:
 
 
 def _schedule_timezone(name: str | None) -> ZoneInfo:
-    value = str(name or "UTC").strip() or "UTC"
-    try:
-        return ZoneInfo(value)
-    except ZoneInfoNotFoundError:
-        return ZoneInfo("UTC")
+    # Empty means the process-local timezone (cc cron.ts default).
+    value = str(name or "").strip()
+    if not value:
+        return datetime.now().astimezone().tzinfo  # type: ignore[return-value]
+    # An unknown timezone is a configuration error and must fail explicitly;
+    # silently shifting every fire time to UTC hid the mistake from the user.
+    return ZoneInfo(value)
 
 
 def is_valid_timezone(name: str | None) -> bool:
@@ -266,7 +284,7 @@ def _stored_next_run(task: ScheduledTask) -> datetime | None:
 def _missed_schedule_points(task: ScheduledTask, now: datetime) -> list[datetime]:
     """Return at most one durable, coalesced due point.
 
-    Claude Code advances recurring schedules from the time they are actually
+    MiniCode advances recurring schedules from the time they are actually
     claimed instead of replaying every wall-clock minute missed while the
     process was asleep.  ``next_run_at`` is the durable equivalent here: an
     overdue value fires once on startup, then the scheduler advances it from
@@ -297,6 +315,10 @@ class TaskScheduler:
         self._on_change = on_change
         self._loop_task: asyncio.Task[None] | None = None
         self._running = False
+        # Structured evidence for the most recent corrupt state-file read and
+        # for tasks whose stored schedule could not be recomputed.
+        self.last_load_error: dict[str, str] | None = None
+        self._unusable_schedule_ids: set[str] = set()
         self._load()
 
     def _load(self) -> None:
@@ -324,32 +346,68 @@ class TaskScheduler:
             data = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
                 raise ValueError("scheduler state must be an object")
-            for raw in data.get("tasks", []):
-                if not isinstance(raw, dict):
-                    continue
-                task = ScheduledTask.from_dict(raw)
-                task.workspace_root = _normalize_workspace_root(task.workspace_root or workspace_root)
-                if workspace_root and task.workspace_root != workspace_root:
-                    logger.warning("Ignoring task %s with mismatched workspace store", task.id)
-                    continue
-                if task.enabled:
-                    next_run = _stored_next_run(task)
-                    task.next_run_at = next_run.isoformat() if next_run else None
-                else:
-                    task.next_run_at = None
-                self._tasks[task.id] = task
-            for raw in data.get("runs", []):
-                if not isinstance(raw, dict):
-                    continue
-                run = ScheduledTaskRun.from_dict(raw)
-                run.workspace_root = _normalize_workspace_root(run.workspace_root or workspace_root)
-                if workspace_root and run.workspace_root != workspace_root:
-                    logger.warning("Ignoring scheduled run %s with mismatched workspace store", run.id)
-                    continue
-                if run.task_id:
-                    self._runs[run.id] = run
         except (json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
-            logger.warning("scheduler load failed for %s: %s", path, exc)
+            # A corrupt state file must not silently masquerade as "no tasks".
+            # Quarantine the file so the next _save cannot destroy the only
+            # copy, and keep structured evidence on the scheduler.
+            self.last_load_error = {
+                "path": str(path),
+                "reason": type(exc).__name__,
+                "detail": str(exc),
+            }
+            logger.error(
+                "Scheduled task state %s is unreadable (%s: %s); quarantining it. "
+                "Tasks in this file are preserved but NOT loaded.",
+                path,
+                type(exc).__name__,
+                exc,
+            )
+            try:
+                quarantine = path.with_name(
+                    f"{path.name}.corrupt-{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}"
+                )
+                path.replace(quarantine)
+                self.last_load_error["quarantined_to"] = str(quarantine)
+            except OSError as quarantine_exc:
+                self.last_load_error["quarantine_error"] = str(quarantine_exc)
+                logger.error("Failed to quarantine corrupt scheduler state %s: %s", path, quarantine_exc)
+            return
+        for raw in data.get("tasks", []):
+            if not isinstance(raw, dict):
+                continue
+            task = ScheduledTask.from_dict(raw)
+            task.workspace_root = _normalize_workspace_root(task.workspace_root or workspace_root)
+            if workspace_root and task.workspace_root != workspace_root:
+                logger.warning("Ignoring task %s with mismatched workspace store", task.id)
+                continue
+            if task.enabled:
+                try:
+                    next_run = _stored_next_run(task)
+                except (ZoneInfoNotFoundError, ValueError) as exc:
+                    # A stored task whose schedule can no longer be computed
+                    # must be visible evidence, never a silent UTC shift.
+                    logger.error(
+                        "Task %s has an unusable schedule/timezone (%s); it will not fire until fixed.",
+                        task.id,
+                        exc,
+                    )
+                    self._unusable_schedule_ids.add(task.id)
+                    task.next_run_at = None
+                else:
+                    task.next_run_at = next_run.isoformat() if next_run else None
+            else:
+                task.next_run_at = None
+            self._tasks[task.id] = task
+        for raw in data.get("runs", []):
+            if not isinstance(raw, dict):
+                continue
+            run = ScheduledTaskRun.from_dict(raw)
+            run.workspace_root = _normalize_workspace_root(run.workspace_root or workspace_root)
+            if workspace_root and run.workspace_root != workspace_root:
+                logger.warning("Ignoring scheduled run %s with mismatched workspace store", run.id)
+                continue
+            if run.task_id:
+                self._runs[run.id] = run
 
     def _save(self) -> None:
         # Keep recent history bounded.  It is user-facing diagnostics, not an
@@ -425,11 +483,32 @@ class TaskScheduler:
         except Exception:
             logger.debug("Failed to notify scheduled task observers", exc_info=True)
 
+    def _sweep_expired(self) -> None:
+        """MiniCode auto-expires recurring schedules after 7 days."""
+        now = time.time()
+        changed = False
+        for task in list(self._tasks.values()):
+            if task.deleted_at is not None:
+                continue
+            try:
+                created = datetime.fromisoformat(task.created_at).timestamp()
+            except ValueError:
+                continue
+            if now - created > SCHEDULED_TASK_MAX_AGE_SECONDS:
+                task.deleted_at = datetime.now(UTC).isoformat()
+                task.next_run_at = None
+                changed = True
+        if changed:
+            self._save()
+
     def list_tasks(self, *, workspace_root: str | None = None) -> list[dict[str, Any]]:
+        self._sweep_expired()
         now = datetime.now(UTC)
         requested_workspace = _normalize_workspace_root(workspace_root) if workspace_root is not None else None
         rows: list[dict[str, Any]] = []
         for task in self._tasks.values():
+            if task.deleted_at is not None:
+                continue
             if requested_workspace is not None and task.workspace_root != requested_workspace:
                 continue
             row = task.to_dict()
@@ -458,9 +537,20 @@ class TaskScheduler:
         *,
         workspace_root: str = "",
         conversation_id: str = "",
-        timezone: str = "UTC",
+        timezone: str = "",
         isolation: str = "worktree",
+        recurring: bool = True,
     ) -> ScheduledTask:
+        existing = self.list_tasks()
+        if len([t for t in existing if t.get("status") != "deleted"]) >= MAX_SCHEDULED_JOBS:
+            raise RuntimeError(
+                f"Too many scheduled jobs (max {MAX_SCHEDULED_JOBS}). Cancel one first."
+            )
+        clean_timezone = str(timezone or "").strip()
+        if clean_timezone and not is_valid_timezone(clean_timezone):
+            raise ValueError(
+                f"Unknown timezone '{clean_timezone}'. Use an IANA zone name (e.g. Asia/Shanghai) or leave it empty."
+            )
         task = ScheduledTask(
             name=name,
             prompt=prompt,
@@ -468,8 +558,9 @@ class TaskScheduler:
             permission_mode=permission_mode,
             workspace_root=_normalize_workspace_root(workspace_root),
             conversation_id=conversation_id,
-            timezone=str(timezone or "UTC").strip() or "UTC",
+            timezone=str(timezone or "").strip(),
             isolation="workspace" if isolation == "workspace" else "worktree",
+            recurring=bool(recurring),
         )
         next_run = next_run_after(task.schedule, datetime.now(UTC), timezone=task.timezone)
         task.next_run_at = next_run.isoformat() if next_run else None
@@ -489,6 +580,11 @@ class TaskScheduler:
         task = self._tasks.get(task_id)
         if not task or not self._workspace_matches(task.workspace_root, workspace_root):
             return False
+        if enabled and task.timezone and not is_valid_timezone(task.timezone):
+            raise ValueError(
+                f"Task '{task.id}' has unknown timezone '{task.timezone}'; fix the timezone before enabling."
+            )
+        self._unusable_schedule_ids.discard(task_id)
         task.enabled = enabled
         if enabled:
             next_run = next_run_after(task.schedule, datetime.now(UTC), timezone=task.timezone)
@@ -522,8 +618,49 @@ class TaskScheduler:
         active.cancel()
         run.status = "cancelled"
         run.finished_at = datetime.now(UTC).isoformat()
+        run.cleanup_pending = True
+        run.cleanup_reason = "cancel_requested"
+        run.cleanup_requested_at = run.finished_at
+        run.cleanup_completed_at = None
         self._save()
         return True
+
+    async def destroy_for_conversation(self, conversation_id: str) -> int:
+        """Cancel and remove schedules/runs that can still write to a deleted chat."""
+
+        owner = str(conversation_id or "").strip()
+        if not owner:
+            return 0
+        task_ids = {
+            task_id
+            for task_id, task in self._tasks.items()
+            if str(task.conversation_id or "").strip() == owner
+        }
+        run_ids = {
+            run_id
+            for run_id, run in self._runs.items()
+            if run.task_id in task_ids or str(run.conversation_id or "").strip() == owner
+        }
+        workers = [
+            worker
+            for run_id, worker in self._run_tasks.items()
+            if run_id in run_ids and not worker.done()
+        ]
+        still_pending = await cancel_and_drain(
+            workers,
+            timeout=None,
+            label=f"scheduled runs for conversation {owner}",
+        )
+        if still_pending:
+            raise RuntimeError("a scheduled run did not stop within the lifecycle deadline")
+        for run_id in run_ids:
+            self._run_tasks.pop(run_id, None)
+            self._runs.pop(run_id, None)
+        for task_id in task_ids:
+            self._tasks.pop(task_id, None)
+        if task_ids or run_ids:
+            self._save()
+        return len(task_ids) + len(run_ids)
 
     @staticmethod
     def _workspace_matches(stored: str, requested: str | None) -> bool:
@@ -555,12 +692,15 @@ class TaskScheduler:
                 pass
         active_workers = [worker for worker in self._run_tasks.values() if not worker.done()]
         if active_workers:
-            still_pending = await cancel_and_drain(
+            receipt = await cancel_and_drain_receipt(
                 active_workers,
                 timeout=None,
                 label="scheduled task workers",
             )
-            if still_pending:
+            still_pending = {
+                worker for worker in active_workers if not worker.done()
+            }
+            if receipt.pending:
                 finished_at = datetime.now(UTC).isoformat()
                 for run_id, worker in list(self._run_tasks.items()):
                     if worker not in still_pending:
@@ -571,8 +711,16 @@ class TaskScheduler:
                     run.status = "cancelled"
                     run.error = "cancelled during scheduler shutdown"
                     run.finished_at = finished_at
+                    run.cleanup_pending = True
+                    run.cleanup_reason = "scheduler_shutdown_pending"
+                    run.cleanup_requested_at = run.cleanup_requested_at or finished_at
+                    run.cleanup_completed_at = None
                 self._save()
-        self._run_tasks.clear()
+        self._run_tasks = {
+            run_id: worker
+            for run_id, worker in self._run_tasks.items()
+            if not worker.done()
+        }
         logger.info("TaskScheduler stopped")
 
     async def _run_loop(self) -> None:
@@ -588,7 +736,20 @@ class TaskScheduler:
         for task in list(self._tasks.values()):
             if not task.enabled or self._active_run_for_task(task.id) is not None:
                 continue
-            due_points = _missed_schedule_points(task, now)
+            if task.id in self._unusable_schedule_ids:
+                continue
+            try:
+                due_points = _missed_schedule_points(task, now)
+            except (ZoneInfoNotFoundError, ValueError) as exc:
+                # A broken stored schedule must not kill the scheduler loop;
+                # record evidence and stop firing this task until it is fixed.
+                logger.error(
+                    "Task %s has an unusable schedule/timezone (%s); it will not fire until fixed.",
+                    task.id,
+                    exc,
+                )
+                self._unusable_schedule_ids.add(task.id)
+                continue
             if not due_points:
                 continue
             try:
@@ -678,7 +839,11 @@ class TaskScheduler:
         self._runs[run.id] = run
         claimed_at = datetime.now(UTC)
         task.last_run_at = claimed_at.isoformat()
-        if consume_schedule:
+        if not task.recurring:
+            # cc one-shot (recurring=false): fire once, then auto-delete.
+            task.next_run_at = None
+            task.deleted_at = claimed_at.isoformat()
+        elif consume_schedule:
             next_run = next_run_after(task.schedule, claimed_at, timezone=task.timezone)
             task.next_run_at = next_run.isoformat() if next_run else None
         task.last_run_id = run.id
@@ -741,6 +906,9 @@ class TaskScheduler:
             run.error = str(exc)[:4000]
         finally:
             run.finished_at = datetime.now(UTC).isoformat()
+            if run.cleanup_requested_at is not None:
+                run.cleanup_pending = False
+                run.cleanup_completed_at = run.finished_at
             task.last_run_id = run.id
             task.last_run_status = run.status
             task.last_error = run.error or None

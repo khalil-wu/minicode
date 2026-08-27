@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 import shutil
 from typing import Any
 
 from backend.agent.message import AgentEvent
-from backend.conversations.models import DEFAULT_CONVERSATION_PERMISSION_MODE
+from backend.conversations.models import (
+    DEFAULT_CONVERSATION_PERMISSION_MODE,
+    ConversationType,
+    normalize_conversation_type,
+)
+from backend.conversations.public_projection import project_public_conversation
 from backend.services.runtime_control_service import CommandOutcome
 from backend.ws.utils import normalize_permission_mode
 
@@ -15,6 +21,7 @@ from backend.ws.utils import normalize_permission_mode
 class ConversationCreateRequest:
     conversation_id: str | None
     title: str
+    conversation_type: ConversationType
     memory_mode: str
     permission_mode: str
     workspace_root: str
@@ -47,6 +54,8 @@ class ConversationDeleteRequest:
 @dataclass(frozen=True)
 class ConversationClearRequest:
     conversation_id: str
+    preserve_plan: bool = False
+    plan_content: str = ""
 
 
 @dataclass(frozen=True)
@@ -141,14 +150,16 @@ def parse_conversation_delete_request(data: dict[str, Any]) -> ConversationDelet
 
 def parse_conversation_clear_request(data: dict[str, Any], *, active_conversation_id: str = "") -> ConversationClearRequest:
     return ConversationClearRequest(
-        conversation_id=str(data.get("conversation_id") or active_conversation_id or "").strip()
+        conversation_id=str(data.get("conversation_id") or active_conversation_id or "").strip(),
+        preserve_plan=bool(data.get("preserve_plan") or data.get("preservePlan")),
+        plan_content=str(data.get("plan_content") or data.get("planContent") or ""),
     )
 
 
 def parse_conversation_memory_mode_request(data: dict[str, Any], *, active_conversation_id: str = "") -> ConversationMemoryModeRequest:
     return ConversationMemoryModeRequest(
         conversation_id=str(data.get("conversation_id") or active_conversation_id or ""),
-        memory_mode=str(data.get("memory_mode", "none")),
+        memory_mode=str(data.get("memory_mode") or "").strip().lower(),
     )
 
 
@@ -175,9 +186,18 @@ def build_worktree_cleanup_force_required_outcome(cleanup: dict[str, Any]) -> Co
 
 
 def parse_conversation_create_request(data: dict[str, Any]) -> ConversationCreateRequest:
-    memory_mode = str(data.get("memory_mode", "none"))
     git_isolated = bool(data.get("git_isolated") or data.get("gitIsolated"))
-    activate = not bool(data.get("side_chat") or data.get("sideChat"))
+    raw_conversation_type = data.get("conversation_type") or data.get("conversationType")
+    if raw_conversation_type is None and bool(data.get("side_chat") or data.get("sideChat")):
+        raw_conversation_type = "side_chat"
+    conversation_type = normalize_conversation_type(raw_conversation_type)
+    requested_memory_mode = str(data.get("memory_mode") or "").strip().lower()
+    memory_mode = (
+        requested_memory_mode
+        if requested_memory_mode in {"enabled", "disabled"}
+        else ("disabled" if conversation_type == "side_chat" else "enabled")
+    )
+    activate = conversation_type == "main"
     workspace_root = str(data.get("workspace_root") or data.get("workspaceRoot") or "").strip()
     permission_mode = normalize_permission_mode(
         str(data.get("permission_mode") or data.get("permissionMode") or DEFAULT_CONVERSATION_PERMISSION_MODE)
@@ -193,6 +213,7 @@ def parse_conversation_create_request(data: dict[str, Any]) -> ConversationCreat
     return ConversationCreateRequest(
         conversation_id=str(data.get("conversation_id") or data.get("conversationId") or "").strip() or None,
         title=str(data.get("title") or "New chat"),
+        conversation_type=conversation_type,
         memory_mode=memory_mode,
         permission_mode=permission_mode,
         workspace_root=workspace_root,
@@ -211,9 +232,10 @@ def build_conversation_switched_payload(
     return {
         "type": "conversation.switched",
         "conversation_id": conversation.id,
-        "conversation": conversation.to_dict(),
+        "conversation": project_public_conversation(conversation),
         "is_hydrating": bool(is_hydrating),
         "session": runtime_snapshot,
+        "snapshot_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
     }
 
 
@@ -266,7 +288,7 @@ def build_conversation_truncate_failed_outcome(
     return CommandOutcome(
         "conversation.truncate",
         f"Could not truncate before message '{message_id}'.",
-        level="warning",
+        level="error",
         data={"conversation_id": conversation_id, "message_id": message_id},
     )
 
@@ -275,14 +297,21 @@ def choose_conversation_activation_target(conversation_repo: Any, preferred_id: 
     clean_preferred_id = str(preferred_id or "").strip()
     if clean_preferred_id:
         candidate = conversation_repo.get_conversation(clean_preferred_id)
-        if candidate is not None and not getattr(candidate, "archived", False):
+        if (
+            candidate is not None
+            and not getattr(candidate, "archived", False)
+            and normalize_conversation_type(getattr(candidate, "conversation_type", None)) == "main"
+        ):
             return candidate
         return None
 
     conversations = [
         item
         for item in conversation_repo.list_conversations()
-        if not getattr(item, "archived", False)
+        if (
+            not getattr(item, "archived", False)
+            and normalize_conversation_type(getattr(item, "conversation_type", None)) == "main"
+        )
     ]
     if not conversations:
         return None
@@ -296,7 +325,7 @@ def create_isolated_worktree_binding(
     main_worktree_root: Any,
     worktree_manager_factory: Any | None = None,
 ) -> IsolatedWorktreeCreationResult:
-    from backend.workspace.worktree import WorktreeManager
+    from backend.workspace.worktree import WorktreeManager, isolated_worktree_root
 
     conversation_id = str(getattr(conversation, "id", "") or "")
     base_source = Path(str(getattr(conversation, "workspace_root", "") or current_workspace_root))
@@ -311,7 +340,7 @@ def create_isolated_worktree_binding(
             error_event=AgentEvent.error(f"Git isolation unavailable for this workspace: {exc}", recoverable=True),
         )
 
-    worktree_root = base_root / ".claude" / "worktrees"
+    worktree_root = isolated_worktree_root(base_root)
     worktree_path = worktree_root / conversation_id
     branch = f"minicode/{conversation_id}"
     try:
@@ -367,23 +396,39 @@ def cleanup_isolated_worktree(
     worktree_has_local_changes: Any,
     worktree_manager_factory: Any | None = None,
 ) -> dict[str, Any]:
-    from backend.workspace.worktree import WorktreeManager
+    from backend.workspace.worktree import WorktreeManager, isolated_worktree_root
 
-    worktree_path = Path(str(getattr(conversation, "worktree_path", "") or "")).resolve()
+    # Check the raw value before resolving: Path("").resolve() yields the
+    # process CWD, so an unbound conversation looked like it owned the current
+    # working directory and the "not bound" guard below never fired.
+    raw_worktree_path = str(getattr(conversation, "worktree_path", "") or "").strip()
     conversation_id = getattr(conversation, "id", "")
-    if not str(worktree_path) or not getattr(conversation, "git_isolated", False):
+    if not getattr(conversation, "git_isolated", False):
         return {
             "removed": False,
             "conversation_id": conversation_id,
-            "path": str(worktree_path) if str(worktree_path) != "." else "",
+            "path": raw_worktree_path,
             "error": "Conversation is not bound to an isolated worktree",
         }
+    if not raw_worktree_path:
+        # It claims isolation but never got a path, so there is provably no
+        # worktree to leave behind. Reporting failure here blocked deletion
+        # forever for a record written by a failed creation.
+        return {
+            "removed": True,
+            "conversation_id": conversation_id,
+            "path": "",
+            "detail": "Isolated worktree was never created; nothing to remove.",
+        }
+    worktree_path = Path(raw_worktree_path).resolve()
     fallback_base_root = worktree_path.parents[2] if len(worktree_path.parents) >= 3 and worktree_path.parent.name == "worktrees" else worktree_path.parent
     if not worktree_path.exists():
         return {
             "removed": True,
             "conversation_id": conversation_id,
             "path": str(worktree_path),
+            "branch": str(getattr(conversation, "git_branch", "") or ""),
+            "head": "",
             "workspace_root": str(fallback_base_root),
             "message": "Isolated worktree already removed",
         }
@@ -396,13 +441,13 @@ def cleanup_isolated_worktree(
         }
 
     base_root = main_worktree_root(worktree_path)
-    isolated_root = (base_root / ".claude" / "worktrees").resolve()
+    isolated_root = isolated_worktree_root(base_root)
     if not is_path_within(worktree_path, isolated_root):
         return {
             "removed": False,
             "conversation_id": conversation_id,
             "path": str(worktree_path),
-            "error": "Only isolated worktrees under .claude/worktrees can be removed",
+            "error": "Only isolated worktrees under .minicode/worktrees can be removed",
         }
 
     dirty = worktree_has_local_changes(worktree_path)
@@ -441,6 +486,7 @@ def cleanup_isolated_worktree(
         "conversation_id": conversation_id,
         "path": str(worktree_path),
         "branch": getattr(conversation, "git_branch", ""),
+        "head": str(removal.head or ""),
         "workspace_root": str(base_root),
         "message": "Removed isolated worktree" if removal.removed else (removal.error or "git worktree remove failed"),
     }
@@ -452,4 +498,3 @@ def cleanup_isolated_worktree(
         if removal.removed:
             result["message"] = "Removed isolated worktree (snapshot saved; recoverable)"
     return result
-

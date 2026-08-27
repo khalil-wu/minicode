@@ -7,8 +7,8 @@ stamps every turn-scoped event with:
 - ``turn_id`` — the agent run ID (captured from the first ``agent.run.started``).
 - ``seq`` — a monotonic per-turn sequence number (1, 2, 3, …).
 
-These fields are stamped with ``setdefault`` so events that already carry them
-(e.g. ``tool_call`` with an explicit ``turn_id``) are never overridden.
+The canonical turn/thread owners are authoritative. Source-local transport
+metadata may add fields such as ``message_id``, but it may not replace them.
 
 The frontend's canonical ``ActivityItem`` adapter reads ``taskId`` and
 ``turnId`` from event data.  Without these fields the adapter was forced to
@@ -49,8 +49,9 @@ _TURN_SCOPED: frozenset[str] = frozenset({
     "agent.item",
     "agent.progress",
     "runtime.span",
-    "tool_use_summary",
     "task.update",
+    "turn.plan.updated",
+    "turn.diff.updated",
     "approval_request",
     "approval.file_diff",
     "ask_user",
@@ -102,8 +103,8 @@ class EventEnvelope:
         """Stamp envelope fields onto *event* in-place and return it.
 
         Events not in the turn-scoped set (e.g. ``stream_event``) are
-        returned unchanged.  Fields already present on the event are
-        preserved via ``setdefault``.
+        returned unchanged. Canonical owner fields are asserted here; optional
+        transport fields remain source-owned.
         """
         if event.type in _ADAPTER_INTERNAL:
             return event
@@ -119,14 +120,18 @@ class EventEnvelope:
         if event.type not in _TURN_SCOPED:
             return event
 
-        # Stamp correlation fields. setdefault preserves any value already
-        # set by the event source (e.g. tool_call may carry its own turn_id).
+        # Stamp missing canonical owners while preserving an explicit event
+        # turn id. ``run_id`` is the durable runtime owner, but an event may
+        # carry a distinct app-server/transport turn id that its producer must
+        # be allowed to route and retain.
         if self._task_id:
             data.setdefault("task_id", self._task_id)
         if self._turn_id:
             data.setdefault("turn_id", self._turn_id)
         if self._conversation_id:
-            data.setdefault("conversation_id", self._conversation_id)
+            data["conversation_id"] = self._conversation_id
+            if event.type in {"turn.plan.updated", "turn.diff.updated"}:
+                data["thread_id"] = self._conversation_id
         if "seq" not in data:
             data["seq"] = self._next_seq()
 

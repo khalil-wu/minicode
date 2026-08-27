@@ -12,6 +12,7 @@ attachments or message identifiers.
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
@@ -115,7 +116,63 @@ class TurnInputQueue:
         self._phase = MailboxDeliveryPhase.CURRENT_TURN
         self._turn_id = ""
         self._turn_epoch = 0
+        self._activity_seq = 0
+        self._activity_waiters: set[
+            tuple[asyncio.AbstractEventLoop, asyncio.Event]
+        ] = set()
         self._lock = RLock()
+
+    def _notify_activity_waiters(
+        self,
+        waiters: tuple[tuple[asyncio.AbstractEventLoop, asyncio.Event], ...],
+    ) -> None:
+        for loop, event in waiters:
+            try:
+                loop.call_soon_threadsafe(event.set)
+            except RuntimeError:
+                # The owning turn/event loop was already sealed.  The waiter
+                # removes itself in its finally block.
+                continue
+
+    def activity_cursor(self) -> int:
+        """Return the monotonic steer-enqueue sequence."""
+
+        with self._lock:
+            return self._activity_seq
+
+    async def wait_for_activity(
+        self,
+        *,
+        after_seq: int,
+        timeout: float,
+    ) -> bool:
+        """Wait for user steer input without consuming it.
+
+        Activity observers wake on new user input without consuming it; the
+        normal turn-boundary consumer remains authoritative. The loop/event
+        pair keeps the synchronous WebSocket enqueue path thread-safe.
+        """
+
+        cursor = max(0, int(after_seq))
+        loop = asyncio.get_running_loop()
+        event = asyncio.Event()
+        waiter = (loop, event)
+        with self._lock:
+            if self._activity_seq > cursor:
+                return True
+            self._activity_waiters.add(waiter)
+            if self._activity_seq > cursor:
+                self._activity_waiters.discard(waiter)
+                return True
+        try:
+            await asyncio.wait_for(event.wait(), timeout=max(0.0, float(timeout)))
+            with self._lock:
+                return self._activity_seq > cursor
+        except asyncio.TimeoutError:
+            return False
+        finally:
+            with self._lock:
+                self._activity_waiters.discard(waiter)
 
     @property
     def sealed(self) -> bool:
@@ -140,15 +197,27 @@ class TurnInputQueue:
     def begin_turn(self, turn_id: str) -> int:
         """Bind this owner to one active turn and return its epoch.
 
-        Re-registering the same run is idempotent. A different run advances
-        the epoch and reopens current-turn mailbox delivery.
+        Every call marks a turn beginning, so current-turn mailbox delivery is
+        always (re)opened.  Re-registering the same run keeps the epoch stable;
+        a different run advances it.
         """
         normalized = str(turn_id or "").strip()
         with self._lock:
-            if normalized and normalized == self._turn_id and self._phase is not MailboxDeliveryPhase.SEALED:
-                return self._turn_epoch
-            self._turn_epoch += 1
-            self._turn_id = normalized
+            same_run = (
+                bool(normalized)
+                and normalized == self._turn_id
+                and self._phase is not MailboxDeliveryPhase.SEALED
+            )
+            if not same_run:
+                self._turn_epoch += 1
+                self._turn_id = normalized
+            # Reopening belongs here rather than in a separate entry point: a
+            # persistent teammate reuses one run id for every turn, so the
+            # NEXT_TURN phase left behind by the previous turn's committed
+            # answer would otherwise latch ``mailbox_deliverable`` False for the
+            # rest of the process and starve the teammate permanently.  This is
+            # the same invariant Codex gets from building a fresh per-turn
+            # TurnState whose phase defaults to CurrentTurn.
             self._phase = MailboxDeliveryPhase.CURRENT_TURN
             return self._turn_epoch
 
@@ -187,6 +256,7 @@ class TurnInputQueue:
         mode: TurnInputMode = "steer",
         target_message_id: str = "",
     ) -> TurnInput | None:
+        waiters: tuple[tuple[asyncio.AbstractEventLoop, asyncio.Event], ...] = ()
         with self._lock:
             if self._phase is not MailboxDeliveryPhase.CURRENT_TURN:
                 return None
@@ -198,7 +268,10 @@ class TurnInputQueue:
             if not item.content.strip() and not item.attachments:
                 return None
             self._steering.append(item)
-            return item
+            self._activity_seq += 1
+            waiters = tuple(self._activity_waiters)
+        self._notify_activity_waiters(waiters)
+        return item
 
     def pop_steer(self) -> TurnInput | None:
         with self._lock:

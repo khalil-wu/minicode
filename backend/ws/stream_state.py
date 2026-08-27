@@ -4,6 +4,10 @@ import copy
 import time
 from typing import Any
 
+from backend.agent.provider_activity import (
+    merge_provider_activity_detail,
+    provider_activity_status_rank,
+)
 from backend.agent.turn_state import (
     COMMAND_OUTPUT_PREVIEW_LIMIT,
     append_agent_message_delta,
@@ -49,7 +53,6 @@ def _tool_status(payload: dict[str, Any], fallback: str = "running") -> str:
         return {
             "completed": "success",
             "error": "failed",
-            "cancelled": "failed",
             "timed_out": "timeout",
             "waiting_approval": "pending",
         }.get(status, status)
@@ -177,6 +180,7 @@ def _tool_record(
         ("display_summary", "displaySummary"),
         ("result_kind", "resultKind"),
         ("activity_kind", "activityKind"),
+        ("visibility", "visibility"),
         ("provider_error_type", "providerErrorType"),
         ("error_info", "errorInfo"),
         ("error_kind", "errorKind"),
@@ -286,9 +290,47 @@ def _upsert_activity_block(
     blocks = _stream_content_blocks(state)
     for index, existing in enumerate(blocks):
         if existing.get("type") == block.get("type") and existing.get("id") == block_id:
-            blocks[index] = block
+            merged = {**existing, **block}
+            if block.get("type") == "progress":
+                if (
+                    str(block_id).startswith("provider:")
+                    and provider_activity_status_rank(existing.get("status"))
+                    > provider_activity_status_rank(block.get("status"))
+                ):
+                    for key in ("status", "message", "summary"):
+                        if key in existing:
+                            merged[key] = existing[key]
+                detail = merge_provider_activity_detail(
+                    existing.get("detail"),
+                    block.get("detail"),
+                )
+                if detail:
+                    merged["detail"] = detail
+                if str(merged.get("status") or "").strip().lower() != "running":
+                    merged.pop("ephemeral", None)
+            blocks[index] = merged
             return
     blocks.append(block)
+
+
+def _remove_activity_block(
+    state: dict[str, Any],
+    *,
+    block_type: str,
+    block_id: str,
+) -> None:
+    target_id = str(block_id or "").strip()
+    if not target_id:
+        return
+    blocks = _stream_content_blocks(state)
+    blocks[:] = [
+        block
+        for block in blocks
+        if not (
+            block.get("type") == block_type
+            and str(block.get("id") or "").strip() == target_id
+        )
+    ]
 
 
 def create_stream_state(
@@ -372,7 +414,12 @@ def apply_stream_event(
                     else None
                 ),
             )
-            state["phase"] = "final"
+            source = str(item.get("source") or "model_final").strip().lower()
+            state["phase"] = (
+                "final"
+                if source in {"model_final", "reply", "partial", "recovery"}
+                else "model"
+            )
     elif event_type in {"thinking_delta", "thinking"}:
         thinking = str(payload.get("content") or "")
         if thinking:
@@ -384,8 +431,6 @@ def apply_stream_event(
                     for key in (
                         "source",
                         "visibility",
-                        "is_raw_provider_reasoning",
-                        "provider_reasoning_type",
                         "phase",
                     )
                     if payload.get(key) is not None
@@ -449,8 +494,18 @@ def apply_stream_event(
             status=progress_status,
             transition=progress_transition,
         )
-    if event_type == "agent.item" and payload.get("visibility") != "debug":
+    if event_type == "agent.item":
         item_id = str(payload.get("item_id") or payload.get("id") or "").strip()
+        if (
+            str(payload.get("status") or "").strip().lower() == "retracted"
+            or payload.get("visibility") == "debug"
+        ):
+            _remove_activity_block(
+                state,
+                block_type="process",
+                block_id=item_id,
+            )
+            return state
         content = str(payload.get("content") or payload.get("summary") or "").strip()
         if item_id and content:
             block: dict[str, Any] = {
@@ -544,25 +599,4 @@ def upsert_pending_tool_call(
     if tool_id:
         tool_calls[tool_id] = dict(record)
         _replace_tool_block(stream_state, dict(record, id=tool_id))
-    return tool_calls
-
-
-def remove_pending_tool_call(
-    stream_state: dict[str, Any],
-    tool_id: str,
-) -> dict[str, dict[str, Any]]:
-    tool_calls = stream_state.get("tool_calls")
-    if not isinstance(tool_calls, dict):
-        return {}
-    tool_calls.pop(tool_id, None)
-    blocks = _stream_content_blocks(stream_state)
-    blocks[:] = [
-        block
-        for block in blocks
-        if not (
-            block.get("type") == "tool_call"
-            and isinstance(block.get("record"), dict)
-            and str(block["record"].get("id") or "").strip() == str(tool_id).strip()
-        )
-    ]
     return tool_calls

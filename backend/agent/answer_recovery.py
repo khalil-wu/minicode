@@ -6,9 +6,10 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from backend.agent.message import AgentEvent
-from backend.agent.provider_protocol import usage_done_event
+from backend.agent.provider_protocol import usage_terminal_projection
 from backend.agent.response_utils import append_assistant_history
 from backend.agent.turn_kernel import _set_terminal_reason
+from backend.agent.terminal_projection import TurnTerminalProjection
 
 
 AnswerRecoveryAction = Literal["accept", "retry", "terminate"]
@@ -17,7 +18,7 @@ AnswerRecoveryAction = Literal["accept", "retry", "terminate"]
 @dataclass(frozen=True, slots=True)
 class AnswerRecoveryResult:
     action: AnswerRecoveryAction
-    events: tuple[AgentEvent, ...] = ()
+    events: tuple[AgentEvent | TurnTerminalProjection, ...] = ()
 
 
 async def recover_empty_answer(
@@ -26,36 +27,56 @@ async def recover_empty_answer(
     stream_text: Any,
     turn_usage: Any,
     finish_reason: str = "",
+    provider_raw_done: dict[str, Any] | None = None,
 ) -> AnswerRecoveryResult:
     """Reject an empty provider answer without fabricating assistant text."""
 
     if stream_text.final_candidate_text.strip():
         return AnswerRecoveryResult("accept")
 
-    # A refusal (Anthropic stop_reason="refusal") is an empty reply with a
-    # specific cause: the model declined on policy grounds. "Please retry" is
-    # the wrong advice, so surface a dedicated message like Claude Code
-    # (getErrorMessageIfRefusal) instead of the generic empty-reply text.
+    # A provider refusal is an empty reply with a specific cause: the model
+    # declined on policy grounds. "Please retry" is
+    # the wrong advice, so surface a dedicated refusal message instead of the
+    # generic empty-reply text.
     if str(finish_reason or "").strip().lower() == "refusal":
+        raw_refusal = (
+            provider_raw_done.get("refusal")
+            if isinstance(provider_raw_done, dict)
+            and isinstance(provider_raw_done.get("refusal"), dict)
+            else {}
+        )
+        explanation = " ".join(
+            str(raw_refusal.get("explanation") or "").split()
+        )[:4_096]
+        category = str(raw_refusal.get("category") or "").strip().lower()[:80]
+        refusal_message = (
+            f"The model declined to respond. Provider explanation: {explanation}"
+            if explanation
+            else (
+                "The provider declined to respond to this request. Edit your last "
+                "message or start a new session for a different task."
+            )
+        )
         state.mark_transition("refusal")
-        events = [
+        events: list[AgentEvent | TurnTerminalProjection] = [
             AgentEvent.error(
-                message=(
-                    "The model declined to respond to this request, which may "
-                    "violate the Anthropic Usage Policy "
-                    "(https://www.anthropic.com/legal/aup). Edit your last "
-                    "message or start a new session for a different task."
-                ),
+                message=refusal_message,
                 recoverable=False,
                 error_type="refusal",
+                error_code=(
+                    f"provider_refusal_{category}"
+                    if category
+                    else "provider_refusal"
+                ),
+                provider_error_type="refusal",
             )
         ]
         _set_terminal_reason(state, "refusal", status="failed")
-        events.append(usage_done_event(turn_usage, status="failed"))
+        events.append(usage_terminal_projection(turn_usage, status="failed"))
         return AnswerRecoveryResult("terminate", tuple(events))
 
     state.mark_transition("empty_reply")
-    events = [
+    events: list[AgentEvent | TurnTerminalProjection] = [
         AgentEvent.error(
             message="模型返回了空回复，未能生成答案。请重试。",
             recoverable=True,
@@ -63,7 +84,7 @@ async def recover_empty_answer(
         )
     ]
     _set_terminal_reason(state, "empty_reply", status="failed")
-    events.append(usage_done_event(turn_usage, status="failed"))
+    events.append(usage_terminal_projection(turn_usage, status="failed"))
     return AnswerRecoveryResult("terminate", tuple(events))
 
 
@@ -87,8 +108,8 @@ async def accept_completed_stream_steer(
     if candidate_text.strip():
         # The answer is complete, so commit it (model_final/completed) so it
         # stays visible and persisted, then start a fresh turn for the steer.
-        # Claude Code emits turn_end for the completed message before injecting
-        # pending messages — it never retracts a completed answer as "cancelled".
+        # The completed message is sealed before pending messages are injected;
+        # a completed answer is never retracted as "cancelled".
         started = stream_text.start_agent_message()
         if started is not None:
             events.append(started)

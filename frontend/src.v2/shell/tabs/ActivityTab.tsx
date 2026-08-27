@@ -1,16 +1,15 @@
 /**
  * Context tab — captured files, sources, workspace state, and runtime details.
  */
-import { ChevronRight, FileCode2, FileText, FileType, Folder, GitBranch, Image, MonitorPlay, Layers, Paperclip, SquareTerminal, MessageSquare, CalendarClock } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { ChevronRight, FileCode2, FileText, FileType, Folder, GitBranch, Image, MessageSquare, MonitorPlay, Layers, Paperclip, SquareTerminal, CalendarClock, Activity } from 'lucide-react'
+import { useMemo } from 'react'
+import { EmptyState } from '../../components/EmptyState'
 import { useAppStore } from '../../stores'
-import { getWebSocket } from '../../hooks/useWebSocket'
 import { openWebTarget } from '../../chat/openWebTarget'
+import { openArtifactPreview, openAttachmentPreview, openWorkspaceFilePreview } from '../../chat/openAttachmentPreview'
 import { hasVisibleActiveConversation } from '../../chat/activeConversation'
 import { openAutomations } from '../../lib/automations-navigation'
-import { ImageLightbox } from '../../components/ImageLightbox'
 import { BrandIcon } from '../../components/BrandIcon'
-import { previewUrlForPath } from '../fileTreeHelpers'
 import {
   buildActivitySidebarState,
   type ActivityBrowserAnnotationItem,
@@ -27,7 +26,6 @@ import {
   ActivityButtonRow,
   ActivityIcon,
   ActivitySection,
-  EmptyLine,
   InfoCard,
   InfoRow,
   PanelHeader,
@@ -120,7 +118,7 @@ export const ActivityTab = () => {
   if (!state.hasConversation) {
     return (
       <div style={activityPanelStyle}>
-        <EmptyLine>暂无当前会话。</EmptyLine>
+        <EmptyState compact icon={<MessageSquare size={20} />} title="暂无当前会话" hint="开始对话后，工具调用与产出会显示在这里。" />
       </div>
     )
   }
@@ -138,7 +136,7 @@ export const ActivityTab = () => {
   if (!hasEvidence) {
     return (
       <div style={activityPanelStyle}>
-        <EmptyLine>暂无上下文信息。</EmptyLine>
+        <EmptyState compact icon={<Activity size={20} />} title="暂无上下文信息" hint="Agent 工作时，读取的文件与执行的命令会显示在这里。" />
       </div>
     )
   }
@@ -219,14 +217,24 @@ const ActivityOutputSection = ({ items }: { items: ActivityOutputItem[] }) => {
   const openOutput = (item: ActivityOutputItem) => {
     const store = useAppStore.getState()
     if (item.artifactId) {
-      store.setPreviewArtifact(null)
-      store.addPanel({ id: `artifact-${item.artifactId}`, kind: 'preview', label: item.label.slice(0, 24) || 'Artifact' })
-      store.setRightStackTab('preview')
-      getWebSocket()?.send({ type: 'read_artifact', artifact_id: item.artifactId })
+      openArtifactPreview({
+        artifactId: item.artifactId,
+        name: item.label,
+        mediaType: item.mediaType,
+        kind: item.kind,
+        conversationId: store.conversationId || undefined,
+      })
       return
     }
     if (item.path) {
-      store.openEditorFile(item.path, item.label)
+      openWorkspaceFilePreview({
+        path: item.path,
+        name: item.label,
+        mediaType: item.mediaType,
+        kind: item.kind,
+        workspaceRoot: store.workingDirectory,
+        conversationId: store.conversationId || undefined,
+      })
       return
     }
     if (item.url) {
@@ -331,77 +339,27 @@ const ActivityAttachmentsSection = ({
   items: ActivityAttachmentItem[]
   workingDirectory: string
 }) => {
-  const [preview, setPreview] = useState<{ src: string; name: string } | null>(null)
-  const [pendingPreviewArtifactId, setPendingPreviewArtifactId] = useState<string | null>(null)
-  const [failedPreviewArtifactId, setFailedPreviewArtifactId] = useState<string | null>(null)
-  const pendingPreviewArtifactIdRef = useRef<string | null>(null)
-
-  useEffect(() => {
-    const onArtifactImagePreview = (event: Event) => {
-      const detail = (event as CustomEvent<{ artifactId?: string; url?: string }>).detail
-      const pendingArtifactId = pendingPreviewArtifactIdRef.current
-      if (!pendingArtifactId || detail?.artifactId !== pendingArtifactId || !detail.url) return
-      const attachment = items.find((item) => item.artifactId === pendingArtifactId)
-      setPreview({ src: detail.url, name: attachment?.label || 'image' })
-      pendingPreviewArtifactIdRef.current = null
-      setPendingPreviewArtifactId(null)
-      setFailedPreviewArtifactId(null)
-    }
-    window.addEventListener('artifact:image-preview', onArtifactImagePreview)
-    return () => window.removeEventListener('artifact:image-preview', onArtifactImagePreview)
-  }, [items])
-
-  useEffect(() => {
-    if (!pendingPreviewArtifactId) return
-    const artifactId = pendingPreviewArtifactId
-    const timeout = window.setTimeout(() => {
-      if (pendingPreviewArtifactIdRef.current !== artifactId) return
-      pendingPreviewArtifactIdRef.current = null
-      setPendingPreviewArtifactId(null)
-      setFailedPreviewArtifactId(artifactId)
-    }, 10_000)
-    return () => window.clearTimeout(timeout)
-  }, [pendingPreviewArtifactId])
-
   const openAttachment = (item: ActivityAttachmentItem) => {
     const store = useAppStore.getState()
-    const isImage = item.kind === 'image' || item.mediaType?.startsWith('image/')
-    if (isImage) {
-      if (item.path) {
-        setPreview({ src: previewUrlForPath(item.path, workingDirectory), name: item.label })
-        return
-      }
-      if (item.artifactId) {
-        setFailedPreviewArtifactId(null)
-        pendingPreviewArtifactIdRef.current = item.artifactId
-        setPendingPreviewArtifactId(item.artifactId)
-        getWebSocket()?.send({ type: 'read_artifact', artifact_id: item.artifactId, purpose: 'image_preview' })
-        return
-      }
-    }
     if (item.path) {
-      store.openEditorFile(item.path, item.label)
+      openWorkspaceFilePreview({
+        path: item.path,
+        name: item.label,
+        mediaType: item.mediaType,
+        kind: item.kind,
+        workspaceRoot: workingDirectory,
+        conversationId: store.conversationId || undefined,
+      })
       return
     }
     if (item.artifactId) {
-      store.addInspectorEntry({
-        targetKind: 'message',
-        targetId: item.messageId,
-        payload: {
-          kind: 'attachment',
-          attachmentId: item.id,
-          messageId: item.messageId,
-          label: item.label,
-          attachmentKind: item.kind,
-          detail: item.detail,
-          artifactId: item.artifactId,
-          docId: item.docId,
-          mediaType: item.mediaType,
-        },
-        timestamp: Date.now(),
+      openAttachmentPreview({
+        artifactId: item.artifactId,
+        name: item.label,
+        mediaType: item.mediaType,
+        kind: item.kind,
+        conversationId: store.conversationId || undefined,
       })
-      store.setInspectorFocus({ kind: 'attachment', id: item.id })
-      store.setRightStackTab('inspector')
       return
     }
     store.addInspectorEntry({
@@ -431,31 +389,19 @@ const ActivityAttachmentsSection = ({
           <ActivityButtonRow
             key={item.id}
             onClick={() => openAttachment(item)}
-            title={failedPreviewArtifactId === item.artifactId ? '图片加载失败，点击重试' : item.detail || item.label}
+            title={item.detail || item.label}
           >
             <ActivityIcon><Icon size={14} /></ActivityIcon>
             <span style={{ flex: 1, minWidth: 0 }}>
               <span style={activityButtonLabelStyle}>{item.label}</span>
               <span style={activityMetaTextStyle}>
-                {pendingPreviewArtifactId === item.artifactId
-                  ? '加载中'
-                  : failedPreviewArtifactId === item.artifactId
-                    ? '加载失败'
-                    : item.kind}{item.detail ? ` - ${item.detail}` : ''}
+                {item.kind}{item.detail ? ` - ${item.detail}` : ''}
               </span>
             </span>
             {(item.artifactId || item.path) && <ChevronRight size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />}
           </ActivityButtonRow>
         )
       })}
-      {preview ? (
-        <ImageLightbox
-          src={preview.src}
-          alt={preview.name}
-          title={preview.name}
-          onClose={() => setPreview(null)}
-        />
-      ) : null}
     </ActivitySection>
   )
 }
@@ -601,6 +547,7 @@ function statusLabel(status: string): string {
   if (status === 'failed') return '失败'
   if (status === 'blocked') return '受阻'
   if (status === 'partial') return '部分完成'
+  if (status === 'stalled') return '等待输入'
   if (status === 'running') return '运行中'
   if (status === 'cancelled') return '已取消'
   return '信息'
@@ -618,7 +565,7 @@ const activityButtonLabelStyle: React.CSSProperties = {
   color: 'var(--text-primary)',
   fontSize: 'var(--text-xs)',
   lineHeight: 1.3,
-  fontWeight: 650,
+  fontWeight: "var(--fw-semibold)",
   overflow: 'hidden',
   textOverflow: 'ellipsis',
   whiteSpace: 'nowrap',
@@ -631,7 +578,7 @@ const activityWorkspaceValueStyle: React.CSSProperties = {
   whiteSpace: 'nowrap',
   color: 'var(--text-secondary)',
   fontSize: 'var(--text-xs)',
-  fontWeight: 600,
+  fontWeight: "var(--fw-semibold)",
 }
 
 const activityMetaTextStyle: React.CSSProperties = {
@@ -661,8 +608,10 @@ const activityStatusPillStyle = (status: string): React.CSSProperties => ({
     ? 'var(--state-success)'
     : status === 'failed'
       ? 'var(--state-danger)'
-      : status === 'running'
-        ? 'var(--state-info)'
-        : 'var(--text-muted)',
+      : status === 'stalled'
+        ? 'var(--state-warning)'
+        : status === 'running'
+          ? 'var(--state-info)'
+          : 'var(--text-muted)',
   background: 'transparent',
 })

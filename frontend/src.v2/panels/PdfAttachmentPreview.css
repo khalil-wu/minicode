@@ -1,0 +1,102 @@
+.mc-pdf-preview {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  background: var(--surface-base);
+}
+
+.mc-pdf-toolbar {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-page);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
+
+.mc-pdf-toolbar-spacer { flex: 1; }
+
+.mc-pdf-icon-button,
+.mc-pdf-scale {
+  display: inline-flex;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: var(--text-xs);
+}
+
+.mc-pdf-icon-button { width: 26px; padding: 0; }
+.mc-pdf-scale { min-width: 76px; padding: 0 7px; }
+
+.mc-pdf-icon-button:hover:not(:disabled),
+.mc-pdf-scale:hover:not(:disabled) {
+  border-color: var(--border-subtle);
+  background: var(--surface-soft);
+  color: var(--text-primary);
+}
+
+.mc-pdf-icon-button:disabled,
+.mc-pdf-scale:disabled { cursor: not-allowed; opacity: 0.45; }
+
+.mc-pdf-page-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.mc-pdf-page-control input {
+  width: 30px;
+  height: 22px;
+  padding: 0 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-base);
+  color: var(--text-primary);
+  font: inherit;
+  text-align: center;
+}
+
+.mc-pdf-state {
+  display: grid;
+  min-height: 48px;
+  place-items: center;
+  gap: 7px;
+  padding: 12px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.mc-pdf-error { display: flex; justify-content: center; color: var(--state-danger); }
+
+.mc-pdf-viewer-viewport {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.mc-pdf-viewer-container {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  background: var(--surface-soft);
+}
+
+.mc-pdf-viewer-container[data-pdf-status="loading"] { visibility: hidden; }
+.mc-pdf-viewer-container .pdfViewer { min-height: 100%; padding: 16px 0 24px; }
+.mc-pdf-viewer-container .page {
+  margin: 0 auto 14px;
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-sm, 0 2px 8px rgba(0, 0, 0, 0.12));
+}

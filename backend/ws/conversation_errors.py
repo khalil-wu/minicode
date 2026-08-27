@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from backend.agent.message import AgentEvent
@@ -9,6 +10,8 @@ if TYPE_CHECKING:
 
 
 CONVERSATION_NOT_FOUND_ERROR_CODE = "conversation.not_found"
+
+logger = logging.getLogger(__name__)
 
 
 def conversation_not_found_event(conversation_id: str) -> AgentEvent:
@@ -36,8 +39,14 @@ async def emit_conversation_not_found(
 
     active_id = str(getattr(session, "active_conversation_id", "") or "").strip()
     if active_id and session.conversation_repo.get_conversation(active_id) is None:
-        session.active_conversation_id = None
-        clear_runtime = getattr(session, "_clear_workspace_runtime", None)
-        if callable(clear_runtime):
-            clear_runtime()
+        from backend.ws.handlers.conversation import _clear_active_conversation_runtime
+
+        try:
+            _clear_active_conversation_runtime(session)
+        except Exception:
+            logger.exception(
+                "Failed to clear runtime after conversation %s was not found",
+                active_id,
+            )
+            raise
     await session._send_conversation_list()

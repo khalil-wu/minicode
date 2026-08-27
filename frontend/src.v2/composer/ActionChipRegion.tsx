@@ -28,32 +28,32 @@ export const ContextChipRegion = () => {
           {item.kind === "file" ? (
             <button
               type="button"
-              aria-label={`Open ${item.name}`}
+              aria-label={`打开 ${item.name}`}
               onClick={() => openEditorFile(item.path, item.name)}
               style={mentionLabelButtonStyle}
             >
               {fileIcon(item.name || item.path || "file", { size: 12, className: "composer-context-icon-svg" })}
-              <span style={tokenNameStyle}>@{item.name}</span>
+              <span style={mentionNameStyle}>@{item.name}</span>
             </button>
           ) : item.kind === "browser_annotation" ? (
             <span style={mentionLabelStyle}>
               <MessageSquareText size={14} />
-              <span style={tokenNameStyle}>@{item.name}</span>
+              <span style={mentionNameStyle}>@{item.name}</span>
             </span>
           ) : item.kind === "plugin" ? (
             <span style={mentionLabelStyle}>
               <Blocks size={14} />
-              <span style={tokenNameStyle}>@{item.name}</span>
+              <span style={mentionNameStyle}>@{item.name}</span>
             </span>
           ) : (
             <span style={mentionLabelStyle}>
               <Folder size={14} />
-              <span style={tokenNameStyle}>@{item.name}</span>
+              <span style={mentionNameStyle}>@{item.name}</span>
             </span>
           )}
           <button
             type="button"
-            aria-label={`Remove ${item.name} from context`}
+            aria-label={`从上下文中移除 ${item.name}`}
             onClick={() => removeSelectedMention(item.path)}
             style={tokenRemoveStyle}
           >
@@ -75,10 +75,10 @@ export const ContextChipRegion = () => {
               }}
               style={searchTokenStyle}
             >
-              <span style={tokenNameStyle}>@{item.name}</span>
+              <span style={mentionNameStyle}>@{item.name}</span>
             </button>
           ))}
-          <button onClick={() => setMentionResults([])} aria-label="Clear context mentions" style={dismissStyle}>
+          <button type="button" onClick={() => setMentionResults([])} aria-label="清空上下文引用" style={dismissStyle}>
             <X size={14} />
           </button>
         </>
@@ -90,8 +90,9 @@ export const ContextChipRegion = () => {
             clearSelectedMentions();
           }}
           style={clearAllStyle}
+          aria-label="清空上下文引用"
         >
-          Clear
+          清空
         </button>
       )}
     </div>
@@ -116,7 +117,7 @@ const tokenStyle: React.CSSProperties = {
   padding: "0 7px",
   background: "color-mix(in oklch, var(--accent-primary) 12%, transparent)",
   border: "1px solid color-mix(in oklch, var(--accent-primary) 32%, transparent)",
-  borderRadius: "var(--radius-full)",
+  borderRadius: "var(--radius-sm, 6px)",
   fontSize: "var(--text-xs)",
   color: "var(--accent-primary)",
 };
@@ -132,7 +133,7 @@ const tokenButtonStyle: React.CSSProperties = {
   background: "color-mix(in oklch, var(--accent-primary) 10%, transparent)",
   color: "var(--accent-primary)",
   border: "1px solid color-mix(in oklch, var(--accent-primary) 28%, transparent)",
-  borderRadius: "var(--radius-full)",
+  borderRadius: "var(--radius-sm, 6px)",
   cursor: "pointer",
   fontSize: "var(--text-xs)",
 };
@@ -171,7 +172,13 @@ const tokenNameStyle: React.CSSProperties = {
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
   fontFamily: "var(--font-mono)",
-  fontWeight: 650,
+  fontWeight: "var(--fw-semibold)",
+};
+
+const mentionNameStyle: React.CSSProperties = {
+  ...tokenNameStyle,
+  fontFamily: "var(--font-ui)",
+  fontWeight: "var(--fw-semibold)",
 };
 
 const tokenDetailStyle: React.CSSProperties = {

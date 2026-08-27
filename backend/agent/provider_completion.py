@@ -6,15 +6,17 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from backend.agent.cache_metrics import args_signature, cache_metric_event
+from backend.agent.cache_metrics import (
+    args_signature,
+    cache_metric_event,
+    prompt_cache_saved_ms,
+)
 from backend.agent.message import AgentEvent
 from backend.agent.prompt_cache import observe_prompt_cache_break
 from backend.agent.provider_protocol import (
     loop_metrics_payload,
     merge_prompt_cache_safe_request_summary,
-    provider_stateful_history_effective,
     provider_trace_payload,
-    set_context_stateful_history_preference,
 )
 from backend.agent.stream_attempt import StreamAttemptState
 from backend.llm.base import StreamEvent, UsageInfo
@@ -28,7 +30,6 @@ class ProviderCompletionResult:
     usage: UsageInfo
     finish_reason: str
     response_phase: str
-    prefer_stateful_history: bool
     events: tuple[AgentEvent, ...]
 
 
@@ -40,7 +41,6 @@ class ProviderCompletionCoordinator:
         *,
         settings: Any,
         state: Any,
-        context_builder: Any,
         turn_kernel: Any,
         prompt_cache_tracking_source: str,
         turn_started_at: float,
@@ -48,7 +48,6 @@ class ProviderCompletionCoordinator:
     ) -> None:
         self.settings = settings
         self.state = state
-        self.context_builder = context_builder
         self.turn_kernel = turn_kernel
         self.prompt_cache_tracking_source = prompt_cache_tracking_source
         self.turn_started_at = turn_started_at
@@ -64,7 +63,6 @@ class ProviderCompletionCoordinator:
         iteration_id: str,
         iteration_limit: int,
         tool_batch_count: int,
-        prefer_stateful_history: bool,
     ) -> ProviderCompletionResult:
         stream_state.accept_provider_event(event)
         usage = stream_state.usage
@@ -114,19 +112,12 @@ class ProviderCompletionCoordinator:
                     turn_id=iteration_id,
                     args_signature_value=args_signature(raw_done.get("request_summary") or {}),
                     hit=cache_read_tokens > 0,
-                    estimated_saved_ms=300 if cache_read_tokens > 0 else 0,
+                    estimated_saved_ms=prompt_cache_saved_ms(cache_read_tokens),
                     payload_size_bytes=(cache_read_tokens + cache_creation_tokens) * 4,
                 )
             )
 
         call_index, trace_id = self.turn_kernel.commit_provider_call(iteration_id)
-        stateful_effective = provider_stateful_history_effective(raw_done)
-        if stateful_effective is not None and stateful_effective != prefer_stateful_history:
-            prefer_stateful_history = stateful_effective
-            set_context_stateful_history_preference(
-                self.context_builder,
-                prefer_stateful_history,
-            )
         raw_done.setdefault("trace_id", trace_id)
         events.append(
             AgentEvent.inspector_update(
@@ -156,6 +147,5 @@ class ProviderCompletionCoordinator:
             usage=usage,
             finish_reason=finish_reason,
             response_phase=stream_state.response_phase,
-            prefer_stateful_history=prefer_stateful_history,
             events=tuple(events),
         )

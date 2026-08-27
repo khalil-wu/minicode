@@ -1,8 +1,13 @@
+import {
+  fetchWithTimeout,
+  type FetchTimeoutOptions,
+} from "../protocol/api";
+
 type RetryOptions = {
   attempts?: number;
   delaysMs?: number[];
   cacheKey?: string;
-};
+} & FetchTimeoutOptions;
 
 const DEFAULT_STARTUP_RETRY_DELAYS_MS = [250, 700, 1400];
 const inFlightLoads = new Map<string, Promise<unknown>>();
@@ -57,7 +62,7 @@ const fetchJsonWithStartupRetryInner = async <T,>(
 
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
-      const res = await fetch(url, init);
+      const res = await fetchWithTimeout(url, init, options);
       if (!res.ok) throw new Error(await res.text().catch(() => res.statusText));
       return await res.json() as T;
     } catch (error) {

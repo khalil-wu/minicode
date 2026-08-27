@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from backend.llm.base import LLMMessage
@@ -13,36 +14,44 @@ class CompactionOutput:
 
 
 def format_compaction_history(messages: list[LLMMessage]) -> str:
-    """Format conversation history for LLM-based compaction.
-
-    Pi serializes selected conversation entries and caps tool output at 2,000
-    characters before asking the model for a summary.
-    """
+    """Serialize selected history into MiniCode's compaction transcript format."""
     tool_cap = 2_000
     parts: list[str] = []
     for message in messages:
         if message.role == "user":
-            parts.append(f"User: {message.content or ''}")
+            content = str(message.content or "")
+            if content:
+                parts.append(f"[User]: {content}")
         elif message.role == "assistant":
-            if message.content:
-                parts.append(f"Assistant: {message.content}")
+            content = str(message.content or "")
+            if content:
+                parts.append(f"[Assistant]: {content}")
             if message.tool_calls:
-                calls = [
-                    {
-                        "name": call.name,
-                        "id": call.id,
-                        "arguments": call.arguments,
-                    }
-                    for call in message.tool_calls
-                ]
-                parts.append(f"[Assistant tool calls] {calls}")
+                calls: list[str] = []
+                for call in message.tool_calls:
+                    args = ", ".join(
+                        f"{key}={json.dumps(value, ensure_ascii=False, separators=(',', ':'))}"
+                        for key, value in call.arguments.items()
+                    )
+                    calls.append(f"{call.name}({args})")
+                parts.append(f"[Assistant tool calls]: {'; '.join(calls)}")
         elif message.role == "tool":
-            content = message.content or ""
+            content = str(message.content or "")
             if len(content) > tool_cap:
-                content = f"{content[:tool_cap]}... [truncated from {len(content)} chars]"
-            parts.append(f"Tool({message.name}): {content}")
-    return "\n".join(parts)
+                truncated_chars = len(content) - tool_cap
+                content = (
+                    f"{content[:tool_cap]}\n\n"
+                    f"[... {truncated_chars} more characters truncated]"
+                )
+            if content:
+                parts.append(f"[Tool result]: {content}")
+    return "\n\n".join(parts)
 
 
-def parse_compaction_output(output: str) -> CompactionOutput:
-    return CompactionOutput(summary=str(output or "").strip())
+def parse_compaction_output(
+    output: str,
+) -> CompactionOutput:
+    summary = str(output or "").strip()
+    if not summary:
+        raise ValueError("Compaction output is empty")
+    return CompactionOutput(summary=summary)

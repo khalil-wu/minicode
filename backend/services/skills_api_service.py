@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable
 
 from backend.skills.marketplace import (
+    import_local_skill,
     install_marketplace_skill,
     remove_user_skill,
 )
@@ -60,6 +61,11 @@ async def install_skill_from_marketplace(skill_name: str, *, skill_manager: Any 
 
 def remove_skill(skill_name: str, *, skill_manager: Any | None) -> dict[str, Any]:
     result = remove_user_skill(skill_name)
+    return {**result, "skills": refresh_skill_list(skill_manager)}
+
+
+def import_skill(source_path: str, *, skill_manager: Any | None) -> dict[str, Any]:
+    result = import_local_skill(source_path)
     return {**result, "skills": refresh_skill_list(skill_manager)}
 
 

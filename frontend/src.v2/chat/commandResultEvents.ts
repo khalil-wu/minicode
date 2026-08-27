@@ -68,6 +68,15 @@ const surfaceCommandResult = (ev: CommandResultEvent) => {
   });
 };
 
+const isUserInvokedCommandResult = (command: string): boolean => {
+  const normalized = String(command || "").trim();
+  // Slash/plugin commands use their user-facing name (for example "usage"
+  // or "agent-ui"). Dotted names are control-plane operations owned by a
+  // settings panel, menu, or other caller and must never be written into the
+  // conversation process area.
+  return Boolean(normalized) && !normalized.includes(".");
+};
+
 const commandResultTargetsActiveConversation = (conversationId?: string): boolean => {
   if (!conversationId) return true;
   return useAppStore.getState().conversationId === conversationId;
@@ -75,9 +84,12 @@ const commandResultTargetsActiveConversation = (conversationId?: string): boolea
 
 const RIGHT_STACK_TABS = new Set<RightStackTab>([
   "preview",
+  "browser",
   "tasks",
+  "diff",
   "plan",
   "subagents",
+  "artifacts",
   "inspector",
   "diagnostics",
 ]);
@@ -100,18 +112,31 @@ const PANEL_KINDS = new Set<PanelKind>([
   "plan",
   "tasks",
   "subagents",
+  "artifacts",
   "inspector",
 ]);
 
-const SETTINGS_TABS = new Set([
-  "general",
-  "provider",
-  "connectors",
-  "scheduler",
-  "features",
-  "plugins",
-  "advanced",
-  "diagnostics",
+const SETTINGS_TABS = new Map<string, Parameters<typeof openSettings>[0]>([
+  ["general", "general"],
+  ["appearance", "appearance"],
+  ["personalization", "personalization"],
+  ["shortcuts", "shortcuts"],
+  ["keyboard", "shortcuts"],
+  ["provider", "provider"],
+  ["model", "provider"],
+  ["plugins", "plugins"],
+  ["skills", "skills"],
+  ["connectors", "connectors"],
+  ["mcp", "connectors"],
+  ["browser", "browser"],
+  ["scheduler", "scheduler"],
+  ["automations", "scheduler"],
+  ["workspacegit", "workspaceGit"],
+  ["workspace-git", "workspaceGit"],
+  ["git", "workspaceGit"],
+  ["features", "features"],
+  ["advanced", "advanced"],
+  ["archived", "archived"],
 ]);
 
 const splitUiAction = (action: string): [string, string] => {
@@ -160,7 +185,7 @@ const handleUiAction = (
 
   if (action === "open_settings") {
     const tab = (suffix || String(data?.tab || "").trim().toLowerCase());
-    openSettings(SETTINGS_TABS.has(tab) ? tab as Parameters<typeof openSettings>[0] : undefined);
+    openSettings(SETTINGS_TABS.get(tab));
     return true;
   }
 
@@ -231,6 +256,14 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
     };
   };
 
+  // Resolve the owning operation before doing any generic presentation. A
+  // settings page waiting on this result owns its inline state/toast; surfacing
+  // the same MCP/plugin/scheduler result as agent progress mixes control-plane
+  // UI into the conversation and produces duplicate feedback.
+  const consumedByCaller = "resolveClientCommandResult" in wsOutbox
+    ? wsOutbox.resolveClientCommandResult(ev)
+    : false;
+
   if (
     ev.command === "usage" &&
     ev.data?.budget?.used != null &&
@@ -256,27 +289,47 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
 
   handleUiAction(ev.data);
 
+  if (ev.command === "send_message" && typeof ev.data?.message_id === "string") {
+    const messageId = ev.data.message_id;
+    const recipient = typeof ev.data.recipient === "string" ? ev.data.recipient : "";
+    const deliveryStatus = commandResultStatus(ev.level) === "failed" ? "failed" : "sent";
+    const state = useAppStore.getState();
+    const target = state.subagents.find((subagent) =>
+      (recipient && subagent.id === recipient)
+      || subagent.messages?.some((message) => message.messageId === messageId)
+    );
+    if (target) {
+      state.updateSubagent(target.id, {
+        messages: (target.messages ?? []).map((message) =>
+          message.messageId === messageId ? { ...message, deliveryStatus } : message,
+        ),
+      }, state.conversationId ?? undefined);
+    }
+  }
+
   if (
     ev.command === "conversation.export" &&
     typeof ev.data?.content === "string" &&
     typeof ev.data?.filename === "string"
   ) {
     if (!downloadConversationExport(ev.data.filename, ev.data.content, ev.data.mime_type)) {
-      pushToast("Export is ready, but this environment cannot start a download.", "error", 5000);
+    pushToast("导出文件已生成，但当前环境无法开始下载。", "error", 5000);
     }
   }
 
-  surfaceCommandResult(ev);
+  if (!consumedByCaller && isUserInvokedCommandResult(ev.command)) {
+    surfaceCommandResult(ev);
+  }
 
   if (ev.command === "conversation.worktree.cleanup") {
     if (ev.data?.needs_force && ev.data.conversation_id) {
       const convId = ev.data.conversation_id;
-      const msg = ev.message || ev.data.error || "Worktree has local changes.";
+    const msg = ev.message || ev.data.error || "Worktree 中存在本地更改。";
       import("../overlays/DialogService").then(({ showConfirm }) =>
         showConfirm({
-          title: "Worktree cleanup",
+      title: "清理 Worktree",
           message: `${msg}\n\nForce cleanup and discard local changes?`,
-          confirmLabel: "Force cleanup",
+      confirmLabel: "强制清理",
           danger: true,
         }).then((ok) => {
           if (ok) {
@@ -334,14 +387,14 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
     if (ev.data?.allowed && conversationId && fingerprint) {
       const warnings = checks.filter((check) => check.severity === "warning").map((check) => check.message).filter(Boolean);
       import("../overlays/DialogService").then(({ showConfirm }) => showConfirm({
-        title: target === "local" ? "Move task to local checkout?" : "Move task to protected workspace?",
+      title: target === "local" ? "将任务移到本地检出？" : "将任务移到受保护工作区？",
         message: [
           target === "local"
-            ? "MiniCode will remove the clean protected workspace and switch the local checkout to this task branch."
-            : "MiniCode will create a clean isolated worktree for this task.",
+        ? "MiniCode 将移除干净的受保护工作区，并把本地检出切换到此任务分支。"
+        : "MiniCode 将为此任务创建干净、隔离的 Worktree。",
           ...warnings,
         ].join("\n\n"),
-        confirmLabel: "Move task",
+      confirmLabel: "移动任务",
       }).then((ok) => {
         if (ok) wsOutbox.sendClientCommand({
           type: "conversation.worktree.handoff.execute",
@@ -370,11 +423,5 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
     }));
   }
 
-  // Older embedded/test outboxes may expose only sendClientCommand. The
-  // durable result resolver is optional at this boundary; never make a
-  // transient UI projection fail merely because that adapter is absent.
-  if ("resolveClientCommandResult" in wsOutbox) {
-    wsOutbox.resolveClientCommandResult(ev);
-  }
   return true;
 };

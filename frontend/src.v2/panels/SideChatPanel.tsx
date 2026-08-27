@@ -1,14 +1,21 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAppStore } from "../stores";
-import { getWebSocket } from "../hooks/useWebSocket";
 import { sendChatMessage } from "../chat/sendChatMessage";
 import { MarkdownRenderer } from "../chat/messages/MarkdownRenderer";
 import { ToolCallCard } from "../chat/tool-calls/ToolCallCard";
 import { StreamingCursor } from "../chat/messages/StreamingCursor";
 import { getToolCallsFromMessage } from "../lib/content-blocks";
 import { toBackendPermissionMode } from "../protocol/permissions";
-import { sendConversationDeleteCommand } from "../protocol/ws-outbox";
+import {
+  commandResultSucceeded,
+  sendClientCommand,
+  sendClientCommandAwaitResult,
+  sendConversationDeleteCommand,
+} from "../protocol/ws-outbox";
+import { pushToast } from "../overlays/ToastContainer";
 import { uniqueMessageId } from "../stores/shared-helpers";
+import { buildInterruptCommand } from "../lib/interrupt-command";
+import { releasePreviewScope } from "../chat/previewRequestScope";
 
 const newSideChatId = (): string =>
   `side-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
@@ -19,6 +26,8 @@ export const SideChatPanel = () => {
   const removeSideChat = useAppStore((s) => s.removeSideChat);
   const setDraft = useAppStore((s) => s.setSideChatDraft);
   const startMessage = useAppStore((s) => s.startSideChatMessage);
+  const isConnected = useAppStore((s) => s.isConnected);
+  const workingDirectory = useAppStore((s) => s.workingDirectory);
 
   const idRef = useRef<string>("");
   if (!idRef.current) {
@@ -26,26 +35,62 @@ export const SideChatPanel = () => {
   }
   const id = idRef.current;
   const thread = sideChats[id];
+  const createdOnServerRef = useRef(false);
+  const deleteRequestedRef = useRef(false);
+  const createInFlightRef = useRef<Promise<void> | null>(null);
+  const mountedRef = useRef(true);
+  const [serverReady, setServerReady] = useState(false);
+
+  const cleanupServerConversation = () => {
+    if (!createdOnServerRef.current || deleteRequestedRef.current) return;
+    deleteRequestedRef.current = true;
+    void sendConversationDeleteCommand({
+      type: "conversation.delete",
+      conversation_id: id,
+    });
+  };
 
   useEffect(() => {
+    mountedRef.current = true;
     ensureSideChat(id);
-    const ws = getWebSocket();
-    ws?.send({
-      type: "conversation.create",
-      conversation_id: id,
-      title: "Side chat",
-      side_chat: true,
-      permission_mode: toBackendPermissionMode(useAppStore.getState().permissionMode),
-    });
     return () => {
-      void sendConversationDeleteCommand({
-        type: "conversation.delete",
-        conversation_id: id,
-      });
+      mountedRef.current = false;
+      cleanupServerConversation();
+      releasePreviewScope(id);
       removeSideChat(id);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  useEffect(() => {
+    if (!isConnected || createdOnServerRef.current || createInFlightRef.current) return;
+    const create = async () => {
+      try {
+        const result = await sendClientCommandAwaitResult({
+          type: "conversation.create",
+          conversation_id: id,
+          title: "侧边对话",
+          conversation_type: "side_chat",
+          permission_mode: toBackendPermissionMode(useAppStore.getState().permissionMode),
+        }, "conversation.create");
+        if (!commandResultSucceeded(result)) {
+          if (mountedRef.current) pushToast(result.message || "无法创建侧边对话。", "error", 4000);
+          return;
+        }
+        createdOnServerRef.current = true;
+        if (mountedRef.current) {
+          setServerReady(true);
+        } else {
+          cleanupServerConversation();
+        }
+      } catch {
+        // The command transport already reports offline/timeout failures.
+      } finally {
+        createInFlightRef.current = null;
+      }
+    };
+    createInFlightRef.current = create();
+  }, [id, isConnected]);
 
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -59,7 +104,7 @@ export const SideChatPanel = () => {
 
   const submit = () => {
     const content = (thread?.draft ?? "").trim();
-    if (!content || !thread || thread.isStreaming) return;
+    if (!content || !thread || thread.isStreaming || !isConnected || !serverReady) return;
     const selectedPrefix = thread.messages.length === 0 && thread.selectedContext?.text
       ? `Selected context${thread.selectedContext.source ? ` (${thread.selectedContext.source})` : ""}:\n\n${thread.selectedContext.text}\n\n`
       : "";
@@ -81,13 +126,12 @@ export const SideChatPanel = () => {
   };
 
   const stop = () => {
-    const ws = getWebSocket();
-    ws?.send({ type: "interrupt", conversation_id: id });
+    sendClientCommand(buildInterruptCommand(useAppStore.getState(), id));
   };
 
   const sendDisabled = useMemo(
-    () => !thread || thread.isStreaming || !(thread?.draft ?? "").trim(),
-    [thread],
+    () => !thread || thread.isStreaming || !isConnected || !serverReady || !(thread?.draft ?? "").trim(),
+    [isConnected, serverReady, thread],
   );
 
   if (!thread) return null;
@@ -104,14 +148,14 @@ export const SideChatPanel = () => {
         }}
       >
         <span className="flex-1">
-          {thread.selectedContext ? "Ask about selection" : "Side chat"}
+          {thread.selectedContext ? "询问所选内容" : "侧边对话"}
         </span>
         <span
           style={{
             color: thread.isStreaming ? "var(--state-info)" : "var(--text-muted)",
           }}
         >
-          {thread.isStreaming ? "streaming..." : "idle"}
+          {thread.isStreaming ? "生成中..." : "空闲"}
         </span>
       </div>
 
@@ -127,7 +171,7 @@ export const SideChatPanel = () => {
               fontSize: "var(--text-sm)",
             }}
           >
-            This side chat stays separate from the main conversation.
+            侧边对话与主会话相互独立。
             {thread.selectedContext && (
               <div
                 className="mt-2.5 p-2.5 text-left whitespace-pre-wrap max-h-40 overflow-auto"
@@ -181,7 +225,7 @@ export const SideChatPanel = () => {
                 {getToolCallsFromMessage(m).length > 0 && (
                   <div className="flex flex-col gap-1">
                     {getToolCallsFromMessage(m).map((tc) => (
-                      <ToolCallCard key={tc.id} record={tc} />
+                      <ToolCallCard key={tc.id} record={tc} workspaceDirectory={workingDirectory} />
                     ))}
                   </div>
                 )}
@@ -190,7 +234,7 @@ export const SideChatPanel = () => {
                     style={{
                       color: "var(--text-primary)",
                       fontSize: "var(--text-sm)",
-                      lineHeight: "var(--leading-md, 1.55)",
+                      lineHeight: "var(--leading-normal)",
                     }}
                   >
                     {m.content && <MarkdownRenderer content={m.content} />}
@@ -220,7 +264,8 @@ export const SideChatPanel = () => {
               submit();
             }
           }}
-          placeholder="Side-chat message..."
+          placeholder="输入侧边对话消息..."
+          aria-label="侧边对话消息"
           rows={2}
           className="px-2 py-1.5 resize-none outline-none"
           style={{
@@ -235,6 +280,7 @@ export const SideChatPanel = () => {
         <div className="flex justify-end gap-1.5">
           {thread.isStreaming && (
             <button
+              type="button"
               onClick={stop}
               className="border-0 px-2.5 py-1 cursor-pointer font-semibold"
               style={{
@@ -244,10 +290,11 @@ export const SideChatPanel = () => {
                 fontSize: "var(--text-xs)",
               }}
             >
-              Stop
+              停止
             </button>
           )}
           <button
+            type="button"
             onClick={submit}
             disabled={sendDisabled}
             className="border-0 px-3 py-1 font-semibold"
@@ -261,7 +308,7 @@ export const SideChatPanel = () => {
               fontSize: "var(--text-xs)",
             }}
           >
-            Send
+            发送
           </button>
         </div>
       </div>

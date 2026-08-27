@@ -77,6 +77,8 @@ export interface PreviewLaunchProcessInfo extends PreviewLaunchConfigInfo {
 
 interface PreviewOwnedEvent {
   conversation_id: string;
+  workspace_root: string;
+  request_id?: string;
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -105,11 +107,11 @@ export interface PreviewNavigatedEvent extends PreviewOwnedEvent {
 export interface PreviewRefreshedEvent extends PreviewOwnedEvent {
   type: "preview.refreshed";
   url?: string;
+  path?: string;
 }
 
 export interface PreviewLaunchConfigEvent extends PreviewOwnedEvent {
   type: "preview.launch.config";
-  workspace_root?: string;
   configs: PreviewLaunchConfigInfo[];
   running?: PreviewLaunchProcessInfo[];
 }
@@ -162,37 +164,43 @@ export interface PreviewVerifiedEvent extends PreviewOwnedEvent {
 // Client command payloads (preview domain)
 // ──────────────────────────────────────────────────────────────────
 
-export interface PreviewDetectCommand {
+interface PreviewOwnedCommand {
+  conversation_id?: string;
+  workspace_root?: string;
+  request_id?: string;
+}
+
+export interface PreviewDetectCommand extends PreviewOwnedCommand {
   type: "preview.detect";
 }
 
-export interface PreviewNavigateCommand {
+export interface PreviewNavigateCommand extends PreviewOwnedCommand {
   type: "preview.navigate";
   url: string;
 }
 
-export interface PreviewRefreshCommand {
+export interface PreviewRefreshCommand extends PreviewOwnedCommand {
   type: "preview.refresh";
   url?: string;
 }
 
-export interface PreviewLaunchConfigCommand {
+export interface PreviewLaunchConfigCommand extends PreviewOwnedCommand {
   type: "preview.launch.config";
   workspace_root?: string;
 }
 
-export interface PreviewLaunchStartCommand {
+export interface PreviewLaunchStartCommand extends PreviewOwnedCommand {
   type: "preview.launch.start";
   name?: string;
   workspace_root?: string;
 }
 
-export interface PreviewLaunchStopCommand {
+export interface PreviewLaunchStopCommand extends PreviewOwnedCommand {
   type: "preview.launch.stop";
   name?: string;
 }
 
-export interface PreviewVerifyCommand {
+export interface PreviewVerifyCommand extends PreviewOwnedCommand {
   type: "preview.verify";
   url: string;
 }

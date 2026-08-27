@@ -1,4 +1,4 @@
-import React, { useLayoutEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   Archive,
@@ -8,16 +8,15 @@ import {
   FolderOpen,
   GitBranch,
   GitMerge,
-  LogIn,
+  Pencil,
   RotateCcw,
-  Trash2,
   XCircle,
 } from "lucide-react";
 
 // ── Small shared components ────────────────────────────────────────────
 
 export const SectionTitle = ({ label }: { label: string }) => (
-  <div style={{ color: "var(--text-secondary)", fontSize: "var(--text-sm)", fontWeight: 650 }}>
+  <div style={{ color: "var(--text-secondary)", fontSize: "var(--text-sm)", fontWeight: "var(--fw-semibold)" }}>
     {label}
   </div>
 );
@@ -29,6 +28,7 @@ export const IconAction = ({
   buttonRef,
   expanded,
   controls,
+  disabled,
 }: {
   children: React.ReactNode;
   label: string;
@@ -36,6 +36,7 @@ export const IconAction = ({
   buttonRef?: React.Ref<HTMLButtonElement>;
   expanded?: boolean;
   controls?: string;
+  disabled?: boolean;
 }) => (
   <button
     ref={buttonRef}
@@ -46,6 +47,7 @@ export const IconAction = ({
     aria-haspopup="menu"
     aria-expanded={expanded}
     aria-controls={controls}
+    disabled={disabled}
     className="btn-ghost mc-icon-button mc-icon-button-compact"
   >
     {children}
@@ -87,7 +89,7 @@ export const MenuItem = ({
       cursor: disabled ? "not-allowed" : "pointer",
       fontSize: "var(--text-xs)",
       fontFamily: "var(--font-ui)",
-      fontWeight: 500,
+      fontWeight: "var(--fw-medium)",
       lineHeight: 1.45,
       textAlign: "left",
       opacity: disabled ? 0.55 : 1,
@@ -108,12 +110,10 @@ export const ConversationMenu = ({
   menuId,
   archived,
   isIsolated,
-  canDelete,
   canReveal,
   canCopy,
-  canSwitch = true,
   canMerge = false,
-  onSwitch,
+  onRename,
   onReveal,
   onCopy,
   onCleanup,
@@ -122,18 +122,16 @@ export const ConversationMenu = ({
   onClone,
   onMerge,
   onExport,
-  onDelete,
+  onClose,
 }: {
   anchor: HTMLElement | null;
   menuId: string;
   archived: boolean;
   isIsolated: boolean;
-  canDelete: boolean;
   canReveal: boolean;
   canCopy: boolean;
-  canSwitch?: boolean;
   canMerge?: boolean;
-  onSwitch: () => void;
+  onRename: () => void;
   onReveal: () => void;
   onCopy: () => void;
   onCleanup: () => void;
@@ -142,7 +140,7 @@ export const ConversationMenu = ({
   onClone: () => void;
   onMerge: () => void;
   onExport: () => void;
-  onDelete: () => void;
+  onClose: () => void;
 }) => {
   const menuRef = useRef<HTMLDivElement | null>(null);
   const [position, setPosition] = useState<{
@@ -200,13 +198,52 @@ export const ConversationMenu = ({
       window.removeEventListener("scroll", placeMenu, true);
       observer?.disconnect();
     };
-  }, [anchor, archived, canCopy, canDelete, canMerge, canReveal, canSwitch, isIsolated]);
+  }, [anchor, archived, canCopy, canMerge, canReveal, isIsolated]);
+
+  useEffect(() => {
+    const menu = menuRef.current;
+    if (!menu || !position) return;
+    const items = () => Array.from(menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'));
+    items()[0]?.focus();
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node) || menu.contains(target) || anchor?.contains(target)) return;
+      onClose();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      const available = items();
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+        anchor?.focus();
+        return;
+      }
+      if (!available.length) return;
+      const current = Math.max(0, available.indexOf(document.activeElement as HTMLButtonElement));
+      let next: number | null = null;
+      if (event.key === "ArrowDown") next = (current + 1) % available.length;
+      else if (event.key === "ArrowUp") next = (current - 1 + available.length) % available.length;
+      else if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = available.length - 1;
+      if (next == null) return;
+      event.preventDefault();
+      available[next]?.focus();
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    menu.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      menu.removeEventListener("keydown", onKeyDown);
+    };
+  }, [anchor, onClose, position]);
 
   if (typeof document === "undefined") return null;
   return createPortal(
     <div
       ref={menuRef}
       id={menuId}
+      className="mc-conversation-menu"
       role="menu"
       aria-label="会话操作"
       onClick={(e) => e.stopPropagation()}
@@ -214,7 +251,7 @@ export const ConversationMenu = ({
         position: "fixed",
         left: position?.left ?? 0,
         top: position?.top ?? 0,
-        zIndex: 1100,
+        zIndex: "var(--z-toast)",
         width: position?.width ?? 236,
         maxWidth: "calc(100vw - 16px)",
         maxHeight: position?.maxHeight ?? "calc(100vh - 16px)",
@@ -227,7 +264,7 @@ export const ConversationMenu = ({
         boxShadow: "var(--shadow-strong, var(--shadow-md))",
       }}
     >
-      {canSwitch && <MenuItem icon={<LogIn size={14} />} label="切换会话" onClick={onSwitch} />}
+      <MenuItem icon={<Pencil size={14} />} label="重命名" onClick={onRename} />
       <MenuItem icon={<CopyPlus size={14} />} label="克隆会话" onClick={onClone} />
       {canMerge && <MenuItem icon={<GitMerge size={14} />} label="合并到父会话" onClick={onMerge} />}
       <MenuItem icon={<Download size={14} />} label="导出会话树" onClick={onExport} />
@@ -247,7 +284,6 @@ export const ConversationMenu = ({
         label={archived ? "取消归档" : "归档"}
         onClick={onArchive}
       />
-      {canDelete && <MenuItem danger icon={<Trash2 size={14} />} label="删除" onClick={onDelete} />}
     </div>,
     document.body,
   );
@@ -269,14 +305,26 @@ export const ConfirmDialog = ({
   dialog: NonNullable<ConfirmDialogState>;
   onCancel: () => void;
   onConfirm: () => void;
-}) => (
+}) => {
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    cancelRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onCancel();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onCancel]);
+  return (
   <div
     role="presentation"
     onClick={onCancel}
     style={{
       position: "fixed",
       inset: 0,
-      zIndex: 1200,
+      zIndex: "var(--z-dialog)",
       display: "grid",
       placeItems: "center",
       background: "var(--backdrop-strong)",
@@ -297,15 +345,15 @@ export const ConfirmDialog = ({
         padding: 14,
       }}
     >
-      <div style={{ fontSize: "var(--text-md)", color: "var(--text-primary)", fontWeight: 700 }}>
+      <div style={{ fontSize: "var(--text-md)", color: "var(--text-primary)", fontWeight: "var(--fw-bold)" }}>
         {dialog.title}
       </div>
       <div style={{ marginTop: 8, color: "var(--text-secondary)", fontSize: "var(--text-sm)", lineHeight: 1.45 }}>
         {dialog.message}
       </div>
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
-        <button type="button" onClick={onCancel} style={dialogCancelStyle}>
-          Cancel
+        <button ref={cancelRef} type="button" onClick={onCancel} style={dialogCancelStyle}>
+          取消
         </button>
         <button
           type="button"
@@ -320,7 +368,8 @@ export const ConfirmDialog = ({
       </div>
     </div>
   </div>
-);
+  );
+};
 
 // ── Dialog styles (kept local - only used here) ────────────────────────
 
@@ -341,5 +390,5 @@ const dialogConfirmStyle: React.CSSProperties = {
   padding: "6px 10px",
   cursor: "pointer",
   fontSize: "var(--text-xs)",
-  fontWeight: 700,
+  fontWeight: "var(--fw-bold)",
 };

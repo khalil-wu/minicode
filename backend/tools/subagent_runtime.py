@@ -13,6 +13,17 @@ def runtime_from_context(context: ToolExecutionContext | None) -> AgentRuntime |
     return runtime if isinstance(runtime, AgentRuntime) else None
 
 
+def require_runtime_from_context(
+    context: ToolExecutionContext | None,
+) -> AgentRuntime:
+    runtime = runtime_from_context(context)
+    if runtime is None:
+        raise RuntimeError(
+            "Tool execution context does not own an AgentRuntime"
+        )
+    return runtime
+
+
 def metadata_from_context(context: ToolExecutionContext | None) -> dict[str, Any]:
     if context is None or not isinstance(context.metadata, dict):
         return {}

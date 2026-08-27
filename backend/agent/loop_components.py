@@ -21,19 +21,17 @@ from backend.agent.loop_session import (
     mcp_registry_version,
     populate_prompt_context,
 )
-from backend.agent.message import AgentEvent
 from backend.agent.provider_completion import ProviderCompletionCoordinator
 from backend.agent.provider_protocol import (
     build_llm_request_metadata,
     prompt_cache_tracking_source,
-    provider_stateful_history_preferred,
-    set_context_stateful_history_preference,
+    usage_terminal_projection,
 )
 from backend.agent.response_utils import append_assistant_history
 from backend.agent.tool_schema_derivation import (
     TurnToolSchemaDerivation,
     derive_turn_tool_schema_state,
-    workspace_bound_tool_names,
+    effective_toolset_policy,
 )
 from backend.agent.turn_budget import TurnBudgetController
 from backend.agent.turn_budget_runtime import TurnBudgetRuntime
@@ -42,6 +40,12 @@ from backend.agent.turn_kernel import _set_terminal_reason
 from backend.llm.base import UsageInfo
 from backend.permissions.checker import PermissionChecker
 from backend.tools.registry import ToolRegistry
+from backend.tools.toolsets import (
+    ACTIVE_TOOLSET_POLICY_METADATA_KEY,
+    SESSION_TOOLSET_POLICY_METADATA_KEY,
+    ToolsetPolicy,
+)
+from backend.tools.toolset_runtime import restore_toolset_policy
 
 
 @dataclass(slots=True)
@@ -54,7 +58,6 @@ class AgentLoopComponents:
     budget_runtime: TurnBudgetRuntime
     answer_committer: AnswerCommitter
     llm_request_metadata: dict[str, Any]
-    prefer_stateful_history: bool
     provider_completion: ProviderCompletionCoordinator
 
 
@@ -64,8 +67,9 @@ def build_agent_loop_components(
     tool_registry: ToolRegistry,
     permission_checker: PermissionChecker,
     usage: Callable[[], UsageInfo],
+    skill_manager: Any | None = None,
 ) -> AgentLoopComponents:
-    """Build the dependency graph after preflight and skill activation."""
+    """Build the dependency graph after preflight."""
 
     state = bootstrap.state
     context = bootstrap.context
@@ -87,29 +91,74 @@ def build_agent_loop_components(
         if hook_result.has_additional_context:
             pending_turn_context.append(hook_result.additional_context)
 
-    active_toolset_policy = active_toolset_policy_for_context(
+    configured_session_policy: ToolsetPolicy | None = None
+    if SESSION_TOOLSET_POLICY_METADATA_KEY in metadata:
+        configured_session_policy = restore_toolset_policy(
+            metadata[SESSION_TOOLSET_POLICY_METADATA_KEY],
+            label="session toolset policy",
+        )
+    elif ACTIVE_TOOLSET_POLICY_METADATA_KEY in metadata:
+        # Older sessions only persisted the turn-effective policy. It is a safe,
+        # narrower first-turn ceiling; new sessions immediately split the keys.
+        configured_session_policy = restore_toolset_policy(
+            metadata[ACTIVE_TOOLSET_POLICY_METADATA_KEY],
+            label="legacy active toolset policy",
+        )
+    if configured_session_policy is not None:
+        metadata[SESSION_TOOLSET_POLICY_METADATA_KEY] = configured_session_policy
+
+    def current_session_toolset_policy() -> ToolsetPolicy | None:
+        owner = bootstrap.agent_session
+        active_names = getattr(owner, "active_tool_names", None)
+        if active_names is not None:
+            # Pi's active-tool list is a per-session selection, not a new
+            # capability grant.  Intersect it with the durable ceiling so a
+            # UI/extension update cannot erase parent denies, child profiles,
+            # or availability filters.  Keep the immutable ceiling in its own
+            # metadata slot; only the turn-effective policy is published as
+            # ``ACTIVE_TOOLSET_POLICY_METADATA_KEY`` below.
+            ceiling = configured_session_policy or ToolsetPolicy.default()
+            policy = ceiling.with_active_tool_selection(active_names)
+            # Delegation/resume must inherit the current session selection, not
+            # fall back to the root default.  The closure retains ``ceiling``
+            # separately so a later additive setActiveTools update in this
+            # turn can still select another tool the parent was allowed to use.
+            metadata[SESSION_TOOLSET_POLICY_METADATA_KEY] = policy
+            # Tool execution and delegated child sessions receive the
+            # bootstrap context's metadata object, while the loop's public
+            # metadata may be a separate transport projection. Keep the
+            # durable session selection on the execution context as well so
+            # child creation cannot mistake a transient turn policy for its
+            # inherited ceiling.
+            tool_context.metadata[SESSION_TOOLSET_POLICY_METADATA_KEY] = policy
+            return policy
+        return configured_session_policy
+
+    session_toolset_policy = current_session_toolset_policy()
+    base_toolset_policy = active_toolset_policy_for_context(
         permission_context=tool_context.permission,
+        session_policy=session_toolset_policy,
+        metadata=metadata,
     )
+    active_toolset_policy = effective_toolset_policy(
+        base_policy=base_toolset_policy,
+        tool_registry=tool_registry,
+        disabled_tools=state.disabled_tools,
+        requires_explicit_workspace=bool(metadata.get("requires_explicit_workspace")),
+        workspace_root=bootstrap.workspace_root,
+        permission_mode=str(tool_context.permission.mode or ""),
+    )
+    tool_context.metadata[ACTIVE_TOOLSET_POLICY_METADATA_KEY] = active_toolset_policy
+    mcp_manager = metadata.get("_mcp_manager")
     base_tool_schemas = tool_registry.get_schemas(
-        budget=bootstrap.budget.tool_schemas,
         permission_checker=permission_checker,
         permission_context=tool_context.permission,
         toolset_policy=active_toolset_policy,
-        mcp_registry_version=mcp_registry_version(),
+        mcp_registry_version=mcp_registry_version(mcp_manager),
     )
-    if (
-        bool(metadata.get("requires_explicit_workspace"))
-        and bootstrap.workspace_root is None
-        and tool_context.permission.mode != "bypass"
-    ):
-        workspace_bound_tools = workspace_bound_tool_names(base_tool_schemas)
-        if workspace_bound_tools:
-            state.disable_tools(workspace_bound_tools)
-
-    mcp_instructions = collect_mcp_instructions()
+    mcp_instructions = collect_mcp_instructions(mcp_manager)
     turn_tool_schema_state = derive_turn_tool_schema_state(
         base_tool_schemas=base_tool_schemas,
-        disabled_tools=state.disabled_tools,
         mcp_instructions=mcp_instructions,
         tool_registry=tool_registry,
         permission_checker=permission_checker,
@@ -133,11 +182,18 @@ def build_agent_loop_components(
         metadata=metadata,
         workspace_root=bootstrap.workspace_root,
         mcp_instructions=mcp_instructions,
-        tool_schema_budget=bootstrap.budget.tool_schemas,
-        mcp_registry_version=mcp_registry_version,
-        active_toolset_policy_factory=active_toolset_policy_for_context,
+        mcp_registry_version=lambda: mcp_registry_version(mcp_manager),
+        active_toolset_policy_factory=lambda *, permission_context: (
+            active_toolset_policy_for_context(
+                permission_context=permission_context,
+                session_policy=current_session_toolset_policy(),
+                metadata=metadata,
+            )
+        ),
         populate_prompt_context=populate_prompt_context,
         run_record=run_record,
+        skill_manager=skill_manager,
+        agent_session=bootstrap.agent_session,
     )
 
     turn_start_tool_call_count = len(state.tool_calls)
@@ -156,7 +212,7 @@ def build_agent_loop_components(
             context=context,
             set_terminal_reason=_set_terminal_reason,
             run_stop_failure_hook=run_stop_failure_hook,
-            terminal_event=lambda status, reason: _usage_done_event(
+            terminal_projection=lambda status, reason: usage_terminal_projection(
                 usage(),
                 status=status,
                 reason=reason,
@@ -167,7 +223,6 @@ def build_agent_loop_components(
         AnswerCommitDependencies(
             context=context,
             state=state,
-            turn_kernel=turn_kernel,
             append_assistant_history=append_assistant_history,
             set_terminal_reason=_set_terminal_reason,
         )
@@ -196,14 +251,9 @@ def build_agent_loop_components(
         session_id=bootstrap.session_id,
         task_id=bootstrap.task_id,
     )
-    prefer_stateful_history = provider_stateful_history_preferred(
-        bootstrap.tool_context.llm
-    )
-    set_context_stateful_history_preference(context, prefer_stateful_history)
     provider_completion = ProviderCompletionCoordinator(
         settings=settings,
         state=state,
-        context_builder=context,
         turn_kernel=turn_kernel,
         prompt_cache_tracking_source=tracking_source,
         turn_started_at=bootstrap.turn_started_at,
@@ -218,25 +268,5 @@ def build_agent_loop_components(
         budget_runtime=budget_runtime,
         answer_committer=answer_committer,
         llm_request_metadata=llm_request_metadata,
-        prefer_stateful_history=prefer_stateful_history,
         provider_completion=provider_completion,
-    )
-
-
-def _usage_done_event(
-    usage: UsageInfo,
-    *,
-    status: str,
-    reason: str,
-) -> AgentEvent:
-    return AgentEvent.done(
-        input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
-        cache_creation_input_tokens=usage.cache_creation_input_tokens,
-        cache_read_input_tokens=usage.cache_read_input_tokens,
-        cache_deleted_input_tokens=usage.cache_deleted_input_tokens,
-        reasoning_output_tokens=usage.reasoning_output_tokens,
-        input_includes_cache_read=usage.input_includes_cache_read,
-        status=status,
-        reason=reason,
     )

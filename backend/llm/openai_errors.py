@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
+
+from backend.llm.errors import retry_after_seconds
 
 _TRANSIENT_ERROR_SUBSTRINGS = (
     "concurrency limit exceeded",
@@ -138,6 +138,7 @@ def _is_request_metadata_unsupported_error(exc: Exception) -> bool:
         token in text
         for token in (
             "metadata",
+            "client_metadata",
             "store",
             "stored completion",
             "unknown parameter: 'metadata'",
@@ -159,6 +160,15 @@ def _is_request_metadata_unsupported_error(exc: Exception) -> bool:
             "bad request",
         )
     )
+    if mentions_request_metadata and any(
+        token in text
+        for token in (
+            "unexpected keyword argument",
+            "unexpected argument",
+            "unexpected keyword",
+        )
+    ):
+        return True
     return bool(status_code in {400, 422} and mentions_request_metadata and mentions_incompatibility)
 
 
@@ -191,6 +201,62 @@ def _is_stream_options_unsupported_error(exc: Exception) -> bool:
     )
 
 
+def _unsupported_responses_tool_control_fields(exc: Exception) -> frozenset[str]:
+    """Return explicitly rejected optional Responses tool-control fields.
+
+    Compatibility relays vary here: some accept the Responses endpoint but
+    reject the otherwise standard ``tool_choice`` or
+    ``parallel_tool_calls`` controls, and a smaller set rejects an empty
+    ``tools`` array.  Only a concrete 400/422 field error is eligible for a
+    downgrade; transient failures and vague model/tool errors must continue to
+    surface unchanged.
+    """
+
+    if _error_status_code(exc) not in {400, 422}:
+        return frozenset()
+    text = _error_text(exc)
+    mentions_incompatibility = any(
+        token in text
+        for token in (
+            "invalid parameter",
+            "unsupported",
+            "not supported",
+            "not support",
+            "unrecognized",
+            "unknown parameter",
+            "unknown field",
+            "unexpected field",
+            "unexpected parameter",
+            "extra field",
+            "extra inputs",
+            "extra_forbidden",
+            "not permitted",
+            "not allowed",
+            "badrequest",
+            "bad request",
+        )
+    )
+    if not mentions_incompatibility:
+        return frozenset()
+
+    aliases = {
+        "tools": ("tools",),
+        "tool_choice": ("tool_choice", "tool choice"),
+        "parallel_tool_calls": ("parallel_tool_calls", "parallel tool calls"),
+    }
+    rejected: set[str] = set()
+    for field, field_aliases in aliases.items():
+        if any(
+            re.search(
+                rf"(?<![a-z0-9_]){re.escape(alias)}(?![a-z0-9_])",
+                text,
+            )
+            for alias in field_aliases
+        ):
+            rejected.add(field)
+    return frozenset(rejected)
+
+
 def _is_prompt_cache_retention_unsupported_error(exc: Exception) -> bool:
     text = _error_text(exc)
     status_code = _error_status_code(exc)
@@ -220,9 +286,45 @@ def _is_prompt_cache_retention_unsupported_error(exc: Exception) -> bool:
     return bool(status_code in {400, 422} and mentions_prompt_cache_retention and mentions_incompatibility)
 
 
+def _is_prompt_cache_breakpoint_unsupported_error(exc: Exception) -> bool:
+    text = _error_text(exc)
+    status_code = _error_status_code(exc)
+    mentions_breakpoint = any(
+        token in text
+        for token in (
+            "prompt_cache_options",
+            "prompt cache options",
+            "prompt_cache_breakpoint",
+            "prompt cache breakpoint",
+        )
+    )
+    mentions_incompatibility = any(
+        token in text
+        for token in (
+            "invalid",
+            "unsupported",
+            "not supported",
+            "not support",
+            "unrecognized",
+            "unknown parameter",
+            "unknown field",
+            "extra inputs",
+            "badrequest",
+            "bad request",
+        )
+    )
+    return bool(
+        status_code in {400, 422}
+        and mentions_breakpoint
+        and mentions_incompatibility
+    )
+
+
 def _is_blocked_gateway_error(exc: Exception) -> bool:
     text = _error_text(exc)
     status_code = _error_status_code(exc)
+    if status_code is not None and 500 <= status_code <= 599:
+        return False
     return bool(status_code == 403) or any(
         token in text
         for token in (
@@ -240,28 +342,13 @@ def _is_blocked_gateway_error(exc: Exception) -> bool:
 def _is_transient_gateway_error(exc: Exception) -> bool:
     text = str(exc).lower()
     status_code = _error_status_code(exc)
-    return bool(status_code in {408, 409, 425, 429, 500, 502, 503, 504}) or any(
+    return bool(
+        status_code in {408, 409, 425, 429}
+        or (status_code is not None and 500 <= status_code <= 599)
+    ) or any(
         token in text for token in _TRANSIENT_ERROR_SUBSTRINGS
     )
 
 
 def _retry_after_seconds(exc: Exception, *, maximum: float = 300.0) -> float:
-    response = getattr(exc, "response", None)
-    headers = getattr(response, "headers", None)
-    raw = None
-    if headers is not None:
-        raw = headers.get("retry-after")
-        if raw is None:
-            raw = headers.get("Retry-After")
-    if raw is None:
-        return 0.0
-    try:
-        return max(0.0, min(float(raw), maximum))
-    except (TypeError, ValueError):
-        try:
-            target = parsedate_to_datetime(str(raw))
-            if target.tzinfo is None:
-                target = target.replace(tzinfo=UTC)
-            return max(0.0, min((target - datetime.now(UTC)).total_seconds(), maximum))
-        except (TypeError, ValueError, OverflowError):
-            return 0.0
+    return retry_after_seconds(exc, maximum=maximum)

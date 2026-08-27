@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from backend.agent.budget_termination import BudgetTerminationCoordinator
@@ -13,7 +13,8 @@ from backend.agent.turn_budget import (
     TurnBudgetController,
     TurnDeadlineController,
 )
-from backend.agent.rollout_budget import RolloutBudget
+from backend.agent.rollout_budget import RolloutBudget, billable_tokens_from_usage
+from backend.llm.cost_tracker import estimate_usage_cost_usd
 from backend.llm.base import UsageInfo
 
 
@@ -29,17 +30,6 @@ class TurnBudgetRuntime:
     controller: TurnBudgetController
     termination: BudgetTerminationCoordinator
     cost_session_id: str = ""
-    _cost_baseline_usd: float = field(init=False, default=0.0)
-
-    def __post_init__(self) -> None:
-        from backend.llm.cost_tracker import CostTracker
-
-        self._cost_baseline_usd = float(
-            CostTracker.get_instance()
-            .get_summary(self.cost_session_id)
-            .get("total_cost_usd")
-            or 0.0
-        )
 
     async def apply_boundary(
         self,
@@ -51,15 +41,49 @@ class TurnBudgetRuntime:
         self.deadlines.start_turn()
         self.tool_context.deadline_monotonic = self.deadlines.turn_deadline
 
-    def rollout_tokens_used(self) -> int:
+    def local_tokens_used(self) -> int:
+        current_usage = self.usage()
         self.rollout_budget.record_usage_total(
             self._usage_contributor_id(),
-            self.usage(),
+            current_usage,
+            reservation_id=self._reservation_id(),
         )
+        return billable_tokens_from_usage(current_usage)
+
+    def rollout_boundary(self, *, post_tools: bool = False) -> BudgetBoundary | None:
+        """Fence shared capacity without charging a child for its own quota."""
+
+        self.local_tokens_used()
+        snapshot = self.rollout_budget.snapshot(
+            excluding_reservation=self._reservation_id(),
+        )
+        observed = snapshot.tokens_used + snapshot.reserved_tokens
+        if snapshot.token_limit <= 0 or observed < snapshot.token_limit:
+            return None
+        return BudgetBoundary(
+            reason="max_turn_tokens",
+            limit=float(snapshot.token_limit),
+            observed=float(observed),
+            detail=(
+                "shared rollout token capacity exhausted "
+                f"({snapshot.tokens_used} used + {snapshot.reserved_tokens} reserved"
+                f"/{snapshot.token_limit})"
+            ),
+            post_tools=post_tools,
+        )
+
+    def rollout_tokens_used(self) -> int:
+        """Compatibility metric; admission must use the two-level methods."""
+
+        self.local_tokens_used()
         return self.rollout_budget.tokens_used()
 
     def _usage_contributor_id(self) -> str:
         metadata = getattr(self.tool_context, "metadata", {}) or {}
+        agent_path = str(metadata.get("agent_path") or "").strip()
+        mailbox_epoch = max(0, int(metadata.get("mailbox_epoch") or 0))
+        if agent_path and mailbox_epoch > 0:
+            return f"{agent_path}@{mailbox_epoch}"
         return str(
             metadata.get("run_id")
             or metadata.get("task_id")
@@ -67,22 +91,39 @@ class TurnBudgetRuntime:
             or f"run:{id(self)}"
         ).strip()
 
+    def _reservation_id(self) -> str:
+        metadata = getattr(self.tool_context, "metadata", {}) or {}
+        return str(metadata.get("_rollout_reservation_id") or "").strip()
+
     def record_provider_usage_total(self, total_usage: UsageInfo) -> None:
         self.rollout_budget.record_usage_total(
             self._usage_contributor_id(),
             total_usage,
+            reservation_id=self._reservation_id(),
         )
 
-    def turn_cost_usd(self) -> float:
-        from backend.llm.cost_tracker import CostTracker
+    def turn_cost_usd(self) -> float | None:
+        """Cost of this turn so far, or None when it cannot be priced.
 
-        current = float(
-            CostTracker.get_instance()
-            .get_summary(self.cost_session_id)
-            .get("total_cost_usd")
-            or 0.0
-        )
-        return max(0.0, current - self._cost_baseline_usd)
+        Budget checks happen before the WS terminal handler commits totals to
+        CostTracker, so the turn-owned provider usage is authoritative here.
+
+        ``UsageInfo.cost_usd`` is only ever populated from a provider-reported
+        cost, and no provider MiniCode supports reports one, so reading it alone
+        made ``max_turn_cost_usd`` unarmed for every provider while presenting a
+        confident ``$0``. Fall back to the local price table, and return None —
+        not 0.0 — when the active model is unpriced, so the caller can say the
+        ceiling cannot be enforced instead of silently never reaching it.
+        """
+        usage = self.usage()
+        reported = getattr(usage, "cost_usd", None)
+        if reported is not None:
+            return max(0.0, float(reported))
+        model_id = str(getattr(self.state, "model", "") or "").strip()
+        if not model_id:
+            return None
+        estimated = estimate_usage_cost_usd(model_id, usage)
+        return None if estimated is None else max(0.0, estimated)
 
     def active_phase_deadline(self) -> float | None:
         return self.deadlines.active_deadline()

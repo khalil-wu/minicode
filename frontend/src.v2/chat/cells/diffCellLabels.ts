@@ -14,17 +14,8 @@ export function diffFileChangeType(file: DiffFileChange): DiffChangeType {
 }
 
 export function diffCellTitle(cell: DiffCellState): string {
-  const count = cell.summary.modifiedFiles || cell.files.length;
-  const types = new Set(cell.files.map(diffFileChangeType));
-  const verb =
-    types.size === 1 && types.has("created")
-      ? "已创建"
-      : types.size === 1 && types.has("deleted")
-        ? "已删除"
-        : types.size === 1 && types.has("updated")
-          ? "已编辑"
-          : "已更改";
-  return `${verb} ${count} 个文件`;
+  void cell;
+  return "已编辑";
 }
 
 export function diffChangeBreakdown(files: DiffFileChange[]): Record<DiffChangeType, number> {
@@ -33,7 +24,7 @@ export function diffChangeBreakdown(files: DiffFileChange[]): Record<DiffChangeT
       counts[diffFileChangeType(file)] += 1;
       return counts;
     },
-    { created: 0, updated: 0, deleted: 0 } satisfies Record<DiffChangeType, number>,
+    { created: 0, updated: 0, deleted: 0, renamed: 0 } satisfies Record<DiffChangeType, number>,
   );
 }
 
@@ -43,6 +34,7 @@ export function diffChangeBreakdownLabel(files: DiffFileChange[]): string {
     counts.created ? `新建 ${counts.created}` : "",
     counts.updated ? `修改 ${counts.updated}` : "",
     counts.deleted ? `删除 ${counts.deleted}` : "",
+    counts.renamed ? `重命名 ${counts.renamed}` : "",
   ].filter(Boolean).join(" · ");
 }
 
@@ -52,6 +44,8 @@ export function diffFileChangeTypeLabel(file: DiffFileChange): string {
       return "新建";
     case "deleted":
       return "删除";
+    case "renamed":
+      return "重命名";
     case "updated":
     default:
       return "修改";

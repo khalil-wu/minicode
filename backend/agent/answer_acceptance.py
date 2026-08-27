@@ -28,10 +28,8 @@ async def apply_stop_hook_policy(
     state: Any,
     context_builder: Any,
     stream_text: Any,
-    budget_runtime: Any,
     provider_phase: str,
     provider_items: list[dict[str, Any]],
-    feedback_limit: int,
 ) -> AcceptanceResult:
     hook_manager = get_hook_manager()
     if not hook_manager or not hook_manager_has_hooks(hook_manager, HookEvent.STOP):
@@ -40,6 +38,7 @@ async def apply_stop_hook_policy(
         user_message,
         candidate_text,
         tool_results=state.tool_calls,
+        stop_hook_active=state.stop_hook_feedback_count > 0,
     )
     notice_events = (
         (AgentEvent(type="system_notice", data={"content": hook_result.system_message}),)
@@ -51,16 +50,12 @@ async def apply_stop_hook_policy(
     # terminal response; it is not fed back as another retry prompt.
     if hook_result.prevent_continuation:
         return AcceptanceResult("accept", notice_events)
-    if not hook_result.has_feedback or state.stop_hook_feedback_count >= feedback_limit:
+    if not hook_result.has_feedback:
         return AcceptanceResult("accept", notice_events)
 
-    boundary = budget_runtime.consume_retry("stop_hook_feedback")
-    if boundary is not None:
-        _, events = await budget_runtime.apply_boundary(boundary)
-        return AcceptanceResult(
-            "terminate",
-            tuple(events),
-        )
+    # A blocking Stop hook starts another model turn in Claude Code. It is not
+    # a provider failure and therefore must not consume the API retry budget.
+    # Explicit turn limits, when configured, remain the loop's outer guard.
     state.stop_hook_feedback_count += 1
     state.mark_transition(
         "stop_hook_feedback",

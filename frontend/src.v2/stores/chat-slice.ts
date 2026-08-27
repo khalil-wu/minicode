@@ -9,10 +9,17 @@ import type {
   SkillContextRef,
 } from "./types";
 import { canonicalWorkspacePath } from "../lib/workspace-display";
+import { workspaceRootsEqual } from "../lib/workspace-path";
 import { promptCacheEffectivePromptTokens } from "../chat/cacheUsage";
 import { desktop } from "../desktop/runtime";
 import { toBackendPermissionMode } from "../protocol/permissions";
-import { sendClientCommand, sendConversationDeleteCommand } from "../protocol/ws-outbox";
+import {
+  commandResultSucceeded,
+  sendClientCommand,
+  sendClientCommandAwaitResult,
+  sendConversationDeleteCommand,
+} from "../protocol/ws-outbox";
+import { pushToast } from "../overlays/ToastContainer";
 import {
   getAnswerTextFromBlocks,
   getContentBlocks,
@@ -34,8 +41,7 @@ import {
   conversationWorkspacePath,
   editorStateForWorkspace,
   conversationResetPayload,
-  ensureCodePanelSlots,
-  persistPanelSlots,
+  visibleDiffReviewForConversation,
   LS,
   writeLS,
 } from "./shared-helpers";
@@ -50,8 +56,6 @@ function stripDisplayContextSuffix(content: string, refs: MessageContextRef[]): 
   return content.endsWith(suffix) ? content.slice(0, -suffix.length).trimEnd() : content;
 }
 
-type ProcessBlock = Extract<ContentBlock, { type: "process" }>;
-
 function findAgentMessageBlockIndex(blocks: ContentBlock[], itemId: string): number {
   for (let index = blocks.length - 1; index >= 0; index -= 1) {
     const block = blocks[index];
@@ -60,25 +64,10 @@ function findAgentMessageBlockIndex(blocks: ContentBlock[], itemId: string): num
   return -1;
 }
 
-function normalizeProcessContent(content: string | undefined): string {
-  return (content || "").trim().replace(/\s+/g, " ");
-}
-
 function mergeToolCallIds(left: string[] | undefined, right: string[] | undefined): string[] | undefined {
   const ids = [...(left || []), ...(right || [])].filter(Boolean);
   if (ids.length === 0) return undefined;
   return Array.from(new Set(ids));
-}
-
-function isDuplicateRuntimeAction(block: ContentBlock, item: ProcessBlock): block is ProcessBlock {
-  return (
-    block.type === "process" &&
-    block.itemKind === "action_summary" &&
-    item.itemKind === "action_summary" &&
-    block.source === "runtime" &&
-    item.source === "runtime" &&
-    normalizeProcessContent(block.content) === normalizeProcessContent(item.content)
-  );
 }
 
 function applyRecallTruncation(
@@ -111,9 +100,7 @@ function completeRunWorkState(state: AppStore, terminalStatus: "completed" | "pa
   if (terminalStatus === "failed" || terminalStatus === "interrupted" || terminalStatus === "partial") {
     const unfinishedLabel = terminalStatus === "partial" ? "运行部分完成" : "运行已停止";
     return {
-      plan: state.plan?.status === "executing"
-        ? { ...state.plan, status: "cancelled" as const }
-        : state.plan,
+      plan: state.plan,
       todos: state.todos.map((todo) =>
         todo.status === "in_progress"
           ? { ...todo, status: "blocked" as const, activeForm: todo.activeForm || unfinishedLabel }
@@ -122,39 +109,82 @@ function completeRunWorkState(state: AppStore, terminalStatus: "completed" | "pa
     };
   }
 
+  // Turn plan updates are the canonical writer of checklist state. A finished
+  // run must not silently mark unfinished work completed.
   return {
-    plan: state.plan?.status === "executing" || state.plan?.status === "accepted"
-      ? {
-          ...state.plan,
-          status: "completed" as const,
-          steps: state.plan.steps.map((step) =>
-            step.status === "running" || step.status === "pending"
-              ? { ...step, status: "done" as const }
-              : step,
-          ),
-        }
-      : state.plan,
-    todos: state.todos.map((todo) =>
-      todo.status === "in_progress" || todo.status === "pending"
-        ? { ...todo, status: "completed" as const, activeForm: "" }
-        : todo,
-    ),
+    plan: state.plan,
+    todos: state.todos,
   };
+}
+
+/**
+ * Answer text that arrived with no live assistant record to attach it to is
+ * real model output. Returning `null` from the reducer keeps the store
+ * consistent, but dropping the text with no trace makes the loss
+ * unverifiable — a whole final answer can disappear from the transcript with
+ * nothing anywhere to explain it. Record every drop in the Inspector, keyed per
+ * (conversation, item) so a long run of dropped deltas collapses into one
+ * running total instead of flooding the list.
+ */
+function recordDroppedAnswerText(
+  store: AppStore,
+  reason: "agent_message_delta" | "agent_message_completed",
+  text: string,
+  itemId: string,
+  conversationId?: string,
+  messageId?: string,
+) {
+  const owner = conversationId?.trim() || store.conversationId || "session";
+  const targetId = `dropped-answer:${owner}:${itemId || "item"}`;
+  const previous = store.inspectorEntries.find((entry) =>
+    entry.targetKind === "message" && entry.targetId === targetId,
+  );
+  const previousEvents = typeof previous?.payload.dropped_events === "number"
+    ? previous.payload.dropped_events
+    : 0;
+  const previousCharacters = typeof previous?.payload.dropped_characters === "number"
+    ? previous.payload.dropped_characters
+    : 0;
+  store.addInspectorEntry({
+    targetKind: "message",
+    targetId,
+    payload: {
+      dropped: true,
+      reason,
+      detail: "没有正在流式输出的助手消息，文本无法归属",
+      conversation_id: conversationId?.trim() || store.conversationId || undefined,
+      message_id: messageId?.trim() || undefined,
+      item_id: itemId || undefined,
+      dropped_events: previousEvents + 1,
+      dropped_characters: previousCharacters + text.length,
+      text_preview: text.slice(0, 2000),
+    },
+    timestamp: Date.now(),
+  });
 }
 
 function findStreamingIndexForMessage(messages: AppStore["messages"], messageId?: string): number {
   const targetId = messageId?.trim();
   if (!targetId) return findLastStreamingIndex(messages);
-  return messages.findIndex((message) =>
-    message.role === "assistant" &&
-    Boolean(message.isStreaming) &&
-    message.id === targetId,
-  );
+  // Live assistant records are appended near the tail. Searching from the
+  // beginning turned every text/thinking delta into a full-history walk on a
+  // long task, even though the target is normally the final message.
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (
+      message.role === "assistant"
+      && Boolean(message.isStreaming)
+      && message.id === targetId
+    ) return index;
+  }
+  return -1;
 }
 
 export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, get) => ({
   conversationId: null,
   conversations: [],
+  conversationInventoryInstanceId: null,
+  conversationInventoryRevision: 0,
   activeGoal: null,
   messages: [],
   conversationMessages: {},
@@ -202,17 +232,6 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       };
     });
   },
-  deleteMessage: (id) =>
-    set((s) => {
-      const nextMessages = s.messages.filter((message) => message.id !== id);
-      const nextStreaming = s.messages.some((message) => message.id === id && message.isStreaming) ? false : s.isStreaming;
-      return {
-        messages: nextMessages,
-        isStreaming: nextStreaming,
-        toolCallCount: s.toolCallCount - computeToolCallCount(s.messages) + computeToolCallCount(nextMessages),
-        ...cacheMessagesForConversation(s, s.conversationId, nextMessages, nextStreaming),
-      };
-    }),
   upsertSystemMessage: (id, content, options) =>
     set((s) => {
       const targetId = options?.conversationId || s.conversationId || undefined;
@@ -250,9 +269,42 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         ...cacheMessagesForConversation(s, s.conversationId, nextMessages, s.isStreaming),
       };
     }),
-  recallMessage: (id) => {
-    let truncateCommand: Parameters<typeof sendClientCommand>[0] | null = null;
+  recallMessage: async (id) => {
+    const current = get();
+    const currentIndex = current.messages.findIndex((message) => message.id === id);
+    if (currentIndex < 0) return false;
+    const currentTarget = current.messages[currentIndex];
+    const currentTurnStart = currentTarget.role === "user"
+      ? currentIndex
+      : (() => {
+          for (let i = currentIndex; i >= 0; i -= 1) {
+            if (current.messages[i]?.role === "user") return i;
+          }
+          return currentIndex;
+        })();
+    const currentRecalled = current.messages[currentTurnStart] ?? currentTarget;
+    const conversationId = current.conversationId || "";
+    if (conversationId && currentRecalled.id) {
+      try {
+        const result = await sendClientCommandAwaitResult({
+          type: "conversation.truncate",
+          conversation_id: conversationId,
+          truncate_before_message_id: currentRecalled.id,
+          retained_message_ids: current.messages.slice(0, currentTurnStart).map((message) => message.id),
+        }, "conversation.truncate");
+        if (!commandResultSucceeded(result)) {
+          pushToast(result.message || "Unable to recall this turn.", "error", 4000);
+          return false;
+        }
+      } catch {
+        return false;
+      }
+    }
+    let restored = false;
     set((s) => {
+      // The truncate response may arrive after the user switches chats. Never
+      // restore a durable attachment handle into a different conversation.
+      if (String(s.conversationId || "") !== conversationId) return s;
       const index = s.messages.findIndex((message) => message.id === id);
       if (index < 0) return s;
       const target = s.messages[index];
@@ -273,44 +325,47 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       );
       const skillRefs: SkillContextRef[] = contextRefs.filter((ref): ref is SkillContextRef => ref.kind === "skill");
       const attachmentRefs = recalled.attachmentRefs ?? target.attachmentRefs ?? [];
-      const restoredAttachments = attachmentRefs.map((attachment) => ({
-        id: `att-recall-${attachment.artifactId || attachment.id}-${Date.now().toString(36)}`,
-        name: attachment.name,
-        type: attachment.mediaType || "application/octet-stream",
-        size: attachment.sizeBytes || 0,
-        status: "ready" as const,
-        artifactId: attachment.artifactId,
-        docId: attachment.docId,
-        inputSource: attachment.inputSource,
-        sourceCharCount: attachment.sourceCharCount,
-        attachment: {
-          id: attachment.id,
-          kind: attachment.kind,
-          file_name: attachment.name,
-          media_type: attachment.mediaType,
-          artifact_id: attachment.artifactId,
-          doc_id: attachment.docId,
-          size_bytes: attachment.sizeBytes ?? 0,
-          ...(attachment.inputSource ? { input_source: attachment.inputSource } : {}),
-          ...(attachment.sourceCharCount ? { source_char_count: attachment.sourceCharCount } : {}),
-        },
-      }));
+      const restoredAt = Date.now().toString(36);
+      const restoredAttachments = attachmentRefs.map((attachment, attachmentIndex) => {
+        const artifactId = String(attachment.artifactId || "").trim();
+        const canReuseDurableAttachment = Boolean(conversationId && artifactId);
+        return {
+          id: `att-recall-${artifactId || attachment.id}-${restoredAt}-${attachmentIndex}`,
+          name: attachment.name,
+          type: attachment.mediaType || "application/octet-stream",
+          size: attachment.sizeBytes || 0,
+          status: canReuseDurableAttachment ? "ready" as const : "error" as const,
+          ...(conversationId ? { conversationId } : {}),
+          ...(artifactId ? { artifactId } : {}),
+          docId: attachment.docId,
+          inputSource: attachment.inputSource,
+          sourceCharCount: attachment.sourceCharCount,
+          ...(!canReuseDurableAttachment
+            ? { error: "原附件缺少可验证的持久化引用，请重新上传。" }
+            : {
+                attachment: {
+                  id: attachment.id,
+                  kind: attachment.kind,
+                  file_name: attachment.name,
+                  media_type: attachment.mediaType,
+                  artifact_id: artifactId,
+                  doc_id: attachment.docId,
+                  size_bytes: attachment.sizeBytes ?? 0,
+                  ...(attachment.inputSource ? { input_source: attachment.inputSource } : {}),
+                  ...(attachment.sourceCharCount ? { source_char_count: attachment.sourceCharCount } : {}),
+                },
+              }),
+        };
+      });
       const removedMessages = s.messages.slice(turnStart);
       const nextStreaming = removedMessages.some((message) => message.isStreaming) ? false : s.isStreaming;
       const restoredDraft = recalled.role === "user"
         ? stripDisplayContextSuffix(recalled.content, contextRefs)
         : s.draft;
-      const conversationId = s.conversationId || "";
+      const activeConversationId = conversationId;
       const removedIds = removedMessages.map((message) => message.id).filter(Boolean);
-      const existingTruncation = conversationId ? s.conversationRecallTruncations[conversationId] : undefined;
-      if (conversationId && recalled.id) {
-        truncateCommand = {
-          type: "conversation.truncate",
-          conversation_id: conversationId,
-          truncate_before_message_id: recalled.id,
-          retained_message_ids: nextMessages.map((message) => message.id),
-        };
-      }
+      const existingTruncation = activeConversationId ? s.conversationRecallTruncations[activeConversationId] : undefined;
+      restored = true;
       return {
         messages: nextMessages,
         draft: restoredDraft,
@@ -323,10 +378,10 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         mentionPanelOpen: false,
         isStreaming: nextStreaming,
         toolCallCount: s.toolCallCount - computeToolCallCount(s.messages) + computeToolCallCount(nextMessages),
-        conversationRecallTruncations: conversationId && removedIds.length > 0
+        conversationRecallTruncations: activeConversationId && removedIds.length > 0
           ? {
               ...s.conversationRecallTruncations,
-              [conversationId]: {
+              [activeConversationId]: {
                 removedIds: Array.from(new Set([...(existingTruncation?.removedIds ?? []), ...removedIds])),
                 retainedIds: nextMessages.map((message) => message.id),
                 updatedAt: Date.now(),
@@ -336,9 +391,15 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         ...cacheMessagesForConversation(s, s.conversationId, nextMessages, nextStreaming),
       };
     });
-    if (truncateCommand) {
-      sendClientCommand(truncateCommand);
+    if (restored && conversationId) {
+      sendClientCommand({
+        type: "session.usage.inspect",
+        conversation_id: conversationId,
+        source: "conversation_recall",
+        silent: true,
+      }, { silent: true });
     }
+    return restored;
   },
   removeEmptyStreamingAssistant: (conversationId, messageId) =>
     set((s) => {
@@ -400,24 +461,27 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
   requestConversationSwitch: (id) => {
     const targetId = id.trim();
     if (!targetId) return;
-    // Optimistically switch the UI from local cache; the canonical
-    // conversation.switched event re-applies and hydrates the transcript.
-    if (get().conversations.some((conversation) => conversation.id === targetId)) {
-      get().applyConversationSwitched({ conversationId: targetId });
-    }
+    // `conversation.switched` is the causal event and the only authority on
+    // which conversation is active — the backend refuses a stale or archived
+    // target rather than switching to it. Applying the switch locally first
+    // left the renderer showing a conversation the backend never activated, and
+    // every later command then carried a conversation_id its scope check
+    // rejects. Wait for applyConversationSwitched.
     sendClientCommand({ type: "conversation.switch", conversation_id: targetId });
   },
   applyConversationSwitched: ({ conversationId }) => {
     const id = conversationId.trim();
     if (!id) return;
     const currentConversationId = get().conversationId;
-    if (currentConversationId) {
+    if (currentConversationId && get().conversations.some((conversation) => conversation.id === currentConversationId)) {
       get().snapshotAgentState(currentConversationId);
       get().snapshotWorkbenchState(currentConversationId);
     }
     const targetConversation = get().conversations.find((c) => c.id === id);
     const targetWorkspace = conversationWorkspacePath(targetConversation);
     set((s) => {
+      const sameConversation = s.conversationId === id;
+      const workspaceChanged = !workspaceRootsEqual(targetWorkspace, s.workingDirectory);
       const currentStillKnown = Boolean(
         s.conversationId &&
         s.conversations.some((conversation) => conversation.id === s.conversationId),
@@ -430,6 +494,15 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
           };
       return {
         ...conversationResetPayload(),
+        ...(sameConversation
+          ? {
+              contextUsage: s.contextUsage,
+              budgetBuckets: s.budgetBuckets,
+              totalBudgetPercent: s.totalBudgetPercent,
+              lastUsage: s.lastUsage,
+              usageTotals: s.usageTotals,
+            }
+          : {}),
         conversationId: id,
         activeGoal: targetConversation?.goal ?? null,
         messages: cachedCurrent.conversationMessages[id] ?? [],
@@ -452,8 +525,10 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         ...(targetConversation
           ? {
               workingDirectory: targetWorkspace,
-              workspaceGit: targetWorkspace !== s.workingDirectory ? null : s.workspaceGit,
-              ...(targetWorkspace !== s.workingDirectory ? editorStateForWorkspace(targetWorkspace) : {}),
+              workspaceGit: workspaceChanged ? null : s.workspaceGit,
+              ...(workspaceChanged
+                ? editorStateForWorkspace(targetWorkspace)
+                : {}),
             }
           : {}),
       };
@@ -461,6 +536,10 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     persistActiveConversationId(id);
     get().restoreAgentState(id);
     get().restoreWorkbenchState(id);
+    set((s) => ({
+      diffReview: visibleDiffReviewForConversation(id, s.pendingDiffReview, s.diffReviewQueue)
+        ?? s.diffReview,
+    }));
     if (targetWorkspace) {
       const rt = desktop();
       if (rt?.trustWorkspace) rt.trustWorkspace(targetWorkspace);
@@ -469,233 +548,78 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
   switchConversation: (id) => {
     get().applyConversationSwitched({ conversationId: id });
   },
-  createConversation: (options) => {
+  createConversation: async (options) => {
     const state = get();
-    if (state.conversationId) {
-      get().snapshotAgentState(state.conversationId);
-      get().snapshotWorkbenchState(state.conversationId);
-    }
     const id = newConversationId();
-    const shouldBindWorkspace = Boolean(options?.bindWorkspace || options?.workspaceRoot);
+    const nextAppMode = options?.appMode ?? state.appMode;
+    const requestedWorkspace = canonicalWorkspacePath(
+      options?.workspaceRoot ?? state.workingDirectory,
+    );
+    const shouldBindWorkspace = Boolean(options?.workspaceRoot)
+      || options?.bindWorkspace === true
+      || (
+        options?.bindWorkspace === undefined
+        && nextAppMode === "code"
+        && Boolean(state.workingDirectory)
+      );
+    if (shouldBindWorkspace && !requestedWorkspace) {
+      pushToast("Select a workspace before creating a workspace-bound conversation.", "error", 4000);
+      return false;
+    }
     const workspaceRoot = shouldBindWorkspace
-      ? canonicalWorkspacePath(options?.workspaceRoot ?? state.workingDirectory)
+      ? requestedWorkspace
       : "";
-    const currentWorkspaceRoot = canonicalWorkspacePath(state.workingDirectory);
-    const canUseCurrentWorkspaceGit = Boolean(workspaceRoot && workspaceRoot === currentWorkspaceRoot);
-    const nextAppMode = options?.appMode ?? "cowork";
-    sendClientCommand({
-      type: "conversation.create",
-      conversation_id: id,
-      title: "New chat",
-      workspace_root: workspaceRoot || undefined,
-      permission_mode: toBackendPermissionMode(state.permissionMode),
-    });
-    set((s) => {
-      const cachedCurrent = cacheMessagesForConversation(s, s.conversationId);
-      const panelSlots = nextAppMode === "code" ? ensureCodePanelSlots(s.panelSlots) : s.panelSlots;
-      if (nextAppMode === "code") persistPanelSlots(panelSlots);
-      return {
-        ...conversationResetPayload(),
-        conversationId: id,
-        conversations: [
-          {
-            id,
-            title: "New chat",
-            updatedAt: new Date().toISOString(),
-            workspaceRoot: workspaceRoot || undefined,
-            gitBranch: canUseCurrentWorkspaceGit ? state.workspaceGit?.branch || undefined : undefined,
-            worktreePath: canUseCurrentWorkspaceGit ? state.workspaceGit?.currentPath || undefined : undefined,
-            gitIsolated: canUseCurrentWorkspaceGit ? state.workspaceGit?.isWorktree : undefined,
-            goal: null,
-          },
-          ...s.conversations,
-        ],
-        activeGoal: null,
-        messages: [],
-        isStreaming: false,
-        toolCallCount: 0,
-        appMode: nextAppMode,
-        workingDirectory: workspaceRoot,
-        workspaceGit: workspaceRoot !== s.workingDirectory ? null : s.workspaceGit,
-        ...(workspaceRoot !== s.workingDirectory ? editorStateForWorkspace(workspaceRoot) : {}),
-        ...(nextAppMode === "code" ? { panelSlots } : {}),
-        conversationMessages: {
-          ...cachedCurrent.conversationMessages,
-          [id]: [],
-        },
-        conversationStreaming: {
-          ...cachedCurrent.conversationStreaming,
-          [id]: false,
-        },
-        conversationAgentStates: {
-          ...(s.conversationAgentStates ?? {}),
-          [id]: { plan: null, todos: [], subagents: [], agentProgress: [] },
-        },
-        conversationWorkbenchStates: {
-          ...(s.conversationWorkbenchStates ?? {}),
-          [id]: {
-            diffReview: null,
-            previewArtifact: null,
-            livePreviewUrl: null,
-            activeTerminalSessionId: null,
-            rightStackTab: "tasks" as const,
-            rightPanelOpen: false,
-            rightStackTabLocked: false,
-            draft: "",
-            attachments: [],
-            quotedMessage: null,
-            selectedMentions: [],
-            selectedSkills: [],
-            allowedRemoteImageDomains: [],
-          },
-        },
-        runtimeSession: null,
-        draft: "",
-        attachments: [],
-        quotedMessage: null,
-        selectedMentions: [],
-        selectedSkills: [],
-        actionChip: null,
-        mentionResults: [],
-        slashPanelOpen: false,
-        mentionPanelOpen: false,
-        prMonitor: null,
-        // --- End cross-slice reset ---
-      };
-    });
-    persistActiveConversationId(id);
-    get().restoreWorkbenchState(id);
-  },
-  removeConversation: (id) => {
-    let state = get();
-    if (state.conversationId && state.conversationId !== id) {
-      get().snapshotAgentState(state.conversationId);
-      get().snapshotWorkbenchState(state.conversationId);
-      state = get();
-    }
-    void sendConversationDeleteCommand({ type: "conversation.delete", conversation_id: id });
-    const remaining = state.conversations.filter((conversation) => conversation.id !== id);
-    const nextActive = remaining.find((conversation) => !conversation.archived);
-    const conversationMessages = Object.fromEntries(
-      Object.entries(state.conversationMessages).filter(([key]) => key !== id),
-    );
-    const conversationStreaming = Object.fromEntries(
-      Object.entries(state.conversationStreaming).filter(([key]) => key !== id),
-    );
-    const conversationAgentStates = { ...(state.conversationAgentStates ?? {}) };
-    delete conversationAgentStates[id];
-    const conversationWorkbenchStates = { ...(state.conversationWorkbenchStates ?? {}) };
-    delete conversationWorkbenchStates[id];
-    const conversationRecallTruncations = { ...(state.conversationRecallTruncations ?? {}) };
-    delete conversationRecallTruncations[id];
-
-    if (state.conversationId !== id) {
-      set({
-        conversations: remaining,
-        conversationMessages,
-        conversationStreaming,
-        conversationAgentStates,
-        conversationWorkbenchStates,
-        conversationRecallTruncations,
-      });
-      return;
-    }
-
-    if (nextActive) {
-      const targetWorkspace = conversationWorkspacePath(nextActive);
-      const targetMessages = conversationMessages[nextActive.id] ?? [];
-      set((s) => ({
-        ...conversationResetPayload(),
-        conversations: remaining,
-        conversationMessages,
-        conversationStreaming,
-        conversationAgentStates,
-        conversationWorkbenchStates,
-        conversationRecallTruncations,
-        conversationId: nextActive.id,
-        activeGoal: nextActive.goal ?? null,
-        messages: targetMessages,
-        isStreaming: conversationStreaming[nextActive.id] ?? false,
-        toolCallCount: computeToolCallCount(targetMessages),
-        runtimeSession: null,
-        draft: "",
-        attachments: [],
-        quotedMessage: null,
-        selectedMentions: [],
-        selectedSkills: [],
-        actionChip: null,
-        mentionResults: [],
-        slashPanelOpen: false,
-        mentionPanelOpen: false,
-        prMonitor: null,
-        workingDirectory: targetWorkspace,
-        workspaceGit: targetWorkspace !== s.workingDirectory ? null : s.workspaceGit,
-        ...(targetWorkspace !== s.workingDirectory ? editorStateForWorkspace(targetWorkspace) : {}),
-      }));
-      persistActiveConversationId(nextActive.id);
-      get().restoreAgentState(nextActive.id);
-      get().restoreWorkbenchState(nextActive.id);
-      if (targetWorkspace) {
-        const rt = typeof window !== "undefined"
-          ? (window as any).__MINICODE_RUNTIME__?.desktop
-          : undefined;
-        if (rt?.trustWorkspace) rt.trustWorkspace(targetWorkspace);
+    try {
+      const result = await sendClientCommandAwaitResult({
+        type: "conversation.create",
+        conversation_id: id,
+        title: "New chat",
+        conversation_type: "main",
+        workspace_root: workspaceRoot || undefined,
+        permission_mode: toBackendPermissionMode(state.permissionMode),
+      }, "conversation.create");
+      if (!commandResultSucceeded(result)) {
+        pushToast(result.message || "Unable to create the conversation.", "error", 4000);
+        return false;
       }
-      return;
+      get().setAppMode(nextAppMode);
+      return true;
+    } catch (error) {
+      const message = error instanceof Error && error.message.trim()
+        ? error.message
+        : "Unable to create the conversation.";
+      pushToast(message, "error", 4000);
+      return false;
     }
-
-    const hasCodeContext = Boolean(
-      state.workingDirectory ||
-      state.editorTabs.length > 0 ||
-      state.activeTabPath ||
-      state.activeEditorPath,
-    );
-    const panelSlots = hasCodeContext ? ensureCodePanelSlots(state.panelSlots) : state.panelSlots;
-    if (hasCodeContext) persistPanelSlots(panelSlots);
-
-    set({
-      ...conversationResetPayload(),
-      conversations: remaining,
-      conversationMessages,
-      conversationStreaming,
-      conversationAgentStates,
-      conversationWorkbenchStates,
-      conversationRecallTruncations,
-      conversationId: null,
-      activeGoal: null,
-      messages: [],
-      isStreaming: false,
-      toolCallCount: 0,
-      draft: "",
-      attachments: [],
-      quotedMessage: null,
-      selectedMentions: [],
-      selectedSkills: [],
-      allowedRemoteImageDomains: [],
-      actionChip: null,
-      mentionResults: [],
-      slashPanelOpen: false,
-      mentionPanelOpen: false,
-      prMonitor: null,
-      ...(hasCodeContext ? { appMode: "code" as const, panelSlots } : {}),
-    });
-    persistActiveConversationId(null);
   },
+  removeConversation: async (id) => sendConversationDeleteCommand({
+    type: "conversation.delete",
+    conversation_id: id,
+  }),
   getVisibleMessages: (conversationId) => {
     const state = get();
     const targetId = conversationId || state.conversationId;
     if (!targetId || targetId === state.conversationId) return state.messages;
     return state.sideChats[targetId]?.messages ?? state.conversationMessages[targetId] ?? [];
   },
-  setActiveGoal: (goal: ConversationGoal | null, conversationId?: string) =>
+  setActiveGoal: (goal: ConversationGoal | null, conversationId?: string, revision?: number) =>
     set((s) => {
       const targetId = conversationId || s.conversationId || undefined;
       const isActive = !targetId || targetId === s.conversationId;
+      const normalizedRevision = Number.isSafeInteger(revision) && Number(revision) >= 0
+        ? Number(revision)
+        : undefined;
       return {
         ...(isActive ? { activeGoal: goal } : {}),
         conversations: targetId
           ? s.conversations.map((conversation) =>
-              conversation.id === targetId ? { ...conversation, goal } : conversation,
+              conversation.id === targetId
+                ? {
+                    ...conversation,
+                    goal,
+                    ...(normalizedRevision !== undefined ? { revision: normalizedRevision } : {}),
+                  }
+                : conversation,
             )
           : s.conversations,
       };
@@ -737,7 +661,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       return next;
     }));
   },
-  startAgentMessage: (itemId, conversationId, messageId) =>
+  startAgentMessage: (itemId, conversationId, messageId, source) =>
     set((s) => {
       return updateMessagesForConversation(s, conversationId, (messages) => {
         const idx = findStreamingIndexForMessage(messages, messageId);
@@ -747,7 +671,14 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         const blocks = (msg.blocks ? msg.blocks.slice() : []).filter((block) =>
           block.type !== "text" || block.itemId !== itemId,
         );
-        blocks.push({ type: "text", itemId, content: "", status: "in_progress", isStreaming: true });
+        blocks.push({
+          type: "text",
+          itemId,
+          content: "",
+          ...(source ? { source } : {}),
+          status: "in_progress",
+          isStreaming: true,
+        });
         next[idx] = {
           ...msg,
           isThinkingStreaming: false,
@@ -756,10 +687,15 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         return next;
       });
     }),
-  appendAgentMessageDelta: (itemId, delta, conversationId, messageId) =>
+  appendAgentMessageDelta: (itemId, delta, conversationId, messageId, source) => {
+    let droppedDelta = false;
     set((s) => updateMessagesForConversation(s, conversationId, (messages) => {
       const idx = findStreamingIndexForMessage(messages, messageId);
-      if (idx < 0 || !delta) return null;
+      if (idx < 0 || !delta) {
+        // An empty delta loses nothing; a non-empty one with no owner does.
+        droppedDelta = idx < 0 && Boolean(delta);
+        return null;
+      }
       const next = messages.slice();
       const msg = next[idx];
       const blocks = msg.blocks ? msg.blocks.slice() : [];
@@ -767,14 +703,31 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       if (blockIndex >= 0) {
         const block = blocks[blockIndex];
         if (block.type === "text") {
-          blocks[blockIndex] = { ...block, content: block.content + delta, status: "in_progress", isStreaming: true };
+          blocks[blockIndex] = {
+            ...block,
+            content: block.content + delta,
+            ...(source ? { source } : {}),
+            status: "in_progress",
+            isStreaming: true,
+          };
         }
       } else {
-        blocks.push({ type: "text", itemId, content: delta, status: "in_progress", isStreaming: true });
+        blocks.push({
+          type: "text",
+          itemId,
+          content: delta,
+          ...(source ? { source } : {}),
+          status: "in_progress",
+          isStreaming: true,
+        });
       }
       next[idx] = { ...msg, isThinkingStreaming: false, blocks };
       return next;
-    })),
+    }));
+    if (droppedDelta) {
+      recordDroppedAnswerText(get(), "agent_message_delta", delta, itemId, conversationId, messageId);
+    }
+  },
   setFinalAnswerAttachments: (conversationId, attachments, messageId) =>
     set((s) => {
       return updateMessagesForConversation(s, conversationId, (messages) => {
@@ -785,11 +738,15 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         return next;
       });
     }),
-  completeAgentMessage: (item, conversationId, metadata, messageId) =>
+  completeAgentMessage: (item, conversationId, metadata, messageId) => {
+    let droppedAnswer = false;
     set((s) => {
       return updateMessagesForConversation(s, conversationId, (messages) => {
         const idx = findStreamingIndexForMessage(messages, messageId);
-        if (idx < 0) return null;
+        if (idx < 0) {
+          droppedAnswer = true;
+          return null;
+        }
         const next = messages.slice();
         const msg = next[idx];
         const blocks: ContentBlock[] = msg.blocks ? msg.blocks.slice() : [];
@@ -813,7 +770,23 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         };
         return next;
       });
-    }),
+    });
+    if (droppedAnswer) {
+      recordDroppedAnswerText(
+        get(),
+        "agent_message_completed",
+        item.text || "",
+        item.id,
+        conversationId,
+        messageId,
+      );
+      // A whole final answer vanishing is the worst case of this class of drop:
+      // the transcript looks finished and simply has no answer in it. Say so.
+      if (String(item.text || "").trim()) {
+        pushToast("收到的最终答复无法归属到任何进行中的回答，已记录在检查器中。", "warning", 6000);
+      }
+    }
+  },
   appendThinkingChunk: (content, conversationId, metadata, messageId) =>
     set((s) => {
       return updateMessagesForConversation(s, conversationId, (messages) => {
@@ -822,10 +795,28 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         const next = messages.slice();
         const msg = next[idx];
         const blocks = msg.blocks ? msg.blocks.slice() : [];
-        const last = blocks[blocks.length - 1];
         const thinkingMetadata = normalizeThinkingMetadata(metadata);
-        if (last && last.type === "thinking" && thinkingMetadataMatches(last, thinkingMetadata)) {
-          blocks[blocks.length - 1] = { ...last, content: last.content + content };
+        const identity = thinkingMetadata.item_id;
+        const matchingIndex = identity
+          ? blocks.findIndex((block) => block.type === "thinking" && block.item_id === identity)
+          : -1;
+        const lastIndex = blocks.length - 1;
+        const fallbackIndex = matchingIndex >= 0
+          ? matchingIndex
+          : lastIndex >= 0
+            && blocks[lastIndex].type === "thinking"
+            && thinkingMetadataMatches(blocks[lastIndex], thinkingMetadata)
+            ? lastIndex
+            : -1;
+        if (fallbackIndex >= 0) {
+          const existing = blocks[fallbackIndex];
+          if (existing.type === "thinking") {
+            blocks[fallbackIndex] = {
+              ...existing,
+              ...thinkingMetadata,
+              content: existing.content + content,
+            };
+          }
         } else {
           blocks.push({ type: "thinking", content, ...thinkingMetadata });
         }
@@ -849,12 +840,9 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         const existingIdx = blocks.findIndex((block) =>
           block.type === "process" && block.id === item.id,
         );
-        const duplicateRuntimeActionIdx = existingIdx >= 0
-          ? existingIdx
-          : blocks.findIndex((block) => isDuplicateRuntimeAction(block, processBlock));
-        if (duplicateRuntimeActionIdx >= 0) {
-          const existingBlock = blocks[duplicateRuntimeActionIdx];
-          blocks[duplicateRuntimeActionIdx] = existingBlock.type === "process"
+        if (existingIdx >= 0) {
+          const existingBlock = blocks[existingIdx];
+          blocks[existingIdx] = existingBlock.type === "process"
             ? {
                 ...existingBlock,
                 ...processBlock,
@@ -869,6 +857,67 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
           isThinkingStreaming: false,
           blocks,
         };
+        return next;
+      });
+    }),
+  upsertMessageProgress: (progress, conversationId, messageId) =>
+    set((s) => {
+      return updateMessagesForConversation(s, conversationId, (messages) => {
+        const targetId = messageId?.trim();
+        const idx = targetId
+          ? messages.findIndex((message) => message.role === "assistant" && message.id === targetId)
+          : findLastStreamingIndex(messages);
+        if (idx < 0) return null;
+        const next = messages.slice();
+        const message = next[idx];
+        const blocks = getContentBlocks(message).slice();
+        const timestamp = Date.now();
+        const incoming = {
+          ...progress,
+          type: "progress" as const,
+          timestamp,
+        };
+        const existingIdx = blocks.findIndex((block) =>
+          block.type === "progress" && block.id === incoming.id,
+        );
+        if (existingIdx >= 0) {
+          const existing = blocks[existingIdx];
+          if (existing.type === "progress") {
+            const terminal = new Set(["completed", "failed"]);
+            if (terminal.has(existing.status) && incoming.status === "running") {
+              return null;
+            }
+            blocks[existingIdx] = { ...existing, ...incoming };
+          } else {
+            blocks[existingIdx] = incoming;
+          }
+        } else {
+          blocks.push(incoming);
+        }
+        next[idx] = { ...message, blocks };
+        return next;
+      });
+    }),
+  removeProcessItem: (itemId, conversationId, messageId) =>
+    set((s) => {
+      const targetItemId = itemId.trim();
+      if (!targetItemId) return {};
+      return updateMessagesForConversation(s, conversationId, (messages) => {
+        const targetMessageId = messageId?.trim();
+        const idx = targetMessageId
+          ? messages.findIndex((message) =>
+              message.role === "assistant" && message.id === targetMessageId,
+            )
+          : findLastStreamingIndex(messages);
+        if (idx < 0) return null;
+        const message = messages[idx];
+        const blocks = message.blocks ?? [];
+        const filtered = blocks.filter((block) =>
+          !(block.type === "process" && block.id === targetItemId),
+        );
+        if (filtered.length === blocks.length) return null;
+        const next = messages.slice();
+        next[idx] = { ...message, blocks: filtered };
         return next;
       });
     }),
@@ -923,13 +972,17 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         return next;
       });
     }),
-  finishStreaming: (conversationId, usage, terminalStatus = "completed", messageId, failureMessage, durationMs) =>
+  finishStreaming: (conversationId, usage, terminalStatus = "completed", messageId, failureMessage, failureRecoverable, durationMs, terminationReason) =>
     set((s) => {
       const finishedAt = Date.now();
       const normalizedFailureMessage = terminalStatus === "failed" ? String(failureMessage || "").trim() : "";
+      const normalizedFailureRecoverable = terminalStatus === "failed" && typeof failureRecoverable === "boolean"
+        ? failureRecoverable
+        : undefined;
       const targetId = conversationId || s.conversationId || undefined;
       const isActiveTarget = !targetId || targetId === s.conversationId;
       let matchedStreamingMessage = false;
+      let sawOtherLiveAssistant = false;
       const result = updateMessagesForConversation(
         s,
         conversationId,
@@ -937,7 +990,10 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
           const targetMessageId = messageId?.trim();
           const nextMessages = messages.map((m) => {
             if (!m.isStreaming && !m.isThinkingStreaming) return m;
-            if (targetMessageId && m.id !== targetMessageId) return m;
+            if (targetMessageId && m.id !== targetMessageId) {
+              if (m.role === "assistant") sawOtherLiveAssistant = true;
+              return m;
+            }
             matchedStreamingMessage = true;
             const baseMessage = stripLegacyContentFields(m);
             const blocks = getContentBlocks(m);
@@ -954,15 +1010,18 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
               if (block.type === "tool_call" && (block.record.status === "running" || block.record.status === "pending")) {
                 // A tool call still running/pending at turn end never received
                 // its result (lost tool_result / missed terminal event). Do not
-                // fabricate "success". User interruption is partial rather
-                // than failed; other terminal paths remain failures.
+                // fabricate "success". User interruption cancels the open
+                // item; max-output/partial completion remains partial, and
+                // other terminal paths remain failures.
                 return {
                   ...block,
                   record: {
                     ...block.record,
-                    status: terminalStatus === "interrupted" || terminalStatus === "partial"
-                      ? "partial" as const
-                      : "failed" as const,
+                    status: terminalStatus === "interrupted"
+                      ? "cancelled" as const
+                      : terminalStatus === "partial"
+                        ? "partial" as const
+                        : "failed" as const,
                     finishedAt,
                   },
                 };
@@ -1002,7 +1061,9 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
               isThinkingStreaming: false,
               resumeState: undefined,
               terminalStatus,
+              terminationReason: String(terminationReason || "").trim() || undefined,
               failureMessage: normalizedFailureMessage || undefined,
+              failureRecoverable: normalizedFailureRecoverable,
               usage,
               completedAt: finishedAt,
               durationMs: Number.isFinite(durationMs) ? Math.max(0, Number(durationMs)) : undefined,
@@ -1013,7 +1074,29 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         },
         false,
       );
-      if (!isActiveTarget || result === s) return result;
+      if (result === s) {
+        // The terminal event named a message that is no longer streaming (it
+        // was already sealed, or the id belongs to a turn this client never
+        // rendered). Leaving the flags set strands the spinner forever, because
+        // `done` is the only fence that clears it. Nothing else is live, so the
+        // conversation is idle regardless of which message the id pointed at.
+        if (sawOtherLiveAssistant) return result;
+        if (targetId && s.sideChats[targetId]) {
+          return {
+            sideChats: {
+              ...s.sideChats,
+              [targetId]: { ...s.sideChats[targetId], isStreaming: false },
+            },
+          };
+        }
+        return {
+          ...(isActiveTarget ? { isStreaming: false } : {}),
+          ...(targetId
+            ? { conversationStreaming: { ...s.conversationStreaming, [targetId]: false } }
+            : {}),
+        };
+      }
+      if (!isActiveTarget) return result;
       const workState = completeRunWorkState(s, terminalStatus);
       const nextConversationAgentStates = targetId
         ? {
@@ -1102,13 +1185,14 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         ...cacheMessagesForConversation(s, targetId, nextMessages, true),
       };
     }),
-  setConnected: (c) => set({ isConnected: c }),
+  setConnected: (c) => set(c ? { isConnected: true } : { isConnected: false, runtimeSession: null }),
   setLastUsage: (u) =>
     set((s) => ({
       lastUsage: u,
       usageTotals: u
         ? {
             input: s.usageTotals.input + Math.max(0, u.input || 0),
+            ordinaryInput: Math.max(0, s.usageTotals.ordinaryInput || 0) + Math.max(0, u.ordinaryInput || 0),
             output: s.usageTotals.output + Math.max(0, u.output || 0),
             cacheRead: s.usageTotals.cacheRead + Math.max(0, u.cacheRead || 0),
             cacheWrite: s.usageTotals.cacheWrite + Math.max(0, u.cacheWrite || 0),

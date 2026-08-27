@@ -45,17 +45,25 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     "mjs":  "javascript",
     "cjs":  "javascript",
     "ts":   "typescript",
-    "tsx":  "typescript",
+    # TSX is a distinct grammar, not a TypeScript dialect: parsing a .tsx file
+    # with the plain TypeScript grammar misreads JSX elements.
+    "tsx":  "tsx",
     "go":   "go",
     "rs":   "rust",
     "java": "java",
 }
 
 # ── Language package registry (lazy-loaded) ──────────────────────
-# Maps canonical language name → (pip package, loader callable name)
+# Maps canonical language name → (pip package, loader callable name).
+# The loader name is per-package, not a convention: tree_sitter_typescript
+# ships two grammars and exposes language_typescript()/language_tsx() instead
+# of the language() every other grammar package exports. Assuming language()
+# here made TS/TSX raise AttributeError, get cached as unavailable, and fall
+# back to regex forever.
 _LANGUAGE_PACKAGES: dict[str, tuple[str, str]] = {
     "javascript": ("tree_sitter_javascript", "language"),
-    "typescript": ("tree_sitter_typescript", "language"),
+    "typescript": ("tree_sitter_typescript", "language_typescript"),
+    "tsx":        ("tree_sitter_typescript", "language_tsx"),
     "go":         ("tree_sitter_go",         "language"),
     "rust":       ("tree_sitter_rust",       "language"),
     "java":       ("tree_sitter_java",       "language"),
@@ -242,6 +250,9 @@ _DEFINITION_NODE_TYPES: dict[str, set[str]] = {
         "local_variable_declaration",
     },
 }
+
+# TSX is a separate grammar but declares the same constructs as TypeScript.
+_DEFINITION_NODE_TYPES["tsx"] = _DEFINITION_NODE_TYPES["typescript"]
 
 # Child field names that typically hold the defined identifier
 _NAME_FIELDS = ("name", "identifier", "declarator")

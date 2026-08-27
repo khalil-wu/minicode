@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.artifact.store import ArtifactStore
+from backend.atomic_io import file_mutation_locks
 from backend.attachments.store import AttachmentStore
 from backend.permissions.context import ToolExecutionContext
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
@@ -14,11 +15,11 @@ from backend.tools.file_tools_common import _atomic_write_text
 
 PRESENTABLE_FILE_EXTENSIONS = frozenset({
     ".7z", ".aac", ".avif", ".bmp", ".csv", ".doc", ".docx", ".epub",
-    ".flac", ".gif", ".ico", ".jpeg", ".jpg", ".json", ".m4a", ".md",
-    ".mov", ".mp3", ".mp4", ".odp", ".ods", ".odt", ".ogg", ".pdf",
-    ".png", ".ppt", ".pptx", ".rtf", ".tar", ".tif", ".tiff", ".tsv",
-    ".txt", ".wav", ".webm", ".webp", ".xls", ".xlsx", ".xml", ".yaml",
-    ".yml", ".zip",
+    ".flac", ".gif", ".htm", ".html", ".ico", ".jpeg", ".jpg", ".json",
+    ".m4a", ".md", ".mov", ".mp3", ".mp4", ".odp", ".ods", ".odt", ".ogg",
+    ".pdf", ".png", ".ppt", ".pptx", ".rtf", ".svg", ".tar", ".tif",
+    ".tiff", ".tsv", ".txt", ".wav", ".webm", ".webp", ".xls", ".xlsx",
+    ".xml", ".yaml", ".yml", ".zip",
 })
 
 
@@ -50,7 +51,8 @@ class PresentFileTool(BaseTool):
     display_label = "Present file"
     description = (
         "Register a completed user-facing document or media deliverable after verifying it exists. "
-        "Call this for final artifacts such as DOCX, PDF, XLSX, PPTX, images, text, or archives; "
+        "Call this for final artifacts such as DOCX, PDF, XLSX, PPTX, images, self-contained HTML "
+        "pages, text, or archives; "
         "never call it for temporary helper scripts, source code, or intermediate build files."
     )
     permission = PermissionLevel.AUTO
@@ -62,6 +64,7 @@ class PresentFileTool(BaseTool):
         return ToolSpec(
             name=self.name,
             capability="artifact.present",
+            toolset="artifact",
             exposure="core",
             required_args=("file_path",),
         )
@@ -185,6 +188,7 @@ class ReadArtifactTool(BaseTool):
         return ToolSpec(
             name=self.name,
             capability="artifact.read",
+            toolset="artifact",
             exposure="core",
             required_args=("artifact_id",),
         )
@@ -276,15 +280,22 @@ class ReadArtifactTool(BaseTool):
         # filename inside that trusted directory so the two result-reference
         # mechanisms interoperate without opening an arbitrary-file read path.
         if content is None:
-            content = self._read_persisted_tool_result(artifact_id)
+            content = self._read_persisted_tool_result(
+                artifact_id,
+                conversation_id=conversation_id,
+                workspace_root=workspace_root,
+            )
 
         if content is None:
             return self._error_result(
                 f"Artifact '{artifact_id}' does not exist in this conversation and workspace."
             )
 
-        preview = artifact_content_preview(content)
         sliced, window = self._slice_lines(content, args)
+        # A preview of the artifact head would be appended to the model-visible
+        # result alongside the slice, re-adding the very content offset/limit
+        # was used to skip. Only an unpaged read gets the head preview.
+        preview = artifact_content_preview(content) if not window else None
         return ToolResult(
             content=sliced,
             content_preview=preview,
@@ -323,7 +334,12 @@ class ReadArtifactTool(BaseTool):
         return f"{header}\n{body}", f" lines {start + 1}-{end}"
 
     @staticmethod
-    def _read_persisted_tool_result(reference: str) -> str | None:
+    def _read_persisted_tool_result(
+        reference: str,
+        *,
+        conversation_id: str = "",
+        workspace_root: str = "",
+    ) -> str | None:
         from pathlib import Path
 
         from backend.agent.tool_result_persistence import (
@@ -335,7 +351,11 @@ class ReadArtifactTool(BaseTool):
         if raw.name != reference or raw.name in {"", ".", ".."}:
             return None
         candidate = TOOL_RESULT_DATA_DIR / raw.name
-        if not is_tool_result_path(candidate):
+        if not is_tool_result_path(
+            candidate,
+            conversation_id=conversation_id,
+            workspace_root=workspace_root,
+        ):
             return None
         try:
             return candidate.read_text(encoding="utf-8")
@@ -374,7 +394,7 @@ class ReadArtifactTool(BaseTool):
         if not isinstance(attachment, dict):
             return None
         native_data = str(
-            attachment.get("data", "") or self._attachment_store.get_native_data(artifact_id) or ""
+            attachment.get("data", "") or payload.get("native_data") or ""
         )
         file_name = attachment.get("file_name", "")
         if not native_data or not file_name:
@@ -393,7 +413,7 @@ class ReadArtifactTool(BaseTool):
         try:
             with os.fdopen(fd, "wb") as f:
                 f.write(raw_bytes)
-            from backend.mcp.servers.docparse import _parse_pdf
+            from backend.documents.parsers import _parse_pdf
 
             parsed = _parse_pdf(temp_path)
             full_text = str(parsed.get("full_text", "")).strip()
@@ -408,8 +428,9 @@ class ReadArtifactTool(BaseTool):
             from backend.artifact.store import ARTIFACT_DATA_DIR
 
             content_path = ARTIFACT_DATA_DIR / f"{artifact_id}.txt"
-            if content_path.parent.exists():
-                _atomic_write_text(content_path, full_text)
+            with file_mutation_locks([content_path]):
+                if content_path.parent.exists():
+                    _atomic_write_text(content_path, full_text)
             return full_text
         except Exception:
             return None

@@ -14,14 +14,17 @@ from __future__ import annotations
 
 import fnmatch
 import inspect
+import logging
 import re
 import shlex
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 from weakref import WeakKeyDictionary
 
+from functools import lru_cache
 from pathspec.gitignore import GitIgnoreSpec
 
 from backend.config import PermissionSettings
@@ -29,10 +32,11 @@ from backend.permissions.context import PermissionContext, PermissionDecision
 from backend.permissions.network import assess_network_url
 from backend.permissions.rules import PermissionRuleMatcher, SandboxValidator
 from backend.security.sensitive_files import (
-    PROTECTED_WRITE_FILE_NAMES,
-    PROTECTED_WRITE_PATH_PARTS,
+    DANGEROUS_FILES,
+    DANGEROUS_DIRECTORIES,
 )
 from backend.tools.base import PermissionLevel, WORKSPACE_PATH_SCHEMA_FIELDS
+from backend.tools.path_resolution import windows_path_safety_reason
 
 if TYPE_CHECKING:
     from backend.tools.base import BaseTool
@@ -40,15 +44,11 @@ if TYPE_CHECKING:
 
 _ACCEPTS_TOOL_CACHE: WeakKeyDictionary[Any, dict[str, tuple[Any, bool]]] = WeakKeyDictionary()
 
+logger = logging.getLogger(__name__)
+
 # Windows and macOS resolve paths case-insensitively, so a denylist entry must
 # match regardless of the casing the model happens to use.
 _FILESYSTEM_IS_CASE_INSENSITIVE = sys.platform in {"win32", "darwin"}
-_LEGACY_TOOL_NAME_ALIASES = {
-    "terminal.exec": "run_command",
-    "terminal_exec": "run_command",
-}
-
-
 def _tool_pattern_matches(tool_name: str, pattern: str) -> bool:
     """Match ordinary globs plus an MCP server-level rule.
 
@@ -57,11 +57,6 @@ def _tool_pattern_matches(tool_name: str, pattern: str) -> bool:
     match by raw prefix.
     """
     normalized_pattern = str(pattern or "").strip()
-    normalized_pattern = _LEGACY_TOOL_NAME_ALIASES.get(
-        normalized_pattern.casefold(),
-        normalized_pattern,
-    )
-    tool_name = _LEGACY_TOOL_NAME_ALIASES.get(tool_name.casefold(), tool_name)
     if fnmatch.fnmatch(tool_name, normalized_pattern):
         return True
     if normalized_pattern.startswith("mcp__") and "*" not in normalized_pattern:
@@ -104,10 +99,15 @@ _CATASTROPHIC_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"rm\s+(-[a-z]*f[a-z]*\s+)?/\*", re.I), "recursive delete of root filesystem"),
     (re.compile(r"\brm\b(?:\s+--?[^\s]+)*\s+/\s*$", re.I), "recursive delete of root filesystem"),
     (re.compile(r"\brm\b(?:\s+--?[^\s]+)*\s+(?:~|\$HOME|\$\{HOME\}|%USERPROFILE%)(?:[\\/][^/\s]*)?\s*$", re.I), "recursive delete of home directory"),
-    (re.compile(r"\brm\b(?:\s+--?[^\s]+)*\s+/+(?:Users|home)/[^/\s]+/?\s*$", re.I), "recursive delete of system directory"),
+    (re.compile(r"\brm\b(?:\s+--?[^\s]+)*\s+/+(?:Users|home)(?:/[^/\s]+)?/?\s*$", re.I), "recursive delete of system directory"),
     (re.compile(r"\brm\b(?:\s+--?[^\s]+)*\s+/+(?:etc|usr|var|bin|sbin|System|Library)(?:/|\s*$)", re.I), "recursive delete of system directory"),
     (re.compile(r"\bmkfs\b", re.I), "filesystem format"),
-    (re.compile(r"\bdd\b.*\bof\s*=\s*/dev/", re.I), "raw disk write"),
+    (re.compile(r"\bdd\b.*\bof\s*=\s*/(?:dev|etc|boot|proc|sys|System|Library|Users|home)(?:/|\s*$)", re.I), "raw system-file write"),
+    (re.compile(r"\bfind\b[^\n;&|]*(?:^|\s)-delete(?:\s|$)", re.I), "find delete operation"),
+    # `-exec` may hand the delete to a shell wrapper (`-exec sh -c "rm -rf /"`),
+    # so scan the whole -exec argument list within this shell segment instead of
+    # requiring the delete command to be the first token after -exec.
+    (re.compile(r"\bfind\b[^\n;&|]*-exec(?:dir)?\s[^\n;&|]*\b(?:rm|del|erase|rmdir|rd|unlink|shred)\b", re.I), "find recursive delete operation"),
     (re.compile(r":\(\)\s*\{.*\|.*&", re.I), "fork bomb"),
     (re.compile(r">\s*/dev/sd", re.I), "raw disk overwrite"),
     (re.compile(r"curl\b.*\|\s*(ba)?sh", re.I), "pipe remote script to shell"),
@@ -120,6 +120,44 @@ _CATASTROPHIC_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"del\s+/[sS].*\\Windows", re.I), "delete Windows system directory"),
     (re.compile(r"rd\s+/[sS]\s+/[qQ]\s+[A-Z]:\\$", re.I), "recursive delete of drive root"),
     (re.compile(r"\b(?:rd|rmdir)\b\s+/[sS]\s+/[qQ]\s+[A-Z]:\\Users\\[^\\\s]+\\?\s*$", re.I), "recursive delete of system directory"),
+    # Background process ownership follows Codex/Pi: MiniCode can terminate the
+    # exact process tree registered under a command id, but shell-wide matching
+    # can kill the backend, editor, or unrelated user work. Exact PID forms such
+    # as Stop-Process -Id 123 and taskkill /PID 123 remain available behind the
+    # ordinary run_command approval boundary.
+    (
+        re.compile(r"\bstop-process\b(?=[^\n;&|]*(?:[-\u2013\u2014\u2212](?:name|n)\b))", re.I),
+        "process-name termination is not scoped to an owned background command",
+    ),
+    (
+        re.compile(r"\bget-process\b[^\n;]*\|[^\n;]*\bstop-process\b", re.I),
+        "pipeline termination can kill processes outside the owned background command",
+    ),
+    (
+        re.compile(
+            r"\b(?:foreach-object|foreach|%)\b[^\n;|]*(?:[-\u2013\u2014\u2212](?:membername|m)\s+)?kill\b",
+            re.I,
+        ),
+        "ForEach-Object method termination is not scoped to an owned background command",
+    ),
+    (
+        re.compile(r"\bget-process\b[^\n;]*\|[^\n;]*\.kill\s*\(", re.I),
+        "process pipeline Kill() is not scoped to an owned background command",
+    ),
+    (
+        re.compile(r"\btaskkill(?:\.exe)?\b(?=[^\n;&|]*/im\b)", re.I),
+        "taskkill image-name termination is not scoped to an owned background command",
+    ),
+    (re.compile(r"\bpkill\b", re.I), "pkill is not scoped to an owned background command"),
+    (re.compile(r"\bkillall\b", re.I), "killall is not scoped to an owned background command"),
+    (
+        re.compile(
+            r"(?:\bwin32_process\b|\bwmic\b[^\n;]*\bprocess\b|\binvoke-(?:wmi|cim)method\b)"
+            r"[^\n;]*\bterminate\b",
+            re.I,
+        ),
+        "WMI/CIM process termination is not scoped to an owned background command",
+    ),
     # Environment-variable exfiltration via /proc (parser-differential defense in
     # depth; path validation may not cover a bare `cat`). No legitimate dev use.
     (re.compile(r"/proc/[^/\s]+/environ", re.I), "read of process environment (secret exfiltration)"),
@@ -131,10 +169,13 @@ _CATASTROPHIC_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 
 
 # ── Parser-differential / command-injection risk signals ─────────────────────
-# Mirrors CC bashSecurity.ts COMMAND_SUBSTITUTION_PATTERNS. These are RISK
-# SIGNALS, not outright blocks: a command carrying one is never silently
-# auto-classified as read-only (so it always requires confirmation), but common
-# legitimate uses like `echo $(date)` remain runnable after the user approves.
+# Superset of CC bashSecurity.ts COMMAND_SUBSTITUTION_PATTERNS: the common
+# substitution shapes mirror CC, while `$'`, `$IFS`, `print -P`, and `setopt`
+# are MiniCode additions (CC handles backticks in a separate unescaped-check
+# pass). These are RISK SIGNALS, not outright blocks: a command carrying one
+# is never silently auto-classified as read-only (so it always requires
+# confirmation), but common legitimate uses like `echo $(date)` remain
+# runnable after the user approves.
 _INJECTION_RISK_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\$\("), "$() command substitution"),
     (re.compile(r"`"), "backtick command substitution"),
@@ -179,6 +220,10 @@ _DESTRUCTIVE_COMPOUND_SEGMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(r"^\s*git\s+(?:clean\b(?=[^\n]*\s-[^\s]*[fdx])|reset\s+--hard\b)", re.I),
         "destructive git operation hidden inside a compound command",
+    ),
+    (
+        re.compile(r"^\s*find\b[^\n]*(?:-delete|-exec(?:dir)?\s+(?:rm|del|erase|rmdir|rd)\b)", re.I),
+        "destructive find operation hidden inside a compound command",
     ),
 )
 
@@ -247,17 +292,21 @@ def _destructive_compound_reason(command: str) -> str:
 
 
 # Tokens that, followed by a path, denote a shell WRITE to that path. Used to
-# stop a shell command from writing protected files (.claude/**, .git/**,
-# settings.json, .mcp.json, …) that the file tools (write_file/edit_file/
-# apply_patch) already block. cc blocks the same class of shell writes
-# (bashPermissions cd+redirect / cd+mv into .claude/settings.json); this is the
-# proportionate equivalent reusing the existing segment splitter — the OS
-# sandbox + CONFIRM remain the primary boundary, this closes the file-tool vs
-# shell asymmetry for the protected set.
+# stop a shell command from writing protected files (.env, *.pem, secrets/**,
+# settings.json, .minicode/**, .git/**, …) that the file tools
+# (write_file/edit_file/apply_patch) already block even under bypass. This
+# closes the file-tool vs shell asymmetry for the protected set; the OS sandbox
+# and CONFIRM remain the primary boundary.
+#
+# Known limitation: only writes this matcher can see are covered. Shell *reads*
+# of a protected path are not pattern-matched — any program can read any file,
+# so a string matcher would give false assurance. Read confinement belongs to
+# the sandbox filesystem policy, which denies these paths by profile.
 _SHELL_WRITE_REDIRECT_RE = re.compile(r">>?\s*([^\s;&|]+)")
 _SHELL_WRITE_COMMAND_RE = re.compile(
     r"\b(?:mv|cp|tee|install|ln)\b\s+(.+)", re.IGNORECASE
 )
+_DD_OUTPUT_RE = re.compile(r"\bof\s*=\s*([^\s;&|]+)", re.IGNORECASE)
 
 
 def _path_is_protected_write(raw_path: str) -> bool:
@@ -265,14 +314,23 @@ def _path_is_protected_write(raw_path: str) -> bool:
     if not cleaned:
         return False
     name = cleaned.rsplit("/", 1)[-1].lower()
-    if name in PROTECTED_WRITE_FILE_NAMES:
+    if name in DANGEROUS_FILES:
         return True
     parts = [segment for segment in cleaned.split("/") if segment]
-    return any(part.lower() in PROTECTED_WRITE_PATH_PARTS for part in parts)
+    if any(part.lower() in DANGEROUS_DIRECTORIES for part in parts):
+        return True
+    # Same secret/repo floor the file tools enforce. Consulting it here instead
+    # of keeping a second, shorter list is what makes the two paths agree: the
+    # short list omitted .env, *.pem, secrets/** and settings.json, so a shell
+    # redirect could overwrite a file write_file refuses even under bypass.
+    return _matches_secret_repo_floor(cleaned)
 
 
 def _protected_write_reason(command: str) -> str:
     for segment in _split_shell_compound(command):
+        dd_match = _DD_OUTPUT_RE.search(segment)
+        if dd_match and _path_is_protected_write(dd_match.group(1)):
+            return "shell write to a protected path (dd output)"
         for match in _SHELL_WRITE_REDIRECT_RE.finditer(segment):
             if _path_is_protected_write(match.group(1)):
                 return "shell write to a protected path (redirection)"
@@ -431,9 +489,15 @@ def evaluate_permission_decision(
     context: PermissionContext | None = None,
     tool: Any = None,
 ) -> PermissionDecision:
+    from backend.agent.final_tool_request import canonical_tool_request_digest
+
+    request_digest = canonical_tool_request_digest(tool_name, args or {})
     evaluate = getattr(checker, "evaluate", None)
     if callable(evaluate):
-        return evaluate(tool_name, args, context=context, tool=tool)
+        decision = evaluate(tool_name, args, context=context, tool=tool)
+        if getattr(decision, "request_digest", "") == request_digest:
+            return decision
+        return replace(decision, request_digest=request_digest)
     level = check_permission_level(checker, tool_name, args, context=context, tool=tool)
     denial = check_denial_reason(checker, tool_name, args, context=context, tool=tool) or ""
     decision = "deny" if denial or level == PermissionLevel.ALWAYS_DENY else "allow" if level == PermissionLevel.AUTO else "ask"
@@ -453,24 +517,59 @@ def evaluate_permission_decision(
         risk="medium" if level in {PermissionLevel.CONFIRM, PermissionLevel.DIFF_REVIEW} else "low",
         scope={"workspace_scope": context.workspace_scope if context is not None else "project", "boundary": "general"},
         expiry="call",
+        request_digest=request_digest,
     )
 
+
+PERMISSION_MODES: frozenset[str] = frozenset(
+    {"plan", "confirm", "auto", "bypass"}
+)
+
+
 def normalize_permission_mode_token(mode: str | None) -> str:
+    """Resolve one permission-mode token, or reject it.
+
+    An unrecognized token is a contract error, not a request for the default
+    mode: silently downgrading it would replace the user's explicit permission
+    mode with a different one.
+    """
     normalized = str(mode or "").strip().lower().replace("-", "_").replace(" ", "_")
-    aliases = {
-        "ask": "confirm",
-        "ask_permissions": "confirm",
-        "bypass_permissions": "bypass",
-        "full_access": "bypass",
-        "fullaccess": "bypass",
-        "danger_full_access": "bypass",
-        "dangerfullaccess": "bypass",
-        "acceptedits": "accept_edits",
-    }
-    candidate = aliases.get(normalized, normalized)
-    if candidate in {"default", "plan", "confirm", "bypass", "auto", "accept_edits"}:
-        return candidate
-    return "default"
+    if not normalized:
+        raise ValueError("Permission mode is required")
+    if normalized not in PERMISSION_MODES:
+        raise ValueError(f"Unsupported permission mode: {mode!r}")
+    return normalized
+
+
+_PERMISSION_MODE_AUTHORITY: dict[str, int] = {
+    # Delegation may narrow authority but cannot widen it.
+    "plan": 0,
+    "confirm": 1,
+    "auto": 2,
+    "bypass": 3,
+}
+
+
+def permission_mode_authority(mode: str | None) -> int:
+    """Rank one permission mode by the authority it grants without asking."""
+    return _PERMISSION_MODE_AUTHORITY[normalize_permission_mode_token(mode)]
+
+
+def clamp_permission_mode(requested: str | None, ceiling: str | None) -> str:
+    """Return ``requested`` only when it is no wider than ``ceiling``.
+
+    Delegation may narrow authority and must never widen it. Without this a
+    child could request a mode its parent does not hold — e.g. a teammate
+    spawned from a read-only Plan-mode turn asking for ``bypass`` and getting
+    an unsandboxed, never-prompting context.
+    """
+    ceiling_mode = normalize_permission_mode_token(ceiling)
+    if requested is None or not str(requested).strip():
+        return ceiling_mode
+    requested_mode = normalize_permission_mode_token(requested)
+    if permission_mode_authority(requested_mode) > permission_mode_authority(ceiling_mode):
+        return ceiling_mode
+    return requested_mode
 
 
 _PERMISSION_RESTRICTIVENESS: dict[PermissionLevel, int] = {
@@ -630,16 +729,62 @@ def _looks_like_plain_network_target(value: str) -> bool:
 _DEFAULT_PATH_DENYLIST = tuple(PermissionSettings().path_denylist)
 
 
-def _bypass_denylist(configured: list[str]) -> list[str]:
-    """Keep built-in secret/repo guards in bypass, skip custom workspace policy.
+@lru_cache(maxsize=1)
+def _secret_repo_floor_specs() -> tuple[GitIgnoreSpec, GitIgnoreSpec | None]:
+    """Compile the built-in secret/repo floor once, plus a case-folded pass."""
+    patterns = [
+        pattern.replace("\\", "/").strip()
+        for pattern in _DEFAULT_PATH_DENYLIST
+        if str(pattern or "").strip()
+    ]
+    folded = (
+        GitIgnoreSpec.from_lines(pattern.lower() for pattern in patterns)
+        if _FILESYSTEM_IS_CASE_INSENSITIVE
+        else None
+    )
+    return GitIgnoreSpec.from_lines(patterns), folded
 
-    The built-in guards are unconditional: bypass waives the user's own workspace
-    policy, not the secret/repo floor. Previously a single missing default turned
-    this into an empty list, dropping .env/.git/secrets protection entirely —
-    cc's equivalent safety check is likewise immune to bypass.
+
+def _matches_secret_repo_floor(workspace_relative_path: str) -> bool:
+    """True when a path is inside the bypass-immune secret/repo floor.
+
+    Shares the exact patterns is_path_allowed enforces for the file tools, so
+    the shell write guard and the file tools cannot disagree about what is
+    protected. Negations (``!.env.example``) are honoured by the same spec.
     """
-    del configured
-    return list(_DEFAULT_PATH_DENYLIST)
+    candidate = workspace_relative_path.replace("\\", "/").strip().lstrip("/")
+    if not candidate:
+        return False
+    spec, folded_spec = _secret_repo_floor_specs()
+    if spec.match_file(candidate):
+        return True
+    return bool(folded_spec is not None and folded_spec.match_file(candidate.lower()))
+
+
+def _bypass_denylist(host_constraints: list[str]) -> list[str]:
+    """Keep built-in guards and host constraints in bypass, drop local settings.
+
+    Bypass waives the user's own workspace policy (``permissions.path_denylist``
+    in settings.json), never the built-in secret/repo floor and never a
+    constraint the host injected into the live permission context — managed
+    ``permissions.filesystem.deny_read`` arrives that way, and the sandbox layer
+    already folds it into its hard denies, so discarding it here made the two
+    layers disagree about the same administrator policy.
+
+    The built-in floor is appended last so a host pattern cannot negate it.
+    """
+    return list(
+        dict.fromkeys(
+            [
+                *(
+                    str(pattern).strip()
+                    for pattern in host_constraints
+                    if str(pattern or "").strip()
+                ),
+                *_DEFAULT_PATH_DENYLIST,
+            ]
+        )
+    )
 
 
 class PermissionChecker:
@@ -660,6 +805,7 @@ class PermissionChecker:
         from backend.permissions.content_rules import parse_content_rules
 
         self._content_allow = parse_content_rules(list(getattr(settings, "content_allow_rules", [])))
+        self._content_ask = parse_content_rules(list(getattr(settings, "content_ask_rules", [])))
         self._content_deny = parse_content_rules(list(getattr(settings, "content_deny_rules", [])))
 
     def with_workspace_root(self, workspace_root: Path | str | None) -> "PermissionChecker":
@@ -667,40 +813,98 @@ class PermissionChecker:
             return self
         return PermissionChecker(self._settings, Path(workspace_root))
 
+    def capability_available(
+        self,
+        tool_name: str,
+        *,
+        context: PermissionContext | None = None,
+        tool: "BaseTool | None" = None,
+    ) -> tuple[bool, str]:
+        """Check static capability boundaries without inventing invocation args."""
+        matched = self._first_match(tool_name, self._settings.always_deny)
+        if matched:
+            return False, f"Tool '{tool_name}' is disabled by the static permission policy ({matched})."
+        if context is not None:
+            matched = self._first_match(tool_name, context.tool_deny_rules)
+            if matched:
+                return False, f"Tool '{tool_name}' is disabled for this session ({matched})."
+        if tool is not None:
+            declared = getattr(tool, "permission", PermissionLevel.AUTO)
+            if declared == PermissionLevel.ALWAYS_DENY:
+                return False, f"Tool '{tool_name}' declares an unavailable capability."
+            if not tool.is_capability_available(context):
+                return False, f"Tool '{tool_name}' is unavailable in the current permission context."
+        return True, ""
+
     def _content_rule_decision(
         self,
         tool_name: str,
         args: dict[str, Any] | None,
     ) -> PermissionLevel | None:
-        """Evaluate parsed Tool(content) rules. Returns ALWAYS_DENY, AUTO, or None."""
+        """Evaluate parsed Tool(content) rules with deny > ask > allow precedence."""
         from backend.permissions.content_rules import rule_matches_call
 
         for rule in self._content_deny:
-            if rule_matches_call(rule, tool_name, args):
+            if rule_matches_call(rule, tool_name, args, effect="deny"):
                 return PermissionLevel.ALWAYS_DENY
+        for rule in self._content_ask:
+            if rule_matches_call(rule, tool_name, args, effect="ask"):
+                return PermissionLevel.CONFIRM
         for rule in self._content_allow:
-            if rule_matches_call(rule, tool_name, args):
+            if rule_matches_call(rule, tool_name, args, effect="allow"):
                 return PermissionLevel.AUTO
         return None
 
     def build_context(
         self,
         *,
-        mode: str = "default",
+        mode: str = "confirm",
         session_overrides: dict[str, PermissionLevel] | None = None,
+        command_prompt_allow_rules: list[str] | tuple[str, ...] | None = None,
         tool_deny_rules: list[str] | None = None,
         filesystem_constraints: dict[str, list[str]] | None = None,
         workspace_scope: str = "project",
         source: str = "runtime",
+        pre_plan_mode: str | None = None,
+        approval_policy: str = "",
+        sandbox_mode: str = "",
+        requirements_source: str = "",
     ) -> PermissionContext:
         normalized_mode = normalize_permission_mode_token(mode)
+        # The mode already implies an approval policy (bypass never
+        # prompt; plan and the rest ask on request). Derive it from the one
+        # canonical mapping so the authorizing chokepoint and visible surface agree.
+        from backend.config_requirements import permission_mode_requirements
+
+        resolved_approval_policy = str(approval_policy or "").strip() or (
+            permission_mode_requirements(normalized_mode)[0]
+        )
         return PermissionContext(
             mode=normalized_mode,  # type: ignore[arg-type]
             session_overrides=dict(session_overrides or {}),
+            command_prompt_allow_rules=tuple(
+                dict.fromkeys(
+                    prompt
+                    for prompt in (
+                        str(item or "").strip()
+                        for item in (command_prompt_allow_rules or ())
+                    )
+                    if prompt
+                )
+            ),
             tool_deny_rules=list(tool_deny_rules or []),
             filesystem_constraints=dict(filesystem_constraints or {}),
             workspace_scope=workspace_scope if workspace_scope in {"computer", "project", "worktree"} else "project",
             source=source,
+            pre_plan_mode=(
+                normalize_permission_mode_token(pre_plan_mode)
+                if str(pre_plan_mode or "").strip()
+                and normalize_permission_mode_token(pre_plan_mode) != "plan"
+                else None
+            ),
+            approval_policy=resolved_approval_policy,
+            sandbox_mode=sandbox_mode,
+            requirements_source=requirements_source,
         )
 
     def check(
@@ -778,11 +982,17 @@ class PermissionChecker:
         content_decision = self._content_rule_decision(tool_name, args)
         if content_decision == PermissionLevel.ALWAYS_DENY:
             return PermissionLevel.ALWAYS_DENY, "content_rule", "content_deny"
-        if policy_override is None and content_decision == PermissionLevel.AUTO:
-            policy_override = (PermissionLevel.AUTO, "content_rule", "content_allow")
-
-        if context is not None and context.mode == "bypass":
-            return PermissionLevel.AUTO, "mode", "bypass:auto"
+        if policy_override is None and content_decision in {
+            PermissionLevel.AUTO,
+            PermissionLevel.CONFIRM,
+        }:
+            policy_override = (
+                content_decision,
+                "content_rule",
+                "content_allow"
+                if content_decision == PermissionLevel.AUTO
+                else "content_ask",
+            )
 
         tool_level: PermissionLevel | None = None
         tool_decision_is_explicit = False
@@ -808,18 +1018,90 @@ class PermissionChecker:
         if matched:
             static_auto = (PermissionLevel.AUTO, "static_policy", matched)
 
+        # cc's COMMAND_SUBSTITUTION_PATTERNS make commands carrying injection
+        # signals 'ask' instead of silently auto-classified read-only.
+        injection_reason = ""
+        if args is not None and (
+            fnmatch.fnmatch(tool_name, "run_command") or tool_name.startswith("terminal_")
+        ):
+            shell_command = str(args.get("command") or args.get("cmd") or "")
+            injection_reason = command_injection_risk(shell_command)
+            if injection_reason:
+                static_auto = None
+                static_floor.append((PermissionLevel.CONFIRM, "injection_risk", injection_reason))
+
         if context is not None and context.mode == "plan":
-            if tool is None or tool_level != PermissionLevel.AUTO:
+            if tool is None or tool_level is None:
                 return PermissionLevel.ALWAYS_DENY, "mode", "plan:deny"
+            if tool_level == PermissionLevel.ALWAYS_DENY:
+                return PermissionLevel.ALWAYS_DENY, "mode", "plan:tool_deny"
             try:
                 side_effect_kind = str(tool.get_side_effect_kind(args) or "").strip().lower()
             except Exception:
                 return PermissionLevel.ALWAYS_DENY, "mode", "plan:metadata_error"
+            if side_effect_kind == "none":
+                if tool_name.startswith("mcp__"):
+                    return PermissionLevel.ALWAYS_DENY, "mode", "plan:untrusted_mcp"
+                # Plan mode may strengthen permissions, but it must never
+                # weaken a tool-owned interactive floor.  ExitPlanMode is
+                # side-effect-free in the workspace taxonomy yet still
+                # requires explicit user approval.
+                if tool_decision_is_explicit and tool_level in {
+                    PermissionLevel.CONFIRM,
+                    PermissionLevel.DIFF_REVIEW,
+                }:
+                    return tool_level, "mode", f"plan:{tool_level.value}"
+                return PermissionLevel.AUTO, "mode", "plan:auto"
+
+            # Claude delegates the one Plan-mode write exception to the file
+            # tools' path-aware permission seam.  Their explicit AUTO is only
+            # returned for the exact session plan path; all other workspace,
+            # external, and destructive side effects remain denied.  In
+            # particular, a command tool's own CONFIRM declaration is not a
+            # Plan-mode exception and must not be downgraded to approval.
+            if (
+                tool_name in {"edit_file", "write_file"}
+                and tool_decision_is_explicit
+                and tool_level == PermissionLevel.AUTO
+            ):
+                return PermissionLevel.AUTO, "mode", "plan:plan_file"
             if side_effect_kind != "none":
                 return PermissionLevel.ALWAYS_DENY, "mode", "plan:side_effect"
-            if tool_name.startswith("mcp__"):
-                return PermissionLevel.ALWAYS_DENY, "mode", "plan:untrusted_mcp"
-            return PermissionLevel.AUTO, "mode", "plan:auto"
+
+        # Bypass is MiniCode's explicit unattended/full-access mode.  It
+        # removes approval routing for ordinary workspace and external work;
+        # otherwise DIFF_REVIEW/CONFIRM would be converted into a denial by
+        # approval_policy="never", hiding the capability from the provider and
+        # making the user's selected mode unusable.  Hard policy denies and
+        # tool-owned refusals have already returned above.  Path containment
+        # and sensitive-file checks remain authoritative in evaluate().
+        if context is not None and context.mode == "bypass":
+            if tool_level == PermissionLevel.ALWAYS_DENY:
+                return PermissionLevel.ALWAYS_DENY, "tool", f"{tool_name}.check_permission"
+            if tool is not None:
+                try:
+                    side_effect_kind = str(tool.get_side_effect_kind(args) or "").strip().lower()
+                except Exception:
+                    return PermissionLevel.ALWAYS_DENY, "tool", f"{tool_name}.side_effect_metadata"
+                # Bypass skips ordinary tool-default prompts, as in Claude
+                # Code's bypassPermissions branch.  Concrete destructive
+                # classification remains a human-confirmation boundary. MCP
+                # extensions keep the same boundary for open-world/external
+                # calls: bypass removes the generic MCP prompt, but it does
+                # not turn an untrusted remote capability into a local AUTO
+                # operation. A plain read-only MCP-shaped test tool with no
+                # external metadata remains eligible for bypass AUTO.
+                if bool(getattr(tool, "destructive", False)) or side_effect_kind == "destructive":
+                    return PermissionLevel.CONFIRM, "capability_boundary", "bypass:destructive"
+                if (
+                    tool_name.startswith("mcp__")
+                    and (
+                        bool(getattr(tool, "open_world", False))
+                        or side_effect_kind == "external"
+                    )
+                ):
+                    return PermissionLevel.CONFIRM, "capability_boundary", "bypass:mcp_external"
+            return PermissionLevel.AUTO, "mode", "bypass:auto"
 
         # A user-authored/session-scoped MCP allow is the only way an extension
         # may skip confirmation. Its own readOnlyHint is never sufficient.
@@ -832,34 +1114,75 @@ class PermissionChecker:
         ):
             return policy_override
 
-        # MCP declarations are untrusted extensions.  Their claimed read-only
-        # metadata may shape the UI but cannot waive an explicit confirmation.
-        if tool_name.startswith("mcp__"):
+        # MCP declarations are untrusted extensions in ordinary modes. Their
+        # claimed read-only metadata may shape the UI but cannot waive an
+        # explicit confirmation. Claude's bypassPermissions branch happens
+        # after the tool's own deny/safety hooks and therefore does not invent
+        # a second generic MCP confirmation here.
+        if tool_name.startswith("mcp__") and not (
+            context is not None and context.mode == "bypass"
+        ):
             raise_floor(PermissionLevel.CONFIRM, "capability_boundary", "mcp_extension")
 
         # CC asks whenever a filesystem-shaped tool call has no getPath seam.
         # A forgotten declaration must not silently inherit AUTO in MiniCode.
-        if tool is not None and _has_undeclared_path_argument(tool, args):
+        if (
+            tool is not None
+            and not (context is not None and context.mode == "bypass")
+            and _has_undeclared_path_argument(tool, args)
+        ):
             raise_floor(
                 PermissionLevel.CONFIRM,
                 "capability_boundary",
                 f"{tool_name}.undeclared_path",
             )
 
-        if context is not None and _network_target_requires_confirmation(
-            tool_name,
-            args,
-            context,
-            tool,
+        if (
+            not (context is not None and context.mode == "bypass")
+            and _network_target_requires_confirmation(tool_name, args, context, tool)
         ):
             raise_floor(PermissionLevel.CONFIRM, "capability_boundary", "network_target")
 
         # Tool-owned checks define an invocation-specific capability floor.
         # A content allow or remembered ordinary approval cannot lower it.
         if tool is not None:
-            if tool_level is not None and tool_decision_is_explicit:
+            if (
+                tool_level is not None
+                and tool_decision_is_explicit
+                and (
+                    context is None
+                    or context.mode != "bypass"
+                    or tool_level in {
+                        PermissionLevel.ALWAYS_DENY,
+                        PermissionLevel.DIFF_REVIEW,
+                    }
+                )
+            ):
                 raise_floor(tool_level, "tool", f"{tool_name}.check_permission")
-            metadata_floor = self._tool_capability_floor(tool, args, context)
+            # An explicit allow is a decision about this exact capability, so it
+            # clears the metadata-derived external/open-world floor: the tool's
+            # own check_permission returning AUTO (sandbox exclusions,
+            # autoAllowCommandsIfSandboxed), an exact Tool(content) rule, or a scoped
+            # session override ("don't ask again for this tool"). A broad session
+            # mode never clears it, and neither does a coarse static auto_allow
+            # tool-name glob — embedding hosts synthesize those themselves, so
+            # they are not evidence of a user decision about this capability.
+            # An injection-risk signal also keeps the floor: that asymmetry is
+            # the point.
+            explicit_capability_allow = not injection_reason and (
+                (tool_decision_is_explicit and tool_level == PermissionLevel.AUTO)
+                or (
+                    policy_override is not None
+                    and policy_override[0] == PermissionLevel.AUTO
+                    and policy_override[1] in {"content_rule", "session_override"}
+                )
+            )
+            metadata_floor = self._tool_capability_floor(
+                tool,
+                args,
+                context,
+                explicit_allow=explicit_capability_allow,
+            )
             if metadata_floor is not None:
                 raise_floor(
                     metadata_floor,
@@ -869,6 +1192,19 @@ class PermissionChecker:
 
         if policy_override is not None:
             return apply_floor(*policy_override)
+
+        # A tool-owned AUTO describes this exact invocation (a sandbox-excluded
+        # command, autoAllowCommandsIfSandboxed, a read-only browser action), so it
+        # is more specific than a static require_confirm glob and is returned
+        # before the static routing layer. apply_floor still keeps every
+        # capability floor accumulated above (destructive metadata, MCP
+        # extension boundary, undeclared path, network target, diff review).
+        if (
+            tool_decision_is_explicit
+            and tool_level == PermissionLevel.AUTO
+            and not injection_reason
+        ):
+            return apply_floor(tool_level, "tool", f"{tool_name}.check_permission")
 
         # Static rules are the default routing layer. Explicit content/session
         # allows above are more specific; capability boundaries still win.
@@ -880,37 +1216,33 @@ class PermissionChecker:
 
         if context is not None:
             mode_level: PermissionLevel | None = None
-            if context.mode in {"auto", "accept_edits"}:
+            if context.mode == "auto":
                 mode_level = tool_level or PermissionLevel.CONFIRM
-                if (
-                    context.mode == "accept_edits"
-                    and mode_level == PermissionLevel.DIFF_REVIEW
-                    and tool is not None
-                ):
-                    try:
-                        if tool.get_side_effect_kind(args) == "workspace":
-                            mode_level = PermissionLevel.AUTO
-                    except Exception:
-                        pass
             elif context.mode == "confirm":
                 mode_level = tool_level or PermissionLevel.CONFIRM
 
             if mode_level is not None:
-                if (
-                    context.mode == "accept_edits"
-                    and mode_level == PermissionLevel.AUTO
-                    and capability_floor[0] == PermissionLevel.DIFF_REVIEW
-                ):
-                    # This is the explicit product meaning of accept_edits:
-                    # workspace edits skip the review dialog, while confirm
-                    # and destructive/network floors remain effective.
-                    return PermissionLevel.AUTO, "mode", "accept_edits:auto"
                 return apply_floor(mode_level, "mode", f"{context.mode}:{mode_level.value}")
 
         if tool_level is not None:
             return apply_floor(tool_level, "tool", f"{tool_name}.permission")
 
         return apply_floor(PermissionLevel.CONFIRM, "default", "confirm")
+
+    def _is_owner_allowed_tool_result_path(
+        self,
+        file_path: str | Path,
+        *,
+        context: PermissionContext | None = None,
+    ) -> bool:
+        from backend.agent.tool_result_persistence import is_tool_result_path
+
+        workspace_root = getattr(context, "workspace_root", None) if context is not None else None
+        return is_tool_result_path(
+            file_path,
+            conversation_id=str(getattr(context, "conversation_id", "") or ""),
+            workspace_root=workspace_root or self._workspace_root,
+        )
 
     def validate_file_operation(
         self,
@@ -925,10 +1257,13 @@ class PermissionChecker:
         path = Path(file_path).expanduser()
         if not path.is_absolute():
             path = self._workspace_root / path
-        if operation == "read":
-            from backend.agent.tool_result_persistence import is_tool_result_path
+        if context is not None:
+            from backend.agent.plans import is_current_plan_file
 
-            if is_tool_result_path(path):
+            if operation in {"read", "write"} and is_current_plan_file(path, context):
+                return True, ""
+        if operation == "read":
+            if self._is_owner_allowed_tool_result_path(path, context=context):
                 return True, ""
             constraints = context.filesystem_constraints if context is not None else {}
             for raw_root in constraints.get("readable_roots", []):
@@ -966,6 +1301,16 @@ class PermissionChecker:
             if level == PermissionLevel.AUTO
             else "ask"
         )
+        if (
+            decision == "ask"
+            and context is not None
+            and context.approval_policy == "never"
+            and context.mode != "bypass"
+        ):
+            level = PermissionLevel.ALWAYS_DENY
+            decision = "deny"
+            rule_source = "managed_requirements"
+            matched_rule = context.requirements_source or "allowed_approval_policies=never"
         approval_policy = {
             PermissionLevel.AUTO: "auto",
             PermissionLevel.CONFIRM: "confirm",
@@ -973,6 +1318,8 @@ class PermissionChecker:
             PermissionLevel.ALWAYS_DENY: "deny",
         }[level]
         scope = self._decision_scope(tool_name, args, context=context, tool=tool)
+        from backend.agent.final_tool_request import canonical_tool_request_digest
+
         return PermissionDecision(
             permission_level=level,
             decision=decision,
@@ -984,6 +1331,7 @@ class PermissionChecker:
             risk=self._decision_risk(level, tool),
             scope=scope,
             expiry="session" if rule_source == "session_override" else "call" if rule_source == "tool" else "policy",
+            request_digest=canonical_tool_request_digest(tool_name, args or {}),
         )
 
     def validate_command(self, command: str) -> tuple[bool, str]:
@@ -1027,6 +1375,8 @@ class PermissionChecker:
             True 表示允许访问
         """
         # 检查黑名单
+        if windows_path_safety_reason(file_path):
+            return False
         path_denylist = list(self._settings.path_denylist)
         path_allowlist = list(self._settings.path_allowlist)
         path_obj = Path(file_path).expanduser()
@@ -1041,12 +1391,17 @@ class PermissionChecker:
         while normalized_path.startswith("./"):
             normalized_path = normalized_path[2:]
         if context is not None:
+            host_denylist: list[str] = []
             if "denylist" in context.filesystem_constraints:
-                path_denylist = list(context.filesystem_constraints["denylist"])
+                host_denylist = list(context.filesystem_constraints["denylist"])
+                # A host/managed constraint narrows the surface; it does not
+                # replace the built-in secret/repo floor. Appending the floor
+                # last also keeps a host pattern from negating it.
+                path_denylist = [*host_denylist, *_DEFAULT_PATH_DENYLIST]
             if "allowlist" in context.filesystem_constraints:
                 path_allowlist = list(context.filesystem_constraints["allowlist"])
             if context.mode == "bypass":
-                path_denylist = _bypass_denylist(path_denylist)
+                path_denylist = _bypass_denylist(host_denylist)
 
         deny_spec = GitIgnoreSpec.from_lines(
             pattern.replace("\\", "/").strip()
@@ -1126,23 +1481,43 @@ class PermissionChecker:
             try:
                 workspace_paths = list(tool.get_workspace_paths(args))
             except Exception:
-                workspace_paths = []
+                # A failed extraction means the invocation's paths are unknown,
+                # never that there are none to check.  Treating it as the latter
+                # skipped the denylist and the DANGEROUS_* guards below, so a
+                # tool whose extractor raised could read .env.  Every other
+                # failure branch in this checker fails closed; so does this one.
+                logger.warning(
+                    "Failed to extract workspace paths for %s; denying at the capability boundary",
+                    tool_name,
+                    exc_info=True,
+                )
+                return (
+                    f"无法确定工具 '{tool_name}' 访问的路径，出于安全已拒绝执行。"
+                    "请修正该工具的路径声明后重试。"
+                )
             for file_path in workspace_paths:
                 if str(file_path or "").strip() in {"", "."}:
                     continue
                 tool_result_read = False
                 if bool(getattr(tool, "allow_tool_result_path", False)):
-                    from backend.agent.tool_result_persistence import is_tool_result_path
-
-                    tool_result_read = is_tool_result_path(str(file_path))
+                    tool_result_read = self._is_owner_allowed_tool_result_path(
+                        str(file_path),
+                        context=context,
+                    )
                 root_path_allowed = bool(
                     getattr(tool, "allow_workspace_root_path", False)
                     and self._is_allowed_workspace_root_path(str(file_path), context=context)
                 )
+                plan_path_allowed = False
+                if context is not None:
+                    from backend.agent.plans import is_current_plan_file
+
+                    plan_path_allowed = is_current_plan_file(str(file_path), context)
                 if (
                     not tool_result_read
                     and not self.is_path_allowed(str(file_path), context=context)
                     and not root_path_allowed
+                    and not plan_path_allowed
                 ):
                     return (
                         f"路径 '{file_path}' 不在允许范围内。"
@@ -1150,7 +1525,7 @@ class PermissionChecker:
                         f"禁止的路径模式: {self._settings.path_denylist}。"
                     )
 
-                if not tool_result_read and not (context is not None and context.mode == "bypass"):
+                if not tool_result_read:
                     try:
                         operation = (
                             "write"
@@ -1247,8 +1622,13 @@ class PermissionChecker:
                 return decided, True
             if tool.is_read_only(args):
                 return PermissionLevel.AUTO, False
-        except Exception:  # pragma: no cover - metadata errors use declared policy
-            return declared, False
+        except Exception:  # pragma: no cover - metadata errors must fail closed
+            # A broken metadata hook is not evidence that the invocation is
+            # read-only. Preserve stricter declarations and otherwise require
+            # an explicit confirmation instead of silently granting AUTO.
+            if _PERMISSION_RESTRICTIVENESS[declared] > _PERMISSION_RESTRICTIVENESS[PermissionLevel.CONFIRM]:
+                return declared, False
+            return PermissionLevel.CONFIRM, False
         return declared, False
 
     @staticmethod
@@ -1267,6 +1647,8 @@ class PermissionChecker:
         tool: "BaseTool",
         args: dict[str, Any] | None,
         context: PermissionContext | None,
+        *,
+        explicit_allow: bool = False,
     ) -> PermissionLevel | None:
         """Translate tool metadata into an approval floor that rules cannot lower.
 
@@ -1280,6 +1662,11 @@ class PermissionChecker:
         * open-world tools whose own metadata does not classify the invocation
           as an ordinary read require confirmation.
 
+        ``explicit_allow`` marks the third case as already decided by the user
+        for this exact call (tool-owned AUTO, exact content rule, scoped session
+        override).  Destructive and diff-review floors stay in force because
+        they describe harm, not merely reach.
+
         Bypass and plan modes are resolved before this helper.  Metadata or
         classification failures fail closed only to the tool's declared
         permission; they never silently turn a mutating call into ``AUTO``.
@@ -1291,13 +1678,18 @@ class PermissionChecker:
         if declared == PermissionLevel.ALWAYS_DENY:
             return PermissionLevel.ALWAYS_DENY
 
-        mode = getattr(context, "mode", "default") if context is not None else "default"
-        if declared == PermissionLevel.DIFF_REVIEW and mode != "accept_edits":
+        mode = getattr(context, "mode", "confirm") if context is not None else "confirm"
+        if declared == PermissionLevel.DIFF_REVIEW and mode != "auto":
             return PermissionLevel.DIFF_REVIEW
 
         try:
             side_effect_kind = str(tool.get_side_effect_kind(args) or "").strip().lower()
         except Exception:  # pragma: no cover - defensive metadata fallback
+            logger.warning(
+                "Failed to determine runtime side effects for %s; retaining declared permission floor",
+                getattr(tool, "name", type(tool).__name__),
+                exc_info=True,
+            )
             side_effect_kind = ""
         destructive = bool(getattr(tool, "destructive", False)) or side_effect_kind == "destructive"
         if destructive:
@@ -1308,13 +1700,22 @@ class PermissionChecker:
                 else PermissionLevel.CONFIRM
             )
 
-        if bool(getattr(tool, "open_world", False)) and declared != PermissionLevel.AUTO:
+        external_capability = bool(
+            getattr(tool, "open_world", False)
+            or getattr(tool, "mutates_external_state", False)
+        )
+        if external_capability and not explicit_allow:
             try:
                 invocation_is_read_only = bool(tool.is_read_only(args))
-            except Exception:  # pragma: no cover - unknown open-world calls require review
+            except Exception:  # pragma: no cover - unknown external calls require review
                 invocation_is_read_only = False
             if not invocation_is_read_only:
-                return PermissionLevel.CONFIRM
+                return (
+                    declared
+                    if _PERMISSION_RESTRICTIVENESS[declared]
+                    > _PERMISSION_RESTRICTIVENESS[PermissionLevel.CONFIRM]
+                    else PermissionLevel.CONFIRM
+                )
 
         return None
 

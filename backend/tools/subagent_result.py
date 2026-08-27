@@ -7,7 +7,12 @@ PER_TASK_OUTPUT_CAP = MAX_TOOL_RESULT_BYTES
 
 
 def _truncate_parallel_output(content: str, max_bytes: int) -> tuple[str, bool]:
-    """Direct port of Pi's per-task parallel-output cap."""
+    """Cap each parallel task's output.
+
+    The byte ceiling aligns with the shared 2000-line/50-KiB tool-output
+    boundary used by Pi's tool projections; applying it per task while results
+    stream in parallel is MiniCode's own extension.
+    """
 
     encoded = content.encode("utf-8")
     if len(encoded) <= max_bytes:

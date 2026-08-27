@@ -19,25 +19,21 @@ dependencies = [
   "defusedxml>=0.7,<1.0",
   "keyring>=25,<26",
   "filelock>=3.16,<4.0",
+  "regex>=2024.11,<2027",
 ]
 
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["backend*"]
-exclude = ["frontend*", "desktop*", "node_modules*", "foo*", "data*", "skills*"]
+exclude = ["frontend*", "desktop*", "node_modules*", "data*", "skills*"]
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8.3,<9.0",
   "pytest-asyncio>=0.25,<1.0",
 ]
-search = [
-  "ddgs>=9.0,<10.0",
-  "duckduckgo-search>=7.0,<8.0",
-]
 docparse = [
-  "trafilatura>=2.0,<3.0",
   "pymupdf>=1.24,<2.0",
   "pymupdf4llm>=0.0.17,<1.0",
   "python-docx>=1.1,<2.0",

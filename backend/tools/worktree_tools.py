@@ -5,6 +5,7 @@ Git Worktree 工具（参考 Claude Code 的 worktree 支持）。
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -13,22 +14,124 @@ from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 if TYPE_CHECKING:
     from backend.permissions.context import ToolExecutionContext
 
+logger = logging.getLogger(__name__)
 
-async def _run_worktree_hook(event: str, *, path: str, branch: str = "", base: str = "", reason: str = "") -> None:
+# WorktreeCreate hooks can provide a VCS-backed directory outside Git.  Keep a
+# process-local ownership ledger so RemoveWorktreeTool can route those paths
+# back through WorktreeRemove instead of incorrectly invoking `git worktree
+# remove`.  A restarted process can still detect the hook-only path when no
+# Git manager exists, but the ledger preserves the stronger hook-created
+# distinction during a normal session.
+_HOOK_CREATED_WORKTREES: set[str] = set()
+
+
+def _owned_git_worktree_path(manager: Any, requested_path: Path) -> Path:
+    from backend.workspace.worktree import isolated_worktree_root
+
+    owned_root = isolated_worktree_root(Path(manager.repo_root))
+    if requested_path.is_absolute():
+        candidate = requested_path.expanduser().resolve()
+    elif tuple(requested_path.parts[:2]) == (".minicode", "worktrees"):
+        candidate = (Path(manager.repo_root) / requested_path).resolve()
+    else:
+        candidate = (owned_root / requested_path).resolve()
+    try:
+        relative = candidate.relative_to(owned_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"Worktree path must stay under MiniCode's owned root: {owned_root}"
+        ) from exc
+    if not relative.parts:
+        raise ValueError("Worktree path must identify a child of the owned root")
+    return candidate
+
+
+def _hook_has_event(hook_mgr: Any, event_name: str) -> bool:
+    try:
+        from backend.hooks.manager import HookEvent
+
+        event = getattr(HookEvent, event_name)
+        has_hooks = getattr(hook_mgr, "has_hooks", None)
+        return bool(callable(has_hooks) and has_hooks(event))
+    except Exception:
+        return False
+
+
+async def _run_worktree_hook(
+    event: str,
+    *,
+    path: str,
+    branch: str = "",
+    base: str = "",
+    reason: str = "",
+) -> Any | None:
     from backend.hooks import get_hook_manager
 
     hook_mgr = get_hook_manager()
-    if not hook_mgr:
-        return
+    if not hook_mgr or not _hook_has_event(
+        hook_mgr,
+        "WORKTREE_CREATE" if event == "create" else "WORKTREE_REMOVE",
+    ):
+        return None
     try:
         if event == "create":
-            await hook_mgr.run_worktree_create(path=path, branch=branch, base=base)
+            result = await hook_mgr.run_worktree_create(path=path, branch=branch, base=base)
         elif event == "remove":
-            await hook_mgr.run_worktree_remove(path=path, reason=reason)
-    except Exception:
-        # Worktree hooks are audit/automation side effects; tool success has
-        # already happened, so hook failures should not roll it back.
-        return
+            result = await hook_mgr.run_worktree_remove(path=path, reason=reason)
+        else:
+            return None
+        # A configured hook that returns no structured result still owns the
+        # backend.  Treat the missing result as a failed hook rather than
+        # silently falling back to Git and executing a different VCS workflow.
+        if result is None:
+            from types import SimpleNamespace
+
+            return SimpleNamespace(
+                failed=True,
+                blocked=False,
+                message=f"Worktree{event.title()} hook returned no result",
+                feedback="",
+                errors=(),
+            )
+        return result
+    except Exception as exc:
+        logger.warning("Worktree%s hook failed: %s", event, exc)
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            failed=True,
+            blocked=False,
+            message=str(exc),
+            feedback="",
+            errors=(str(exc),),
+        )
+
+
+def _hook_result_error(result: Any, *, event: str) -> str:
+    """Render a stable user-facing error from a HookResult-like value."""
+
+    if result is None:
+        return f"Worktree{event} hook did not return a result"
+    return str(
+        getattr(result, "message", "")
+        or getattr(result, "feedback", "")
+        or "\n".join(str(item) for item in (getattr(result, "errors", ()) or ()) if item)
+        or f"Worktree{event} hook failed"
+    ).strip()
+
+
+def _normalize_hook_worktree_path(raw_path: Any, *, requested_path: Path, context: Any) -> Path | None:
+    value = str(raw_path or "").strip()
+    if not value:
+        return None
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        root = getattr(context, "workspace_root", None) if context is not None else None
+        candidate = Path(root or requested_path.parent) / candidate
+    try:
+        return candidate.resolve()
+    except OSError:
+        return candidate.absolute()
 
 
 class ListWorktreesTool(BaseTool):
@@ -149,12 +252,46 @@ class CreateWorktreeTool(BaseTool):
         if not path_str:
             return self._error_result("缺少 path 参数")
 
+        requested_path = Path(path_str)
+
+        # Claude delegates WorktreeCreate to the configured hook as the VCS
+        # backend.  Check this before resolving a Git manager: hook-only
+        # projects are valid even when the current directory is not a Git
+        # repository.
+        hook_result = await _run_worktree_hook(
+            "create",
+            path=str(requested_path),
+            branch=str(branch or ""),
+            base=str(commit or "HEAD"),
+        )
+        if hook_result is not None:
+            if getattr(hook_result, "blocked", False) or getattr(hook_result, "failed", False):
+                return self._error_result(
+                    f"WorktreeCreate hook blocked creation: {_hook_result_error(hook_result, event='Create')}"
+                )
+            hook_path = _normalize_hook_worktree_path(
+                getattr(hook_result, "worktree_path", ""),
+                requested_path=requested_path,
+                context=context,
+            )
+            if hook_path is None:
+                return self._error_result(
+                    "WorktreeCreate hook completed without returning a worktree path"
+                )
+            _HOOK_CREATED_WORKTREES.add(str(hook_path))
+            return self._success_result(
+                f"已通过 WorktreeCreate hook 创建 worktree: {hook_path}"
+            )
+
         manager = await _resolve_worktree_manager(context)
 
         if manager is None:
             return self._error_result("当前目录不是 Git 仓库")
 
-        path = Path(path_str)
+        try:
+            path = _owned_git_worktree_path(manager, requested_path)
+        except ValueError as exc:
+            return self._error_result(str(exc))
 
         success = await asyncio.to_thread(
             manager.create_worktree,
@@ -166,12 +303,6 @@ class CreateWorktreeTool(BaseTool):
 
         if success:
             branch_info = f"分支 {branch}" if branch else f"提交 {commit or 'HEAD'}"
-            await _run_worktree_hook(
-                "create",
-                path=str(path),
-                branch=str(branch or ""),
-                base=str(commit or "HEAD"),
-            )
             return self._success_result(
                 f"已创建 worktree: {path}\n基于: {branch_info}"
             )
@@ -187,6 +318,7 @@ class RemoveWorktreeTool(BaseTool):
     activity_kind = "genericTool"
     display_label = "Remove worktree"
     mutates_workspace = True
+    destructive = True
     description = (
         "删除指定的 Git worktree。"
         "注意: 如果 worktree 中有未提交的更改，需要使用 force=true 强制删除。"
@@ -227,21 +359,55 @@ class RemoveWorktreeTool(BaseTool):
         if not path_str:
             return self._error_result("缺少 path 参数")
 
+        requested_path = Path(path_str)
+        normalized_path = str(requested_path.expanduser().resolve())
+        hook_mgr_result = None
+        if normalized_path in _HOOK_CREATED_WORKTREES:
+            hook_mgr_result = await _run_worktree_hook(
+                "remove",
+                path=normalized_path,
+                reason="force" if force else "remove",
+            )
+        if hook_mgr_result is not None:
+            if getattr(hook_mgr_result, "blocked", False) or getattr(hook_mgr_result, "failed", False):
+                return self._error_result(
+                    f"WorktreeRemove hook blocked removal: {_hook_result_error(hook_mgr_result, event='Remove')}"
+                )
+            _HOOK_CREATED_WORKTREES.discard(normalized_path)
+            return self._success_result(
+                f"已通过 WorktreeRemove hook 删除 worktree: {normalized_path}"
+            )
+
         manager = await _resolve_worktree_manager(context)
 
         if manager is None:
+            # A process restart loses the in-memory ownership ledger.  In a
+            # non-Git directory, a configured WorktreeRemove hook is still the
+            # only valid cleanup backend, so route it there rather than
+            # reporting a misleading Git-repository error.
+            hook_result = await _run_worktree_hook(
+                "remove",
+                path=normalized_path,
+                reason="force" if force else "remove",
+            )
+            if hook_result is not None:
+                if getattr(hook_result, "blocked", False) or getattr(hook_result, "failed", False):
+                    return self._error_result(
+                        f"WorktreeRemove hook blocked removal: {_hook_result_error(hook_result, event='Remove')}"
+                    )
+                return self._success_result(
+                    f"已通过 WorktreeRemove hook 删除 worktree: {normalized_path}"
+                )
             return self._error_result("当前目录不是 Git 仓库")
 
-        path = Path(path_str)
+        try:
+            path = _owned_git_worktree_path(manager, requested_path)
+        except ValueError as exc:
+            return self._error_result(str(exc))
 
         success = await asyncio.to_thread(manager.remove_worktree, path=path, force=force)
 
         if success:
-            await _run_worktree_hook(
-                "remove",
-                path=str(path),
-                reason="force" if force else "remove",
-            )
             return self._success_result(f"已删除 worktree: {path}")
         else:
             return self._error_result(
@@ -270,7 +436,7 @@ class SnapshotWorktreeTool(BaseTool):
     result_kind = "workspace"
     activity_kind = "genericTool"
     display_label = "Snapshot worktree"
-    mutates_external_state = True
+    mutates_workspace = True
     description = (
         "为一个 worktree 抓取可恢复的快照(包含未提交的 tracked 与 untracked 改动)。"
         "适合在清理/删除一个隔离 worktree 之前手动保存,之后可用 worktree_restore 恢复。"
@@ -403,8 +569,9 @@ class ListWorktreeSnapshotsTool(BaseTool):
     display_label = "List worktree snapshots"
     read_only = True
     description = (
-        "列出已保存的 worktree 快照(删除前自动或手动抓取的可恢复点),最新在前。"
-        "可选 conversation_id 过滤。"
+        "列出通过 worktree_snapshot 手动保存的 worktree 快照,最新在前。"
+        "快照不会在删除 worktree 前自动创建——移除包含未提交更改的 worktree 前,"
+        "必须先显式调用 worktree_snapshot。可选 conversation_id 过滤。"
     )
     permission = PermissionLevel.AUTO
 

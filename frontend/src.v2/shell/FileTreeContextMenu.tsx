@@ -12,6 +12,7 @@ import {
 import type { WorkspaceTreeNode } from "../protocol/workspace";
 import { useAppStore } from "../stores";
 import { isDesktop, desktop, revealPath } from "../desktop/runtime";
+import { openWorkspaceFilePreview } from "../chat/openAttachmentPreview";
 import {
   createWorkspaceDirectory,
   deleteWorkspacePath,
@@ -24,9 +25,14 @@ import {
 import {
   mediaTypeForPath,
   isPreviewableFile,
-  previewUrlForPath,
   joinWorkspacePath,
+  parentTreePath,
+  normalizeChangePath,
 } from "./fileTreeHelpers";
+
+const editableFilePattern = /\.(?:c|cc|cpp|cs|css|go|h|hpp|html?|java|js|jsx|json|kt|md|mjs|py|rb|rs|scss|sh|sql|swift|toml|ts|tsx|vue|yaml|yml|txt)$/i;
+
+const isEditableFile = (path: string): boolean => editableFilePattern.test(path);
 
 export const FileContextMenu = ({
   menu,
@@ -66,31 +72,27 @@ export const FileContextMenu = ({
 
   const openPreview = () => {
     const name = menu.path.split(/[/\\]/).pop() ?? menu.path;
-    useAppStore.getState().setPreviewArtifact({
-      artifactId: menu.path,
-      content: "",
+    openWorkspaceFilePreview({
+      path: menu.path,
       name,
       mediaType: mediaTypeForPath(menu.path),
-      url: previewUrlForPath(
-        isDesktop() ? joinWorkspacePath(workingDirectory, menu.path) : menu.path,
-        workingDirectory,
-      ),
-      loadedAt: Date.now(),
+      workspaceRoot: workingDirectory,
     });
-    useAppStore.getState().setRightStackTab("preview");
     onClose();
   };
 
   const createChildFile = async () => {
-    const { showPrompt } = await import("../overlays/DialogService");
+    const { showPrompt, showAlert } = await import("../overlays/DialogService");
     const name = await showPrompt({ title: "新建文件", message: "文件名：", placeholder: "example.ts" });
     if (!name) { onClose(); return; }
     const base = menu.path === "." ? "" : menu.path.replace(/[\\/]+$/, "");
     const path = base ? `${base}/${name}` : name;
     const targetPath = isDesktop() ? joinWorkspacePath(workingDirectory, path) : path;
     try {
-      if (isDesktop()) await desktop()?.fs.writeFile(targetPath, "");
-      else await writeWorkspaceFile(targetPath, "", workingDirectory);
+      if (!(await writeWorkspaceFile(targetPath, "", workingDirectory))) {
+        await showAlert({ title: "创建失败", message: `无法创建文件：${path}。目标可能已存在或不可写。` });
+        return;
+      }
       onRefresh();
     } finally {
       onClose();
@@ -98,15 +100,17 @@ export const FileContextMenu = ({
   };
 
   const createChildFolder = async () => {
-    const { showPrompt } = await import("../overlays/DialogService");
+    const { showPrompt, showAlert } = await import("../overlays/DialogService");
     const name = await showPrompt({ title: "新建文件夹", message: "文件夹名：", placeholder: "components" });
     if (!name) { onClose(); return; }
     const base = menu.path === "." ? "" : menu.path.replace(/[\\/]+$/, "");
     const path = base ? `${base}/${name}` : name;
     const targetPath = isDesktop() ? joinWorkspacePath(workingDirectory, path) : path;
     try {
-      if (isDesktop()) await desktop()?.fs.createDirectory(targetPath);
-      else await createWorkspaceDirectory(targetPath, workingDirectory);
+      if (!(await createWorkspaceDirectory(targetPath, workingDirectory))) {
+        await showAlert({ title: "创建失败", message: `无法创建文件夹：${path}。目标可能已存在或不可写。` });
+        return;
+      }
       onRefresh();
     } finally {
       onClose();
@@ -114,7 +118,7 @@ export const FileContextMenu = ({
   };
 
   const deleteFile = async () => {
-    const { showConfirm } = await import("../overlays/DialogService");
+    const { showConfirm, showAlert } = await import("../overlays/DialogService");
     const ok = await showConfirm({
       title: "删除",
       message: `删除 ${menu.path}？`,
@@ -142,7 +146,11 @@ export const FileContextMenu = ({
         return;
       }
     } else {
-      await deleteWorkspacePath(menu.path, workingDirectory, menu.isDir);
+      if (!(await deleteWorkspacePath(menu.path, workingDirectory, menu.isDir))) {
+        await showAlert({ title: "删除失败", message: `无法删除：${menu.path}` });
+        onClose();
+        return;
+      }
     }
     onRefresh();
     onClose();
@@ -161,12 +169,18 @@ export const FileContextMenu = ({
       onClose();
       return;
     }
-    const parent = menu.path.replace(/[/\\][^/\\]+$/, "");
-    const newPath = parent ? `${parent}/${newName}` : newName;
-    if (isDesktop()) {
-      await desktop()?.fs.renamePath(menu.path, newPath);
-    } else {
-      await renameWorkspacePath(menu.path, newPath, workingDirectory);
+    // Renaming the workspace root itself keeps the root path (web mode
+    // resolves relative paths against the workspace); use the shared
+    // parentTreePath helper instead of a bare regex that mangles it.
+    const parent = parentTreePath(menu.path, workingDirectory);
+    const isRoot = normalizeChangePath(menu.path) === normalizeChangePath(workingDirectory || ".");
+    const newPath = isRoot
+      ? menu.path
+      : `${parent && parent !== "." ? `${parent}/` : ""}${newName}`;
+    if (!(await renameWorkspacePath(menu.path, newPath, workingDirectory))) {
+      await showAlert({ title: "重命名失败", message: `无法将 ${menu.path} 重命名为 ${newPath}。目标可能已存在或不可写。` });
+      onClose();
+      return;
     }
     onRefresh();
     onClose();
@@ -178,7 +192,9 @@ export const FileContextMenu = ({
   };
 
   const items = [
-    ...(!menu.isDir ? [{ label: "在编辑器中打开", action: openInEditor, icon: <FilePenLine size={14} /> }] : []),
+    ...(!menu.isDir && isEditableFile(menu.path)
+      ? [{ label: "在编辑器中打开", action: openInEditor, icon: <FilePenLine size={14} /> }]
+      : []),
     ...(!menu.isDir && isPreviewableFile(menu.path) ? [{ label: "在预览面板中打开", action: openPreview, icon: <Eye size={14} /> }] : []),
     ...(menu.isDir ? [
       { label: "新建文件…", action: createChildFile, icon: <FilePlus2 size={14} /> },

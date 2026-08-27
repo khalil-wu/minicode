@@ -10,7 +10,8 @@ export const isKnownProviderModelList = (provider: string): boolean => {
  *   provider (the user explicitly ran Discover and it succeeded).
  * - Otherwise use the explicit built-in provider contract: OpenAI and
  *   Anthropic show their configured list, while custom gateways only expose
- *   the current model unless discovery marked the list as live.
+ *   the current model unless discovery marked the list as live. This avoids
+ *   treating a runtime fallback list as an authoritative custom catalog.
  */
 export const selectableModelsForProvider = (
   models: string[],

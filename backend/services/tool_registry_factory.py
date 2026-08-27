@@ -16,7 +16,6 @@ from backend.tools.agent_artifact_tools import PresentFileTool
 from backend.tools.apply_patch import ApplyPatchTool
 from backend.tools.browser_control_tool import BrowserControlTool
 from backend.tools.command_tool import RunCommandTool
-from backend.tools.environment_tools import DetectPythonEnvironmentTool
 from backend.tools.file_tools import (
     EditFileTool,
     ListFilesTool,
@@ -40,7 +39,6 @@ from backend.tools.swarm_tools import (
     TeamDeleteTool,
     TeamListTool,
 )
-from backend.tools.team_memory_sync_tool import TeamMemorySyncTool
 from backend.tools.terminal_tools import ReadTerminalTool
 
 logger = logging.getLogger(__name__)
@@ -74,7 +72,7 @@ def build_tool_registry(
       run_command   - command execution
       ask_user      - proactive questions
       read_artifact - read artifact
-      read_memory / save_memory - memory operations
+      memory_list / memory_read / memory_search / memory_add_ad_hoc_note
 
     MCP tools are registered dynamically after connection.
     """
@@ -94,7 +92,6 @@ def build_tool_registry(
     registry.register(SleepTool())
     registry.register(MonitorTool())
     registry.register(ReadTerminalTool())
-    registry.register(DetectPythonEnvironmentTool())
 
     registry.register(AskUserTool())
     registry.register(BriefTool())
@@ -105,19 +102,19 @@ def build_tool_registry(
         )
     )
     registry.register(PresentFileTool())
-    registry.register(
-        TaskTool(
-            llm_provider=llm_provider,
-            tool_registry_provider=lambda: registry,
-            artifact_store=artifact_store,
-            permission_checker_provider=lambda: PermissionChecker(load_config().permissions),
-            agent_settings_provider=lambda: load_config().agent,
-            token_budget_provider=lambda: load_config().token_budget,
-        )
+    task_tool = TaskTool(
+        llm_provider=llm_provider,
+        tool_registry_provider=lambda: registry,
+        artifact_store=artifact_store,
+        permission_checker_provider=lambda: PermissionChecker(load_config().permissions),
+        agent_settings_provider=lambda: load_config().agent,
+        token_budget_provider=lambda: load_config().token_budget,
     )
+    registry.register(task_tool)
     registry.register(TaskStopTool())
     registry.register(TaskStatusTool())
-    registry.register(SendMessageTool())
+    send_message_tool = SendMessageTool()
+    registry.register(send_message_tool)
     registry.register(MessageListTool())
     registry.register(TaskCreateTool())
     registry.register(TaskListTool())
@@ -127,20 +124,26 @@ def build_tool_registry(
     registry.register(TeamCreateTool())
     registry.register(TeamListTool())
     registry.register(TeamDeleteTool())
-    registry.register(TeamMemorySyncTool())
     bootstrap = _current_bootstrap()
     file_memory = bootstrap.file_memory if bootstrap else None
     if file_memory:
-        from backend.tools.memory_tools import ReadMemoryTool, SaveMemoryTool
+        from backend.tools.memory_tools import (
+            MemoryAddAdHocNoteTool,
+            MemoryListTool,
+            MemoryReadTool,
+            MemorySearchTool,
+        )
 
-        # File memory is the CC-aligned memory path: MEMORY.md index plus
-        # explicit file reads, without a parallel semantic-memory protocol.
-        registry.register(ReadMemoryTool(file_memory))
-        registry.register(SaveMemoryTool(file_memory))
+        registry.register(MemoryAddAdHocNoteTool(file_memory))
+        registry.register(MemoryListTool(file_memory))
+        registry.register(MemoryReadTool(file_memory))
+        registry.register(MemorySearchTool(file_memory))
 
     from backend.tools.web_tools import WebFetchTool, WebSearchTool
     registry.register(WebFetchTool(artifact_store))
-    registry.register(WebSearchTool(artifact_store))
+    from backend.tools.image_generation_tool import GenerateImageTool
+    registry.register(GenerateImageTool())
+    registry.register(WebSearchTool(llm_provider))
     registry.register(BrowserControlTool())
 
     from backend.tools.ast_tools import GoToDefinitionTool, FindReferencesTool
@@ -186,17 +189,18 @@ def build_tool_registry(
     from backend.tools.preview_tool import PreviewServerTool
     registry.register(PreviewServerTool(workspace_root=str(workspace_root)))
 
-    from backend.tools.todo_tool import TodoReadTool, TodoWriteTool
-    todo_tool = TodoWriteTool()
-    registry.register(todo_tool)
-    registry.register(TodoReadTool(todo_write_tool=todo_tool))
-
     from backend.tools.plan_tool import EnterPlanModeTool, ExitPlanModeTool, UpdatePlanTool
-    from backend.tools.schedule_cron_tool import ScheduleCronTool
-    registry.register(UpdatePlanTool(workspace_root=workspace_root))
+    from backend.tools.schedule_cron_tool import (
+        ScheduleCronTool,
+        ScheduleCronListTool,
+        ScheduleCronDeleteTool,
+    )
+    registry.register(UpdatePlanTool())
     registry.register(ExitPlanModeTool(workspace_root=workspace_root))
     registry.register(EnterPlanModeTool(workspace_root=workspace_root))
     registry.register(ScheduleCronTool())
+    registry.register(ScheduleCronListTool())
+    registry.register(ScheduleCronDeleteTool())
 
     effective_mcp_manager = mcp_manager if mcp_manager is not None else (bootstrap.mcp_manager if bootstrap else None)
     from backend.tools.mcp_tools import (
@@ -218,30 +222,15 @@ def build_tool_registry(
     registry.register(ListMcpPromptsTool(effective_mcp_manager))
     registry.register(GetMcpPromptTool(effective_mcp_manager))
 
-    from backend.tools.tool_search import ToolCallTool, ToolDescribeTool, ToolSearchTool
+    from backend.tools.tool_search import ToolSearchTool
     tool_search = ToolSearchTool(registry)
     registry.register(tool_search)
-    registry.register(ToolDescribeTool(registry))
-    registry.register(ToolCallTool())
 
-    skill_manager = bootstrap.skill_manager if bootstrap else None
     for command_definition in get_builtin_command_catalog():
         registry.register_command(command_definition["name"], command_definition)
-    if skill_manager:
-        try:
-            for skill in skill_manager.list_all():
-                if isinstance(skill, dict):
-                    skill_name = str(skill.get("name", "")).strip()
-                    if skill_name:
-                        registry.register_skill(skill_name, skill)
-        except Exception as exc:
-            logger.debug("Skill metadata registration failed: %s", exc)
 
     if mcp_manager is not None:
-        try:
-            register_mcp_tools(registry, mcp_manager, artifact_store)
-        except Exception as exc:  # pragma: no cover - never block registry build
-            logger.warning("MCP tool registration failed: %s", exc)
+        register_mcp_tools(registry, mcp_manager, artifact_store)
 
     return registry
 

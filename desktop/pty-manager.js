@@ -1,7 +1,6 @@
 "use strict";
 
 const path = require("node:path");
-const { StringDecoder } = require("node:string_decoder");
 const { spawn } = require("node:child_process");
 
 // ---------------------------------------------------------------------------
@@ -147,6 +146,9 @@ function windowsPowerShellArgs() {
 }
 
 function spawnSession(cwd, conversationId) {
+  if (ptyCleanupDone) {
+    throw new Error("Terminal manager is shutting down.");
+  }
   pruneExitedSessions();
   const ownerConversationId = requireConversationId(conversationId);
   const liveSessionCount = Array.from(ptySessions.values()).filter((session) => session.isAlive !== false).length;
@@ -157,68 +159,29 @@ function spawnSession(cwd, conversationId) {
   const shellArgs = process.platform === "win32" ? windowsPowerShellArgs() : [];
   const resolvedCwd = resolveTerminalCwd(cwd);
 
-  let ptyProcess;
-  if (pty) {
-    try {
-      ptyProcess = pty.spawn(shellStr, shellArgs, {
-        name: "xterm-256color",
-        cols: 80,
-        rows: 24,
-        cwd: resolvedCwd,
-        env: sanitizedPtyEnv(),
-      });
-    } catch (err) {
-      console.error("[desktop] node-pty spawn failed, falling back to child_process:", err);
-    }
+  // Single authoritative execution path: a real PTY.  There is deliberately
+  // no child_process fallback — a missing/broken node-pty runtime is an
+  // explicit startup failure surfaced to the renderer, never a silently
+  // degraded pipe session with different semantics.
+  if (!pty) {
+    appendDesktopLog("[desktop] terminal spawn failed: node-pty module unavailable");
+    throw new Error(
+      "Terminal unavailable: the node-pty runtime module failed to load. Reinstall MiniCode desktop or run scripts/verify-node-pty-runtime.js.",
+    );
   }
-
-  if (!ptyProcess) {
-    try {
-      const cp = require("node:child_process");
-      const sub = cp.spawn(shellStr, shellArgs, {
-        cwd: resolvedCwd,
-        env: sanitizedPtyEnv(),
-        windowsHide: true,
-      });
-      const stdoutDecoder = new StringDecoder("utf8");
-      const stderrDecoder = new StringDecoder("utf8");
-
-      ptyProcess = {
-        pid: sub.pid,
-        write: (data) => {
-          if (sub.stdin && !sub.stdin.destroyed) {
-            sub.stdin.write(data);
-          }
-        },
-        resize: () => {},
-        kill: () => {
-          sub.kill();
-        },
-        onData: (cb) => {
-          sub.stdout.on("data", (chunk) => {
-            const text = stdoutDecoder.write(chunk);
-            if (text) cb(text);
-          });
-          sub.stdout.on("end", () => {
-            const text = stdoutDecoder.end();
-            if (text) cb(text);
-          });
-          sub.stderr.on("data", (chunk) => {
-            const text = stderrDecoder.write(chunk);
-            if (text) cb(text);
-          });
-          sub.stderr.on("end", () => {
-            const text = stderrDecoder.end();
-            if (text) cb(text);
-          });
-        },
-        onExit: (cb) => {
-          sub.on("exit", (exitCode) => cb({ exitCode: exitCode ?? 0 }));
-        },
-      };
-    } catch (cpErr) {
-      throw new Error("Terminal process spawn failed: " + cpErr.message);
-    }
+  let ptyProcess;
+  try {
+    ptyProcess = pty.spawn(shellStr, shellArgs, {
+      name: "xterm-256color",
+      cols: 80,
+      rows: 24,
+      cwd: resolvedCwd,
+      env: sanitizedPtyEnv(),
+    });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    appendDesktopLog(`[desktop] node-pty spawn failed: ${err instanceof Error ? err.stack || err.message : String(err)}`);
+    throw new Error(`Terminal spawn failed: ${detail}`);
   }
 
   const sessionId = `term_${ptyIdCounter++}`;
@@ -239,19 +202,25 @@ function spawnSession(cwd, conversationId) {
     if (session.isAlive) appendSessionOutput(sessionId, session, data);
   });
 
-  ptyProcess.onExit(({ exitCode }) => {
+  ptyProcess.onExit(({ exitCode, signal }) => {
     if (ptySessions.get(sessionId) !== session || session.isAlive === false) return;
-    const normalizedExitCode = Number.isFinite(exitCode) ? exitCode : 0;
-    appendSessionOutput(sessionId, session, `\r\n[Process exited with code ${normalizedExitCode}]\r\n`);
+    // Never normalize a signal/unknown termination into a fake code 0.
+    const hasRealExitCode = Number.isFinite(exitCode);
+    const exitLabel = hasRealExitCode
+      ? `code ${exitCode}`
+      : `signal ${signal || "unknown"}`;
+    appendSessionOutput(sessionId, session, `\r\n[Process exited with ${exitLabel}]\r\n`);
     session.isAlive = false;
-    session.exitCode = normalizedExitCode;
+    session.exitCode = hasRealExitCode ? exitCode : null;
+    session.exitSignal = hasRealExitCode ? null : (signal || "unknown");
     session.exitedAt = Date.now();
     const wc = getSendTarget();
     if (wc) {
       wc.send("minicode:pty:exit", {
         sessionId,
         conversationId: session.conversationId,
-        exitCode: normalizedExitCode,
+        exitCode: session.exitCode,
+        exitSignal: session.exitSignal,
         exitedAt: session.exitedAt,
       });
     }
@@ -297,10 +266,6 @@ function resizeSession(sessionId, cols, rows, conversationId) {
   }
 }
 
-function killProcessTree(pid, fallback) {
-  void killProcessTreeAndWait(pid, fallback);
-}
-
 function killProcessTreeAndWait(pid, fallback) {
   if (!Number.isFinite(pid) || pid <= 0) {
     try { fallback(); } catch {}
@@ -336,6 +301,22 @@ async function killSession(sessionId, conversationId) {
     return true;
   }
   return false;
+}
+
+async function restartSession(sessionId, conversationId) {
+  const session = ptySessions.get(sessionId);
+  if (!isOwnedBy(session, conversationId)) return null;
+  const cwd = session.cwd;
+  appendDesktopLog(`[desktop] restarting pty ${sessionId} for ${conversationId}`);
+  if (!await killSession(sessionId, conversationId)) return null;
+  try {
+    const replacement = spawnSession(cwd, conversationId);
+    appendDesktopLog(`[desktop] restarted pty ${sessionId} as ${replacement.session_id}`);
+    return replacement;
+  } catch (error) {
+    appendDesktopLog(`[desktop] pty restart failed for ${sessionId}: ${error.message}`);
+    throw error;
+  }
 }
 
 async function killConversation(conversationId) {
@@ -376,6 +357,7 @@ function _snapshotEntry(sessionId, session, maxChars) {
     truncated,
     is_alive: session.isAlive !== false,
     exit_code: session.exitCode,
+    exit_signal: session.exitSignal ?? null,
     exited_at: session.exitedAt,
   };
 }
@@ -387,6 +369,21 @@ function snapshotSession(sessionId, maxChars, conversationId) {
     return null;
   }
   return _snapshotEntry(sessionId, session, maxChars);
+}
+
+function clearSession(sessionId, conversationId) {
+  pruneExitedSessions();
+  const session = ptySessions.get(sessionId);
+  if (!isOwnedBy(session, conversationId)) {
+    return { cleared: false, outputCursor: 0 };
+  }
+  // Preserve the monotonic output cursor so the renderer can reject a data
+  // event emitted before this clear but delivered after the invoke resolves.
+  session.scrollback = "";
+  return {
+    cleared: true,
+    outputCursor: Number.isFinite(session.outputCursor) ? session.outputCursor : 0,
+  };
 }
 
 function listSessions(conversationId, maxChars) {
@@ -401,17 +398,38 @@ function listSessions(conversationId, maxChars) {
   return list;
 }
 
-function killAllSessions() {
+function listActiveSessions() {
+  pruneExitedSessions();
+  const list = [];
+  for (const [sessionId, session] of ptySessions.entries()) {
+    if (session.isAlive === false) continue;
+    list.push({
+      session_id: sessionId,
+      conversation_id: session.conversationId,
+    });
+  }
+  return list.sort((left, right) => left.session_id.localeCompare(right.session_id));
+}
+
+async function killAllSessions() {
   if (ptyCleanupDone) return;
   ptyCleanupDone = true;
+  const terminations = [];
   for (const [sessionId, session] of ptySessions.entries()) {
+    session.isAlive = false;
     try {
-      killProcessTree(session.process.pid, () => session.process.kill());
+      terminations.push(
+        killProcessTreeAndWait(session.process.pid, () => session.process.kill())
+          .catch((error) => {
+            appendDesktopLog(`[desktop] failed to kill pty ${sessionId}: ${error.message}`);
+          }),
+      );
     } catch (error) {
       appendDesktopLog(`[desktop] failed to kill pty ${sessionId}: ${error.message}`);
     }
   }
   ptySessions.clear();
+  await Promise.allSettled(terminations);
 }
 
 // ---------------------------------------------------------------------------
@@ -424,9 +442,12 @@ module.exports = {
   writeToSession,
   resizeSession,
   killSession,
+  restartSession,
   killConversation,
   listSessions,
+  listActiveSessions,
   snapshotSession,
+  clearSession,
   acknowledgeExitedSession,
   pruneExitedSessions,
   killAllSessions,

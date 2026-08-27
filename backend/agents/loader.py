@@ -1,26 +1,43 @@
-"""Custom agent definitions loaded from ``agents/*.md`` (frontmatter + prompt body).
+"""MiniCode custom agents loaded from ``.minicode/agents/*.md``.
 
-Mirrors Claude Code's ``agents/`` directory: a user defines a subagent by
-dropping a markdown file whose YAML frontmatter holds ``name`` / ``description``
-/ ``model`` / ``tools`` and whose body is the subagent's system prompt.
+A user defines a subagent with YAML frontmatter for identity and execution
+policy, followed by the subagent system prompt as Markdown.
 Discovered agents become selectable ``subagent_type`` values in the Task tool,
 alongside the built-in types (general-purpose / explore / plan).
 """
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
-from backend.agent.claude_md import _find_project_root, _get_managed_claude_dir
+from backend.agent.instruction_discovery import _get_managed_minicode_dir
+from backend.agent.markdown_scopes import (
+    file_identity,
+    get_minicode_config_home_dir,
+    get_markdown_directories,
+)
+from backend.atomic_io import atomic_write_text, file_mutation_locks
 from backend.workspace.state import get_explicit_active_workspace_root
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
+AgentSource = Literal[
+    "user",
+    "project",
+    "policy",
+    "unknown",
+]
+EditableAgentSource = Literal["user", "project"]
+_SUPPORTED_AGENT_EFFORT_LEVELS = frozenset(
+    {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+)
+logger = logging.getLogger(__name__)
 
 
 def _string_list(value: Any) -> list[str]:
@@ -30,6 +47,15 @@ def _string_list(value: Any) -> list[str]:
         separator = "," if "," in value else None
         return [item.strip() for item in value.split(separator) if item.strip()]
     return []
+
+
+def _agent_effort(value: Any) -> str:
+    """Return a MiniCode reasoning level or inherit when invalid."""
+
+    if value is None or value == "" or not isinstance(value, str):
+        return ""
+    text = str(value).strip().lower()
+    return text if text in _SUPPORTED_AGENT_EFFORT_LEVELS else ""
 
 
 def _extract_body(raw: str) -> str:
@@ -48,65 +74,144 @@ class AgentDefinition:
     disallowed_tools: list[str] = field(default_factory=list)
     effort: str = ""  # "" = inherit; else reasoning effort (low/medium/high/…)
     source_path: Path | None = None
+    # Source identity lets editors update the exact file without creating an
+    # accidental override in another scope.
+    source: AgentSource = "unknown"
+    filename: str = ""
+    base_dir: Path | None = None
+    # Optional runtime policy declared by the agent definition.
+    permission_mode: str = ""
+    background: bool | None = None
+    has_output_schema: bool = False
 
 
 def _project_agent_dirs(workspace_root: Path | None) -> list[Path]:
-    """Return CC project agent directories, closest scope first."""
+    """Return MiniCode project agent directories, closest scope first."""
     if workspace_root is None:
         return []
-    current = workspace_root.expanduser().resolve()
-    boundary = _find_project_root(current)
-    directories: list[Path] = []
-    home = Path.home().resolve()
-    while current != home:
-        directory = current / ".claude" / "agents"
-        if directory.is_dir():
-            directories.append(directory)
-        if boundary is not None and current == boundary:
-            break
-        parent = current.parent
-        if parent == current:
-            break
-        current = parent
-    return directories
+    return [
+        scope.path
+        for scope in get_markdown_directories(
+            "agents",
+            workspace_root,
+            managed_root=_get_managed_minicode_dir(),
+            session_project_root=get_explicit_active_workspace_root(),
+        )
+        if scope.source == "project"
+    ]
 
 
 def _agent_search_dirs(workspace_root: Path | None = None) -> list[Path]:
-    """Return Claude Code agent scopes in effective precedence order.
-
-    Managed definitions override project definitions; the closest project scope
-    then overrides parent project and user definitions. This is CC's active
-    agent precedence. The install tree is deliberately absent: it is not
-    a project scope and previously made agents depend on where MiniCode itself
-    happened to be installed.
-    """
+    """Return MiniCode agent scopes in managed, user, project order."""
     root = workspace_root or get_explicit_active_workspace_root()
-    return [
-        _get_managed_claude_dir() / ".claude" / "agents",
-        *_project_agent_dirs(root),
-        Path.home() / ".claude" / "agents",
-    ]
+    scopes = get_markdown_directories(
+        "agents",
+        root,
+        managed_root=_get_managed_minicode_dir(),
+        session_project_root=get_explicit_active_workspace_root(),
+    )
+    if _agents_restricted_to_plugins(root):
+        scopes = [scope for scope in scopes if scope.source == "policy"]
+    return [scope.path for scope in scopes]
+
+
+def _agents_restricted_to_plugins(workspace_root: Path | None) -> bool:
+    try:
+        from backend.config import load_config_layer_stack
+
+        requirements = load_config_layer_stack(cwd=workspace_root).requirements
+        return requirements.restricts_customization_to_plugins("agents")
+    except Exception:
+        # Managed policy failures cannot safely widen executable Agent sources.
+        logger.warning(
+            "Unable to determine managed plugin-only Agent policy; "
+            "restricting filesystem Agents to managed policy",
+            exc_info=True,
+        )
+        return True
+
+
+def _source_for_agent_dir(directory: Path, workspace_root: Path | None) -> AgentSource:
+    resolved = directory.expanduser().resolve()
+    for scope in get_markdown_directories(
+        "agents",
+        workspace_root,
+        managed_root=_get_managed_minicode_dir(),
+        session_project_root=get_explicit_active_workspace_root(),
+    ):
+        if resolved == scope.path.resolve():
+            return scope.source
+    return "unknown"
+
+
+def discover_agent_definitions(
+    workspace_root: str | Path | None = None,
+) -> list[AgentDefinition]:
+    """Return every discovered file with its MiniCode setting-source identity.
+
+    ``discover_agents`` below still projects the effective name map used by the
+    Task runtime. The editor needs the complete list so shadowed user/project
+    files remain addressable by the editor.
+    """
+
+    root = (
+        Path(workspace_root).expanduser().absolute()
+        if workspace_root is not None
+        else get_explicit_active_workspace_root()
+    )
+    definitions: list[AgentDefinition] = []
+    seen_files: set[tuple[int, int]] = set()
+    for directory in _agent_search_dirs(root):
+        if not directory.is_dir():
+            continue
+        source = _source_for_agent_dir(directory, root)
+        for md_file in sorted(
+            directory.rglob("*.md"), key=lambda item: str(item).casefold()
+        ):
+            identity = file_identity(md_file)
+            if identity is not None and identity in seen_files:
+                continue
+            if identity is not None:
+                seen_files.add(identity)
+            agent = _parse_agent_file(
+                md_file,
+                source=source,
+                base_dir=directory,
+            )
+            if agent and agent.name:
+                definitions.append(agent)
+    return definitions
 
 
 def discover_agents(workspace_root: str | Path | None = None) -> dict[str, AgentDefinition]:
     """Scan agent directories and return {name: AgentDefinition}.
 
-    Managed and project-local directories take precedence over user-global
-    definitions (first wins), matching CC's active-agent priority.
+    User definitions are overridden by the closest project definition and then
+    by managed policy. Unknown sources remain first-wins for embedders.
     """
+    definitions = discover_agent_definitions(workspace_root)
     agents: dict[str, AgentDefinition] = {}
-    root = Path(workspace_root).resolve() if workspace_root is not None else None
-    for directory in _agent_search_dirs(root):
-        if not directory.is_dir():
-            continue
-        for md_file in sorted(directory.glob("*.md")):
-            agent = _parse_agent_file(md_file)
-            if agent and agent.name:
-                agents.setdefault(agent.name, agent)
+    for agent in definitions:
+        if agent.source == "unknown":
+            agents.setdefault(agent.name, agent)
+    for agent in definitions:
+        if agent.source == "user":
+            agents[agent.name] = agent
+    for agent in reversed(definitions):
+        if agent.source == "project":
+            agents[agent.name] = agent
+    for agent in definitions:
+        if agent.source == "policy":
+            agents[agent.name] = agent
     return agents
 
 
-def _parse_agent_file(path: Path) -> AgentDefinition | None:
+def _parse_agent_file(
+    path: Path,
+    *,
+    source: AgentSource = "unknown",
+    base_dir: Path | None = None,
+) -> AgentDefinition | None:
     try:
         raw = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
@@ -133,9 +238,16 @@ def _parse_agent_file(path: Path) -> AgentDefinition | None:
         model = str(fm.get("model") or "").strip()
         tools = _string_list(fm.get("tools"))
         disallowed = _string_list(
-            fm.get("disallowed_tools") or fm.get("disallowedTools") or []
+            fm.get("disallowed_tools") or []
         )
-        effort = str(fm.get("effort") or "").strip()
+        effort = _agent_effort(fm.get("effort"))
+        permission_mode = str(fm.get("permission_mode") or "").strip()
+        raw_background = fm.get("background")
+        background = raw_background if isinstance(raw_background, bool) else None
+        has_output_schema = fm.get("has_output_schema") is True
+    else:
+        # A Markdown file without structured identity is not an agent.
+        return None
 
     body = _extract_body(raw)
     if not body and not description:
@@ -150,6 +262,12 @@ def _parse_agent_file(path: Path) -> AgentDefinition | None:
         disallowed_tools=disallowed,
         effort=effort,
         source_path=path,
+        source=source,
+        filename=path.stem,
+        base_dir=base_dir or path.parent,
+        permission_mode=permission_mode,
+        background=background,
+        has_output_schema=has_output_schema,
     )
 
 
@@ -165,44 +283,42 @@ def get_custom_agent(
 _AGENT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 
 
-def _writable_agents_dir(workspace_root: str | Path | None = None) -> Path:
-    """Return the active project's standard Claude Code agent directory."""
+def _agents_dir_for_source(
+    source: EditableAgentSource,
+    workspace_root: str | Path | None = None,
+) -> Path:
+    if source == "user":
+        return get_minicode_config_home_dir() / "agents"
     root = (
         Path(workspace_root).expanduser().resolve()
         if workspace_root is not None
         else get_explicit_active_workspace_root()
     )
     if root is None:
-        raise ValueError("Open a workspace before creating or editing a project agent.")
-    return root / ".claude" / "agents"
-
-
-def _yaml_escape(value: str) -> str:
-    """Quote a scalar for frontmatter when it contains YAML-significant chars."""
-    if value and not re.search(r"[:#\n\"']", value):
-        return value
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        raise ValueError("Open a workspace before creating a project agent.")
+    return root / ".minicode" / "agents"
 
 
 def _render_agent_markdown(agent: AgentDefinition) -> str:
-    lines = ["---", f"name: {_yaml_escape(agent.name)}"]
-    if agent.description:
-        lines.append(f"description: {_yaml_escape(agent.description)}")
-    if agent.model:
-        lines.append(f"model: {_yaml_escape(agent.model)}")
-    if agent.effort:
-        lines.append(f"effort: {_yaml_escape(agent.effort)}")
-    if agent.tools:
-        lines.append("tools: [" + ", ".join(_yaml_escape(t) for t in agent.tools) + "]")
+    frontmatter: dict[str, Any] = {
+        "name": agent.name,
+        "description": agent.description,
+    }
+    if agent.tools and agent.tools != ["*"]:
+        frontmatter["tools"] = agent.tools
     if agent.disallowed_tools:
-        lines.append(
-            "disallowed_tools: [" + ", ".join(_yaml_escape(t) for t in agent.disallowed_tools) + "]"
-        )
-    lines.append("---")
-    lines.append("")
-    lines.append(agent.prompt.strip())
-    lines.append("")
-    return "\n".join(lines)
+        frontmatter["disallowed_tools"] = agent.disallowed_tools
+    if agent.model:
+        frontmatter["model"] = agent.model
+    if agent.effort:
+        frontmatter["effort"] = agent.effort
+    metadata = yaml.safe_dump(
+        frontmatter,
+        allow_unicode=True,
+        sort_keys=False,
+        default_flow_style=False,
+    ).rstrip()
+    return f"---\n{metadata}\n---\n\n{agent.prompt.strip()}\n"
 
 
 def save_custom_agent(
@@ -215,28 +331,44 @@ def save_custom_agent(
     disallowed_tools: list[str] | None = None,
     effort: str = "",
     workspace_root: str | Path | None = None,
+    source: EditableAgentSource = "project",
+    source_path: str | Path | None = None,
 ) -> AgentDefinition:
-    """Create or overwrite a user-defined agent markdown file.
-
-    Raises ValueError on an invalid name or an attempt to overwrite a
-    built-in agent file living outside the writable user directory.
-    """
+    """Create a user/project agent or update the exact discovered source file."""
     clean_name = (name or "").strip()
     if not _AGENT_NAME_RE.match(clean_name):
         raise ValueError(
             "Agent name must be 1-64 chars: letters, digits, dash or underscore."
         )
 
-    writable_dir = _writable_agents_dir(workspace_root)
-    existing = get_custom_agent(clean_name, workspace_root)
-    target_dir = writable_dir
-    if existing and existing.source_path is not None:
-        # Edit in place only when the file already lives in a writable dir.
-        if writable_dir in existing.source_path.parents:
-            target_dir = existing.source_path.parent
+    if source not in {"user", "project"}:
+        raise ValueError("Only user and project Agent files are editable.")
 
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target_path = target_dir / f"{clean_name}.md"
+    target_path: Path
+    target_source: EditableAgentSource = source
+    if source_path is not None and str(source_path).strip():
+        requested_path = Path(source_path).expanduser().resolve()
+        existing = next(
+            (
+                candidate
+                for candidate in discover_agent_definitions(workspace_root)
+                if candidate.source_path is not None
+                and candidate.source_path.resolve() == requested_path
+                and candidate.name == clean_name
+            ),
+            None,
+        )
+        if existing is None:
+            raise ValueError("Agent source file is no longer available.")
+        if existing.source not in {"user", "project"}:
+            raise ValueError("This Agent source is read-only.")
+        if existing.source != source:
+            raise ValueError("Agent source does not match its discovered file.")
+        target_path = requested_path
+        target_source = existing.source
+    else:
+        target_dir = _agents_dir_for_source(source, workspace_root)
+        target_path = target_dir / f"{clean_name}.md"
 
     agent = AgentDefinition(
         name=clean_name,
@@ -247,30 +379,66 @@ def save_custom_agent(
         disallowed_tools=[str(t).strip() for t in (disallowed_tools or []) if str(t).strip()],
         effort=(effort or "").strip(),
         source_path=target_path,
+        source=target_source,
+        filename=target_path.stem,
+        base_dir=target_path.parent,
     )
-    target_path.write_text(_render_agent_markdown(agent), encoding="utf-8")
+    rendered = _render_agent_markdown(agent)
+    if source_path is None or not str(source_path).strip():
+        # Exclusive creation prevents concurrent creators from being silently
+        # overwritten between an exists check and the atomic write.
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        with file_mutation_locks([target_path]):
+            try:
+                atomic_write_text(target_path, rendered, overwrite=False)
+            except FileExistsError as exc:
+                raise ValueError(f"Agent file already exists: {target_path}") from exc
+    else:
+        with file_mutation_locks([target_path]):
+            atomic_write_text(target_path, rendered)
     return agent
 
 
 def delete_custom_agent(
-    name: str, workspace_root: str | Path | None = None
+    name: str,
+    workspace_root: str | Path | None = None,
+    *,
+    source: EditableAgentSource | None = None,
+    source_path: str | Path | None = None,
 ) -> bool:
-    """Delete a user-defined agent file. Returns False if not found or not deletable.
-
-    Only deletes files inside the writable user directory; built-in/global
-    definitions elsewhere are left untouched.
-    """
+    """Delete the exact user/project source file selected by the editor."""
     clean_name = (name or "").strip()
     if not _AGENT_NAME_RE.match(clean_name):
         return False
-    writable_dir = _writable_agents_dir(workspace_root)
-    agent = get_custom_agent(clean_name, workspace_root)
+    definitions = discover_agent_definitions(workspace_root)
+    requested_path = (
+        Path(source_path).expanduser().resolve()
+        if source_path is not None and str(source_path).strip()
+        else None
+    )
+    agent = next(
+        (
+            candidate
+            for candidate in definitions
+            if candidate.name == clean_name
+            and (
+                requested_path is None
+                or (
+                    candidate.source_path is not None
+                    and candidate.source_path.resolve() == requested_path
+                )
+            )
+            and (source is None or candidate.source == source)
+        ),
+        None,
+    )
     if agent is None or agent.source_path is None:
         return False
-    if writable_dir not in agent.source_path.parents:
+    if agent.source not in {"user", "project"}:
         return False
     try:
-        agent.source_path.unlink()
-        return True
+        with file_mutation_locks([agent.source_path]):
+            agent.source_path.unlink()
+            return True
     except OSError:
         return False

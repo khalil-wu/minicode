@@ -39,7 +39,11 @@ const displayStatus = (agent: SubagentState): AgentDisplayStatus => {
     case "error":
       return "attention";
     case "blocked":
-      return "attention";
+      return agent.needsInput
+        ? "attention"
+        : agent.blockedBy?.length || String(agent.waitingOn || "").trim()
+          ? "waiting"
+          : "attention";
     case "running":
       return "running";
     case "pending":
@@ -64,7 +68,9 @@ const statusLabel = (status: AgentDisplayStatus): string => {
 const statusLabelFor = (agent: SubagentState, status: AgentDisplayStatus): string => {
   const effective = effectiveSubagentStatus(agent);
   if (effective === "blocked") {
-    return "等待中";
+    if (agent.needsInput) return "等待你回复";
+    if (agent.blockedBy?.length || String(agent.waitingOn || "").trim()) return "等待中";
+    return "已阻塞";
   }
   if (effective === "running") return "运行中";
   if (effective === "pending") return "等待中";
@@ -93,7 +99,15 @@ const summaryFor = (agent: SubagentState): string => {
     return summary || "已完成部分工作";
   }
   if (status === "cancelled") return agent.terminationInitiator === "user" ? "已由你停止" : "任务已取消";
+  if (status === "blocked" && agent.needsInput) {
+    return String(agent.waitingOn || agent.detail || agent.summary || "").trim()
+      || "需要你的输入才能继续";
+  }
   if (status === "blocked" && agent.blockedBy?.length) return "等待前置任务完成";
+  if (status === "blocked") {
+    return String(agent.waitingOn || agent.currentActivity || agent.detail || agent.summary || "").trim()
+      || "任务已阻塞";
+  }
   if (status === "pending") return "等待启动";
   if (status === "done") return summary || activity || "任务已完成";
   return activity || detail || summary || "正在执行";
@@ -144,7 +158,7 @@ export function projectAgentViews(
   agents: SubagentState[],
   now = Date.now(),
 ): AgentView[] {
-  return agents
+  return [...agents]
     .filter((agent) => agent.role !== "message" && agent.role !== "workflow")
     // Keep the creation order stable within each status group so progress
     // events update a row in place instead of making the list jump around.
@@ -162,8 +176,6 @@ export function projectAgentViews(
       const needsResult = Boolean(
         !resultContent
         && !resultError
-        && !source.resultContent
-        && !source.resultError
         && (source.resultAvailable || terminalWithoutResult),
       );
       return {
@@ -177,9 +189,11 @@ export function projectAgentViews(
         effectiveStatus,
         hasResult: Boolean(resultError || resultContent || source.resultAvailable),
         needsResult,
-        canStop: effectiveStatus === "running",
+        canStop: ["pending", "running", "blocked"].includes(effectiveStatus),
         executionMode,
-        activityLog: (source.activityLog ?? []).map((entry) => entry.trim()).filter(Boolean),
+        activityLog: (source.activityLog ?? [])
+          .map((entry) => String(entry || "").trim())
+          .filter(Boolean),
         resultContent,
         resultError,
       };

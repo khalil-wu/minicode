@@ -10,6 +10,8 @@ const CONTROL_PLANE_NOTICE_PATTERNS = [
   /^Reasoning effort set to\b/i,
   /^Reasoning effort applies to OpenAI-compatible providers\.?$/i,
   /^Reasoning effort was not applied because\b/i,
+  /^Connector configuration was saved\b/i,
+  /^Connector ['"].+['"] (?:installed and ready|was saved, but is not ready:)/i,
 ];
 
 export const isControlPlaneNotice = (content: string): boolean => {

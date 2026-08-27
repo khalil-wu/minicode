@@ -3,15 +3,12 @@ Pure utility functions extracted from ws/handler.py.
 
 These functions handle:
   - Permission mode / level normalization
-  - Conversation facts: normalize, merge, inherit, extract, summarize
   - Attachment payload normalization
   - Conversation summary building
   - Text helpers (collapse whitespace, truncate)
 """
 from __future__ import annotations
 
-import hashlib
-from datetime import UTC, datetime
 from typing import Any
 
 from backend.tools.base import PermissionLevel
@@ -19,39 +16,25 @@ from backend.tools.base import PermissionLevel
 # ── Constants ──────────────────────────────────────────────
 
 CONVERSATION_SUMMARY_MAX_CHARS = 320
-MAX_INHERITED_FACTS = 24
-MAX_FACT_NOTE_ITEMS = 8
-CONTROL_PROTOCOL_V1 = "control_v1"
-
-
-# ── Control protocol ──────────────────────────────────────
-
-def uses_control_protocol(value: Any) -> bool:
-    return str(value or "").strip().lower() in {CONTROL_PROTOCOL_V1, "control"}
 
 
 # ── Permission helpers ────────────────────────────────────
 
 def normalize_permission_mode(value: str) -> str | None:
-    normalized = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-    if not normalized:
+    """Accept one wire permission mode, or ``None`` when it is not a mode.
+
+    The token table lives with the permission checker so the wire boundary and
+    the policy boundary cannot drift apart; this wrapper only turns the
+    checker's rejection into the ``None`` that wire callers expect.
+    """
+    from backend.permissions.checker import normalize_permission_mode_token
+
+    if not str(value or "").strip():
         return None
-    aliases = {
-        "on": "plan",
-        "off": "default",
-        "ask": "confirm",
-        "ask_permissions": "confirm",
-        "bypass_permissions": "bypass",
-        "full_access": "bypass",
-        "fullaccess": "bypass",
-        "danger_full_access": "bypass",
-        "dangerfullaccess": "bypass",
-        "acceptedits": "accept_edits",
-    }
-    mode = aliases.get(normalized, normalized)
-    if mode in {"default", "plan", "confirm", "bypass", "auto", "accept_edits"}:
-        return mode
-    return None
+    try:
+        return normalize_permission_mode_token(value)
+    except ValueError:
+        return None
 
 
 def normalize_permission_level(value: Any) -> PermissionLevel | None:
@@ -178,10 +161,8 @@ def normalize_attachment_payloads(raw_attachments: Any) -> list[dict[str, Any]]:
             "input_source": str(item.get("input_source", "")).strip(),
             "source_char_count": int(item.get("source_char_count", 0) or 0),
         }
-        if entry["kind"] == "image" or entry["media_type"] == "application/pdf":
-            data = str(item.get("data", "")).strip()
-            if data:
-                entry["data"] = data
+        # Uploaded media is resolved from AttachmentStore by artifact_id. Raw
+        # base64 is deliberately not accepted on the WebSocket boundary.
         parse_error = str(item.get("parse_error", "")).strip()
         if parse_error:
             entry["parse_error"] = parse_error
@@ -213,187 +194,6 @@ def build_effective_user_message(
     if content:
         return f"{content}\n\n{attachment_block}"
     return attachment_block
-
-
-# ── Fact helpers ──────────────────────────────────────────
-
-def make_fact_key(kind: str, content: str) -> str:
-    digest = hashlib.sha1(f"{kind}:{content}".encode("utf-8")).hexdigest()
-    return f"{kind}:{digest[:12]}"
-
-
-def normalize_conversation_fact(raw_fact: dict[str, Any]) -> dict[str, Any] | None:
-    if not isinstance(raw_fact, dict):
-        return None
-
-    kind = collapse_whitespace(str(raw_fact.get("kind", "")))
-    content = collapse_whitespace(str(raw_fact.get("content", "")))
-    if not kind or not content:
-        return None
-
-    priority = raw_fact.get("priority", 50)
-    depth = raw_fact.get("depth", 0)
-    try:
-        normalized_priority = int(priority)
-    except (TypeError, ValueError):
-        normalized_priority = 50
-    try:
-        normalized_depth = max(0, int(depth))
-    except (TypeError, ValueError):
-        normalized_depth = 0
-
-    source_conversation_id = collapse_whitespace(str(raw_fact.get("source_conversation_id", "")))
-    origin_conversation_id = collapse_whitespace(
-        str(raw_fact.get("origin_conversation_id") or source_conversation_id)
-    )
-    updated_at = collapse_whitespace(str(raw_fact.get("updated_at", ""))) or datetime.now(UTC).isoformat()
-    key = collapse_whitespace(str(raw_fact.get("key", ""))) or make_fact_key(kind, content)
-
-    return {
-        "key": key,
-        "kind": kind,
-        "content": content,
-        "source_conversation_id": source_conversation_id,
-        "origin_conversation_id": origin_conversation_id,
-        "updated_at": updated_at,
-        "priority": normalized_priority,
-        "depth": normalized_depth,
-    }
-
-
-def merge_conversation_facts(*fact_groups: list[dict[str, Any]], limit: int = MAX_INHERITED_FACTS) -> list[dict[str, Any]]:
-    merged: dict[str, dict[str, Any]] = {}
-    for group in fact_groups:
-        for raw_fact in group:
-            fact = normalize_conversation_fact(raw_fact)
-            if fact is None:
-                continue
-            existing = merged.get(fact["key"])
-            if existing is None:
-                merged[fact["key"]] = fact
-                continue
-            if (
-                fact["priority"] > existing["priority"]
-                or (
-                    fact["priority"] == existing["priority"]
-                    and (
-                        fact["updated_at"] > existing["updated_at"]
-                        or (
-                            fact["updated_at"] == existing["updated_at"]
-                            and fact["depth"] < existing["depth"]
-                        )
-                    )
-                )
-            ):
-                merged[fact["key"]] = fact
-
-    ordered = sorted(
-        merged.values(),
-        key=lambda fact: (-int(fact["priority"]), int(fact["depth"]), str(fact["updated_at"]), str(fact["key"])),
-        reverse=False,
-    )
-    return ordered[:limit]
-
-
-def inherit_conversation_fact(raw_fact: dict[str, Any], *, source_conversation_id: str) -> dict[str, Any] | None:
-    fact = normalize_conversation_fact(raw_fact)
-    if fact is None:
-        return None
-    fact["source_conversation_id"] = source_conversation_id
-    fact["origin_conversation_id"] = fact["origin_conversation_id"] or source_conversation_id
-    fact["depth"] = int(fact["depth"]) + 1
-    return fact
-
-
-def build_inherited_memory_note(facts: list[dict[str, Any]], fallback_summary: str = "") -> str:
-    normalized_facts = merge_conversation_facts(facts)
-    if normalized_facts:
-        return "\n".join(
-            f"- {fact['content']}"
-            for fact in normalized_facts[:MAX_FACT_NOTE_ITEMS]
-        )
-    return truncate_middle(collapse_whitespace(fallback_summary), CONVERSATION_SUMMARY_MAX_CHARS)
-
-
-def build_summary_from_facts(facts: list[dict[str, Any]], fallback_summary: str = "") -> str:
-    normalized_facts = merge_conversation_facts(facts, limit=3)
-    if normalized_facts:
-        return truncate_middle(
-            " | ".join(fact["content"] for fact in normalized_facts),
-            CONVERSATION_SUMMARY_MAX_CHARS,
-        )
-    return truncate_middle(collapse_whitespace(fallback_summary), CONVERSATION_SUMMARY_MAX_CHARS)
-
-
-def extract_turn_facts(
-    *,
-    conversation_id: str,
-    user_message: str,
-    attachments: list[dict[str, Any]],
-    assistant_content: str,
-) -> list[dict[str, Any]]:
-    facts: list[dict[str, Any]] = []
-    timestamp = datetime.now(UTC).isoformat()
-    normalized_user_message = collapse_whitespace(user_message)
-    normalized_assistant_content = collapse_whitespace(assistant_content)
-
-    if normalized_user_message:
-        user_fact_content = f"User request: {truncate_middle(normalized_user_message, 160)}"
-        facts.append(
-            {
-                "key": make_fact_key("user_request", user_fact_content),
-                "kind": "user_request",
-                "content": user_fact_content,
-                "source_conversation_id": conversation_id,
-                "origin_conversation_id": conversation_id,
-                "updated_at": timestamp,
-                "priority": 70,
-                "depth": 0,
-            }
-        )
-
-    for attachment in attachments[:4]:
-        file_name = collapse_whitespace(str(attachment.get("file_name", "")))
-        if not file_name:
-            continue
-        kind = collapse_whitespace(str(attachment.get("kind", ""))) or "document"
-        media_type = collapse_whitespace(str(attachment.get("media_type", "")))
-        attachment_summary = collapse_whitespace(str(attachment.get("summary", "")))
-        detail_parts = [f"Attachment: {file_name} ({kind})"]
-        if media_type:
-            detail_parts.append(media_type)
-        if attachment_summary:
-            detail_parts.append(attachment_summary)
-        attachment_fact_content = ". ".join(detail_parts)
-        facts.append(
-            {
-                "key": make_fact_key("attachment", f"{file_name}:{kind}:{media_type}"),
-                "kind": "attachment",
-                "content": attachment_fact_content,
-                "source_conversation_id": conversation_id,
-                "origin_conversation_id": conversation_id,
-                "updated_at": timestamp,
-                "priority": 95,
-                "depth": 0,
-            }
-        )
-
-    if normalized_assistant_content:
-        assistant_fact_content = f"Assistant conclusion: {truncate_middle(normalized_assistant_content, 200)}"
-        facts.append(
-            {
-                "key": make_fact_key("assistant_conclusion", assistant_fact_content),
-                "kind": "assistant_conclusion",
-                "content": assistant_fact_content,
-                "source_conversation_id": conversation_id,
-                "origin_conversation_id": conversation_id,
-                "updated_at": timestamp,
-                "priority": 90,
-                "depth": 0,
-            }
-        )
-
-    return merge_conversation_facts(facts)
 
 
 # ── Conversation summary ──────────────────────────────────
@@ -436,35 +236,6 @@ def build_effective_transcript_content(message: dict[str, Any]) -> str:
         attachments = normalize_attachment_payloads(message.get("attachments", []))
         return build_effective_user_message(content, attachments)
     return content
-
-
-def rebuild_local_facts_from_transcript(
-    conversation_id: str,
-    transcript: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    facts: list[dict[str, Any]] = []
-    pending_user: dict[str, Any] | None = None
-
-    for message in transcript:
-        role = str(message.get("role", "")).strip()
-        if role == "user":
-            pending_user = message
-            continue
-        if role != "assistant" or pending_user is None:
-            continue
-
-        facts = merge_conversation_facts(
-            facts,
-            extract_turn_facts(
-                conversation_id=conversation_id,
-                user_message=str(pending_user.get("content", "")),
-                attachments=normalize_attachment_payloads(pending_user.get("attachments", [])),
-                assistant_content=str(message.get("content", "")),
-            ),
-        )
-        pending_user = None
-
-    return facts
 
 
 def build_summary_from_transcript(

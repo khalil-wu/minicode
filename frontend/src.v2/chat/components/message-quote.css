@@ -30,7 +30,7 @@
 
 .message-quote-label {
   font-size: var(--text-xs);
-  font-weight: 650;
+  font-weight: var(--fw-semibold);
   flex: 1;
 }
 

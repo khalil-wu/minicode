@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 import os
 import re
 from typing import Any
+from uuid import uuid4
 
+from backend.agent.context import ContextBuilder
 from backend.agent.message import AgentEvent
+from backend.agent.state import AgentState
+from backend.agent.tool_execution import execute_tool_batch
+from backend.config import AgentSettings, TokenBudget
+from backend.llm.base import ToolCallEvent
+from backend.tools.registry import ToolRegistry
 from backend.terminal.shell_commands import normalize_windows_shell_command
 from backend.tools.output_limits import (
-    CLAUDE_BASH_OUTPUT_DEFAULT_CHARS,
-    CLAUDE_BASH_OUTPUT_MAX_CHARS,
+    TERMINAL_OUTPUT_DEFAULT_CHARS,
+    TERMINAL_OUTPUT_MAX_CHARS,
 )
 
 
@@ -120,11 +128,11 @@ def normalize_snapshot_max_chars(data: dict[str, Any]) -> int:
         value = int(
             data.get("max_chars")
             or data.get("maxChars")
-            or CLAUDE_BASH_OUTPUT_DEFAULT_CHARS
+            or TERMINAL_OUTPUT_DEFAULT_CHARS
         )
-        return max(1, min(value, CLAUDE_BASH_OUTPUT_MAX_CHARS))
+        return max(1, min(value, TERMINAL_OUTPUT_MAX_CHARS))
     except (TypeError, ValueError):
-        return CLAUDE_BASH_OUTPUT_DEFAULT_CHARS
+        return TERMINAL_OUTPUT_DEFAULT_CHARS
 
 
 def terminal_snapshot_payload(
@@ -165,12 +173,16 @@ def optional_int(value: Any) -> int | None:
 
 
 def mirror_output_chunk(
-    data: dict[str, Any], *, max_chars: int = CLAUDE_BASH_OUTPUT_MAX_CHARS
+    data: dict[str, Any], *, max_chars: int = TERMINAL_OUTPUT_MAX_CHARS
 ) -> str:
     chunk = str(data.get("data") or data.get("output") or "")
-    limit = max(1, min(int(max_chars), CLAUDE_BASH_OUTPUT_MAX_CHARS))
+    limit = max(1, min(int(max_chars), TERMINAL_OUTPUT_MAX_CHARS))
     if len(chunk) > limit:
-        chunk = chunk[-limit:]
+        # Keep the head and announce the truncation (cc TaskOutput always
+        # surfaces a notice; silently keeping only the tail hides the start
+        # of errors which is usually where the cause lives).
+        omitted = len(chunk) - limit
+        chunk = chunk[:limit] + f"\n[... {omitted} earlier characters truncated ...]"
     return chunk
 
 
@@ -181,12 +193,17 @@ def terminal_output_payload(
     *,
     conversation_id: str = "",
 ) -> dict[str, Any]:
-    payload = {
+    payload: dict[str, Any] = {
         "type": "terminal.output",
         "command": command,
         "output": output,
-        "exit_code": exit_code,
     }
+    # An unknown exit status is represented by omission on the wire.  JSON
+    # null is not a number and used to disagree with TerminalOutputEvent's
+    # optional numeric contract, while the UI also cannot distinguish null
+    # from a successful zero exit code if it blindly coalesces the value.
+    if exit_code is not None:
+        payload["exit_code"] = int(exit_code)
     if clean_conversation_id := str(conversation_id or "").strip():
         payload["conversation_id"] = clean_conversation_id
     return payload
@@ -207,38 +224,6 @@ def parse_terminal_exec_command(data: dict[str, Any]) -> TerminalCommandRequest:
     return TerminalCommandRequest(command=normalize_windows_shell_command(command))
 
 
-def terminal_exec_approval_event(
-    *,
-    request_id: str,
-    command_args: dict[str, Any],
-    conversation_id: str = "",
-) -> AgentEvent:
-    event = AgentEvent.approval_request(
-        tool_call_id=request_id,
-        tool_name="run_command",
-        args=command_args,
-    )
-    clean_conversation_id = str(conversation_id or "").strip()
-    if clean_conversation_id:
-        event.data["conversation_id"] = clean_conversation_id
-    return event
-
-
-def terminal_exec_rejected_payload(
-    command: str,
-    approval: Any,
-    *,
-    conversation_id: str = "",
-) -> dict[str, Any]:
-    guidance = str((approval or {}).get("guidance") or "terminal command rejected").strip()
-    return terminal_output_payload(
-        command,
-        f"Command rejected: {guidance}",
-        -1,
-        conversation_id=conversation_id,
-    )
-
-
 async def run_terminal_exec_command(
     command: str,
     cwd: str,
@@ -246,6 +231,8 @@ async def run_terminal_exec_command(
     tool: Any | None = None,
     context: Any | None = None,
     conversation_id: str = "",
+    approval_handler: Any | None = None,
+    event_handler: Any | None = None,
 ) -> dict[str, Any]:
     """Execute terminal.exec through the registered run_command tool.
 
@@ -261,16 +248,39 @@ async def run_terminal_exec_command(
             conversation_id=conversation_id,
         )
     try:
-        result = await tool.execute({"command": command, "cwd": cwd}, context)
-        output = str(getattr(result, "content", "") or "")
-        preview = str(getattr(result, "artifact_preview", "") or "")
-        if preview:
-            output = f"{output}\n\n{preview}" if output else preview
+        command_args = {"command": command, "cwd": cwd}
+        tool_call_id = f"terminal_exec_{uuid4().hex}"
+        registry = ToolRegistry()
+        registry.register(tool)
+        model_context = ContextBuilder(
+            token_budget=TokenBudget(),
+            agent_settings=AgentSettings(),
+        )
+        state = AgentState(user_message=f"terminal.exec: {command}", max_iterations=1)
+        result_event: AgentEvent | None = None
+        async for event in execute_tool_batch(
+            [ToolCallEvent(id=tool_call_id, name="run_command", arguments=command_args)],
+            ctx=model_context,
+            state=state,
+            tool_registry=registry,
+            permission_checker=context.permission_checker,
+            approval_handler=approval_handler,
+            skill_manager=None,
+            permission_context=context.permission,
+            tool_ctx=context,
+        ):
+            if callable(event_handler):
+                handled = event_handler(event)
+                if inspect.isawaitable(handled):
+                    await handled
+            if event.type == "tool_result":
+                result_event = event
+        output = str(result_event.data.get("summary") or "") if result_event is not None else ""
         match = re.match(r"Exit code:\s*(-?\d+)", output, re.IGNORECASE)
-        exit_code = int(match.group(1)) if match else (-1 if getattr(result, "is_error", False) else 0)
+        exit_code = int(match.group(1)) if match else (-1 if result_event is None or result_event.data.get("is_error") else 0)
         return terminal_output_payload(
             command,
-            output[:10000],
+            output[:30000],
             exit_code,
             conversation_id=conversation_id,
         )

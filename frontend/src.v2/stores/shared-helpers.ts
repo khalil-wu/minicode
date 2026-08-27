@@ -8,17 +8,36 @@ import type {
   ThinkingContentBlock,
   UISlice,
   WorkspaceSlice,
+  ResolvedTheme,
 } from "./types";
 import { clamp } from "../lib/clamp";
 import { clampTextScale } from "../lib/text-scale";
+import { safeJsonParse } from "../lib/safe-parse";
 import { getContentBlocks, getThinkingFromMessage, getToolCallsFromMessage } from "../lib/content-blocks";
-import type { ToolCallRecord } from "../lib/tool-call-reducer";
+import {
+  isTerminalToolCallStatus,
+  type ToolCallRecord,
+} from "../lib/tool-call-reducer";
+import { DEFAULT_SHORTCUT_BINDINGS, SHORTCUT_DEFINITIONS, type ShortcutBindings } from "../lib/keyboard-shortcuts";
+import {
+  normalizeWorkspacePath,
+  normalizeWorkspaceRoot,
+  workspaceFilePathComparisonKey,
+  workspacePathWithin,
+  workspacePathsEqual,
+} from "../lib/workspace-path";
 
 // ── LocalStorage keys ──────────────────────────────────────────────
 
 export const LS = {
   theme: "minicode.theme",
   textScale: "minicode.textScale",
+  codeTextScale: "minicode.codeTextScale",
+  reducedMotion: "minicode.reducedMotion",
+  viewMode: "minicode.activity.viewMode",
+  sendShortcut: "minicode.composer.sendShortcut",
+  followUpBehavior: "minicode.composer.followUpBehavior",
+  shortcutBindings: "minicode.keyboard.bindings",
   layout: {
     leftWidth: "minicode.layout.left-width",
     rightWidth: "minicode.layout.right-width",
@@ -43,6 +62,11 @@ export const LEFT_SIDEBAR_MIN_WIDTH = 272;
 export const LEFT_SIDEBAR_MAX_WIDTH = 400;
 export const RIGHT_SIDEBAR_DEFAULT_WIDTH = 380;
 export const RIGHT_SIDEBAR_MAX = 1040;
+export const COMPACT_WORKBENCH_MAX_WIDTH = 1599;
+
+export const isCompactWorkbenchViewport = () => (
+  typeof window !== "undefined" && window.innerWidth <= COMPACT_WORKBENCH_MAX_WIDTH
+);
 
 // ── LocalStorage read/write ────────────────────────────────────────
 
@@ -64,8 +88,8 @@ export const writeLS = (key: string, value: string) => {
 
 // ── Theme & text scale ─────────────────────────────────────────────
 
-export const applyTheme = (mode: UISlice["themeMode"]) => {
-  let resolved: "dark" | "light" = "dark";
+export const resolveTheme = (mode: UISlice["themeMode"]): ResolvedTheme => {
+  let resolved: ResolvedTheme = "dark";
   if (mode === "light") resolved = "light";
   else if (mode === "dark") resolved = "dark";
   else {
@@ -74,13 +98,32 @@ export const applyTheme = (mode: UISlice["themeMode"]) => {
       : null;
     resolved = mediaQuery?.matches ? "light" : "dark";
   }
+  return resolved;
+};
+
+export const applyTheme = (mode: UISlice["themeMode"]): ResolvedTheme => {
+  const resolved = resolveTheme(mode);
   if (typeof document !== "undefined") {
     document.documentElement.setAttribute("data-theme", resolved);
   }
+  return resolved;
 };
 
 export const applyTextScale = (s: number) => {
   document.documentElement.style.setProperty("--app-text-scale", String(s));
+};
+
+export const applyCodeTextScale = (s: number) => {
+  document.documentElement.style.setProperty("--code-text-scale", String(s));
+};
+
+export const applyReducedMotion = (reduced: boolean) => {
+  document.documentElement.setAttribute("data-reduced-motion", reduced ? "true" : "false");
+};
+
+export const initialViewMode = (): UISlice["viewMode"] => {
+  const stored = readLS(LS.viewMode);
+  return stored === "summary" || stored === "verbose" ? stored : "normal";
 };
 
 export const initialTheme = (): UISlice["themeMode"] => {
@@ -97,7 +140,9 @@ export const initialTextScale = (): number => {
 // ── Panel helpers ──────────────────────────────────────────────────
 
 export const normalizePanelSlots = (slots: PanelSlot[]): PanelSlot[] => {
-  const visibleSlots = slots.filter((slot) => slot.kind !== "inspector");
+  const visibleSlots = slots
+    .filter((slot) => slot.kind !== "inspector")
+    .map((slot) => slot.kind === "plan" ? { ...slot, kind: "tasks" as const, label: slot.label ?? "上下文" } : slot);
   if (visibleSlots.length === 0) return [{ id: "main-chat", kind: "chat", label: "Chat", size: 1, focused: true }];
   const hasFocused = visibleSlots.some((slot) => slot.focused);
   return visibleSlots.map((slot, index) => ({
@@ -156,12 +201,16 @@ export const loadInitialLayout = () => {
   try {
     const raw = readLS(LS.layout.panelSlots);
     if (raw) {
-      const parsed = (JSON.parse(raw) as (PanelSlot | (Omit<PanelSlot, "kind"> & { kind: "subagent" }))[])
+      const rawSlots = safeJsonParse<unknown>(raw, []);
+      const parsed = (Array.isArray(rawSlots) ? rawSlots : [])
+        .filter((slot): slot is Record<string, unknown> => Boolean(slot) && typeof slot === "object")
         .map((slot) =>
           slot.kind === "subagent"
             ? { ...slot, kind: "subagents", label: slot.label ?? "协作" }
-            : slot,
-        ) as PanelSlot[];
+            : slot.kind === "plan"
+              ? { ...slot, kind: "tasks", label: slot.label ?? "上下文" }
+              : slot,
+        ) as unknown as PanelSlot[];
       if (Array.isArray(parsed) && parsed.length > 0) slots = parsed;
     }
   } catch {
@@ -209,8 +258,7 @@ export const automaticRightPanelState = (
   if (
     state.rightPanelOpen &&
     state.rightStackTab !== "preview" &&
-    state.rightStackTab !== "tasks" &&
-    !(state.rightStackTab === "plan" && tab === "tasks")
+    state.rightStackTab !== "tasks"
   ) {
     return {};
   }
@@ -230,23 +278,43 @@ export const automaticRightPanelState = (
 // ── Editor tab helpers ─────────────────────────────────────────────
 
 const editorWorkspaceKey = (workspace: string | null | undefined): string => {
-  const value = (workspace || "").trim();
+  const value = normalizeWorkspaceRoot(workspace);
   return value || DEFAULT_WORKSPACE_KEY;
 };
 
 const editorTabsStorageKey = (workspace: string | null | undefined): string =>
   `${LS.editorTabs}:${editorWorkspaceKey(workspace)}`;
 
+const legacyEditorTabsStorageKey = (workspace: string | null | undefined): string => {
+  const value = (workspace || "").trim() || DEFAULT_WORKSPACE_KEY;
+  return `${LS.editorTabs}:${value}`;
+};
+
 export const normalizeEditorPath = (path: string, workingDirectory = ""): string => {
-  const raw = String(path || "").trim().replace(/\\/g, "/");
+  const raw = normalizeWorkspacePath(path);
   if (!raw) return raw;
-  const root = workingDirectory.replace(/\\/g, "/").replace(/\/+$/, "");
-  const normalizedRoot = root.toLowerCase();
-  const normalizedRaw = raw.toLowerCase();
-  if (normalizedRoot && (normalizedRaw === normalizedRoot || normalizedRaw.startsWith(`${normalizedRoot}/`))) {
+  const root = normalizeWorkspacePath(workingDirectory);
+  if (root && workspacePathWithin(raw, root)) {
+    if (workspacePathsEqual(raw, root)) return ".";
     return raw.slice(root.length).replace(/^\/+/, "") || ".";
   }
   return raw.replace(/\/+/g, "/").replace(/^\.\/+/, "");
+};
+
+export const editorPathComparisonKey = (path: string, workingDirectory = ""): string => {
+  const normalized = normalizeEditorPath(path, workingDirectory);
+  // Tabs are stored workspace-relative, so the workspace supplies Windows
+  // case-insensitivity that cannot be inferred from the relative spelling.
+  return workspaceFilePathComparisonKey(normalized, workingDirectory);
+};
+
+export const editorPathsEqual = (
+  left: string | null | undefined,
+  right: string | null | undefined,
+  workingDirectory = "",
+): boolean => {
+  if (!left || !right) return false;
+  return editorPathComparisonKey(left, workingDirectory) === editorPathComparisonKey(right, workingDirectory);
 };
 
 const blankEditorTab = (path: string): EditorTab => ({
@@ -265,17 +333,30 @@ const blankEditorTab = (path: string): EditorTab => ({
 export const loadPersistedEditorTabs = (workspace?: string | null): EditorTab[] => {
   try {
     const storageKey = editorTabsStorageKey(workspace);
-    const scopedRaw = readLS(storageKey);
+    const legacyStorageKey = legacyEditorTabsStorageKey(workspace);
+    const canonicalRaw = readLS(storageKey);
+    const scopedRaw = canonicalRaw
+      ?? (legacyStorageKey !== storageKey ? readLS(legacyStorageKey) : null);
     const raw = scopedRaw ?? (editorWorkspaceKey(workspace) === DEFAULT_WORKSPACE_KEY ? readLS(LS.editorTabs) : null);
     if (!raw) return [];
-    const paths = JSON.parse(raw) as string[];
-    if (!Array.isArray(paths)) return [];
+    const parsed = safeJsonParse<unknown>(raw, []);
+    if (!Array.isArray(parsed)) return [];
+    const paths = parsed.filter((path): path is string => typeof path === "string");
+    const seen = new Set<string>();
     const normalizedPaths = paths
       .slice(0, 20)
       .map((path) => normalizeEditorPath(path, workspace ?? ""))
-      .filter(Boolean);
+      .filter((path) => {
+        if (!path) return false;
+        const key = editorPathComparisonKey(path, workspace ?? "");
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
     const normalizedRaw = JSON.stringify(normalizedPaths);
-    if (normalizedRaw !== JSON.stringify(paths.slice(0, 20))) writeLS(storageKey, normalizedRaw);
+    if (canonicalRaw == null || normalizedRaw !== JSON.stringify(paths.slice(0, 20))) {
+      writeLS(storageKey, normalizedRaw);
+    }
     return normalizedPaths.map(blankEditorTab);
   } catch {
     return [];
@@ -283,7 +364,15 @@ export const loadPersistedEditorTabs = (workspace?: string | null): EditorTab[] 
 };
 
 export const persistEditorTabs = (tabs: EditorTab[], workspace?: string | null) => {
-  writeLS(editorTabsStorageKey(workspace), JSON.stringify(tabs.map((t) => t.path)));
+  const seen = new Set<string>();
+  const paths = tabs.flatMap((tab) => {
+    const path = normalizeEditorPath(tab.path, workspace ?? "");
+    const key = editorPathComparisonKey(path, workspace ?? "");
+    if (!path || seen.has(key)) return [];
+    seen.add(key);
+    return [path];
+  });
+  writeLS(editorTabsStorageKey(workspace), JSON.stringify(paths));
 };
 
 export const editorStateForWorkspace = (workspace: string | null | undefined) => {
@@ -424,7 +513,13 @@ export const conversationWorkspacePath = (conversation?: AppStore["conversations
 
 // ── Thinking metadata helpers ──────────────────────────────────────
 
-const THINKING_METADATA_KEYS = ["source", "visibility", "is_raw_provider_reasoning", "provider_reasoning_type", "phase"] as const;
+const THINKING_METADATA_KEYS = [
+  "source",
+  "visibility",
+  "phase",
+  "item_id",
+  "content_index",
+] as const;
 
 export const normalizeThinkingMetadata = (
   metadata?: Partial<Omit<ThinkingContentBlock, "type" | "content">>,
@@ -433,13 +528,10 @@ export const normalizeThinkingMetadata = (
   const normalized: Partial<Omit<ThinkingContentBlock, "type" | "content">> = {};
   if (metadata.source !== undefined) normalized.source = metadata.source;
   if (metadata.visibility !== undefined) normalized.visibility = metadata.visibility;
-  if (metadata.is_raw_provider_reasoning !== undefined) {
-    normalized.is_raw_provider_reasoning = metadata.is_raw_provider_reasoning;
-  }
-  if (metadata.provider_reasoning_type !== undefined) {
-    normalized.provider_reasoning_type = metadata.provider_reasoning_type;
-  }
   if (metadata.phase !== undefined) normalized.phase = metadata.phase;
+  if (metadata.item_id !== undefined) normalized.item_id = metadata.item_id;
+  if (metadata.content_index !== undefined) normalized.content_index = metadata.content_index;
+  if (metadata.lifecycle !== undefined) normalized.lifecycle = metadata.lifecycle;
   return normalized;
 };
 
@@ -460,6 +552,39 @@ const resumeToolStatus = (status: PendingToolCallResume["status"]): ToolCallReco
     return normalized as ToolCallRecord["status"];
   }
   return "running";
+};
+
+export const initialResolvedTheme = (): ResolvedTheme => resolveTheme(initialTheme());
+
+export const initialCodeTextScale = (): number => {
+  const value = parseFloat(readLS(LS.codeTextScale) ?? "");
+  return clamp(0.88, 1.2, Number.isFinite(value) ? value : 1);
+};
+
+export const initialReducedMotion = (): boolean => readLS(LS.reducedMotion) === "1";
+
+export const initialSendShortcut = (): UISlice["sendShortcut"] => (
+  readLS(LS.sendShortcut) === "mod-enter" ? "mod-enter" : "enter"
+);
+
+export const initialFollowUpBehavior = (): UISlice["followUpBehavior"] => (
+  readLS(LS.followUpBehavior) === "steer" ? "steer" : "queue"
+);
+
+export const initialShortcutBindings = (): ShortcutBindings => {
+  try {
+    const raw = safeJsonParse<unknown>(readLS(LS.shortcutBindings) ?? "{}", {});
+    const parsed = raw && typeof raw === "object" && !Array.isArray(raw)
+      ? raw as Record<string, unknown>
+      : {};
+    const bindings = { ...DEFAULT_SHORTCUT_BINDINGS };
+    for (const definition of SHORTCUT_DEFINITIONS) {
+      if (typeof parsed[definition.id] === "string") bindings[definition.id] = parsed[definition.id] as string;
+    }
+    return bindings;
+  } catch {
+    return { ...DEFAULT_SHORTCUT_BINDINGS };
+  }
 };
 
 const pendingToolCallToRecord = (
@@ -511,6 +636,11 @@ export const mergeResumeToolCalls = (
           record: {
             ...existing.record,
             ...definedRecord,
+            // Reconnect data may enrich a completed item, but cannot move it
+            // back into the active lifecycle.
+            status: isTerminalToolCallStatus(existing.record.status)
+              ? existing.record.status
+              : record.status,
             args: pending.args ?? existing.record.args,
             name: pending.name || existing.record.name,
           },
@@ -526,20 +656,15 @@ export const mergeResumeToolCalls = (
 /** Single source of truth for resetting conversation-scoped state on switch/create. */
 export function conversationResetPayload(): Record<string, unknown> {
   return {
-    pendingApproval: null,
-    approvalQueue: [],
-    pendingDiffReview: null,
-    diffReviewQueue: [],
     diffReview: null,
     previewArtifact: null,
     livePreviewUrl: null,
+    terminalSessions: [],
     activeTerminalSessionId: null,
     rightStackTab: "tasks",
     rightPanelOpen: false,
     rightStackTabLocked: false,
     allowedRemoteImageDomains: [],
-    pendingAskUser: null,
-    askUserQueue: [],
     plan: null,
     todos: [],
     subagents: [],
@@ -551,8 +676,39 @@ export function conversationResetPayload(): Record<string, unknown> {
     lastUsage: null,
     usageTotals: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, turns: 0 },
     inspectorEntries: [],
+    inspectorFocus: null,
   };
 }
+
+export const promptTargetsConversation = (
+  prompt: { conversationId?: string } | null | undefined,
+  conversationId: string | null | undefined,
+): boolean => {
+  const owner = prompt?.conversationId?.trim();
+  const target = conversationId?.trim();
+  if (!target) return false;
+  return !owner || owner === target;
+};
+
+export const visibleDiffReviewForConversation = (
+  conversationId: string | null | undefined,
+  pending: AppStore["pendingDiffReview"],
+  queue: AppStore["diffReviewQueue"],
+) => [pending, ...queue].find((item) =>
+  promptTargetsConversation(item, conversationId),
+)?.reviewState ?? null;
+
+export const removeConversationOwnedPrompts = <T extends { conversationId?: string }>(
+  pending: T | null,
+  queue: T[],
+  conversationId: string,
+): { pending: T | null; queue: T[] } => {
+  const retained = [pending, ...queue].filter((item): item is T => (
+    Boolean(item) && item?.conversationId?.trim() !== conversationId
+  ));
+  const [next, ...rest] = retained;
+  return { pending: next ?? null, queue: rest };
+};
 
 const sameToolCallRecord = (
   left: ToolCallRecord,

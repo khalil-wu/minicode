@@ -1,6 +1,6 @@
 import { hmac } from "@noble/hashes/hmac.js";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { safeURL } from "../lib/safe-parse";
+import { safeJsonParse, safeURL } from "../lib/safe-parse";
 
 const RUNTIME = (globalThis as unknown as {
   __MINICODE_RUNTIME__?: { apiBaseUrl?: string; wsBaseUrl?: string; runtimeToken?: string };
@@ -168,6 +168,32 @@ const pluginAssetToken = (pluginPath: string, variant: "composer" | "logo" | "lo
   return `${expiresAt}.${signature}`;
 };
 
+const attachmentAssetToken = (
+  artifactId: string,
+  sessionId: string,
+  conversationId: string,
+): string => {
+  const token = runtimeToken();
+  if (!token) return "";
+  const expiresAt = Math.floor(Date.now() / 1000) + 300;
+  const payload = `attachment_raw:v2:${sessionId}:${conversationId}:${artifactId}:${expiresAt}`;
+  const signature = bytesToBase64Url(hmacSha256Bytes(toUtf8Bytes(token), toUtf8Bytes(payload)));
+  return `${expiresAt}.${signature}`;
+};
+
+const artifactAssetToken = (
+  artifactId: string,
+  sessionId: string,
+  conversationId: string,
+): string => {
+  const token = runtimeToken();
+  if (!token) return "";
+  const expiresAt = Math.floor(Date.now() / 1000) + 300;
+  const payload = `artifact_raw:v1:${sessionId}:${conversationId}:${artifactId}:${expiresAt}`;
+  const signature = bytesToBase64Url(hmacSha256Bytes(toUtf8Bytes(token), toUtf8Bytes(payload)));
+  return `${expiresAt}.${signature}`;
+};
+
 export const withRuntimeToken = (url: string): string => url;
 
 export const workspaceRawResourceUrlWithToken = (
@@ -216,6 +242,40 @@ export const pluginAssetResourceUrlWithToken = (
   return url.toString();
 };
 
+export const attachmentRawResourceUrlWithToken = (
+  artifactId: string,
+  sessionId: string,
+  conversationId: string,
+  base = apiBase(),
+): string => {
+  if (!artifactId.trim() || !sessionId.trim() || !conversationId.trim()) return "";
+  const url = safeURL(`${base}/api/attachments/raw`, currentHttpOrigin());
+  if (!url) return "";
+  url.searchParams.set("artifact_id", artifactId);
+  url.searchParams.set("session_id", sessionId);
+  url.searchParams.set("conversation_id", conversationId);
+  const assetToken = attachmentAssetToken(artifactId, sessionId, conversationId);
+  if (assetToken) url.searchParams.set("asset_token", assetToken);
+  return url.toString();
+};
+
+export const artifactRawResourceUrlWithToken = (
+  artifactId: string,
+  sessionId: string,
+  conversationId: string,
+  base = apiBase(),
+): string => {
+  if (!artifactId.trim() || !sessionId.trim() || !conversationId.trim()) return "";
+  const url = safeURL(`${base}/api/artifacts/raw`, currentHttpOrigin());
+  if (!url) return "";
+  url.searchParams.set("artifact_id", artifactId);
+  url.searchParams.set("session_id", sessionId);
+  url.searchParams.set("conversation_id", conversationId);
+  const assetToken = artifactAssetToken(artifactId, sessionId, conversationId);
+  if (assetToken) url.searchParams.set("asset_token", assetToken);
+  return url.toString();
+};
+
 export const wsUrl = (path: string, params?: Record<string, string | undefined>): string => {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
   const url = safeURL(`${wsBase()}${normalizedPath}`);
@@ -230,9 +290,6 @@ export const wsUrl = (path: string, params?: Record<string, string | undefined>)
   return url.toString();
 };
 
-export const v1 = (path: string): string =>
-  `${apiBase()}/api/v1${path.startsWith("/") ? path : `/${path}`}`;
-
 export class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -242,53 +299,90 @@ export class ApiError extends Error {
   }
 }
 
+export const DEFAULT_HTTP_TIMEOUT_MS = 60_000;
+export const LONG_HTTP_TIMEOUT_MS = 10 * 60_000;
+
+export type FetchTimeoutOptions = {
+  timeoutMs?: number;
+  timeoutMessage?: string;
+};
+
+/**
+ * Fetch with one bounded lifetime while preserving caller cancellation.
+ *
+ * Desktop operations must always reach a visible terminal state. Native fetch
+ * has no timeout, so a dead backend or stalled installer would otherwise leave
+ * its button spinning forever.
+ */
+export const fetchWithTimeout = async (
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  options: FetchTimeoutOptions = {},
+): Promise<Response> => {
+  const configuredTimeout = Number(options.timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS);
+  const timeoutMs = Number.isFinite(configuredTimeout) && configuredTimeout > 0
+    ? configuredTimeout
+    : DEFAULT_HTTP_TIMEOUT_MS;
+  const controller = new AbortController();
+  const callerSignal = init.signal;
+  let timedOut = false;
+
+  const abortFromCaller = () => {
+    try {
+      controller.abort(callerSignal?.reason);
+    } catch {
+      controller.abort();
+    }
+  };
+
+  if (callerSignal?.aborted) {
+    abortFromCaller();
+  } else {
+    callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
+  }
+
+  const timeout = globalThis.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (timedOut) {
+      throw new Error(
+        options.timeoutMessage
+        || `请求超时：${Math.ceil(timeoutMs / 1000)} 秒内没有收到响应`,
+      );
+    }
+    throw error;
+  } finally {
+    globalThis.clearTimeout(timeout);
+    callerSignal?.removeEventListener("abort", abortFromCaller);
+  }
+};
+
 export const errorMessageFromResponseText = (text: string, fallback: string): string => {
   const trimmed = text.trim();
   if (!trimmed) return fallback;
-  try {
-    const parsed = JSON.parse(trimmed) as unknown;
-    if (parsed && typeof parsed === "object") {
-      const detail = (parsed as { detail?: unknown; message?: unknown; error?: unknown }).detail
-        ?? (parsed as { message?: unknown }).message
-        ?? (parsed as { error?: unknown }).error;
-      if (Array.isArray(detail)) {
-        return detail.map((item) => {
-          if (item && typeof item === "object" && "msg" in item) return String((item as { msg?: unknown }).msg);
-          return String(item);
-        }).join("; ");
-      }
-      if (detail != null) return String(detail);
+  const parsed = safeJsonParse<unknown>(trimmed, null);
+  if (parsed && typeof parsed === "object") {
+    const detail = (parsed as { detail?: unknown; message?: unknown; error?: unknown }).detail
+      ?? (parsed as { message?: unknown }).message
+      ?? (parsed as { error?: unknown }).error;
+    if (Array.isArray(detail)) {
+      return detail.map((item) => {
+        if (item && typeof item === "object" && "msg" in item) return String((item as { msg?: unknown }).msg);
+        return String(item);
+      }).join("; ");
     }
-  } catch {
-    /* not json */
+    if (detail != null) return String(detail);
   }
   return trimmed;
 };
 
-export const apiFetch = async <T = unknown>(
-  path: string,
-  init?: RequestInit,
-): Promise<T> => {
-  const res = await fetch(v1(path), {
-    ...init,
-    headers: authHeaders({ "content-type": "application/json", ...(init?.headers ?? {}) }),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new ApiError(res.status, errorMessageFromResponseText(text, res.statusText));
-  }
-  if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
-};
-
-export interface StatusResponse {
-  ok: boolean;
-  [k: string]: unknown;
-}
-export const fetchStatus = (): Promise<StatusResponse> => apiFetch("/status");
-export const fetchGuidelines = (): Promise<unknown> => apiFetch("/guidelines");
 export const fetchLLMSettings = async (): Promise<unknown> => {
-  const res = await fetch(`${apiBase()}/api/llm/settings`, {
+  const res = await fetchWithTimeout(`${apiBase()}/api/llm/settings`, {
     cache: "no-store",
     headers: authHeaders(),
   });
@@ -300,23 +394,167 @@ export const fetchLLMSettings = async (): Promise<unknown> => {
 };
 
 export interface UploadResponse {
+  conversation_id: string;
   file_name: string;
   doc_id: string;
   artifact_id: string;
   attachment: Record<string, unknown>;
 }
 
+export interface AttachmentPreviewResponse {
+  artifact_id: string;
+  conversation_id: string;
+  file_name: string;
+  media_type: string;
+  kind: string;
+  size_bytes: number;
+  summary: string;
+  parse_error: string;
+  content: string;
+  content_chars: number;
+  truncated: boolean;
+  has_native: boolean;
+}
+
+export const fetchAttachmentPreview = async (
+  sessionId: string,
+  conversationId: string,
+  artifactId: string,
+  signal?: AbortSignal,
+): Promise<AttachmentPreviewResponse> => {
+  const url = safeURL(`${apiBase()}/api/attachments/preview`, currentHttpOrigin());
+  if (!url) throw new ApiError(400, "Invalid attachment preview URL");
+  url.searchParams.set("session_id", sessionId);
+  url.searchParams.set("conversation_id", conversationId);
+  url.searchParams.set("artifact_id", artifactId);
+  const res = await fetchWithTimeout(
+    url.toString(),
+    { headers: authHeaders(), signal },
+    { timeoutMessage: "附件预览加载超时，请重试。" },
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new ApiError(res.status, errorMessageFromResponseText(text, res.statusText));
+  }
+  return (await res.json()) as AttachmentPreviewResponse;
+};
+
+export type AttachmentUploadPhase = "uploading" | "processing";
+
+export interface UploadAttachmentOptions {
+  signal?: AbortSignal;
+  onProgress?: (percent: number, phase: AttachmentUploadPhase) => void;
+}
+
+const abortError = (): Error => {
+  if (typeof DOMException !== "undefined") {
+    return new DOMException("附件上传已取消。", "AbortError");
+  }
+  const error = new Error("附件上传已取消。");
+  error.name = "AbortError";
+  return error;
+};
+
+const uploadAttachmentWithXhr = (
+  url: string,
+  form: FormData,
+  options: UploadAttachmentOptions,
+): Promise<UploadResponse> => new Promise((resolve, reject) => {
+  const xhr = new XMLHttpRequest();
+  let settled = false;
+  const callerSignal = options.signal;
+
+  const cleanup = () => {
+    callerSignal?.removeEventListener("abort", abortFromCaller);
+  };
+  const finish = (callback: () => void) => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    callback();
+  };
+  const abortFromCaller = () => {
+    xhr.abort();
+    finish(() => reject(abortError()));
+  };
+
+  xhr.open("POST", url, true);
+  xhr.timeout = LONG_HTTP_TIMEOUT_MS;
+  const headers = new Headers(authHeaders());
+  headers.forEach((value, key) => xhr.setRequestHeader(key, value));
+
+  xhr.upload.addEventListener("progress", (event) => {
+    if (!event.lengthComputable || event.total <= 0) return;
+    const percent = Math.max(0, Math.min(100, Math.round((event.loaded / event.total) * 100)));
+    options.onProgress?.(percent, "uploading");
+  });
+  xhr.upload.addEventListener("load", () => {
+    options.onProgress?.(100, "processing");
+  });
+  xhr.addEventListener("load", () => {
+    finish(() => {
+      const responseText = String(xhr.responseText || "");
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new ApiError(
+          xhr.status || 500,
+          errorMessageFromResponseText(responseText, xhr.statusText || "附件上传失败"),
+        ));
+        return;
+      }
+      const parsed = safeJsonParse<UploadResponse | undefined>(responseText, undefined);
+      if (parsed === undefined) {
+        reject(new ApiError(500, "附件上传响应无效，请重试。"));
+        return;
+      }
+      resolve(parsed);
+    });
+  });
+  xhr.addEventListener("error", () => {
+    finish(() => reject(new Error("附件上传失败，请检查连接后重试。")));
+  });
+  xhr.addEventListener("timeout", () => {
+    finish(() => reject(new Error("附件上传超时，请检查连接后重试。")));
+  });
+  xhr.addEventListener("abort", () => {
+    finish(() => reject(abortError()));
+  });
+
+  if (callerSignal?.aborted) {
+    abortFromCaller();
+    return;
+  }
+  callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
+  options.onProgress?.(0, "uploading");
+  xhr.send(form);
+});
+
 export const uploadAttachment = async (
   sessionId: string,
+  conversationId: string,
   file: File,
-  signal?: AbortSignal,
+  options: UploadAttachmentOptions = {},
 ): Promise<UploadResponse> => {
   const form = new FormData();
   form.append("file", file);
-  const res = await fetch(
-    `${apiBase()}/api/uploads?session_id=${encodeURIComponent(sessionId)}`,
-    { method: "POST", body: form, headers: authHeaders(), signal },
+  const url = safeURL(`${apiBase()}/api/uploads`, currentHttpOrigin());
+  if (!url) throw new ApiError(400, "Invalid attachment upload URL");
+  url.searchParams.set("session_id", sessionId);
+  if (conversationId.trim()) url.searchParams.set("conversation_id", conversationId.trim());
+
+  if (typeof XMLHttpRequest !== "undefined") {
+    return uploadAttachmentWithXhr(url.toString(), form, options);
+  }
+
+  options.onProgress?.(0, "uploading");
+  const res = await fetchWithTimeout(
+    url.toString(),
+    { method: "POST", body: form, headers: authHeaders(), signal: options.signal },
+    {
+      timeoutMs: LONG_HTTP_TIMEOUT_MS,
+      timeoutMessage: "附件上传超时，请检查连接后重试。",
+    },
   );
+  options.onProgress?.(100, "processing");
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new ApiError(res.status, errorMessageFromResponseText(text, res.statusText));

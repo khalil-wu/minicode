@@ -23,12 +23,14 @@ const BINARY_READ_DENY_EXTENSIONS = new Set([
 
 const _SENSITIVE_ENV_PREFIXES = [
   "OPENAI_", "ANTHROPIC_", "AZURE_OPENAI_",
-  "AWS_SECRET", "GITHUB_TOKEN", "GH_TOKEN",
+  "AWS_SECRET", "GITHUB_TOKEN", "GH_TOKEN", "MINICODE_RUNTIME_TOKEN",
 ];
 const _SENSITIVE_ENV_NAMES = new Set([
   "API_KEY", "SECRET_KEY", "PRIVATE_KEY",
   "ACCESS_TOKEN", "AUTH_TOKEN",
   "DATABASE_URL", "REDIS_URL", "MONGO_URI",
+  "MINICODE_RUNTIME_TOKEN", "STRIPE_SECRET_KEY", "STRIPE_PUBLISHABLE_KEY",
+  "AWS_ACCESS_KEY_ID", "AWS_SESSION_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -51,7 +53,11 @@ function isHttpUrl(target) {
 
 function isSamePath(left, right) {
   if (!left || !right) return false;
-  return path.resolve(left).toLowerCase() === path.resolve(right).toLowerCase();
+  const leftPath = path.resolve(left);
+  const rightPath = path.resolve(right);
+  return process.platform === "win32"
+    ? leftPath.toLowerCase() === rightPath.toLowerCase()
+    : leftPath === rightPath;
 }
 
 // ---------------------------------------------------------------------------
@@ -76,6 +82,57 @@ function isProbablyTextBuffer(buffer, filePath) {
 
 function hashFileContent(content) {
   return crypto.createHash("sha256").update(String(content), "utf8").digest("hex");
+}
+
+const fileMutationQueues = new Map();
+let fileMutationRegistrationQueue = Promise.resolve();
+
+async function fileMutationQueueKey(filePath) {
+  const resolved = path.resolve(String(filePath));
+  let canonical = resolved;
+  try {
+    canonical = await fs.promises.realpath(resolved);
+  } catch (error) {
+    if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") throw error;
+  }
+  return process.platform === "win32" ? canonical.toLowerCase() : canonical;
+}
+
+/**
+ * Serialize mutations touching any of the same files while allowing unrelated
+ * paths to proceed in parallel. Registration is globally ordered and keys are
+ * canonicalized through realpath, matching Pi's file-mutation-queue contract.
+ */
+async function withFileMutationQueues(filePaths, operation) {
+  const registration = fileMutationRegistrationQueue.then(async () => {
+    const keys = [...new Set(await Promise.all(filePaths.map(fileMutationQueueKey)))].sort();
+    return keys.map((key) => {
+      const currentQueue = fileMutationQueues.get(key) ?? Promise.resolve();
+      let releaseNext;
+      const nextQueue = new Promise((resolve) => { releaseNext = resolve; });
+      const chainedQueue = currentQueue.then(() => nextQueue);
+      fileMutationQueues.set(key, chainedQueue);
+      return { key, currentQueue, chainedQueue, releaseNext };
+    });
+  });
+  fileMutationRegistrationQueue = registration.then(() => undefined, () => undefined);
+
+  const reservations = await registration;
+  await Promise.all(reservations.map((reservation) => reservation.currentQueue));
+  try {
+    return await operation();
+  } finally {
+    for (const reservation of reservations) reservation.releaseNext();
+    for (const reservation of reservations) {
+      if (fileMutationQueues.get(reservation.key) === reservation.chainedQueue) {
+        fileMutationQueues.delete(reservation.key);
+      }
+    }
+  }
+}
+
+async function withFileMutationQueue(filePath, operation) {
+  return withFileMutationQueues([filePath], operation);
 }
 
 async function atomicWriteText(filePath, content) {
@@ -128,6 +185,9 @@ function sanitizedPtyEnv() {
     const upper = key.toUpperCase();
     if (_SENSITIVE_ENV_NAMES.has(upper)) { delete env[key]; continue; }
     if (_SENSITIVE_ENV_PREFIXES.some((p) => upper.startsWith(p))) { delete env[key]; }
+    if (/(?:^|_)(?:TOKEN|SECRET|PASSWORD|PRIVATE_KEY|CREDENTIALS?)(?:$|_)/.test(upper)) {
+      delete env[key];
+    }
   }
   return env;
 }
@@ -193,6 +253,8 @@ module.exports = {
   // File helpers
   isProbablyTextBuffer,
   hashFileContent,
+  withFileMutationQueue,
+  withFileMutationQueues,
   atomicWriteText,
   atomicWriteTextSync,
   countDirEntries,

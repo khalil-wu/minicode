@@ -30,7 +30,9 @@ _CONTEXT_OVERFLOW_MARKERS = (
     "prompt too long",
     "context_length",
     "maximum context",
-    "context window",
+    # Bare "context window" deliberately excluded (cc matches only the exact
+    # 'prompt is too long' prefix): a random 500 mentioning the context window
+    # must not consume the single reactive-compaction budget.
     "request_too_large",
     "request entity too large",
     "request body too large",
@@ -56,33 +58,25 @@ def is_context_overflow_error(error: Any) -> bool:
     )
 
 
-_MEDIA_SIZE_MARKERS = (
-    "image exceeds",
-    "image too large",
-    "image dimensions exceed",
-    "many-image",
-    "media size",
-    "media too large",
-    "pdf specified was not valid",
-    "request too large",
-)
+_MEDIA_SIZE_PDF_PAGES_RE = re.compile(r"maximum of \d+ PDF pages")
 
 
 def is_media_size_error(error: Any) -> bool:
     """True when the provider rejected oversized image/PDF media in context.
 
-    Mirrors Claude Code's media-size withholding path: these are recoverable by
-    stripping historical media attachments and retrying, not by generic backoff.
+    cc's predicate is deliberately conjunctive (errors.ts isMediaSizeError):
+    a bare ``request too large`` 413 must NOT match, or stripping would delete
+    the user's current-turn attachments for an unrelated payload rejection.
     """
-    text = str(error or "").lower()
+    text = str(error or "")
     if not text:
         return False
-    if any(marker in text for marker in _MEDIA_SIZE_MARKERS):
-        return True
-    # Common Anthropic/OpenAI phrasing around base64 payload limits.
-    if "maximum" in text and ("image" in text or "media" in text or "pdf" in text):
-        return True
-    return False
+    lowered = text.lower()
+    return (
+        ("image exceeds" in lowered and "maximum" in lowered)
+        or ("image dimensions exceed" in lowered and "many-image" in lowered)
+        or _MEDIA_SIZE_PDF_PAGES_RE.search(lowered) is not None
+    )
 
 
 @dataclass

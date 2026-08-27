@@ -45,11 +45,13 @@ class _ReasoningSplitter:
                     self._buf = self._buf[open_idx + len(_THINK_OPEN_TAG):]
                     self._inside = True
                 else:
-                    segment = self._buf[:close_idx]
+                    # A closing tag without an opening tag is literal model
+                    # text.  Do not route the prefix into hidden reasoning.
+                    literal_end = close_idx + len(_THINK_CLOSE_TAG)
+                    segment = self._buf[:literal_end]
                     if segment:
-                        out.append(("reasoning", segment))
-                    self._buf = self._buf[close_idx + len(_THINK_CLOSE_TAG):]
-                    self._inside = False
+                        out.append(("text", segment))
+                    self._buf = self._buf[literal_end:]
         if len(self._buf) > _THINK_TAG_HOLD:
             cut = len(self._buf) - _THINK_TAG_HOLD
             out.append((self._kind(), self._buf[:cut]))
@@ -72,15 +74,11 @@ def _splitter_events(segments: list[tuple[str, str]]) -> list[StreamEvent]:
     for kind, segment in segments:
         if not segment:
             continue
-        if kind == "reasoning":
-            events.append(
-                StreamEvent(
-                    type=StreamEventType.THINKING_CHUNK,
-                    content=segment,
-                    raw={"provider_reasoning_type": "inline_think"},
-                )
-            )
-        else:
+        # Inline <think> blocks are provider raw reasoning, not a reasoning
+        # summary. Codex keeps raw reasoning hidden unless an explicit opt-in is
+        # enabled; MiniCode exposes no such opt-in, so strip the block while
+        # preserving the surrounding answer text.
+        if kind == "text":
             events.append(StreamEvent(type=StreamEventType.TEXT_CHUNK, content=segment))
     return events
 
@@ -91,6 +89,11 @@ class _ToolCallAccumulator:
     def __init__(self) -> None:
         self._slots: dict[str, dict[str, Any]] = {}
         self._order: list[str] = []
+        # Slots that finished without both an id and a name. The caller must
+        # fail the turn instead of running a partial batch: with two parallel
+        # calls, dropping one silently executes half of what the model asked
+        # for.
+        self.dropped_incomplete: list[dict[str, Any]] = []
 
     def feed(self, tool_call: dict[str, Any], index: int) -> tuple[bool, str, dict[str, Any]]:
         call_id = tool_call.get("id") or ""
@@ -113,7 +116,12 @@ class _ToolCallAccumulator:
                 "id": call_id,
                 "name": name,
                 "arguments": "",
-                "_arguments_complete": False,
+                # Keep the last parsed snapshot only to recognize gateways
+                # that replay the entire completed JSON document in a finish
+                # chunk.  A valid object is not itself a lifecycle boundary:
+                # providers may legally append another property in a later
+                # delta.
+                "_last_complete_snapshot": "",
                 "_delta_bytes": 0,
                 "_start_emitted": False,
             }
@@ -126,17 +134,30 @@ class _ToolCallAccumulator:
             slot["name"] = name
         argument_delta = str(function.get("arguments") or "")
         if argument_delta:
-            # A function call owns one JSON argument document. A few compatible
-            # gateways replay the completed snapshot in their finish chunk;
-            # bytes after a complete object belong to that replay, not a second
-            # document. A real second call must arrive in a new id/index slot.
-            if not bool(slot.get("_arguments_complete")):
-                slot["arguments"] = str(slot.get("arguments") or "") + argument_delta
-                slot["_delta_bytes"] += len(argument_delta)
-                if argument_delta.rstrip().endswith("}"):
-                    slot["_arguments_complete"] = self._is_complete_json_object(
-                        str(slot["arguments"])
+            # A function call owns one JSON argument document.  Do not stop
+            # after the first parseable object: ``{"a":1}`` followed by
+            # ``,"b":2}`` is a valid streamed document.  Only suppress an
+            # exact/same-value replay of the already complete snapshot, which
+            # a few OpenAI-compatible gateways emit in their finish chunk.
+            current = str(slot.get("arguments") or "")
+            snapshot = str(slot.get("_last_complete_snapshot") or "")
+            duplicate_snapshot = False
+            if snapshot and argument_delta.strip():
+                try:
+                    duplicate_snapshot = (
+                        argument_delta.strip() == snapshot.strip()
+                        or (
+                            isinstance(json.loads(argument_delta), dict)
+                            and json.loads(argument_delta) == json.loads(snapshot)
+                        )
                     )
+                except (json.JSONDecodeError, TypeError):
+                    duplicate_snapshot = False
+            if not duplicate_snapshot:
+                slot["arguments"] = current + argument_delta
+                slot["_delta_bytes"] += len(argument_delta)
+                if self._is_complete_json_object(str(slot["arguments"])):
+                    slot["_last_complete_snapshot"] = str(slot["arguments"])
 
         # Some OpenAI-compatible providers split id and function.name across
         # separate deltas. Emit START exactly once when both fields first
@@ -161,6 +182,7 @@ class _ToolCallAccumulator:
 
     def finalize(self) -> list[ToolCallEvent]:
         events: list[ToolCallEvent] = []
+        self.dropped_incomplete = []
         for key in self._order:
             slot = self._slots[key]
             call_id = str(slot.get("id") or "").strip()
@@ -168,12 +190,20 @@ class _ToolCallAccumulator:
             raw_args = str(slot.get("arguments") or "")
             raw_arg_len = len(raw_args)
             if not call_id or not name:
-                logger.debug(
-                    "Dropping incomplete streamed tool call key=%s id=%r name=%r args=%r",
+                logger.warning(
+                    "Incomplete streamed tool call key=%s has_id=%s has_name=%s raw_arg_len=%d",
                     key,
-                    call_id,
-                    name,
-                    raw_args[:200],
+                    bool(call_id),
+                    bool(name),
+                    raw_arg_len,
+                )
+                self.dropped_incomplete.append(
+                    {
+                        "key": key,
+                        "has_id": bool(call_id),
+                        "has_name": bool(name),
+                        "raw_arg_len": raw_arg_len,
+                    }
                 )
                 continue
             parse_status = "ok"

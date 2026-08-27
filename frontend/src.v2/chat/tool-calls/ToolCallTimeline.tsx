@@ -3,6 +3,7 @@ import { useAppStore } from "../../stores";
 import { getToolCallsFromMessage } from "../../lib/content-blocks";
 import type { CSSProperties } from "react";
 import type { AgentProgressEntry, ChatMessage } from "../../stores/types";
+import { readableToolLabel } from "../toolDisplayName";
 
 export type TimelinePhase = "context" | "model" | "tool" | "approval" | "subagent" | "cache" | "recovery" | "final";
 
@@ -45,14 +46,14 @@ export type RunReplaySummary = {
 };
 
 const PHASE_LABELS: Record<TimelinePhase, string> = {
-  context: "Context",
-  model: "Model",
-  tool: "Tools",
-  approval: "Approval",
-  subagent: "Subagents",
-  cache: "Cache",
-  recovery: "Recovery",
-  final: "Final",
+  context: "上下文",
+  model: "模型",
+  tool: "工具",
+  approval: "审批",
+  subagent: "子智能体",
+  cache: "缓存",
+  recovery: "恢复",
+  final: "最终答复",
 };
 
 const PHASE_ORDER: TimelinePhase[] = ["context", "model", "tool", "approval", "subagent", "cache", "recovery", "final"];
@@ -66,7 +67,7 @@ export const ToolCallTimeline = ({ limit = 40 }: { limit?: number } = {}) => {
   if (items.length === 0) {
     return (
       <div style={{ color: "var(--text-muted)", fontSize: "var(--text-sm)", padding: 12 }}>
-        No runtime timeline events in this conversation yet.
+        当前会话暂无运行时间线事件。
       </div>
     );
   }
@@ -85,8 +86,8 @@ export const ToolCallTimeline = ({ limit = 40 }: { limit?: number } = {}) => {
           marginBottom: 6,
         }}
       >
-        Run trace · {items.length}{allItems.length > items.length ? ` of ${allItems.length}` : ""} event{allItems.length === 1 ? "" : "s"} ·{" "}
-        {(span / 1000).toFixed(1)}s span
+        运行轨迹 · {items.length}{allItems.length > items.length ? ` / ${allItems.length}` : ""} 个事件 ·{" "}
+        跨度 {(span / 1000).toFixed(1)}s
       </div>
       {PHASE_ORDER.filter((phase) => grouped[phase]?.length).map((phase) => (
         <section key={phase} style={{ display: "grid", gap: 6 }}>
@@ -100,7 +101,7 @@ export const ToolCallTimeline = ({ limit = 40 }: { limit?: number } = {}) => {
             const duration = item.finishedAt
               ? `${((item.finishedAt - item.startedAt) / 1000).toFixed(2)}s`
               : item.status === "running"
-                ? "running"
+                ? "进行中"
                 : "";
             return (
               <div
@@ -137,7 +138,7 @@ export const ToolCallTimeline = ({ limit = 40 }: { limit?: number } = {}) => {
                       textOverflow: "ellipsis",
                       whiteSpace: "nowrap",
                     }}
-                    title={item.toolName || item.label}
+                    title={readableToolLabel(item.toolName || item.label)}
                   >
                     {item.label}
                   </span>
@@ -159,7 +160,7 @@ export const ToolCallTimeline = ({ limit = 40 }: { limit?: number } = {}) => {
                   <div
                     style={{
                       color: item.status === "failed" ? "var(--state-danger)" : "var(--text-secondary)",
-                      fontWeight: 600,
+                      fontWeight: "var(--fw-semibold)",
                     }}
                   >
                     {status}
@@ -184,9 +185,9 @@ export function buildRunTimelineItems(
     getToolCallsFromMessage(message).map((tc) => ({
       id: `tool:${tc.id}`,
       phase: phaseForTool(tc.phase),
-      label: tc.status === "running" || tc.status === "pending"
-        ? tc.displayHint || "Tool"
-        : tc.displaySummary || tc.displayHint || "Tool",
+      label: readableToolLabel(tc.status === "running" || tc.status === "pending"
+        ? tc.displayHint || tc.name || "工具"
+        : tc.displaySummary || tc.displayHint || tc.name || "工具"),
       summary: tc.inputSummary || tc.userSummary || tc.sourceUrl || "",
       status: normalizeToolStatus(tc.status),
       startedAt: tc.startedAt || message.timestamp || Date.now(),
@@ -200,7 +201,7 @@ export function buildRunTimelineItems(
     .map((entry) => ({
       id: `progress:${entry.id}`,
       phase: phaseForProgress(entry),
-      label: entry.label || entry.message || PHASE_LABELS[phaseForProgress(entry)],
+      label: readableToolLabel(entry.label || entry.message || PHASE_LABELS[phaseForProgress(entry)]),
       summary: entry.summary || entry.detail,
       status: entry.status === "info" ? "info" : entry.status,
       startedAt: entry.timestamp || Date.now(),
@@ -317,6 +318,8 @@ function phaseForTool(value?: string): TimelinePhase {
 
 function normalizeToolStatus(status: string): TimelineItem["status"] {
   if (status === "success") return "completed";
+  if (status === "pending") return "running";
+  if (status === "timeout") return "failed";
   if (status === "failed" || status === "blocked" || status === "partial" || status === "running" || status === "cancelled") return status;
   return "info";
 }
@@ -324,19 +327,19 @@ function normalizeToolStatus(status: string): TimelineItem["status"] {
 function statusLabel(status: TimelineItem["status"]): string {
   switch (status) {
     case "completed":
-      return "Completed";
+      return "已完成";
     case "failed":
-      return "Failed";
+      return "失败";
     case "blocked":
-      return "Blocked";
+      return "已阻止";
     case "partial":
-      return "Partial";
+      return "部分完成";
     case "cancelled":
-      return "Cancelled";
+      return "已取消";
     case "running":
-      return "Running";
+      return "运行中";
     default:
-      return "Info";
+      return "信息";
   }
 }
 
@@ -355,7 +358,7 @@ const phaseHeaderStyle: CSSProperties = {
   alignItems: "center",
   color: "var(--text-muted)",
   fontSize: "var(--text-xs)",
-  fontWeight: 700,
+  fontWeight: "var(--fw-bold)",
   textTransform: "uppercase",
   letterSpacing: 0,
 };

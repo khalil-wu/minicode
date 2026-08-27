@@ -64,6 +64,22 @@ class ToolResult:
     output_files: list[dict[str, Any]] = field(default_factory=list)
     superseded_tool_call_ids: list[str] = field(default_factory=list)
     removed_file_paths: list[str] = field(default_factory=list)
+    # Identity of the frozen provider-neutral request that produced this
+    # result.  It is safe to expose (it is only a SHA-256 digest) and lets
+    # approvals, state, journal and projections prove they refer to one
+    # authorized request without persisting sensitive arguments again.
+    request_digest: str = ""
+    # Cancellation/cleanup evidence for side-effecting tools.  This is kept
+    # structured all the way through the event and journal projections so a
+    # timeout cannot be mistaken for confirmed termination.
+    cleanup_receipt: dict[str, Any] = field(default_factory=dict)
+    # Private hand-off data for model-facing protocol adapters that reuse a
+    # canonical executor.  The normal tool event/context projection does not
+    # serialize this field; wrappers may read it only while the nested execute
+    # call is still in-process.  Keeping opaque ids and resolved child config
+    # here avoids parsing human-readable ToolResult.content or creating a
+    # second Agent runtime path merely to obtain a dialect-specific result.
+    runtime_metadata: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def to_context_string(self) -> str:
         """Return the compact representation injected into model context.
@@ -86,6 +102,12 @@ class ToolResult:
                 meta_parts.append(f"wall_time: {self.duration_ms}ms")
         if self.status and self.status not in ("success", "completed"):
             meta_parts.append(f"status: {self.status}")
+        cleanup = self.cleanup_receipt if isinstance(self.cleanup_receipt, dict) else {}
+        if cleanup:
+            if cleanup.get("pending") or cleanup.get("manual_recovery_required"):
+                meta_parts.append("cleanup: pending/manual recovery required")
+            elif cleanup.get("completed"):
+                meta_parts.append("cleanup: completed")
         if meta_parts:
             parts.append(f"[{', '.join(meta_parts)}]")
         if self.source_url and self.evidence_type == "fetched":
@@ -101,11 +123,15 @@ class ToolResult:
         return "\n".join(parts)
 
 
-# Pi's shared tool-output contract.  Keep the legacy ``*_CHARS`` alias because
-# third-party tools may import it, but the limit is measured in UTF-8 bytes.
+# MiniCode persists tool results above DEFAULT_MAX_RESULT_SIZE_CHARS=50_000
+# chars (toolLimits.ts) — this inline ceiling is the same persist trigger, kept
+# as the shared tool-output contract.
 MAX_TOOL_RESULT_LINES = 2_000
-MAX_TOOL_RESULT_BYTES = 50 * 1024
-MAX_TOOL_RESULT_CHARS = MAX_TOOL_RESULT_BYTES
+# MiniCode keeps a 50,000-character generic model-visible boundary while
+# byte-oriented adapters (including delegated-result transport) use 50 KiB.
+# They must remain distinct because 50,000 CJK characters are about 150 KiB.
+MAX_TOOL_RESULT_CHARS = 50_000
+MAX_TOOL_RESULT_BYTES = 50 * 1024  # 50 KiB transport/persistence cap
 WORKSPACE_PATH_SCHEMA_FIELDS = frozenset({
     "file_path",
     "directory",
@@ -130,7 +156,7 @@ TOOL_SIDE_EFFECT_KINDS = frozenset({
 
 @dataclass(frozen=True)
 class TextTruncationResult:
-    """Python port of Pi's ``truncateHead`` result contract."""
+    """Python port of MiniCode's ``truncateHead`` result contract."""
 
     content: str
     truncated: bool
@@ -146,7 +172,7 @@ class TextTruncationResult:
 
 @dataclass(frozen=True)
 class TailTextTruncationResult:
-    """Python port of Pi's ``truncateTail`` result contract."""
+    """Python port of MiniCode's ``truncateTail`` result contract."""
 
     content: str
     truncated: bool
@@ -175,7 +201,7 @@ def truncate_text_head(
     max_lines: int = MAX_TOOL_RESULT_LINES,
     max_bytes: int = MAX_TOOL_RESULT_BYTES,
 ) -> TextTruncationResult:
-    """Keep complete leading lines until Pi's line or UTF-8 byte limit wins."""
+    """Keep complete leading lines until MiniCode's line or UTF-8 byte limit wins."""
 
     max_lines = max(1, int(max_lines))
     max_bytes = max(1, int(max_bytes))
@@ -239,24 +265,61 @@ def truncate_text_head(
 
 
 def truncate_tool_result(content: str, max_chars: int = MAX_TOOL_RESULT_CHARS) -> str:
-    """Apply Pi's complete-line, UTF-8-byte-aware head truncation."""
+    """Apply MiniCode's complete-line character and line limits."""
 
-    result = truncate_text_head(content, max_bytes=max_chars)
-    if not result.truncated:
+    rendered, truncated_by, output_lines, total_lines, first_line_exceeds = (
+        _truncate_text_head_by_chars(content, max_chars=max_chars)
+    )
+    if truncated_by is None:
         return content
-    if result.first_line_exceeds_limit:
-        return f"[First line exceeds {result.max_bytes} byte limit.]"
-    if result.truncated_by == "lines":
+    if first_line_exceeds:
+        return f"[First line exceeds {max(1, int(max_chars))} character limit.]"
+    if truncated_by == "lines":
         notice = (
-            f"[Truncated: showing {result.output_lines} of {result.total_lines} lines "
-            f"({result.max_lines} line limit).]"
+            f"[Truncated: showing {output_lines} of {total_lines} lines "
+            f"({MAX_TOOL_RESULT_LINES} line limit).]"
         )
     else:
         notice = (
-            f"[Truncated: {result.output_lines} lines shown "
-            f"({result.max_bytes} byte limit).]"
+            f"[Truncated: {output_lines} lines shown "
+            f"({max(1, int(max_chars))} character limit).]"
         )
-    return f"{result.content}\n\n{notice}" if result.content else notice
+    return f"{rendered}\n\n{notice}" if rendered else notice
+
+
+def tool_result_exceeds_inline_limit(
+    content: str,
+    max_chars: int = MAX_TOOL_RESULT_CHARS,
+) -> bool:
+    """Return whether MiniCode's generic model-visible result limit is exceeded."""
+
+    return _truncate_text_head_by_chars(content, max_chars=max_chars)[1] is not None
+
+
+def _truncate_text_head_by_chars(
+    content: str,
+    *,
+    max_chars: int,
+) -> tuple[str, str | None, int, int, bool]:
+    max_chars = max(1, int(max_chars))
+    lines = _split_lines_for_counting(content)
+    total_lines = len(lines)
+    if total_lines <= MAX_TOOL_RESULT_LINES and len(content) <= max_chars:
+        return content, None, total_lines, total_lines, False
+    if lines and len(lines[0]) > max_chars:
+        return "", "chars", 0, total_lines, True
+
+    output: list[str] = []
+    output_chars = 0
+    truncated_by = "lines"
+    for index, line in enumerate(lines[:MAX_TOOL_RESULT_LINES]):
+        line_chars = len(line) + (1 if index > 0 else 0)
+        if output_chars + line_chars > max_chars:
+            truncated_by = "chars"
+            break
+        output.append(line)
+        output_chars += line_chars
+    return "\n".join(output), truncated_by, len(output), total_lines, False
 
 
 def _truncate_utf8_from_end(content: str, max_bytes: int) -> str:
@@ -275,7 +338,7 @@ def truncate_text_tail(
     max_lines: int = MAX_TOOL_RESULT_LINES,
     max_bytes: int = MAX_TOOL_RESULT_BYTES,
 ) -> TailTextTruncationResult:
-    """Keep the final complete lines under Pi's 2000-line/50-KiB contract."""
+    """Keep the final complete lines under MiniCode's 2000-line/50-KiB contract."""
 
     max_lines = max(1, int(max_lines))
     max_bytes = max(1, int(max_bytes))
@@ -341,6 +404,43 @@ class ToolSchema:
     parameters: dict[str, Any]
     strict: bool = False
 
+    @staticmethod
+    def _supports_openai_strict(schema: Any) -> bool:
+        """Return whether a schema can truthfully advertise OpenAI strict mode.
+
+        OpenAI strict tools require every property of every object schema to
+        be listed in ``required``. MiniCode leaves tools with optional parameters
+        at ``strict: false``; silently making those parameters required would
+        change the tool contract.
+        """
+        if isinstance(schema, list):
+            return all(ToolSchema._supports_openai_strict(item) for item in schema)
+        if not isinstance(schema, dict):
+            return True
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            required = schema.get("required")
+            if not isinstance(required, list) or set(required) != set(properties):
+                return False
+            if not all(
+                ToolSchema._supports_openai_strict(value)
+                for value in properties.values()
+            ):
+                return False
+        if "items" in schema and not ToolSchema._supports_openai_strict(schema["items"]):
+            return False
+        for key in ("anyOf", "oneOf", "allOf"):
+            if key in schema and not ToolSchema._supports_openai_strict(schema[key]):
+                return False
+        for key in ("$defs", "definitions"):
+            definitions = schema.get(key)
+            if isinstance(definitions, dict) and not all(
+                ToolSchema._supports_openai_strict(value)
+                for value in definitions.values()
+            ):
+                return False
+        return True
+
     def to_openai_tool(self) -> dict[str, Any]:
         """Convert to OpenAI-compatible function-calling format."""
         tool: dict[str, Any] = {
@@ -351,7 +451,7 @@ class ToolSchema:
                 "parameters": self.parameters,
             },
         }
-        if self.strict:
+        if self.strict and self._supports_openai_strict(self.parameters):
             tool["function"]["strict"] = True
         return tool
 
@@ -365,15 +465,6 @@ class ToolSchema:
             name=self.name,
             description=description,
             parameters=self.parameters,
-            strict=self.strict,
-        )
-
-    def with_parameters(self, parameters: dict[str, Any]) -> "ToolSchema":
-        """Return a copy with model-facing parameter overrides."""
-        return ToolSchema(
-            name=self.name,
-            description=self.description,
-            parameters=parameters,
             strict=self.strict,
         )
 
@@ -421,16 +512,17 @@ class BaseTool(ABC):
     result_kind: str | None = None
     activity_kind: str | None = None
     display_label: str | None = None
-    # Max UTF-8 bytes of result content kept inline before the global truncation
+    projection_visibility: str = "timeline"
+    # Max characters of result content kept inline before the global truncation
     # backstop fires. Tools that already self-bound and store overflow as an
     # artifact (read_file, web_fetch, run_command) set this to None to skip the
     # backstop — double-truncating their compact summary loses head/tail context.
-    max_result_chars: int | None = MAX_TOOL_RESULT_BYTES
+    max_result_chars: int | None = MAX_TOOL_RESULT_CHARS
 
     def get_workspace_paths(self, args: dict[str, Any] | None = None) -> list[str]:
         """Return invocation paths for the filesystem permission boundary.
 
-        This is the same tool-owned path extraction seam used by Claude Code's
+        This is the same tool-owned path extraction seam used by MiniCode's
         filesystem permission checker. Most tools only need declarative fields;
         multi-file tools can override it when paths are embedded in a payload.
         """
@@ -465,17 +557,33 @@ class BaseTool(ABC):
         """
         return getattr(self, "description", "") or ""
 
-    def model_schema(self) -> ToolSchema | None:
-        """Optional compact schema shown only to the model.
+    def model_schema(self) -> ToolSchema:
+        """Compact schema shown only to the model.
 
         Override when the runtime/UI schema should stay rich but the model-facing
         schema can be narrower or terser for latency and prompt-cache efficiency.
         """
-        return None
+        return self.get_execution_schema()
 
     def runtime_description(self) -> str:
         """Human/UI-facing description. Defaults to ``description``."""
         return getattr(self, "description", "") or ""
+
+    def coerce_input(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Return the canonical arguments that should be validated/executed.
+
+        Most tools must preserve their input byte-for-byte and therefore use
+        this no-op implementation.  A protocol adapter may override the hook
+        when the public runtime explicitly normalizes an otherwise valid call
+        *before* JSON-schema validation (for example MiniCode truncates a
+        long optional SendMessage summary instead of rejecting the call).
+
+        The hook must be deterministic and idempotent.  ``validate_tool_input``
+        writes the returned mapping back into the original argument object so
+        permission checks, hooks, durable journaling and execution all observe
+        one canonical payload even when validation is performed more than once.
+        """
+        return args
 
     def to_runtime_metadata(self) -> dict[str, Any]:
         """Non-model-facing metadata for UI, permission display, and diagnostics.
@@ -512,6 +620,7 @@ class BaseTool(ABC):
             "result_kind": self.result_kind,
             "activity_kind": self.activity_kind,
             "display_label": self.display_label,
+            "visibility": self.projection_visibility,
         }
         return {key: value for key, value in metadata.items() if value}
 
@@ -525,11 +634,23 @@ class BaseTool(ABC):
         """
         return ""
 
-    def streamed_input_preview(self, args: dict[str, Any]) -> dict[str, Any]:
+    def streamed_input_preview(
+        self,
+        args: dict[str, Any],
+        context: Any | None = None,
+        prior: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Return safe, displayable fields from partially parsed arguments.
 
-        Tools opt in explicitly, matching Codex's optional argument-diff
+        Tools opt in explicitly, matching MiniCode's optional argument-diff
         consumer. Large bodies and raw partial JSON stay provider-internal.
+
+        The returned dict may carry two projection-owned channels: a ``diff``
+        key with live ``{"plus": n, "minus": m}`` line counts (the projection
+        lifts it into the tool_call event instead of the public args), and
+        underscore-prefixed keys that are private state handed back as
+        ``prior`` on the next delta (e.g. a cached pre-edit line count) so a
+        preview never re-reads the workspace per delta.
         """
         return {}
 
@@ -555,6 +676,27 @@ class BaseTool(ABC):
         per-input analogue of CC's ``checkPermissions``; most tools defer.
         """
         return None
+
+    def is_capability_available(
+        self,
+        context: "PermissionContext | None" = None,
+    ) -> bool:
+        """Return whether this tool belongs on the model capability surface.
+
+        This is deliberately separate from ``check_permission``. The latter
+        evaluates one concrete invocation and therefore cannot answer a schema
+        question for path-dependent tools before their arguments exist.
+        """
+        del context
+        return self.permission != PermissionLevel.ALWAYS_DENY
+
+    def capability_permission_level(
+        self,
+        context: "PermissionContext | None" = None,
+    ) -> PermissionLevel:
+        """Return the capability's baseline UI permission without fake args."""
+        del context
+        return self.permission
 
     def is_concurrency_safe(self, args: dict[str, Any] | None = None) -> bool:
         """Return whether this tool can safely run alongside other read-only work."""
@@ -616,20 +758,22 @@ class BaseTool(ABC):
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         return f"{self.name}:{digest}"
 
-    def _declares_metadata(self, name: str) -> bool:
-        """Return whether this instance or subclass explicitly declares metadata."""
-        if name in self.__dict__:
-            return True
-        for cls in type(self).__mro__:
-            if cls is BaseTool:
-                break
-            if name in cls.__dict__:
-                return True
-        return False
-
     @abstractmethod
     def get_schema(self) -> ToolSchema:
         """Return the JSON schema for this tool."""
+
+    def get_execution_schema(self) -> ToolSchema:
+        """Return the host-side schema accepted at the execution boundary.
+
+        Most tools expose and execute the same shape.  A control tool may have
+        additional host-owned fields supplied by an approval response (for
+        example an edited plan) that must be validated without advertising
+        those fields to the model.  Such tools override ``model_schema``;
+        this method owns every runtime-executable field, including private
+        harness-injected guards.
+        """
+
+        return self.get_schema()
 
     def get_spec(self) -> ToolSpec | None:
         """Return runtime repair metadata, when the tool owns it."""
@@ -677,12 +821,25 @@ class BaseTool(ABC):
 
 
 def validate_tool_input(tool: BaseTool, args: Any) -> str:
-    """Validate declared schema, then tool-specific semantics."""
+    """Coerce protocol input, validate schema, then tool semantics."""
     if not isinstance(args, dict):
         return "arguments: expected an object"
 
     try:
-        schema = tool.get_schema().parameters
+        coerced = tool.coerce_input(args)
+    except Exception as exc:
+        return f"Tool input coercion failed ({type(exc).__name__})."
+    if not isinstance(coerced, dict):
+        return "Tool input coercion must return an object"
+    if coerced is not args:
+        # Preserve object identity: upstream permission and hook owners retain
+        # references to this exact mapping.  Clear/update also removes fields
+        # intentionally dropped by a protocol normalizer.
+        args.clear()
+        args.update(coerced)
+
+    try:
+        schema = tool.get_execution_schema().parameters
         validator_class = validator_for(schema)
         validator_class.check_schema(schema)
         errors = sorted(

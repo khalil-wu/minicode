@@ -1,46 +1,40 @@
-import type { PlanStep } from "../protocol/events";
+import type { TurnPlanStep } from "../protocol/events";
 import type { PlanState, TodoItem } from "../stores/types";
 
 export type PlanProgressStatus = "pending" | "running" | "completed" | "failed";
 
 export function hasVisiblePlanSteps(plan: PlanState | null | undefined): plan is PlanState {
-  return Boolean(plan?.steps?.some((step) => step.title.trim()));
+  return Boolean(plan?.plan?.length);
 }
 
 export function isPlanExecuting(plan: PlanState | null | undefined): plan is PlanState {
-  return hasVisiblePlanSteps(plan) && plan.status === "executing";
+  return hasVisiblePlanSteps(plan) && plan.plan.some((step) => step.status === "in_progress");
 }
 
 export function shouldAutoFocusPlan(plan: PlanState | null | undefined): plan is PlanState {
-  return hasVisiblePlanSteps(plan) && (plan.status === "accepted" || plan.status === "executing");
+  return hasVisiblePlanSteps(plan);
 }
 
 export function shouldSurfacePlanProgress(plan: PlanState | null | undefined): plan is PlanState {
-  return hasVisiblePlanSteps(plan) && plan.status !== "draft" && plan.status !== "cancelled";
+  return hasVisiblePlanSteps(plan);
 }
 
-export function visiblePlanStepStatus(plan: PlanState, step: PlanStep): PlanStep["status"] {
-  if (plan.status === "executing") return step.status;
-  if (step.status === "done" || step.status === "skipped" || step.status === "failed") return step.status;
-  return "pending";
+export function visiblePlanStepStatus(step: TurnPlanStep): TurnPlanStep["status"] {
+  return step.status;
 }
 
-export function isVisiblePlanStepActive(plan: PlanState, step: PlanStep, index: number): boolean {
-  return plan.status === "executing" && index === plan.currentStep && step.status === "running";
+export function isVisiblePlanStepActive(step: TurnPlanStep): boolean {
+  return step.status === "in_progress";
 }
 
 export function planStepProgressStatus(
-  plan: PlanState,
-  step: PlanStep,
+  step: TurnPlanStep,
   isLive: boolean,
 ): PlanProgressStatus {
-  switch (visiblePlanStepStatus(plan, step)) {
-    case "done":
-    case "skipped":
+  switch (visiblePlanStepStatus(step)) {
+    case "completed":
       return "completed";
-    case "failed":
-      return "failed";
-    case "running":
+    case "in_progress":
       return isLive ? "running" : "pending";
     case "pending":
     default:
@@ -48,14 +42,11 @@ export function planStepProgressStatus(
   }
 }
 
-export function planStepTodoStatus(plan: PlanState, step: PlanStep): TodoItem["status"] {
-  switch (visiblePlanStepStatus(plan, step)) {
-    case "done":
-    case "skipped":
+export function planStepTodoStatus(step: TurnPlanStep): TodoItem["status"] {
+  switch (visiblePlanStepStatus(step)) {
+    case "completed":
       return "completed";
-    case "failed":
-      return "blocked";
-    case "running":
+    case "in_progress":
       return "in_progress";
     case "pending":
     default:

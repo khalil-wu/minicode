@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from backend.config import AgentSettings
+
+logger = logging.getLogger(__name__)
 
 
 BudgetReason = Literal[
@@ -131,6 +134,12 @@ class TurnBudgetController:
     max_retries: int = 0
     max_turn_tokens: int = 0
     max_turn_cost_usd: float = 0.0
+    # A frozen controller can still own a mutable one-shot marker; this keeps
+    # the unenforceable-ceiling warning to one line per turn instead of one
+    # per iteration.
+    _unpriced_cost_reported: set[str] = field(
+        default_factory=set, repr=False, compare=False
+    )
 
     @classmethod
     def from_settings(
@@ -166,7 +175,7 @@ class TurnBudgetController:
         tool_calls: int,
         retries: int = 0,
         tokens: int = 0,
-        cost_usd: float = 0.0,
+        cost_usd: float | None = 0.0,
         post_tools: bool = False,
     ) -> BudgetBoundary | None:
         """Return the first exhausted boundary, or None while the turn may run.
@@ -202,7 +211,20 @@ class TurnBudgetController:
                 detail=f"turn token limit reached ({tokens}/{self.max_turn_tokens})",
                 post_tools=post_tools,
             )
-        if self.max_turn_cost_usd > 0 and cost_usd >= self.max_turn_cost_usd:
+        if self.max_turn_cost_usd > 0 and cost_usd is None:
+            # A configured ceiling that cannot be measured must not read as
+            # "not reached yet". The active model is unpriced and no provider
+            # reported a cost, so this budget cannot be enforced this turn —
+            # say so once instead of silently never firing.
+            if "reported" not in self._unpriced_cost_reported:
+                self._unpriced_cost_reported.add("reported")
+                logger.warning(
+                    "max_turn_cost_usd=%.4f cannot be enforced: the active model "
+                    "is not in the local price table and the provider reported "
+                    "no cost.",
+                    self.max_turn_cost_usd,
+                )
+        elif self.max_turn_cost_usd > 0 and cost_usd is not None and cost_usd >= self.max_turn_cost_usd:
             return BudgetBoundary(
                 reason="max_turn_cost_usd",
                 limit=self.max_turn_cost_usd,

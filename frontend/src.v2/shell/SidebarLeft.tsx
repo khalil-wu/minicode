@@ -1,18 +1,16 @@
-import { useEffect, useState } from "react";
-import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from "react";
-import { Blend, ChevronDown, Clock3, Code2, Files, FolderOpen, MessageSquareText, Moon, Search, Settings, SquarePen, Sun } from "lucide-react";
+import { useState } from "react";
+import type { ReactNode } from "react";
+import { Blend, Clock3, Code2, FolderOpen, MessageSquareText, Moon, Search, Settings, SquarePen, Sun } from "lucide-react";
 import { useAppStore } from "../stores";
-import { LEFT_SIDEBAR_DEFAULT_WIDTH, LEFT_SIDEBAR_MAX_WIDTH, LEFT_SIDEBAR_MIN_WIDTH } from "../stores/shared-helpers";
+import { LEFT_SIDEBAR_MIN_WIDTH } from "../stores/shared-helpers";
 import { FileTree } from "./FileTree";
 import { ConfirmDialog, type ConfirmDialogState } from "./sidebarComponents";
 import { ConversationsTab } from "./ConversationsTab";
-import { isConversationRunning } from "./sessionStatus";
+import { Tip } from "../components/Tooltip";
 import { openWorkspaceFolder } from "../workspace/openWorkspaceFolder";
 import { openAutomations } from "../lib/automations-navigation";
 import { capabilityFeatureEnabled } from "../protocol/capabilities";
-import { modeSwitchButtonStyle, modeSwitchStyle } from "./sidebarStyles";
-
-type SidebarTab = "conversations" | "files";
+import { modeSwitchButtonStyle, modeSwitchLabelStyle, modeSwitchStyle } from "./sidebarStyles";
 
 export const SidebarLeft = ({
   embedded = false,
@@ -22,50 +20,23 @@ export const SidebarLeft = ({
   onNavigate?: () => void;
 }) => {
   const appMode = useAppStore((s) => s.appMode);
-  const themeMode = useAppStore((s) => s.themeMode);
+  const resolvedTheme = useAppStore((s) => s.resolvedTheme);
   const conversationId = useAppStore((s) => s.conversationId);
   const leftSidebarWidth = useAppStore((s) => s.leftSidebarWidth);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const setAppMode = useAppStore((s) => s.setAppMode);
   const setThemeMode = useAppStore((s) => s.setThemeMode);
-  const setLeftSidebarWidth = useAppStore((s) => s.setLeftSidebarWidth);
   const createConversation = useAppStore((s) => s.createConversation);
   const toggleCommandPalette = useAppStore((s) => s.toggleCommandPalette);
   const toggleSkillsMarketplace = useAppStore((s) => s.toggleSkillsMarketplace);
   const toggleSettings = useAppStore((s) => s.toggleSettings);
   const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities);
   const globalSearchEnabled = capabilityFeatureEnabled(runtimeCapabilities, "global_search", true);
-  const [tab, setTab] = useState<SidebarTab>(appMode === "code" ? "files" : "conversations");
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState>(null);
   const isOpen = embedded || leftSidebarWidth > 0;
 
-  const runningCount = useAppStore((s) => {
-    let count = 0;
-    for (const c of s.conversations) {
-      if (!c.archived && isConversationRunning({
-        conversationId: c.id,
-        activeConversationId: s.conversationId,
-        activeIsStreaming: s.isStreaming,
-        conversationStreaming: s.conversationStreaming,
-      })) {
-        count++;
-      }
-    }
-    return count;
-  });
-
-  useEffect(() => {
-    setTab(appMode === "code" ? "files" : "conversations");
-  }, [appMode]);
-
   const switchAppMode = (nextMode: "cowork" | "code") => {
     setAppMode(nextMode);
-    setTab(nextMode === "code" ? "files" : "conversations");
-    onNavigate?.();
-  };
-  const switchSidebarTab = (nextTab: SidebarTab) => {
-    setTab(nextTab);
-    if (nextTab === "files" && appMode !== "code") setAppMode("code");
     onNavigate?.();
   };
   const startSession = () => {
@@ -77,64 +48,17 @@ export const SidebarLeft = ({
     onNavigate?.();
   };
 
-  const startResize = (event: ReactPointerEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    const handle = event.currentTarget;
-    const pointerId = event.pointerId;
-    const startX = event.clientX;
-    const startWidth = leftSidebarWidth || LEFT_SIDEBAR_MIN_WIDTH;
-    const onMove = (moveEvent: PointerEvent) => {
-      if (moveEvent.pointerId !== pointerId) return;
-      const nextWidth = startWidth + moveEvent.clientX - startX;
-      setLeftSidebarWidth(nextWidth < 42 ? 0 : nextWidth);
-    };
-    const cleanup = () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      window.removeEventListener("pointercancel", onUp);
-      handle.removeEventListener("lostpointercapture", cleanup);
-      if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-      document.body.classList.remove("layout-dragging");
-    };
-    const onUp = (upEvent: PointerEvent) => {
-      if (upEvent.pointerId !== pointerId) return;
-      cleanup();
-    };
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-    document.body.classList.add("layout-dragging");
-    handle.setPointerCapture(pointerId);
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onUp);
-    handle.addEventListener("lostpointercapture", cleanup);
-  };
-
-  const resetSidebarWidth = () => setLeftSidebarWidth(LEFT_SIDEBAR_DEFAULT_WIDTH);
-  const handleResizeKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    const step = event.shiftKey ? 48 : 16;
-    let nextWidth: number | null = null;
-    if (event.key === "ArrowLeft") nextWidth = leftSidebarWidth - step;
-    else if (event.key === "ArrowRight") nextWidth = leftSidebarWidth + step;
-    else if (event.key === "Home") nextWidth = LEFT_SIDEBAR_MIN_WIDTH;
-    else if (event.key === "End") nextWidth = LEFT_SIDEBAR_MAX_WIDTH;
-    else if (event.key === "Enter") nextWidth = LEFT_SIDEBAR_DEFAULT_WIDTH;
-    if (nextWidth == null) return;
-    event.preventDefault();
-    setLeftSidebarWidth(nextWidth);
-  };
   const openAutomationsPanel = () => navigate(openAutomations);
-  const resolvedTheme = document.documentElement.getAttribute("data-theme");
-  const isDarkTheme = themeMode === "dark" || (themeMode === "system" && resolvedTheme !== "light");
+  const isDarkTheme = resolvedTheme === "dark";
   const nextThemeLabel = isDarkTheme ? "切换到浅色模式" : "切换到深色模式";
 
-  const sidebarWidth = embedded ? "100%" : isOpen ? `${leftSidebarWidth}px` : 0;
+  // Fixed at the minimum width — the sidebar is no longer user-resizable;
+  // the stored width only carries open (0 vs >0) state.
+  const sidebarWidth = embedded ? "100%" : isOpen ? `${LEFT_SIDEBAR_MIN_WIDTH}px` : 0;
 
   return (
     <aside
-      className="mc-sidebar-left anim-slide-left sidebar-animate flex flex-col overflow-hidden box-border"
+      className="mc-sidebar-left anim-slide-left sidebar-animate flex flex-col"
       data-open={isOpen ? "true" : "false"}
       data-embedded={embedded ? "true" : "false"}
       style={{
@@ -148,29 +72,12 @@ export const SidebarLeft = ({
         width: sidebarWidth,
         minWidth: sidebarWidth,
         maxWidth: sidebarWidth,
-        background: "color-mix(in oklch, var(--surface-page) 82%, var(--surface-base))",
+        background: "var(--surface-sidebar)",
         opacity: isOpen ? 1 : 0,
         pointerEvents: isOpen ? "auto" : "none",
       }}
     >
-      <div className="mc-sidebar-brand-row">
-        <button
-          type="button"
-          className="mc-sidebar-brand"
-          onClick={() => switchSidebarTab("conversations")}
-          aria-label="返回会话列表"
-        >
-          <span>MiniCode</span>
-          <ChevronDown className="mc-sidebar-brand-chevron" aria-hidden="true" />
-        </button>
-        {runningCount > 0 && (
-          <span className="mc-sidebar-running-count" aria-label={`${runningCount} 个任务运行中`}>
-            {runningCount} 运行中
-          </span>
-        )}
-      </div>
-
-      <div role="tablist" aria-label="工作模式" style={{ ...modeSwitchStyle, margin: "8px 2px 2px" }}>
+      <div role="tablist" aria-label="工作模式" data-testid="sidebar-mode-switch" style={{ ...modeSwitchStyle, margin: "2px 0" }}>
         <button
           type="button"
           role="tab"
@@ -181,7 +88,7 @@ export const SidebarLeft = ({
           style={modeSwitchButtonStyle}
         >
           <span className="mc-sidebar-mode-icon" aria-hidden="true"><MessageSquareText /></span>
-          协作
+          <span style={modeSwitchLabelStyle}>协作</span>
         </button>
         <button
           type="button"
@@ -193,7 +100,7 @@ export const SidebarLeft = ({
           style={modeSwitchButtonStyle}
         >
           <span className="mc-sidebar-mode-icon" aria-hidden="true"><Code2 /></span>
-          代码
+          <span style={modeSwitchLabelStyle}>代码</span>
         </button>
       </div>
 
@@ -203,57 +110,35 @@ export const SidebarLeft = ({
         <SidebarAction icon={<FolderOpen />} label={workingDirectory ? "切换项目" : "打开项目"} onClick={() => navigate(() => void openWorkspaceFolder())} />
         <SidebarAction icon={<Clock3 />} label="已安排" onClick={openAutomationsPanel} />
         <SidebarAction icon={<Blend />} label="技能" onClick={() => navigate(() => toggleSkillsMarketplace())} />
-        <SidebarAction
-          icon={tab === "files" ? <MessageSquareText /> : <Files />}
-          label={tab === "files" ? "返回会话" : "项目文件"}
-          active={tab === "files"}
-          onClick={() => switchSidebarTab(tab === "files" ? "conversations" : "files")}
-        />
       </nav>
 
-      {tab === "conversations" && (
-        <ConversationsTab
-          conversationId={conversationId ?? ""}
-          onNavigate={onNavigate}
-          onSetConfirmDialog={(dialog) => setConfirmDialog(dialog)}
-        />
-      )}
-
-      {tab === "files" && <FileTree onNavigate={onNavigate} />}
+      <div key={appMode} className="mc-sidebar-mode-content" data-mode={appMode}>
+        {appMode === "cowork" ? (
+          <ConversationsTab
+            conversationId={conversationId ?? ""}
+            onNavigate={onNavigate}
+            onSetConfirmDialog={(dialog) => setConfirmDialog(dialog)}
+          />
+        ) : (
+          <FileTree onNavigate={onNavigate} />
+        )}
+      </div>
 
       <div className="mc-sidebar-footer">
         <div className="mc-sidebar-footer-row">
           <SidebarAction icon={<Settings />} label="设置" onClick={() => navigate(() => toggleSettings())} />
-          <button
-            type="button"
-            className="btn-ghost mc-sidebar-theme-toggle"
-            aria-label={nextThemeLabel}
-            title={nextThemeLabel}
-            onClick={() => setThemeMode(isDarkTheme ? "light" : "dark")}
-          >
-            {isDarkTheme ? <Sun aria-hidden="true" /> : <Moon aria-hidden="true" />}
-          </button>
+          <Tip content={nextThemeLabel}>
+            <button
+              type="button"
+              className="btn-ghost mc-sidebar-theme-toggle"
+              aria-label={nextThemeLabel}
+              onClick={() => setThemeMode(isDarkTheme ? "light" : "dark")}
+            >
+              {isDarkTheme ? <Sun aria-hidden="true" /> : <Moon aria-hidden="true" />}
+            </button>
+          </Tip>
         </div>
       </div>
-
-      {isOpen && !embedded && (
-        <div
-          className="mc-sidebar-left-resize-handle"
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="调整左侧栏宽度"
-          aria-valuemin={LEFT_SIDEBAR_MIN_WIDTH}
-          aria-valuemax={LEFT_SIDEBAR_MAX_WIDTH}
-           aria-valuenow={Math.round(leftSidebarWidth)}
-           aria-valuetext={`${Math.round(leftSidebarWidth)} pixels`}
-           tabIndex={0}
-          title="拖动调整左侧栏宽度，双击恢复默认"
-          onPointerDown={startResize}
-           onDoubleClick={resetSidebarWidth}
-           onKeyDown={handleResizeKeyDown}
-          style={leftResizeHandleStyle}
-        />
-      )}
 
       {confirmDialog && (
         <ConfirmDialog
@@ -291,13 +176,3 @@ const SidebarAction = ({
     <span>{label}</span>
   </button>
 );
-
-const leftResizeHandleStyle: CSSProperties = {
-  position: "absolute",
-  top: 0,
-  right: -3,
-  bottom: 0,
-  width: 7,
-  cursor: "col-resize",
-  zIndex: 2,
-};

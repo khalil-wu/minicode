@@ -2,7 +2,7 @@
  * Error fallback component for Panels (Editor, Terminal, Diff, Browser, etc.)
  * Displays when a panel encounters an unrecoverable error
  */
-export const PanelErrorFallback = ({ panelName }: { panelName?: string }) => {
+export const PanelErrorFallback = ({ panelName, error }: { panelName?: string; error?: Error }) => {
   const handleReload = () => {
     window.location.reload();
   };
@@ -14,8 +14,8 @@ export const PanelErrorFallback = ({ panelName }: { panelName?: string }) => {
         <h3 className="text-base font-semibold">
           {panelName ? `${panelName}面板加载失败` : "面板加载失败"}
         </h3>
-        <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-          此面板遇到错误且无法恢复。
+        <p className="text-xs" style={{ color: "var(--text-muted)", overflowWrap: "anywhere" }}>
+          {error?.message || "此面板遇到错误且无法恢复。"}
         </p>
         <button
           onClick={handleReload}

@@ -1,5 +1,5 @@
 """
-Git Worktree 管理器（参考 Claude Code 的 worktree 支持）。
+Git Worktree 管理器（MiniCode 实现）。
 
 特性：
 - 创建/删除 worktree
@@ -32,6 +32,13 @@ logger = logging.getLogger(__name__)
 WORKTREE_GIT_TIMEOUT_SECONDS = 120
 WORKTREE_SNAPSHOT_MAX_PER_REPO = 50
 WORKTREE_SNAPSHOT_MAX_AGE_DAYS = 30
+MINICODE_WORKTREE_RELATIVE_ROOT = Path(".minicode") / "worktrees"
+
+
+def isolated_worktree_root(repo_root: Path) -> Path:
+    """Return MiniCode's canonical repository-local worktree root."""
+
+    return (repo_root / MINICODE_WORKTREE_RELATIVE_ROOT).resolve()
 
 
 @dataclass
@@ -62,6 +69,7 @@ class WorktreeRemoval:
 
     removed: bool
     snapshot: "WorktreeSnapshotRecord | None" = None
+    head: str = ""
     needs_force: bool = False
     error: Optional[str] = None
 
@@ -430,6 +438,138 @@ class WorktreeManager:
         logger.info("Restored worktree snapshot %s to %s", snapshot_id, dest_path)
         return WorktreeRestore(restored=True, path=dest_path, snapshot=record)
 
+    def restore_removed_worktree(
+        self,
+        path: Path,
+        *,
+        branch: str,
+        expected_head: str = "",
+        snapshot_id: str = "",
+    ) -> WorktreeRestore:
+        """Recreate a removed branch worktree and reapply its recovery snapshot.
+
+        Cleanup commits the Git removal before it can persist the conversation
+        binding.  If that metadata commit fails, the original branch-bound
+        worktree must be recreated at the same path.  A dirty worktree's
+        snapshot is materialized into the recreated checkout while HEAD stays
+        on the original branch, so the conversation binding and Git state do
+        not disagree after compensation.
+        """
+
+        dest_path = Path(path).resolve()
+        clean_branch = str(branch or "").strip()
+        clean_expected_head = str(expected_head or "").strip()
+        clean_snapshot_id = str(snapshot_id or "").strip()
+        if not clean_branch:
+            return WorktreeRestore(
+                restored=False,
+                error="The removed worktree branch could not be identified",
+            )
+        if dest_path.exists() and any(dest_path.iterdir()):
+            return WorktreeRestore(
+                restored=False,
+                error="The original worktree path is no longer empty",
+            )
+
+        snapshot = None
+        if clean_snapshot_id:
+            snapshot = self._snapshots().get(clean_snapshot_id)
+            if snapshot is None or not snapshot.snapshot_sha:
+                return WorktreeRestore(
+                    restored=False,
+                    error=f"Snapshot '{clean_snapshot_id}' was not found",
+                )
+            try:
+                snapshot_repo = Path(snapshot.main_repo_path).resolve()
+                snapshot_path = Path(snapshot.original_path).resolve()
+            except OSError:
+                return WorktreeRestore(
+                    restored=False,
+                    snapshot=snapshot,
+                    error="The recovery snapshot contains invalid paths",
+                )
+            if snapshot_repo != self.repo_root:
+                return WorktreeRestore(
+                    restored=False,
+                    snapshot=snapshot,
+                    error="Snapshot belongs to a different repository",
+                )
+            if snapshot_path != dest_path:
+                return WorktreeRestore(
+                    restored=False,
+                    snapshot=snapshot,
+                    error="Snapshot belongs to a different worktree path",
+                )
+            if snapshot.branch and snapshot.branch != clean_branch:
+                return WorktreeRestore(
+                    restored=False,
+                    snapshot=snapshot,
+                    error="Snapshot belongs to a different worktree branch",
+                )
+            if snapshot.head:
+                if clean_expected_head and snapshot.head != clean_expected_head:
+                    return WorktreeRestore(
+                        restored=False,
+                        snapshot=snapshot,
+                        error="Snapshot HEAD does not match the removed worktree",
+                    )
+                clean_expected_head = snapshot.head
+
+        branch_head = self._rev_parse(self.repo_root, clean_branch) or ""
+        if not branch_head:
+            return WorktreeRestore(
+                restored=False,
+                snapshot=snapshot,
+                error=f"Branch '{clean_branch}' no longer exists",
+            )
+        if clean_expected_head and branch_head != clean_expected_head:
+            return WorktreeRestore(
+                restored=False,
+                snapshot=snapshot,
+                error="The worktree branch moved after cleanup; refusing to rewrite it",
+            )
+
+        if not self.create_worktree(
+            dest_path,
+            branch=clean_branch,
+            new_branch=False,
+        ):
+            return WorktreeRestore(
+                restored=False,
+                snapshot=snapshot,
+                error="git worktree add failed",
+            )
+
+        if snapshot is not None:
+            materialized = self._git_ok(
+                dest_path,
+                "read-tree",
+                "--reset",
+                "-u",
+                snapshot.snapshot_sha,
+            )
+            unstaged = materialized and self._git_ok(
+                dest_path,
+                "reset",
+                "--mixed",
+                "HEAD",
+            )
+            if not materialized or not unstaged:
+                removed_partial = self.remove_worktree(dest_path, force=True)
+                suffix = "" if removed_partial else "; partial worktree cleanup also failed"
+                return WorktreeRestore(
+                    restored=False,
+                    snapshot=snapshot,
+                    error=f"Could not materialize the recovery snapshot{suffix}",
+                )
+
+        logger.info("Recreated removed worktree at %s", dest_path)
+        return WorktreeRestore(
+            restored=True,
+            path=dest_path,
+            snapshot=snapshot,
+        )
+
     def list_snapshots(
         self, conversation_id: str | None = None, *, limit: int = 100
     ) -> list["WorktreeSnapshotRecord"]:
@@ -486,11 +626,13 @@ class WorktreeManager:
         - 脏 worktree 且 force:先快照(``snapshot=True`` 时)再删除。
         """
         wt = Path(path).resolve()
+        head = self._rev_parse(wt, "HEAD") or ""
         dirty = self.has_local_changes(wt)
 
         if dirty and not force:
             return WorktreeRemoval(
                 removed=False,
+                head=head,
                 needs_force=True,
                 error="Worktree has local changes; confirm force cleanup to remove it",
             )
@@ -501,13 +643,19 @@ class WorktreeManager:
             if snap is None:
                 return WorktreeRemoval(
                     removed=False,
+                    head=head,
                     error="Worktree snapshot failed; refusing destructive removal",
                 )
 
         removed = self.remove_worktree(wt, force=force)
         if not removed:
-            return WorktreeRemoval(removed=False, snapshot=snap, error="git worktree remove failed")
-        return WorktreeRemoval(removed=True, snapshot=snap)
+            return WorktreeRemoval(
+                removed=False,
+                snapshot=snap,
+                head=head,
+                error="git worktree remove failed",
+            )
+        return WorktreeRemoval(removed=True, snapshot=snap, head=head)
 
     def _snapshots(self) -> "WorktreeSnapshotStore":
         if self._snapshot_store is None:

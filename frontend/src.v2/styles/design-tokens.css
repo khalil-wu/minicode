@@ -1,7 +1,8 @@
 /*
- * Legacy design-token compatibility layer.
+ * Legacy design-token compatibility stub.
  *
- * Canonical color, type, radius, shadow, and motion values live in tokens.css.
- * Keep this file thin because it is imported before tokens.css; old components
- * should receive aliases from tokens.css after the canonical file loads.
+ * Not imported since the UI polish pass — canonical color, type, radius,
+ * shadow, and motion values live in tokens.css. This file is kept empty on
+ * purpose: lib/tokens.test.ts reads it as a sentinel asserting the legacy
+ * layer stays empty.
  */

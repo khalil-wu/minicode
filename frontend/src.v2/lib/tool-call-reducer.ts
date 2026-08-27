@@ -2,6 +2,9 @@ import type { ToolCallEvent, ToolErrorInfo, ToolResultEvent } from "../protocol/
 
 export type ToolCallStatus = "pending" | "running" | "success" | "failed" | "blocked" | "partial" | "timeout" | "cancelled";
 
+export const isTerminalToolCallStatus = (status: ToolCallStatus): boolean =>
+  status !== "pending" && status !== "running";
+
 export interface ToolCallRecord {
   id: string;
   name: string;
@@ -20,6 +23,7 @@ export interface ToolCallRecord {
   displaySummary?: string;
   resultKind?: string;
   activityKind?: string;
+  visibility?: "timeline" | "compact" | "debug" | string;
   limitation?: string;
   provider?: string;
   providerErrorType?: string;
@@ -50,6 +54,7 @@ export interface ToolCallRecord {
     patch?: string;
     files?: Array<{
       path: string;
+      oldPath?: string;
       plus: number;
       minus: number;
       patch?: string;
@@ -63,6 +68,9 @@ export interface ToolCallRecord {
     mimeType?: string;
     isImage?: boolean;
   }>;
+  cleanupReceipt?: Record<string, unknown>;
+  supersededToolCallIds?: string[];
+  removedFilePaths?: string[];
   /** True when a file created by this call was later removed in the same turn. */
   temporaryRemoved?: boolean;
 }
@@ -71,7 +79,11 @@ const normalizedProjectionValue = (value: string | undefined): string => String(
 
 export const isCommandToolRecord = (record: ToolCallRecord): boolean =>
   normalizedProjectionValue(record.activityKind) === "commandexecution"
-  || normalizedProjectionValue(record.resultKind) === "command";
+  || normalizedProjectionValue(record.resultKind) === "command"
+  // Legacy tool_call events predate result/activity projection metadata, but
+  // command_output_chunk can still arrive without an id. The executable tool
+  // name is the only safe compatibility discriminator in that shape.
+  || normalizedProjectionValue(record.name) === "run_command";
 
 export const isFileChangeToolRecord = (record: ToolCallRecord): boolean =>
   !record.temporaryRemoved && (
@@ -79,7 +91,12 @@ export const isFileChangeToolRecord = (record: ToolCallRecord): boolean =>
   || normalizedProjectionValue(record.resultKind) === "edit");
 
 export const isWorkspaceSearchToolRecord = (record: ToolCallRecord): boolean =>
-  normalizedProjectionValue(record.activityKind) === "workspacesearch";
+  normalizedProjectionValue(record.activityKind) === "workspacesearch"
+  && normalizedProjectionValue(record.name) !== "list_files";
+
+export const isWorkspaceListToolRecord = (record: ToolCallRecord): boolean =>
+  normalizedProjectionValue(record.activityKind) === "workspacelist"
+  || normalizedProjectionValue(record.name) === "list_files";
 
 export const isFileReadToolRecord = (record: ToolCallRecord): boolean =>
   normalizedProjectionValue(record.activityKind) === "fileread"
@@ -158,19 +175,9 @@ export const normalizeToolDiff = (value: unknown): ToolCallRecord["diff"] | unde
   const directPlus = toFiniteNumber(raw.plus ?? raw.additions);
   const directMinus = toFiniteNumber(raw.minus ?? raw.deletions);
   const directPatch = typeof raw.patch === "string" ? raw.patch : undefined;
-  if (directPlus || directMinus || directPatch) {
-    const patchStats = directPatch ? countUnifiedDiffLines(directPatch) : { plus: 0, minus: 0 };
-    const shouldUsePatchStats = directPlus === 0 && directMinus === 0;
-    return {
-      plus: shouldUsePatchStats ? patchStats.plus : directPlus,
-      minus: shouldUsePatchStats ? patchStats.minus : directMinus,
-      patch: directPatch,
-    };
-  }
-
   const stats = raw.stats && typeof raw.stats === "object" ? raw.stats as Record<string, unknown> : {};
-  let plus = toFiniteNumber(stats.additions);
-  let minus = toFiniteNumber(stats.deletions);
+  let plus = directPlus || toFiniteNumber(stats.additions);
+  let minus = directMinus || toFiniteNumber(stats.deletions);
   const files = Array.isArray(raw.files) ? raw.files.filter((item): item is Record<string, unknown> =>
     Boolean(item && typeof item === "object")
   ) : [];
@@ -188,6 +195,11 @@ export const normalizeToolDiff = (value: unknown): ToolCallRecord["diff"] | unde
     }
     return [{
       path,
+      oldPath: typeof file.old_path === "string"
+        ? file.old_path.trim() || undefined
+        : typeof file.oldPath === "string"
+          ? file.oldPath.trim() || undefined
+          : undefined,
       plus: filePlus,
       minus: fileMinus,
       patch: filePatch,
@@ -195,9 +207,9 @@ export const normalizeToolDiff = (value: unknown): ToolCallRecord["diff"] | unde
     }];
   });
 
-  if (files.length) {
-    const filePlus = files.reduce((sum, file) => sum + toFiniteNumber(file.additions), 0);
-    const fileMinus = files.reduce((sum, file) => sum + toFiniteNumber(file.deletions), 0);
+  if (normalizedFiles.length) {
+    const filePlus = normalizedFiles.reduce((sum, file) => sum + file.plus, 0);
+    const fileMinus = normalizedFiles.reduce((sum, file) => sum + file.minus, 0);
     plus = plus || filePlus;
     minus = minus || fileMinus;
   }
@@ -205,11 +217,11 @@ export const normalizeToolDiff = (value: unknown): ToolCallRecord["diff"] | unde
   const patches = files
     .map((file) => typeof file.patch === "string" ? file.patch.trim() : "")
     .filter(Boolean);
-  const patch = patches.length
+  const patch = directPatch ?? (patches.length
     ? patches.join("\n\n")
     : typeof raw.raw === "string"
       ? raw.raw
-      : undefined;
+      : undefined);
 
   if (plus === 0 && minus === 0 && patch) {
     const patchStats = countUnifiedDiffLines(patch);
@@ -218,7 +230,12 @@ export const normalizeToolDiff = (value: unknown): ToolCallRecord["diff"] | unde
   }
 
   return plus || minus || patch || normalizedFiles.length
-    ? { plus, minus, patch, files: normalizedFiles.length ? normalizedFiles : undefined }
+    ? {
+        plus,
+        minus,
+        patch,
+        ...(normalizedFiles.length ? { files: normalizedFiles } : {}),
+      }
     : undefined;
 };
 
@@ -229,8 +246,7 @@ export const reduceToolCallStart = (
 ): Map<string, ToolCallRecord> => {
   const next = new Map(prev);
   const existing = prev.get(e.id);
-  const terminal = existing
-    && ["success", "failed", "blocked", "partial", "timeout", "cancelled"].includes(existing.status);
+  const terminal = existing && isTerminalToolCallStatus(existing.status);
   next.set(e.id, {
     ...existing,
     id: e.id,
@@ -246,6 +262,7 @@ export const reduceToolCallStart = (
     inputSummary: e.input_summary ?? existing?.inputSummary,
     resultKind: e.result_kind ?? existing?.resultKind,
     activityKind: e.activity_kind ?? existing?.activityKind,
+    visibility: e.visibility ?? existing?.visibility,
     groupId: e.group_id ?? existing?.groupId,
     stepId: e.step_id ?? existing?.stepId,
     taskId: e.task_id ?? existing?.taskId,
@@ -253,6 +270,9 @@ export const reduceToolCallStart = (
     seq: e.seq ?? existing?.seq,
     iterationId: e.iteration_id ?? existing?.iterationId,
     phase: e.phase ?? existing?.phase,
+    // Live line counts while arguments stream in; a committed tool_result diff
+    // (reduceToolCallResult) still wins over these provisional numbers.
+    diff: normalizeToolDiff(e.diff) ?? existing?.diff,
   });
   return next;
 };
@@ -289,6 +309,7 @@ export const reduceToolCallResult = (
     displaySummary: e.display_summary,
     resultKind: e.result_kind ?? existing.resultKind,
     activityKind: e.activity_kind ?? existing.activityKind,
+    visibility: e.visibility ?? existing.visibility,
     groupId: e.group_id ?? existing.groupId,
     stepId: e.step_id ?? existing.stepId,
     taskId: e.task_id ?? existing.taskId,

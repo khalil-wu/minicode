@@ -19,35 +19,9 @@
    @keyframes
    ════════════════════════════════════════════════════════ */
 
-/* Message appear — subtle rise + fade for new chat messages */
-@keyframes message-appear {
-  from {
-    opacity: 0;
-    transform: translateY(5px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-/* Tool call running pulse — gentle opacity pulse for active tools */
-@keyframes tool-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.6; }
-}
-
-/* Panel slide from right — for right sidebar entrance */
-@keyframes slide-in-right {
-  from {
-    opacity: 0;
-    transform: translateX(10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
-}
+/* Message appear — the shared @keyframes is `message-in` (reset.css):
+   two identical rise+fade keyframes (message-appear / message-in) used to
+   coexist; everything now points at the reset.css one. */
 
 /* Panel slide from left — for left sidebar entrance */
 @keyframes slide-in-left {
@@ -61,25 +35,51 @@
   }
 }
 
+/* Panel/card entrance with a gentle spring overshoot */
+@keyframes panel-spring {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Skeleton shimmer sweep for loading placeholders */
+@keyframes shimmer {
+  from { background-position: 200% 0; }
+  to   { background-position: -200% 0; }
+}
+
+/* Tool call running pulse — opacity + micro-scale breathing */
+@keyframes tool-pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.72;
+    transform: scale(0.995);
+  }
+}
+
 
 
 /* ════════════════════════════════════════════════════════
    Utility animation classes (.anim-*)
    ════════════════════════════════════════════════════════ */
 
-/* New message entrance — applied to the last N turns in MessageList */
+/* New message entrance — applied to the last N turns in MessageList.
+   Shares the `message-in` keyframes from reset.css. */
 .anim-message-appear {
-  animation: message-appear var(--duration-base, 200ms) var(--easing-enter, ease-out) both;
+  animation: message-in var(--duration-base, 200ms) var(--easing-enter, ease-out) both;
 }
 
 /* Running tool pulse — applied to ToolCallCard when status === "running" */
 .anim-tool-running {
   animation: tool-pulse 1.5s ease-in-out infinite;
-}
-
-/* Right panel slide-in — applied to SidebarRight on mount */
-.anim-slide-right {
-  animation: slide-in-right var(--duration-base, 200ms) var(--easing-enter, ease-out) both;
 }
 
 /* Left panel slide-in — applied to SidebarLeft on mount */
@@ -92,73 +92,56 @@
   animation: fade-in var(--duration-base, 200ms) var(--easing-standard, ease-out) both;
 }
 
-/* Success checkmark scale-in — when activity completes */
-@keyframes checkmark-appear {
-  0% {
+/* Springy panel/card entrance — overlays, cards, mode switches */
+.anim-spring {
+  animation: panel-spring var(--duration-slow, 250ms) var(--easing-spring, cubic-bezier(0.34, 1.56, 0.64, 1)) both;
+}
+
+/* Send ↔ stop icon morph — the glyph rotates/fades in when the button
+   switches role (ArrowUp → Square), reading as one control changing state
+   instead of two icons hard-swapping. */
+@keyframes icon-swap-in {
+  from {
     opacity: 0;
-    transform: scale(0.78);
+    transform: rotate(-70deg) scale(0.55);
   }
-  50% {
-    transform: scale(1.03);
-  }
-  100% {
+  to {
     opacity: 1;
-    transform: scale(1);
+    transform: rotate(0deg) scale(1);
   }
 }
 
-/* Error shake — subtle shake for error states */
-@keyframes error-shake {
-  0%, 100% { transform: translateX(0); }
-  25% { transform: translateX(-1.5px); }
-  75% { transform: translateX(1.5px); }
+.anim-icon-swap {
+  animation: icon-swap-in var(--duration-fast, 150ms) var(--easing-enter, ease-out) both;
 }
 
-/* Button press — subtle scale down on active */
-@keyframes button-press {
-  0% { transform: scale(1); }
-  100% { transform: scale(0.95); }
+/* Skeleton shimmer — apply to loading placeholders */
+.anim-shimmer {
+  background: linear-gradient(90deg,
+    var(--surface-soft) 0%,
+    color-mix(in oklch, var(--surface-soft) 92%, white) 45%,
+    var(--surface-soft) 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s linear infinite;
+  border-radius: var(--radius-sm);
 }
 
-/* Status badge glow — for running/pending states */
-@keyframes status-glow {
-  0%, 100% {
-    opacity: 0;
-    transform: scale(0.96);
-  }
-  50% {
-    opacity: 0.16;
-    transform: scale(1.1);
-  }
+/* Staggered list entrance — pure CSS, capped after 10 children so long
+   histories never accumulate delay. Add .anim-stagger to the container.
+   Shares the `message-in` keyframes from reset.css. */
+.anim-stagger > * {
+  animation: message-in var(--duration-base, 200ms) var(--easing-enter, ease-out) both;
 }
-
-/* Checkmark appear — when activity status changes to done */
-.anim-checkmark-appear {
-  animation: checkmark-appear var(--duration-fast, 150ms) cubic-bezier(0.34, 1.56, 0.64, 1);
-}
-
-/* Error shake — when activity fails */
-.anim-error-shake {
-  animation: error-shake var(--duration-fast, 150ms) ease-in-out;
-}
-
-/* Status glow — for running/pending status badges */
-.anim-status-glow {
-  position: relative;
-}
-
-.anim-status-glow::after {
-  content: "";
-  position: absolute;
-  inset: -2px;
-  border-radius: inherit;
-  background: currentColor;
-  opacity: 0;
-  pointer-events: none;
-  transform: scale(0.96);
-  will-change: transform, opacity;
-  animation: status-glow 2s ease-in-out infinite;
-}
+.anim-stagger > *:nth-child(1)  { animation-delay: 0ms; }
+.anim-stagger > *:nth-child(2)  { animation-delay: 35ms; }
+.anim-stagger > *:nth-child(3)  { animation-delay: 70ms; }
+.anim-stagger > *:nth-child(4)  { animation-delay: 105ms; }
+.anim-stagger > *:nth-child(5)  { animation-delay: 140ms; }
+.anim-stagger > *:nth-child(6)  { animation-delay: 175ms; }
+.anim-stagger > *:nth-child(7)  { animation-delay: 210ms; }
+.anim-stagger > *:nth-child(8)  { animation-delay: 245ms; }
+.anim-stagger > *:nth-child(9)  { animation-delay: 280ms; }
+.anim-stagger > *:nth-child(n + 10) { animation-delay: 315ms; }
 
 /* ════════════════════════════════════════════════════════
    Utility transition classes (.transition-*)
@@ -197,7 +180,7 @@
               border-width var(--duration-micro, 100ms) ease;
 }
 
-/* Rolling number — Codex-style odometer updates for live stats. */
+/* Rolling number — odometer updates for live stats. */
 .rolling-number {
   position: relative;
   display: inline-grid;

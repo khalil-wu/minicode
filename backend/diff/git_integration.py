@@ -10,6 +10,18 @@ from backend.runtime_env import sanitized_git_env
 from backend.subprocesses import communicate, spawn_exec
 
 
+class GitCommandError(RuntimeError):
+    """A git command did not produce a trustworthy result."""
+
+    def __init__(self, args: tuple[str, ...], exit_code: int | None, stderr: str):
+        self.args_list = args
+        self.exit_code = exit_code
+        self.stderr = stderr.strip()
+        command = "git " + " ".join(args)
+        detail = self.stderr or "git exited without diagnostic output"
+        super().__init__(f"{command} failed (exit={exit_code}): {detail}")
+
+
 @dataclass
 class FileDiff:
     path: str
@@ -76,7 +88,13 @@ async def _run_git(workspace_root: str, *args: str) -> str:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, _ = await communicate(proc, timeout=15)
+    stdout, stderr = await communicate(proc, timeout=15)
+    if proc.returncode != 0:
+        raise GitCommandError(
+            args,
+            proc.returncode,
+            stderr.decode("utf-8", errors="replace"),
+        )
     return stdout.decode("utf-8", errors="replace")
 
 
@@ -88,17 +106,33 @@ async def _run_git_ok(workspace_root: str, *args: str) -> bool:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    await communicate(proc, timeout=15)
-    return proc.returncode == 0
+    _stdout, stderr = await communicate(proc, timeout=15)
+    if proc.returncode != 0:
+        raise GitCommandError(
+            args,
+            proc.returncode,
+            stderr.decode("utf-8", errors="replace"),
+        )
+    return True
+
+
+# MiniCode gitDiff.ts / get_git_diff.rs disable external diff drivers and
+# textconv filters: a repo-configured diff driver is arbitrary code execution
+# triggered by reading a diff.
+_GIT_DIFF_SAFETY_FLAGS = ("--no-textconv", "--no-ext-diff")
 
 
 async def get_working_tree_diff(workspace_root: str) -> StructuredDiff:
-    raw = await _run_git(workspace_root, "diff", "--no-color")
+    raw = await _run_git(
+        workspace_root, "diff", "--no-color", *_GIT_DIFF_SAFETY_FLAGS
+    )
     return _parse_diff_output(raw)
 
 
 async def get_staged_diff(workspace_root: str) -> StructuredDiff:
-    raw = await _run_git(workspace_root, "diff", "--cached", "--no-color")
+    raw = await _run_git(
+        workspace_root, "diff", "--cached", "--no-color", *_GIT_DIFF_SAFETY_FLAGS
+    )
     return _parse_diff_output(raw)
 
 

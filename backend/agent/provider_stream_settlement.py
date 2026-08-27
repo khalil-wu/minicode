@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+import asyncio
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -36,6 +37,8 @@ async def settle_provider_stream(
     state: Any,
     pending_tool_calls: list[Any],
     provider_raw_done: dict[str, Any],
+    provider_done: bool,
+    visible_text_sanitizer: Any = None,
     stream_state: Any,
     stream_text: Any,
     context_builder: Any,
@@ -53,10 +56,15 @@ async def settle_provider_stream(
     else:
         await turn_kernel.close_provider_attempt(
             provider_attempt,
-            status="completed",
-            summary="Provider stream ended without a terminal event",
+            status="completed" if provider_done else "failed",
+            summary=(
+                "Provider stream completed"
+                if provider_done
+                else "Provider stream ended without a terminal event"
+            ),
             data={
                 "finish_reason": finish_reason or "stream_exhausted",
+                **({} if provider_done else {"error_type": "provider_terminal_missing"}),
             },
         )
         action = "proceed"
@@ -89,6 +97,19 @@ async def settle_provider_stream(
         if pending_tool_calls and not provider_raw_done:
             finish_reason = finish_reason or "tool_calls_no_done"
             stream_state.finish_reason = finish_reason
+        from backend.memory.citations import parse_memory_citation
+
+        memory_citation = parse_memory_citation(
+            list(getattr(visible_text_sanitizer, "citations", []) or [])
+        )
+        if memory_citation is not None:
+            provider_raw_done["memory_citation"] = memory_citation
+            recorder = getattr(context_builder, "record_memory_citation_usage", None)
+            if callable(recorder):
+                await asyncio.to_thread(
+                    recorder,
+                    list(memory_citation.get("rollout_ids") or []),
+                )
         record_actual_usage = getattr(
             context_builder,
             "record_actual_usage",

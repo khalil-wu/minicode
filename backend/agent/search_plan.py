@@ -18,12 +18,16 @@ ABSOLUTE_DATE_RE = re.compile(
 )
 
 
-def current_temporal_anchor(timezone: str = "Asia/Shanghai") -> tuple[str, str]:
-    now = datetime.now(ZoneInfo(timezone))
-    return now.date().isoformat(), timezone
+def current_temporal_anchor(timezone: str = "UTC") -> tuple[str, str]:
+    try:
+        zone = ZoneInfo(str(timezone or "UTC"))
+    except (KeyError, ValueError):
+        zone = ZoneInfo("UTC")
+    now = datetime.now(zone)
+    return now.date().isoformat(), str(getattr(zone, "key", "UTC"))
 
 
-def build_search_plan(raw_query: str, *, timezone: str = "Asia/Shanghai") -> SearchPlan:
+def build_search_plan(raw_query: str, *, timezone: str = "UTC") -> SearchPlan:
     query = " ".join(str(raw_query or "").split())
     date, tz = current_temporal_anchor(timezone)
     freshness = "realtime" if RELATIVE_TIME_RE.search(query) else "stable"
@@ -40,5 +44,5 @@ def build_search_plan(raw_query: str, *, timezone: str = "Asia/Shanghai") -> Sea
         required_date=required_date,
         timezone=tz,
         freshness_window=freshness,
-        reject_before=required_date,
+        reject_before=None,
     )

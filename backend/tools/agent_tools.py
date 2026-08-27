@@ -4,34 +4,58 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
+import os
 import re
 import time
 from contextlib import suppress
-from dataclasses import replace
-from pathlib import Path
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
 
 from backend.agent.context import ContextBuilder
 from backend.agent.loop import AgentLoopSessionContext
 from backend.agent.message import AgentEvent
+from backend.agent.public_projection import project_public_subagent_result
 from backend.agent.prompt_cache import prompt_cache_fork_diagnostic
 from backend.agent.query_engine import AgentSession, QueryEngine, QuerySubmission
-from backend.agent.runtime import default_runtime
-from backend.agent.execution_journal import ExecutionJournal
+from backend.agent.rollout_budget import RolloutBudget
+from backend.agent.execution_journal import (
+    ExecutionJournal,
+)
 from backend.agent.state import AgentState
 from backend.agents.loader import discover_agents, get_custom_agent
 from backend.artifact.store import ArtifactStore
-from backend.config import AgentSettings, TokenBudget
+from backend.config import AgentSettings, AppConfig, TokenBudget, load_config
+from backend.feature_flags import feature_enabled
 from backend.llm.base import LLMAdapter
-from backend.permissions.checker import PermissionChecker
+from backend.llm.model_selection import (
+    REASONING_LEVEL_ORDER,
+    apply_model_thinking_level,
+    config_with_model_budget,
+    default_model_thinking_level,
+    model_thinking_levels,
+)
+from backend.permissions.checker import (
+    PermissionChecker,
+    normalize_permission_mode_token,
+)
 from backend.permissions.context import PermissionContext, ToolExecutionContext
+from backend.tools.agent_control_plane import (
+    CHILD_AGENT_OPTIONS_METADATA_KEY,
+    normalize_agent_fork_turns,
+    normalize_agent_task_name,
+)
 from backend.tools.base import MAX_TOOL_RESULT_BYTES, BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.registry import ToolRegistry
-from backend.tools.agent_artifact_tools import ReadArtifactTool
-from backend.tools.agent_user_tools import AskUserTool, BriefTool
-from backend.tools.subagent_control_tools import TaskStatusTool, TaskStopTool
+from backend.tools.agent_artifact_tools import ReadArtifactTool as ReadArtifactTool
+from backend.tools.agent_user_tools import AskUserTool as AskUserTool
+from backend.tools.agent_user_tools import BriefTool as BriefTool
+from backend.tools.subagent_control_tools import TaskStatusTool as TaskStatusTool
+from backend.tools.subagent_control_tools import TaskStopTool as TaskStopTool
 from backend.tools.subagent_catalog import (
     BUILTIN_AGENT_TYPES,
     agent_type_description,
@@ -39,25 +63,80 @@ from backend.tools.subagent_catalog import (
     normalize_agent_type,
 )
 from backend.tools.subagent_context import (
+    AgentExecutionProfile,
+    build_agent_execution_profile,
     build_subagent_permission_context,
     build_subagent_prompt,
+    execution_profile_for_background_resume,
+    resolve_agent_execution_profile,
     sanitize_subagent_runtime_metadata,
+    transition_subagent_permission_mode,
 )
-from backend.tools.subagent_runtime import metadata_from_context, runtime_from_context
+from backend.tools.subagent_runtime import (
+    metadata_from_context,
+    require_runtime_from_context,
+)
 from backend.tools.subagent_result import compact_subagent_result
+from backend.tools.toolsets import (
+    ACTIVE_TOOLSET_POLICY_METADATA_KEY,
+    SESSION_TOOLSET_POLICY_METADATA_KEY,
+    ToolsetPolicy,
+)
+from backend.tools.toolset_runtime import restore_toolset_policy
 
 logger = logging.getLogger(__name__)
 
 _SUBAGENT_CAPACITY_MESSAGE = "Maximum concurrent subagents reached. Wait for a running task to finish."
-# Pi's reference extension accepts eight parallel tasks and schedules four at
-# a time. Keep the request limit separate from the runtime's global capacity so
-# a single call can queue work instead of silently dropping tasks.
+# Keep request and execution limits separate so a single call can queue work
+# instead of silently dropping tasks.
 MAX_PARALLEL_TASKS = 8
 MAX_PARALLEL_CONCURRENCY = 4
+_MODEL_FAMILY_ALIASES = frozenset({"opus", "sonnet", "haiku", "fable"})
 # Keep the subagent transport on the same inline contract as every other tool.
 # The result pipeline owns persistence/truncation; this helper only provides a
 # recoverable artifact for direct TaskTool callers that bypass that pipeline.
 _SUBAGENT_RESULT_ARTIFACT_THRESHOLD_BYTES = MAX_TOOL_RESULT_BYTES
+
+_PUBLIC_PERMISSION_MODE_TO_INTERNAL = {
+    "confirm": "confirm",
+    "auto": "auto",
+    "bypass": "bypass",
+    "plan": "plan",
+}
+
+
+def _sanitize_teammate_name(name: str) -> str:
+    """Keep the public teammate identity unambiguous in mailbox keys."""
+
+    return str(name or "").replace("@", "-").strip()
+
+
+def _xml_attribute(value: Any) -> str:
+    return (
+        str(value or "")
+        .replace("&", "&amp;")
+        .replace('"', "&quot;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def _format_teammate_message(
+    sender: str,
+    content: str,
+    *,
+    summary: str = "",
+) -> str:
+    """Build the stable in-process teammate prompt envelope."""
+
+    summary_attr = (
+        f' summary="{_xml_attribute(summary)}"' if str(summary or "").strip() else ""
+    )
+    return (
+        f'<teammate-message teammate_id="{_xml_attribute(sender)}"{summary_attr}>\n'
+        f"{str(content or '')}\n"
+        "</teammate-message>"
+    )
 
 def _externalize_large_subagent_result(
     artifact_store: ArtifactStore,
@@ -112,19 +191,30 @@ def _custom_agent_deny_rules(
         return []
     try:
         custom = get_custom_agent(agent_type, workspace_root)
-    except Exception:
-        return []
+    except Exception as exc:
+        raise RuntimeError(
+            f"Custom agent definition '{agent_type}' could not be loaded; "
+            "the child was not started."
+        ) from exc
     if custom is None:
         return []
     deny: list[str] = []
     deny.extend(str(t).strip() for t in (custom.disallowed_tools or []) if str(t).strip())
     whitelist = [str(t).strip() for t in (custom.tools or []) if str(t).strip()]
+    # "*" means all tools; it is not a literal tool name.
+    if "*" in whitelist:
+        whitelist = []
     if whitelist:
         allowed = set(whitelist)
         try:
-            all_names = tool_registry.list_tools() if tool_registry is not None else []
-        except Exception:
-            all_names = []
+            if tool_registry is None:
+                raise RuntimeError("tool registry is unavailable")
+            all_names = tool_registry.list_tools()
+        except Exception as exc:
+            raise RuntimeError(
+                f"Custom agent '{agent_type}' tool surface could not be inspected; "
+                "the child was not started."
+            ) from exc
         deny.extend(t for t in all_names if t not in allowed)
     seen: set[str] = set()
     unique: list[str] = []
@@ -174,16 +264,22 @@ def _exclusive_parallel_task_scopes(tasks: list[dict[str, Any]]) -> list[str]:
     # caller surfaces this as "non-overlapping assignment" guidance.
     seen_write_paths: list[str] = []
     for task in tasks:
+        # Read-only/exploration workers do not mutate the workspace and should
+        # not create artificial overlap conflicts with write-capable workers.
+        if bool(task.get("read_only")) or str(task.get("agent_type") or "").lower() in {"explore", "plan"}:
+            continue
         raw_scope = task.get("write_scope")
         paths = raw_scope if isinstance(raw_scope, list) else []
         for path in paths:
-            norm = str(path or "").strip().replace("\\", "/").strip("/").casefold()
+            norm = os.path.normcase(
+                os.path.normpath(str(path or "").strip())
+            ).strip("/\\")
             if not norm:
                 continue
             if any(
                 norm == existing
-                or norm.startswith(f"{existing}/")
-                or existing.startswith(f"{norm}/")
+                or norm.startswith(f"{existing}{os.sep}")
+                or existing.startswith(f"{norm}{os.sep}")
                 for existing in seen_write_paths
             ):
                 return []
@@ -231,83 +327,385 @@ def _available_agent_types() -> list[str]:
     return available_agent_types(discover_agents)
 
 
-def _resolve_subagent_llm(
+@dataclass(frozen=True)
+class _SubagentLLMResolution:
+    """Concrete child model config copied from the live parent turn."""
+
+    llm: Any
+    config: AppConfig
+    provider: str
+    model: str
+    effort: str
+    owns_llm: bool = False
+
+
+async def _close_subagent_llm(adapter: Any) -> None:
+    """Close one child-owned adapter without ever touching the parent adapter."""
+
+    close = getattr(adapter, "aclose", None)
+    if not callable(close):
+        return
+    result = close()
+    if inspect.isawaitable(result):
+        await result
+
+
+async def _close_subagent_llm_resolution(
+    resolution: _SubagentLLMResolution | None,
+) -> None:
+    if resolution is None or not resolution.owns_llm:
+        return
+    await _close_subagent_llm(resolution.llm)
+
+
+def _primary_llm_adapter(adapter: Any) -> Any:
+    return adapter
+
+
+def _adapter_provider_model(adapter: Any) -> tuple[str, str]:
+    primary = _primary_llm_adapter(adapter)
+    settings = getattr(primary, "_settings", None)
+    provider = str(
+        getattr(settings, "provider", "")
+        or getattr(primary, "_provider", "")
+        or getattr(primary, "_provider_id", "")
+        or ""
+    ).strip()
+    model = str(
+        getattr(settings, "model", "")
+        or getattr(getattr(primary, "_model", None), "id", "")
+        or getattr(primary, "_model", "")
+        or ""
+    ).strip()
+    return provider, model
+
+
+def _configured_subagent_overrides(
+    *,
+    agent_type: str,
+    model_override: str,
+    effort_override: str,
+    workspace_root: str | Path | None,
+) -> tuple[str, str, bool, bool]:
+    """Resolve canonical precedence: task arguments override agent defaults."""
+
+    custom = get_custom_agent(agent_type, workspace_root) if agent_type else None
+    explicit_model = bool(str(model_override or "").strip())
+    explicit_effort = bool(str(effort_override or "").strip())
+    model = str(model_override or "").strip()
+    effort = str(effort_override or "").strip()
+    if not explicit_model and custom is not None:
+        model = str(getattr(custom, "model", "") or "").strip()
+    if not explicit_effort and custom is not None:
+        effort = str(getattr(custom, "effort", "") or "").strip()
+    return model, effort, explicit_model, explicit_effort
+
+
+async def _resolve_subagent_llm(
     inherited_llm: Any,
     *,
+    parent_metadata: dict[str, Any] | None,
     agent_type: str,
     model_override: str = "",
     effort_override: str = "",
     workspace_root: str | Path | None = None,
-) -> Any:
-    """Build a per-subagent LLM adapter when a model/effort override is requested.
+    build_adapter: bool = True,
+) -> _SubagentLLMResolution:
+    """Resolve one child using the live parent config and ModelRuntime.
 
-    Precedence: explicit task-call override > custom agent definition. A model of
-    ``"inherit"`` (cc convention) or empty string keeps the session model. When a
-    real override is present we construct a fresh adapter for the *current
-    provider* via the existing adapter factory (``build_provider_adapter``), so
-    the user-declared ``model:`` in an agent definition actually takes effect
-    instead of being silently ignored. On any failure we fall back to the
-    inherited adapter and log a warning (never silent).
+    Resolve the child from the live turn config. Explicit task overrides take
+    precedence, while omitted model/thinking values inherit the parent.
     """
-    custom = get_custom_agent(agent_type, workspace_root) if agent_type else None
 
-    model = str(model_override or "").strip()
-    if not model and custom is not None:
-        model = str(getattr(custom, "model", "") or "").strip()
-    if model.lower() == "inherit":
-        model = ""
+    metadata = parent_metadata if isinstance(parent_metadata, dict) else {}
+    snapshot = metadata.get("_subagent_parent_runtime")
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    inherited_llm = snapshot.get("llm") or inherited_llm
+    if inherited_llm is None:
+        raise ValueError("Subagent runtime has no parent LLM to inherit.")
 
-    effort = str(effort_override or "").strip()
-    if not effort and custom is not None:
-        effort = str(getattr(custom, "effort", "") or "").strip()
+    parent_config = snapshot.get("config")
+    if not (
+        isinstance(parent_config, AppConfig)
+        or (
+            parent_config is not None
+            and hasattr(parent_config, "agent")
+            and hasattr(parent_config, "token_budget")
+        )
+    ):
+        try:
+            parent_config = load_config(cwd=workspace_root)
+        except TypeError:
+            parent_config = load_config()
 
-    if not model and not effort:
-        return inherited_llm
+    inferred_provider, inferred_model = _adapter_provider_model(inherited_llm)
+    parent_provider = str(snapshot.get("provider") or inferred_provider).strip()
+    parent_model = str(snapshot.get("model") or inferred_model).strip()
+    model_runtime = snapshot.get("model_runtime")
+    parent_effort = str(snapshot.get("thinking_level") or "").strip().lower()
+    if not parent_effort:
+        primary = _primary_llm_adapter(inherited_llm)
+        current_effort = getattr(primary, "current_reasoning_effort", None)
+        parent_effort = str(
+            (current_effort() if callable(current_effort) else "")
+            or getattr(getattr(primary, "_settings", None), "reasoning_effort", "")
+            or getattr(getattr(parent_config, "llm", None), "reasoning_effort", "")
+            or "off"
+        ).strip().lower()
 
+    requested_model, requested_effort, _explicit_model, _explicit_effort = (
+        _configured_subagent_overrides(
+            agent_type=agent_type,
+            model_override=model_override,
+            effort_override=effort_override,
+            workspace_root=workspace_root,
+        )
+    )
+    # An explicitly selected model owns its own default reasoning level, even
+    # when it happens to equal the parent's current model.  Only an omitted
+    # (or explicit ``inherit``) model inherits the parent's effort.  This is
+    # Comparing only the final model IDs would silently leak the parent's
+    # effort, so explicit selection stays distinct from inheritance.
+    model_inherits = requested_model.lower() in {"", "inherit"}
+    effort_inherits = requested_effort.lower() in {"", "inherit"}
+    model_was_selected = not model_inherits
+    available_snapshot = tuple(snapshot.get("available_models") or ())
+
+    target_provider = parent_provider
+    target_model = parent_model
+    if not model_inherits:
+        target_model = requested_model
+        alias = requested_model.strip().lower()
+        if alias in _MODEL_FAMILY_ALIASES:
+            # Keep the parent's exact model when a bare family alias already
+            # matches; otherwise resolve it within the current provider before
+            # applying provider-qualified model selection.
+            if alias in parent_model.lower():
+                target_model = parent_model
+            elif model_runtime is not None:
+                alias_match = next(
+                    (
+                        candidate
+                        for candidate in model_runtime.get_models(parent_provider)
+                        if alias in candidate.id.lower()
+                        or alias in str(getattr(candidate, "name", "") or "").lower()
+                    ),
+                    None,
+                )
+                if alias_match is not None:
+                    target_model = alias_match.id
+            else:
+                alias_match = next(
+                    (
+                        str(candidate).strip()
+                        for candidate in available_snapshot
+                        if alias in str(candidate).lower()
+                    ),
+                    "",
+                )
+                if alias_match:
+                    target_model = alias_match
+        parent_exact_model = (
+            model_runtime.get_model(parent_provider, target_model)
+            if model_runtime is not None and parent_provider
+            else None
+        )
+        if "/" in target_model and model_runtime is not None and parent_exact_model is None:
+            provider_prefix, qualified_model = target_model.split("/", 1)
+            resolved_prefix = provider_prefix
+            provider_definition = model_runtime.get_provider(resolved_prefix)
+            if provider_definition is None and provider_prefix.lower() in {
+                "openai",
+                "anthropic",
+                "custom",
+            }:
+                resolved_prefix = provider_prefix.lower()
+                provider_definition = model_runtime.get_provider(resolved_prefix)
+            if provider_definition is not None and qualified_model:
+                target_provider = resolved_prefix
+                target_model = qualified_model
+
+    if not target_provider or not target_model:
+        if model_inherits and effort_inherits:
+            return _SubagentLLMResolution(
+                llm=inherited_llm,
+                config=parent_config,
+                provider=parent_provider,
+                model=parent_model,
+                effort=parent_effort,
+                owns_llm=False,
+            )
+        raise ValueError("Unable to resolve the child provider/model from the parent turn.")
+
+    runtime_model = None
+    if model_runtime is not None:
+        runtime_model = model_runtime.get_model(target_provider, target_model)
+        if runtime_model is None:
+            available = [model.id for model in model_runtime.get_models(target_provider)]
+            suffix = f" Available models: {', '.join(available[:20])}." if available else ""
+            raise ValueError(
+                f"Unknown model '{target_provider}/{target_model}' for subagent.{suffix}"
+            )
+    else:
+        available = available_snapshot
+        if (
+            not model_inherits
+            and target_provider == parent_provider
+            and available
+            and target_model not in available
+        ):
+            raise ValueError(
+                f"Unknown model '{target_model}' for subagent. "
+                f"Available models: {', '.join(str(item) for item in available[:20])}."
+            )
+
+    model_changed = target_provider != parent_provider or target_model != parent_model
+    available_efforts = model_thinking_levels(
+        runtime_model,
+        inherited_llm if not model_changed else None,
+    )
+    if (
+        not available_efforts
+        and runtime_model is not None
+        and bool(getattr(runtime_model, "reasoning", False))
+        and model_runtime is not None
+        and model_runtime.get_registered_provider_config(target_provider) is not None
+    ):
+        available_efforts = REASONING_LEVEL_ORDER
+
+    if not effort_inherits:
+        effective_effort = requested_effort.strip().lower()
+        if effective_effort not in available_efforts:
+            supported = ", ".join(available_efforts) or "none"
+            raise ValueError(
+                f"Reasoning effort '{effective_effort}' is not supported for model "
+                f"'{target_provider}/{target_model}'. Supported reasoning efforts: {supported}."
+            )
+    elif model_changed or model_was_selected:
+        effective_effort = default_model_thinking_level(runtime_model, available_efforts)
+    else:
+        effective_effort = parent_effort
+
+    child_config = config_with_model_budget(
+        parent_config,
+        model_runtime=model_runtime,
+        provider=target_provider,
+        model=target_model,
+    )
+    child_llm_settings = getattr(child_config, "llm", None)
+    if child_llm_settings is not None and (
+        str(getattr(child_llm_settings, "provider", "") or "") != target_provider
+        or str(getattr(child_llm_settings, "model", "") or "") != target_model
+        or str(getattr(child_llm_settings, "reasoning_effort", "") or "").strip().lower()
+        != effective_effort
+    ):
+        with suppress(TypeError, ValueError):
+            child_config = replace(
+                child_config,
+                llm=replace(
+                    child_llm_settings,
+                    provider=target_provider,
+                    model=target_model,
+                    reasoning_effort=effective_effort,
+                ),
+            )
+    requires_fresh_adapter = model_changed or not effort_inherits
+    if not requires_fresh_adapter or not build_adapter:
+        return _SubagentLLMResolution(
+            llm=inherited_llm,
+            config=child_config,
+            provider=target_provider,
+            model=target_model,
+            effort=effective_effort,
+            owns_llm=False,
+        )
+
+    from backend.llm.model_registry import create_session_llm
+
+    adapter = None
     try:
-        from backend.config import get_llm_provider
-        from backend.services.llm_adapter_factory import build_provider_adapter
-
-        adapter = build_provider_adapter(
-            get_llm_provider(), model_override=model or None
+        # Provider/model resolution may execute configured command-backed
+        # values and construct a native adapter. Keep that synchronous work
+        # off the shared asyncio loop before publishing the child turn.
+        adapter = await asyncio.to_thread(
+            create_session_llm,
+            child_config,
+            model_override=target_model,
+            provider_override=target_provider,
+            model_runtime=model_runtime,
         )
         if adapter is None:
-            logger.warning(
-                "Subagent %s requested model/effort override (model=%r effort=%r) "
-                "but the provider adapter could not be built; inheriting session LLM.",
-                agent_type, model, effort,
+            raise RuntimeError(
+                f"Unable to create subagent adapter for '{target_provider}/{target_model}'."
             )
-            return inherited_llm
-
-        # Reasoning effort only applies to OpenAI-compatible settings-based
-        # adapters. Rebuild the fresh adapter's own settings (never mutate the
-        # inherited/shared adapter) so the override is isolated to this subagent.
-        if effort:
-            settings = getattr(adapter, "_settings", None)
-            if settings is not None and hasattr(settings, "reasoning_effort"):
-                try:
-                    from backend.llm.openai_adapter import OpenAIAdapter
-
-                    adapter = OpenAIAdapter(settings=replace(settings, reasoning_effort=effort))
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "Subagent %s effort override %r failed to apply: %s",
-                        agent_type, effort, exc,
-                    )
-            else:
-                logger.warning(
-                    "Subagent %s effort override %r ignored: current provider "
-                    "adapter does not support reasoning effort.",
-                    agent_type, effort,
-                )
-        return adapter
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Subagent %s LLM override (model=%r effort=%r) failed: %s; "
-            "inheriting session LLM.",
-            agent_type, model, effort, exc,
+        built_efforts = model_thinking_levels(runtime_model, adapter)
+        if not effort_inherits and effective_effort not in built_efforts:
+            supported = ", ".join(built_efforts) or "none"
+            raise ValueError(
+                f"Reasoning effort '{effective_effort}' is not supported for model "
+                f"'{target_provider}/{target_model}'. Supported reasoning efforts: {supported}."
+            )
+        if effort_inherits and model_changed:
+            effective_effort = default_model_thinking_level(runtime_model, built_efforts)
+        apply_model_thinking_level(
+            adapter,
+            runtime_model,
+            effective_effort or "off",
         )
-        return inherited_llm
+        # Keep the child config snapshot and concrete adapter in lock step. A
+        # model switch must not leave extensions or resume metadata observing
+        # the parent's provider/model settings.
+        primary_adapter = _primary_llm_adapter(adapter)
+        adapter_settings = getattr(primary_adapter, "_settings", None)
+        if adapter_settings is not None:
+            with suppress(TypeError, ValueError):
+                child_config = replace(child_config, llm=adapter_settings)
+        elif getattr(child_config, "llm", None) is not None:
+            with suppress(TypeError, ValueError):
+                child_config = replace(
+                    child_config,
+                    llm=replace(
+                        child_config.llm,
+                        api_key=str(
+                            getattr(primary_adapter, "_api_key", "")
+                            or getattr(child_config.llm, "api_key", "")
+                        ),
+                        provider=str(
+                            getattr(primary_adapter, "_provider_id", "")
+                            or target_provider
+                        ),
+                        base_url=str(
+                            getattr(primary_adapter, "_base_url", "")
+                            or getattr(child_config.llm, "base_url", "")
+                        ),
+                        model=str(
+                            getattr(primary_adapter, "_model", "")
+                            or target_model
+                        ),
+                        reasoning_effort=effective_effort,
+                        wire_api=str(
+                            getattr(
+                                getattr(primary_adapter, "capabilities", None),
+                                "wire_api",
+                                "",
+                            )
+                            or getattr(child_config.llm, "wire_api", "chat")
+                        ),
+                    ),
+                )
+    except BaseException:
+        if adapter is not None:
+            with suppress(Exception):
+                await _close_subagent_llm(adapter)
+        raise
+    return _SubagentLLMResolution(
+        llm=adapter,
+        config=child_config,
+        provider=target_provider,
+        model=target_model,
+        effort=effective_effort,
+        owns_llm=True,
+    )
 
 
 def _string_list(raw: Any) -> list[str]:
@@ -340,6 +738,11 @@ def _bool_field(raw: Any, default: bool = False) -> bool:
 
 def _subagent_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
     raw = raw or {}
+    raw_effort = (
+        raw.get("reasoning_effort")
+        if "reasoning_effort" in raw
+        else raw.get("effort")
+    )
     has_detach = "detach_from_parent" in raw
     has_cancel = "cancel_with_parent" in raw
     if has_detach:
@@ -357,28 +760,177 @@ def _subagent_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
         detach_from_parent = False
     if detach_from_parent:
         cancel_with_parent = False
+    teammate_name = str(
+        raw.get("name")
+        or raw.get("teammate_name")
+        or ""
+    ).strip()
+    team_name = str(raw.get("team_name") or "").strip()
+    public_mode = str(raw.get("mode") or "").strip()
+    internal_mode = _PUBLIC_PERMISSION_MODE_TO_INTERNAL.get(
+        public_mode,
+        public_mode if public_mode in _PUBLIC_PERMISSION_MODE_TO_INTERNAL.values() else "",
+    )
+    team_mode = bool(team_name and teammate_name)
+    if not team_mode and _bool_field(raw.get("team_mode") or raw.get("is_teammate"), False):
+        # Durable transcripts from an already-running teammate retain the
+        # derived runtime bit, but new model calls cannot set it directly.
+        team_mode = True
+    plan_mode_required = team_mode and (
+        internal_mode == "plan" or _bool_field(raw.get("plan_mode_required"), False)
+    )
     return {
         "cancel_with_parent": cancel_with_parent,
         "detach_from_parent": detach_from_parent,
         "read_only": _bool_field(raw.get("read_only"), False),
         "write_scope": _string_list(raw.get("write_scope")),
-        # LLM overrides (cc-compatible): a caller may pin a specific model /
-        # reasoning effort for this subagent instead of inheriting the session.
+        # LLM overrides let a caller pin a model/reasoning effort instead of
+        # inheriting the session.
+        "provider": str(raw.get("provider") or "").strip(),
         "model": str(raw.get("model") or "").strip(),
-        "effort": str(raw.get("effort") or "").strip(),
-        # cc AgentTool isolation: "worktree" runs the subagent inside a
-        # temporary git worktree instead of the shared workspace.
+        "effort": str(raw_effort or "").strip(),
+        # Worktree isolation runs the subagent inside a temporary git worktree
+        # instead of the shared workspace.
         "isolation": str(raw.get("isolation") or "").strip().lower(),
+        "cwd": str(raw.get("cwd") or "").strip(),
+        # Public teammate fields are {name, team_name, mode}; the booleans
+        # below are derived runtime ownership metadata.
+        "team_mode": team_mode,
+        "plan_mode_required": plan_mode_required,
+        "mode": "plan" if plan_mode_required else internal_mode,
+        "team_name": team_name,
+        "team_id": str(raw.get("team_id") or "").strip(),
+        "teammate_name": teammate_name,
+        "teammate_id": str(raw.get("teammate_id") or "").strip(),
+        "plan_slug": str(raw.get("plan_slug") or "").strip(),
     }
 
 
 def _nonempty_subagent_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
     metadata = _subagent_metadata(raw)
-    return {
+    result = {
         key: value
         for key, value in metadata.items()
-        if value not in ("", [], None)
+        if key != "effort" and value not in ("", [], None)
     }
+    if metadata.get("effort") not in ("", None):
+        result["reasoning_effort"] = metadata["effort"]
+    return result
+
+
+def _scope_is_within_any(scope: str, ceiling: list[str]) -> bool:
+    """True when one workspace-relative scope sits inside any ceiling scope."""
+    candidate = PurePosixPath(str(scope).replace("\\", "/")).as_posix().strip("/")
+    for allowed in ceiling:
+        root = PurePosixPath(str(allowed).replace("\\", "/")).as_posix().strip("/")
+        if not root or candidate == root or candidate.startswith(f"{root}/"):
+            return True
+    return False
+
+
+def _narrowed_subagent_scope_metadata(
+    inherited: dict[str, Any],
+    requested: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge a child's requested fence into the inherited one by narrowing.
+
+    ``read_only`` and ``write_scope`` are the keys ``subagent_scope_guard_reason``
+    enforces, and both are model-facing on the ``task`` tool. Spreading the
+    child's request last let it widen the parent's fence — and because the
+    filter keeps ``False``, an unset ``read_only`` always cleared an inherited
+    ``read_only: True``. Delegation may narrow authority, never widen it.
+    """
+    narrowed = dict(requested)
+    narrowed["read_only"] = bool(inherited.get("read_only")) or bool(
+        requested.get("read_only")
+    )
+    parent_scope = [
+        str(scope) for scope in (inherited.get("write_scope") or []) if str(scope).strip()
+    ]
+    child_scope = [
+        str(scope) for scope in (requested.get("write_scope") or []) if str(scope).strip()
+    ]
+    if parent_scope:
+        kept = [scope for scope in child_scope if _scope_is_within_any(scope, parent_scope)]
+        narrowed["write_scope"] = kept or parent_scope
+    elif child_scope:
+        narrowed["write_scope"] = child_scope
+    else:
+        narrowed.pop("write_scope", None)
+    return narrowed
+
+
+def _persisted_session_toolset_policy(
+    metadata: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Project the parent-owned capability ceiling into durable child config."""
+
+    if SESSION_TOOLSET_POLICY_METADATA_KEY in metadata:
+        raw = metadata[SESSION_TOOLSET_POLICY_METADATA_KEY]
+    elif ACTIVE_TOOLSET_POLICY_METADATA_KEY in metadata:
+        # Older sessions had only the effective policy.  It is a safe, narrower
+        # fallback for their first resume; new sessions always write the
+        # dedicated session key and therefore do not freeze per-turn state.
+        raw = metadata[ACTIVE_TOOLSET_POLICY_METADATA_KEY]
+    else:
+        return None
+    try:
+        return restore_toolset_policy(
+            raw,
+            label="parent session tool capability policy",
+        ).to_mapping()
+    except ValueError as exc:
+        raise RuntimeError("parent session tool capability policy is invalid") from exc
+
+
+def _normalize_child_task_name(raw: Any) -> str:
+    return normalize_agent_task_name(raw, required=False)
+
+
+def _normalize_fork_turns(raw: Any) -> str:
+    return normalize_agent_fork_turns(raw, default="none")
+
+
+def _fork_snapshot_for_child(
+    parent_metadata: dict[str, Any],
+    fork_turns: str,
+) -> dict[str, Any] | None:
+    mode = _normalize_fork_turns(fork_turns)
+    if mode == "none":
+        return None
+    parent_builder = parent_metadata.get("_context_builder")
+    export_snapshot = getattr(parent_builder, "export_snapshot", None)
+    if not callable(export_snapshot):
+        raise ValueError(
+            "fork_turns requires an active parent ContextBuilder"
+        )
+    snapshot = export_snapshot()
+    history = snapshot.get("history") if isinstance(snapshot, dict) else None
+    if not isinstance(history, list):
+        raise ValueError("parent context snapshot history is unavailable")
+
+    # Keep the current user input but drop the assistant message that contains
+    # the in-flight spawn call and any later tool protocol items. This avoids
+    # forking a dangling tool-call/result pair into the child.
+    user_indices = [
+        index
+        for index, item in enumerate(history)
+        if isinstance(item, dict) and str(item.get("role") or "") == "user"
+    ]
+    if not user_indices:
+        selected_history: list[dict[str, Any]] = []
+    else:
+        end = user_indices[-1] + 1
+        start = 0
+        if mode != "all":
+            count = int(mode)
+            start = user_indices[max(0, len(user_indices) - count)]
+        selected_history = [
+            dict(item)
+            for item in history[start:end]
+            if isinstance(item, dict)
+        ]
+    return {**snapshot, "history": selected_history}
 
 
 def _subagent_prompt_cache_fork_diagnostic(
@@ -388,19 +940,48 @@ def _subagent_prompt_cache_fork_diagnostic(
     return prompt_cache_fork_diagnostic(parent_summary, child_summary)
 
 
-async def _run_subagent_start_hook(subagent_id: str, agent_type: str) -> None:
+def _hook_veto(result: Any) -> tuple[bool, str]:
+    """Return whether a lifecycle hook vetoed the next state transition."""
+
+    if result is None:
+        return False, ""
+    blocked = bool(getattr(result, "blocked", False))
+    if not blocked:
+        return False, ""
+    message = str(
+        getattr(result, "message", "")
+        or getattr(result, "feedback", "")
+        or "Hook blocked the lifecycle transition"
+    ).strip()
+    return True, message
+
+
+def _is_team_subagent(metadata: dict[str, Any] | None) -> bool:
+    """Return whether the child carries teammate ownership metadata."""
+    raw = metadata if isinstance(metadata, dict) else {}
+    return bool(
+        str(raw.get("team_name") or "").strip()
+        and str(raw.get("name") or raw.get("teammate_name") or "").strip()
+    ) or any(
+        str(raw.get(key) or "").strip()
+        for key in ("team_name", "team_id", "teammate_name", "teammate_id")
+    ) or bool(raw.get("team_mode") or raw.get("is_teammate"))
+
+
+async def _run_subagent_start_hook(subagent_id: str, agent_type: str) -> Any | None:
     from backend.hooks import get_hook_manager
 
     hook_mgr = get_hook_manager()
     if not hook_mgr:
-        return
+        return None
     try:
-        await hook_mgr.run_subagent_start(
+        return await hook_mgr.run_subagent_start(
             subagent_id=subagent_id,
             agent_type=agent_type,
         )
     except Exception as exc:
         logger.warning("subagent_start hook failed: %s", exc)
+        return None
 
 
 async def _run_subagent_stop_hook(
@@ -409,14 +990,14 @@ async def _run_subagent_stop_hook(
     summary: str = "",
     *,
     agent_type: str = "",
-) -> None:
+) -> Any | None:
     from backend.hooks import get_hook_manager
 
     hook_mgr = get_hook_manager()
     if not hook_mgr:
-        return
+        return None
     try:
-        await hook_mgr.run_subagent_stop(
+        return await hook_mgr.run_subagent_stop(
             subagent_id=subagent_id,
             agent_type=agent_type,
             status=status,
@@ -424,6 +1005,7 @@ async def _run_subagent_stop_hook(
         )
     except Exception as exc:
         logger.warning("subagent_stop hook failed: %s", exc)
+        return None
 
 
 async def _run_task_created_hook(
@@ -433,14 +1015,14 @@ async def _run_task_created_hook(
     description: str,
     teammate_name: str = "",
     team_name: str = "",
-) -> None:
+) -> Any | None:
     from backend.hooks import get_hook_manager
 
     hook_mgr = get_hook_manager()
     if not hook_mgr:
-        return
+        return None
     try:
-        await hook_mgr.run_task_created(
+        return await hook_mgr.run_task_created(
             task_id=task_id,
             subject=subject,
             description=description,
@@ -449,6 +1031,7 @@ async def _run_task_created_hook(
         )
     except Exception as exc:
         logger.warning("task_created hook failed: %s", exc)
+        return None
 
 
 async def _run_task_completed_hook(
@@ -458,14 +1041,14 @@ async def _run_task_completed_hook(
     description: str,
     teammate_name: str = "",
     team_name: str = "",
-) -> None:
+) -> Any | None:
     from backend.hooks import get_hook_manager
 
     hook_mgr = get_hook_manager()
     if not hook_mgr:
-        return
+        return None
     try:
-        await hook_mgr.run_task_completed(
+        return await hook_mgr.run_task_completed(
             task_id=task_id,
             subject=subject,
             description=description,
@@ -474,25 +1057,203 @@ async def _run_task_completed_hook(
         )
     except Exception as exc:
         logger.warning("task_completed hook failed: %s", exc)
+        return None
 
 
 async def _run_teammate_idle_hook(
     *,
     teammate_name: str = "",
     team_name: str = "",
-) -> None:
+) -> Any | None:
     from backend.hooks import get_hook_manager
 
     hook_mgr = get_hook_manager()
     if not hook_mgr:
-        return
+        return None
     try:
-        await hook_mgr.run_teammate_idle(
+        return await hook_mgr.run_teammate_idle(
             teammate_name=teammate_name,
             team_name=team_name,
         )
     except Exception as exc:
         logger.warning("teammate_idle hook failed: %s", exc)
+        return None
+
+
+async def _run_terminal_lifecycle_hooks(
+    *,
+    subagent_id: str,
+    status: str,
+    summary: str,
+    subject: str,
+    agent_type: str,
+    run_completion: bool = True,
+    run_idle: bool = True,
+    team_mode: bool = False,
+) -> tuple[bool, str]:
+    """Run terminal hooks in MiniCode's stop → completed → idle order.
+
+    A veto short-circuits later lifecycle events.  Callers use the returned
+    decision to preserve hook feedback in cancellation/error records instead
+    of silently discarding a HookResult.
+    """
+
+    stop_result = await _run_subagent_stop_hook(
+        subagent_id,
+        status,
+        summary,
+        agent_type=agent_type,
+    )
+    blocked, message = _hook_veto(stop_result)
+    if blocked:
+        return True, message
+    if run_completion:
+        completed_result = await _run_task_completed_hook(
+            task_id=subagent_id,
+            subject=subject,
+            description=summary,
+            teammate_name=agent_type,
+        )
+        blocked, message = _hook_veto(completed_result)
+        if blocked:
+            return True, message
+    if run_idle:
+        idle_result = await _run_teammate_idle_hook(teammate_name=agent_type)
+        blocked, message = _hook_veto(idle_result)
+        if blocked:
+            return True, message
+    return False, ""
+
+
+def _task_tool_parameters(
+    agent_types: list[str],
+    agent_type_help: str,
+) -> dict[str, Any]:
+    """Build the one canonical Task input contract used by every projection.
+
+    The registry may expose a concise model description, but it must not hide
+    runtime-required coordination fields. In particular, parallel writers are
+    rejected unless each item declares a disjoint ``write_scope``.
+    """
+
+    def delegation_properties(*, parallel_item: bool) -> dict[str, Any]:
+        subject = "subtask" if parallel_item else "subagent"
+        properties = {
+            "description": {
+                "type": "string",
+                "description": f"Short description of this {subject}, shown in the UI.",
+            },
+            "prompt": {
+                "type": "string",
+                "description": f"Complete self-contained instructions for this {subject}.",
+            },
+            "agent_type": {
+                "type": "string",
+                "enum": agent_types,
+                "description": agent_type_help,
+            },
+            "model": {
+                "type": "string",
+                "description": "Optional model override; 'inherit' or omission keeps the session model.",
+            },
+            "provider": {
+                "type": "string",
+                "description": "Optional provider id for the delegated model; omitted inherits the parent provider.",
+            },
+            "reasoning_effort": {
+                "type": "string",
+                "description": (
+                    "Optional reasoning-effort override. The value must be "
+                    "declared by the resolved target model."
+                ),
+            },
+            "cancel_with_parent": {
+                "type": "boolean",
+                "description": f"Whether parent cancellation also cancels this {subject}.",
+            },
+            "detach_from_parent": {
+                "type": "boolean",
+                "description": f"If true, this {subject} keeps running after parent cancellation.",
+            },
+            "read_only": {
+                "type": "boolean",
+                "description": f"Whether this {subject} must avoid workspace writes.",
+            },
+            "write_scope": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "File or directory scopes this subtask may modify. Required and disjoint for "
+                    "write-capable parallel tasks."
+                    if parallel_item
+                    else "Optional file or directory scopes this subagent may modify."
+                ),
+            },
+            "isolation": {
+                "type": "string",
+                "enum": ["worktree"],
+                "description": "Optional isolation mode: run in a temporary git worktree.",
+            },
+            "cwd": {
+                "type": "string",
+                "description": "Optional absolute working directory inside the active workspace.",
+            },
+        }
+        return properties
+
+    def teammate_properties() -> dict[str, Any]:
+        # Teammate mode uses the public {name, team_name, mode} shape; internal
+        # lifecycle flags are derived from that public contract.
+        return {
+            "name": {
+                "type": "string",
+                "description": "Addressable teammate name. Uses current team context when team_name is omitted.",
+            },
+            "team_name": {
+                "type": "string",
+                "description": "Existing team name used to spawn a teammate.",
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["confirm", "auto", "bypass", "plan"],
+                "description": "Permission mode for the spawned teammate; plan requires leader approval.",
+            },
+        }
+
+    properties = delegation_properties(parallel_item=False)
+    properties.update(teammate_properties())
+    properties.update({
+        "parallel_tasks": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": MAX_PARALLEL_TASKS,
+            "description": (
+                "Run 2-8 bounded subtasks in one call; at most four run concurrently. "
+                "Read-only scopes may overlap. Every write-capable item must declare an "
+                "explicit write_scope disjoint from its siblings."
+            ),
+            "items": {
+                "type": "object",
+                "properties": delegation_properties(parallel_item=True),
+                "required": ["description", "prompt"],
+            },
+        },
+        "run_in_background": {
+            "type": "boolean",
+            "description": (
+                "Return immediately with subagent ids instead of waiting. Background completion "
+                "is delivered later; use task_status/send_message/task_stop to manage it."
+            ),
+        },
+    })
+    return {
+        "type": "object",
+        "properties": properties,
+        "anyOf": [
+            {"required": ["description", "prompt"]},
+            {"required": ["parallel_tasks"]},
+        ],
+    }
 
 
 class TaskTool(BaseTool):
@@ -505,11 +1266,11 @@ class TaskTool(BaseTool):
     result_kind = "subagent"
     activity_kind = "genericTool"
     display_label = "Start subagent"
-    # Pi and Claude Code do not impose an invented per-delegation wall-clock
-    # cutoff.  The enclosing turn/agent lifecycle owns any configured deadline.
+    # The enclosing turn/agent lifecycle owns any configured deadline; the
+    # delegation tool does not invent another wall-clock cutoff.
     timeout_seconds = None
-    # Pi caps each delegated result independently at 50 KiB. A parallel batch
-    # may therefore legitimately exceed the generic single-result backstop.
+    # Each delegated result has its own persistence/truncation boundary, so a
+    # parallel batch may exceed the generic single-result backstop.
     max_result_chars = None
     description = (
         "Delegate a sub-task to an independent agent. The sub-agent has its own context and tool access. "
@@ -572,104 +1333,10 @@ class TaskTool(BaseTool):
             agent_types,
             get_custom_agent=get_custom_agent,
         )
-        parallel_task_schema = {
-            "type": "object",
-            "properties": {
-                "description": {
-                    "type": "string",
-                    "description": "Short label for this independent subtask.",
-                },
-                "prompt": {
-                    "type": "string",
-                    "description": "Complete self-contained instructions for this subtask.",
-                },
-                "agent_type": {
-                    "type": "string",
-                    "enum": agent_types,
-                    "description": agent_type_help,
-                },
-                "read_only": {
-                    "type": "boolean",
-                    "description": "Whether this subtask must avoid writes.",
-                },
-            },
-            "required": ["description", "prompt"],
-        }
         return ToolSchema(
             name=self.name,
             description=self.model_description(),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "description": {
-                        "type": "string",
-                        "description": "Short task label shown in the UI.",
-                    },
-                    "prompt": {
-                        "type": "string",
-                        "description": "Complete self-contained instructions for the subagent.",
-                    },
-                    "agent_type": {
-                        "type": "string",
-                        "enum": agent_types,
-                        "description": agent_type_help,
-                    },
-                    "model": {
-                        "type": "string",
-                        "description": (
-                            "Optional model override for this subagent. 'inherit' or omitted "
-                            "keeps the session model."
-                        ),
-                    },
-                    "effort": {
-                        "type": "string",
-                        "description": "Optional reasoning effort override (low/medium/high).",
-                    },
-                    "parallel_tasks": {
-                        "type": "array",
-                        "minItems": 2,
-                        "maxItems": MAX_PARALLEL_TASKS,
-                        "items": parallel_task_schema,
-                        "description": (
-                            "Run 2-8 bounded subtasks in one call; at most four run concurrently and the call waits for their results. "
-                            "Set run_in_background=true only when the parent can continue without them."
-                        ),
-                    },
-                    "run_in_background": {
-                        "type": "boolean",
-                        "description": "Return immediately with a subagent id instead of waiting.",
-                    },
-                    "isolation": {
-                        "type": "string",
-                        "enum": ["worktree"],
-                        "description": (
-                            "Isolation mode. 'worktree' creates a temporary git worktree so the "
-                            "subagent works on an isolated copy of the repo."
-                        ),
-                    },
-                    "cancel_with_parent": {
-                        "type": "boolean",
-                        "description": "Whether parent cancel should also cancel this subagent.",
-                    },
-                    "detach_from_parent": {
-                        "type": "boolean",
-                        "description": "If true, this subagent keeps running after parent cancel (cc async unlinked AbortController).",
-                    },
-                    "read_only": {
-                        "type": "boolean",
-                        "description": "Whether the delegated work must avoid writes.",
-                    },
-                    "write_scope": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Optional file or directory scopes the subagent may modify.",
-                    },
-                },
-                "anyOf": [
-                    {"required": ["description", "prompt"]},
-                    {"required": ["parallel_tasks"]},
-                ],
-            },
+            parameters=_task_tool_parameters(agent_types, agent_type_help),
         )
 
     def __init__(
@@ -698,137 +1365,7 @@ class TaskTool(BaseTool):
         return ToolSchema(
             name=self.name,
             description=self.description,
-            parameters={
-                "type": "object",
-                "properties": {
-                    "description": {
-                        "type": "string",
-                        "description": "Short description of the delegated task, shown in the UI.",
-                    },
-                    "prompt": {
-                        "type": "string",
-                        "description": "The complete, self-contained prompt for the subagent.",
-                    },
-                    "agent_type": {
-                        "type": "string",
-                        "enum": agent_types,
-                        "description": agent_type_help,
-                    },
-                    "model": {
-                        "type": "string",
-                        "description": (
-                            "Optional model override for this subagent. Overrides the agent "
-                            "definition's model. Use 'inherit' or omit to keep the session model."
-                        ),
-                    },
-                    "effort": {
-                        "type": "string",
-                        "description": (
-                            "Optional reasoning-effort override (low/medium/high/…) for this "
-                            "subagent. Applies to reasoning-capable providers; omit to inherit."
-                        ),
-                    },
-                    "parallel_tasks": {
-                        "type": "array",
-                        "minItems": 2,
-                        "maxItems": MAX_PARALLEL_TASKS,
-                        "description": (
-                            "Run 2-8 subtasks in one call. At most four run concurrently. Each item is an object with "
-                            "'description', 'prompt', and optional 'agent_type'. Each subtask "
-                            "must cover one concrete scope. Read-only scopes may overlap for independent review; "
-                            "write-capable tasks need explicit, disjoint write_scope paths. "
-                            "When provided, the single-task 'prompt'/'description' fields are ignored."
-                        ),
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "description": {
-                                    "type": "string",
-                                    "description": "Short description of this subtask.",
-                                },
-                                "prompt": {
-                                    "type": "string",
-                                    "description": "Complete prompt for this subtask.",
-                                },
-                                "agent_type": {
-                                    "type": "string",
-                                    "enum": agent_types,
-                                    "description": agent_type_help,
-                                },
-                                "model": {
-                                    "type": "string",
-                                    "description": "Optional model override for this subtask ('inherit'/omit keeps session model).",
-                                },
-                                "effort": {
-                                    "type": "string",
-                                    "description": "Optional reasoning-effort override for this subtask (reasoning-capable providers).",
-                                },
-                                "cancel_with_parent": {
-                                    "type": "boolean",
-                                    "description": "Whether parent cancel should also cancel this subtask.",
-                                },
-                                "detach_from_parent": {
-                                    "type": "boolean",
-                                    "description": "If true, this subtask keeps running after parent cancel.",
-                                },
-                                "read_only": {
-                                    "type": "boolean",
-                                    "description": "Whether this subtask is intended to be read-only.",
-                                },
-                                "write_scope": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "description": "Optional file/path scopes this subtask may modify.",
-                                },
-                                "isolation": {
-                                    "type": "string",
-                                    "enum": ["worktree"],
-                                    "description": "Optional isolation mode: run this subtask in a temporary git worktree.",
-                                },
-                            },
-                            "required": ["description", "prompt"],
-                        },
-                    },
-                    "run_in_background": {
-                        "type": "boolean",
-                        "description": (
-                            "Return immediately with subagent ids instead of waiting for results. "
-                            "Background completion is delivered later; use task_stop to cancel it."
-                        ),
-                    },
-                    "isolation": {
-                        "type": "string",
-                        "enum": ["worktree"],
-                        "description": (
-                            "Isolation mode. 'worktree' runs the subagent in a temporary git worktree "
-                            "(new branch under .minicode/worktrees/). Removed automatically when the "
-                            "subagent made no changes; kept and reported otherwise. Falls back to "
-                            "non-isolated execution outside a git repository."
-                        ),
-                    },
-                    "cancel_with_parent": {
-                        "type": "boolean",
-                        "description": "Whether parent cancel should also cancel this subagent.",
-                    },
-                    "detach_from_parent": {
-                        "type": "boolean",
-                        "description": "If true, this subagent keeps running after parent cancel (cc async unlinked AbortController).",
-                    },
-                    "read_only": {
-                        "type": "boolean",
-                        "description": "Whether this subagent is intended to be read-only.",
-                    },
-                    "write_scope": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Optional file/path scopes this subagent may modify.",
-                    },
-                },
-                "anyOf": [
-                    {"required": ["description", "prompt"]},
-                    {"required": ["parallel_tasks"]},
-                ],
-            },
+            parameters=_task_tool_parameters(agent_types, agent_type_help),
         )
 
     async def execute(
@@ -836,56 +1373,90 @@ class TaskTool(BaseTool):
         args: dict[str, Any],
         context: ToolExecutionContext | None = None,
     ) -> ToolResult:
-        if self._is_recursive_subagent_call(context):
-            return ToolResult(
-                content=(
-                    "Blocked recursive subagent delegation. Subagents cannot call the task tool; "
-                    "return a concise summary to the parent agent instead."
-                ),
-                is_error=True,
-                status="blocked",
-                display_summary="Blocked recursive subagent",
-                result_kind="subagent",
-            )
-
         description = str(args.get("description") or "").strip()
         parallel_tasks = args.get("parallel_tasks")
-        llm = self._resolve_llm()
+        parent_metadata = self._metadata_from_context(context)
+        parent_runtime = parent_metadata.get("_subagent_parent_runtime")
+        parent_runtime = parent_runtime if isinstance(parent_runtime, dict) else {}
+        llm = (
+            parent_runtime.get("llm")
+            or (context.llm if context is not None else None)
+            or self._resolve_llm()
+        )
         tool_registry = self._resolve_tool_registry()
         permission_checker = self._resolve_permission_checker()
         if llm is None or tool_registry is None or permission_checker is None:
             return self._error_result("Subagent runtime is not configured")
-        runtime = self._runtime_from_context(context) or default_runtime()
-        parent_run_id = str(self._metadata_from_context(context).get("run_id") or "").strip()
-
+        if isinstance(parallel_tasks, list) and any(
+            isinstance(item, dict)
+            and (
+                str(item.get("name") or "").strip()
+                or str(item.get("team_name") or "").strip()
+                or str(item.get("mode") or "").strip()
+            )
+            for item in parallel_tasks
+        ):
+            return self._error_result(
+                "Named teammates are spawned as individual task calls; "
+                "parallel_tasks is reserved for ordinary independent subagents."
+            )
         # ── Parallel execution path ──
         if isinstance(parallel_tasks, list) and len(parallel_tasks) > MAX_PARALLEL_TASKS:
             return self._error_result(
                 f"Too many parallel tasks ({len(parallel_tasks)}). Max is {MAX_PARALLEL_TASKS}."
             )
+        if isinstance(parallel_tasks, list) and len(parallel_tasks) == 1:
+            return self._error_result(
+                "parallel_tasks requires at least two tasks; use the single-task fields instead."
+            )
         if isinstance(parallel_tasks, list) and len(parallel_tasks) >= 2:
             workspace_root = context.workspace_root if context is not None else None
-            resolve_custom_agent = lambda name: get_custom_agent(name, workspace_root)
+
+            def resolve_custom_agent(name: str) -> dict[str, Any] | None:
+                return get_custom_agent(name, workspace_root)
+
             tasks: list[dict[str, Any]] = []
             for item in parallel_tasks:
                 if not isinstance(item, dict):
                     continue
                 t_desc = str(item.get("description") or "").strip()
                 t_prompt = str(item.get("prompt") or "").strip()
-                t_type = str(item.get("agent_type") or "general-purpose").strip().lower()
+                t_type = str(item.get("agent_type") or "general-purpose").strip()
                 if t_desc and t_prompt:
-                    tasks.append({
-                        "description": t_desc,
-                        "prompt": t_prompt,
-                        "agent_type": normalize_agent_type(
+                    try:
+                        resolved_type = normalize_agent_type(
                             t_type,
                             get_custom_agent=resolve_custom_agent,
-                        ),
+                        )
+                    except ValueError as exc:
+                        return self._error_result(str(exc))
+                    task_payload = {
+                        "description": t_desc,
+                        "prompt": t_prompt,
+                        "agent_type": resolved_type,
                         **_nonempty_subagent_metadata(item),
-                    })
+                    }
+                    tasks.append(task_payload)
                     if tasks[-1]["agent_type"] in {"explore", "plan"}:
                         tasks[-1]["read_only"] = True
-            if len(tasks) >= 2:
+            # A single-item batch follows the same batch path; a len>=2 gate
+            # used to fall through to the single-execution
+            # path, which reads a top-level prompt that parallel calls lack.
+            if tasks:
+                try:
+                    for task in tasks:
+                        task_runtime_config = _subagent_metadata(task)
+                        await _resolve_subagent_llm(
+                            llm,
+                            parent_metadata=parent_metadata,
+                            agent_type=str(task.get("agent_type") or "general-purpose"),
+                            model_override=str(task_runtime_config.get("model") or ""),
+                            effort_override=str(task_runtime_config.get("effort") or ""),
+                            workspace_root=workspace_root,
+                            build_adapter=False,
+                        )
+                except (RuntimeError, ValueError) as exc:
+                    return self._error_result(str(exc))
                 scopes = _exclusive_parallel_task_scopes(tasks)
                 if len(scopes) != len(tasks):
                     return self._error_result(
@@ -913,29 +1484,208 @@ class TaskTool(BaseTool):
 
         # ── Single execution path ──
         prompt = str(args.get("prompt") or "").strip()
+        teammate_name = str(args.get("name") or "").strip()
+        team_name = str(args.get("team_name") or "").strip()
+        teammate_mode = str(args.get("mode") or "").strip()
+        if self._is_recursive_subagent_call(context):
+            permission = getattr(context, "permission", None)
+            profile = resolve_agent_execution_profile(permission, parent_metadata)
+            if profile is None:
+                # Legacy transcripts may have the child identity but no
+                # persisted profile.  Infer the narrowest safe surface only as
+                # a compatibility fallback; all new routing is capability
+                # based and provider-neutral.
+                source = str(getattr(permission, "source", "") or "")
+                profile = build_agent_execution_profile(
+                    team_mode=source.startswith("teammate:"),
+                    background=not source.startswith("teammate:"),
+                )
+
+            # Named teammates are a leader-facing roster operation, never a
+            # child delegation primitive.  A teammate can launch an ordinary
+            # foreground child; a hierarchical profile may opt in to either
+            # foreground or background ordinary children through its
+            # explicit delegation capability.
+            nested_teammate = bool(teammate_name)
+            nested_background = bool(args.get("run_in_background"))
+            if nested_teammate:
+                message = (
+                    "Nested agents cannot spawn other teammates — the team roster is flat. "
+                    "To spawn an ordinary child, omit the name parameter."
+                )
+                summary = "Blocked nested teammate"
+            elif nested_background and not profile.can_delegate_background:
+                if profile.team_mode:
+                    message = (
+                        "In-process teammates cannot spawn background agents. "
+                        "Use run_in_background=false for a synchronous ordinary child."
+                    )
+                    summary = "Blocked teammate background subagent"
+                else:
+                    message = (
+                        "This child execution profile cannot spawn background agents. "
+                        "Complete the assigned task with the available tools."
+                    )
+                    summary = "Blocked background delegation"
+            elif not nested_background and not profile.can_delegate_foreground:
+                message = (
+                    "Recursive subagent delegation is blocked. This execution profile "
+                    "does not allow another child. "
+                    "Complete the assigned task with the available tools."
+                )
+                summary = "Blocked recursive subagent"
+            else:
+                message = ""
+                summary = ""
+            if message:
+                return ToolResult(
+                    content=message,
+                    is_error=True,
+                    status="blocked",
+                    display_summary=summary,
+                    result_kind="subagent",
+                )
         isolation = str(args.get("isolation") or "").strip().lower()
         if isolation and isolation != "worktree":
             return self._error_result(
                 f"Unsupported isolation mode: {isolation!r}. Only 'worktree' is supported."
             )
         workspace_root = context.workspace_root if context is not None else None
-        agent_type = normalize_agent_type(
-            str(args.get("agent_type") or "general-purpose"),
-            get_custom_agent=lambda name: get_custom_agent(name, workspace_root),
-        )
+        requested_cwd = str(args.get("cwd") or "").strip()
+        if requested_cwd and isolation:
+            return self._error_result(
+                'cwd is mutually exclusive with isolation: "worktree"'
+            )
+        if requested_cwd:
+            candidate = Path(requested_cwd).expanduser()
+            if not candidate.is_absolute():
+                return self._error_result("cwd must be an absolute path")
+            candidate = candidate.resolve()
+            owning_root = Path(workspace_root).resolve() if workspace_root else None
+            if owning_root is None:
+                return self._error_result("cwd requires an active workspace")
+            try:
+                candidate.relative_to(owning_root)
+            except ValueError:
+                return self._error_result("cwd must be inside the active workspace")
+            if not candidate.is_dir():
+                return self._error_result("cwd must reference an existing directory")
+            args = {**args, "cwd": str(candidate)}
+        try:
+            agent_type = normalize_agent_type(
+                str(args.get("agent_type") or "general-purpose"),
+                get_custom_agent=lambda name: get_custom_agent(name, workspace_root),
+            )
+        except ValueError as exc:
+            return self._error_result(str(exc))
         if agent_type in {"explore", "plan"} and not bool(args.get("read_only")):
             args = {**args, "read_only": True}
         if not description:
             return self._error_result("Missing description argument")
         if not prompt:
             return self._error_result("Missing prompt argument")
+        runtime = require_runtime_from_context(context)
+        conversation_id = str(getattr(context, "conversation_id", "") or "").strip()
+        if teammate_name and not team_name:
+            leader_id = str(parent_metadata.get("run_id") or "").strip()
+            led_teams = runtime.list_swarm_teams(
+                conversation_id=conversation_id,
+                limit=100,
+            )
+            current_team = next(
+                (
+                    team for team in led_teams
+                    if str(team.created_by or "") == leader_id
+                ),
+                None,
+            )
+            if current_team is not None:
+                team_name = current_team.team_name
+                args = {**args, "team_name": team_name}
+        if team_name and not teammate_name:
+            return self._error_result(
+                "team_name only selects a team; provide name to spawn a teammate."
+            )
+        if teammate_mode and not (teammate_name and team_name):
+            return self._error_result(
+                "mode is only valid when spawning a named teammate."
+            )
+        if teammate_mode and teammate_mode not in _PUBLIC_PERMISSION_MODE_TO_INTERNAL:
+            return self._error_result(
+                f"Unsupported teammate mode: {teammate_mode!r}."
+            )
+        try:
+            single_runtime_config = _subagent_metadata(args)
+            await _resolve_subagent_llm(
+                llm,
+                parent_metadata=parent_metadata,
+                agent_type=agent_type,
+                model_override=str(single_runtime_config.get("model") or ""),
+                effort_override=str(single_runtime_config.get("effort") or ""),
+                workspace_root=workspace_root,
+                build_adapter=False,
+            )
+        except (RuntimeError, ValueError) as exc:
+            return self._error_result(str(exc))
+        if teammate_name:
+            team = runtime.list_swarm_teams(
+                conversation_id=conversation_id,
+                team_name=team_name,
+                limit=1,
+            )
+            if not team:
+                return self._error_result(
+                    f'Team "{team_name}" does not exist. Call TeamCreate first to create the team.'
+                )
+            existing_names = {
+                str(member.id or "").split("@", 1)[0].casefold()
+                for member in team[0].members
+            }
+            unique_name = teammate_name
+            suffix = 2
+            while unique_name.casefold() in existing_names:
+                unique_name = f"{teammate_name}-{suffix}"
+                suffix += 1
+            sanitized_name = _sanitize_teammate_name(unique_name)
+            teammate_id = f"{sanitized_name}@{team_name}"
+            teammate_metadata = _subagent_metadata({
+                **args,
+                "name": sanitized_name,
+                "team_name": team_name,
+                "teammate_id": teammate_id,
+            })
+            return await self._start_background_subtask(
+                description=description,
+                prompt=prompt,
+                agent_type=agent_type,
+                context=context,
+                subagent_metadata=teammate_metadata,
+                subagent_id=teammate_id,
+            )
+        child_metadata = _subagent_metadata(args)
+        internal_child_options = parent_metadata.get(
+            CHILD_AGENT_OPTIONS_METADATA_KEY
+        )
+        if isinstance(internal_child_options, dict):
+            raw_profile = internal_child_options.get("execution_profile")
+            if isinstance(raw_profile, AgentExecutionProfile):
+                child_metadata["_execution_profile"] = raw_profile
+            elif isinstance(raw_profile, dict):
+                child_metadata["_execution_profile"] = dict(raw_profile)
+            for public_key, internal_key in (
+                ("task_name", "_task_name"),
+                ("fork_turns", "_fork_turns"),
+            ):
+                value = internal_child_options.get(public_key)
+                if value not in (None, ""):
+                    child_metadata[internal_key] = value
         if bool(args.get("run_in_background")):
             return await self._start_background_subtask(
                 description=description,
                 prompt=prompt,
                 agent_type=agent_type,
                 context=context,
-                subagent_metadata=_subagent_metadata(args),
+                subagent_metadata=child_metadata,
             )
 
         return await self._run_foreground_subtask(
@@ -943,7 +1693,7 @@ class TaskTool(BaseTool):
             prompt=prompt,
             agent_type=agent_type,
             context=context,
-            subagent_metadata=_subagent_metadata(args),
+            subagent_metadata=child_metadata,
         )
 
     # ------------------------------------------------------------------
@@ -959,9 +1709,9 @@ class TaskTool(BaseTool):
         context: ToolExecutionContext | None,
         subagent_metadata: dict[str, Any] | None = None,
     ) -> ToolResult:
-        """Wait for a Pi worker slot before starting one foreground task."""
+        """Wait for a MiniCode worker slot before starting one foreground task."""
 
-        runtime = self._runtime_from_context(context) or default_runtime()
+        runtime = require_runtime_from_context(context)
         subagent_id = f"subagent-{uuid4().hex[:8]}"
         acquired = await runtime.acquire_subagent_slot(
             subagent_id,
@@ -976,7 +1726,7 @@ class TaskTool(BaseTool):
                 result_kind="subagent",
             )
         try:
-            return await self._run_single_subtask(
+            result = await self._run_single_subtask(
                 description=description,
                 prompt=prompt,
                 agent_type=agent_type,
@@ -984,6 +1734,8 @@ class TaskTool(BaseTool):
                 subagent_id=subagent_id,
                 subagent_metadata=subagent_metadata,
             )
+            result.runtime_metadata.setdefault("subagent_id", subagent_id)
+            return result
         finally:
             # start_subagent consumes the reservation. Releasing here is still
             # required for failures before start and wakes any capacity waiters
@@ -1000,18 +1752,119 @@ class TaskTool(BaseTool):
         subagent_metadata: dict[str, Any] | None = None,
         subagent_id: str | None = None,
     ) -> ToolResult:
+        # Resolve the shared runtime before publishing the child.  The
+        # background path used to rely on an accidental free variable here;
+        # the resulting NameError was swallowed by the advisory metadata
+        # handler, so the task started but reported an empty output journal.
+        runtime = require_runtime_from_context(context)
         subagent_id = subagent_id or f"subagent-{uuid4().hex[:8]}"
-        subagent_id = self._spawn_background_subtask(
-            description=description,
-            prompt=prompt,
-            agent_type=agent_type,
-            context=context,
-            subagent_metadata=subagent_metadata,
-            subagent_id=subagent_id,
-            wait_for_slot=True,
+        teammate_config = _subagent_metadata(subagent_metadata)
+        is_teammate = _is_team_subagent(teammate_config)
+        # Background calls return to the parent immediately, so the lifecycle
+        # gate must run in this synchronous caller before a queued child task
+        # is exposed as running.  The child path receives an explicit marker to
+        # avoid firing TaskCreated a second time when it eventually starts.
+        task_created_result = await _run_task_created_hook(
+            task_id=subagent_id,
+            subject=description,
+            description=prompt,
+            teammate_name=str(teammate_config.get("teammate_name") or agent_type),
+            team_name=str(teammate_config.get("team_name") or ""),
         )
+        task_created_blocked, task_created_message = _hook_veto(task_created_result)
+        if task_created_blocked:
+            return ToolResult(
+                content=task_created_message,
+                is_error=True,
+                status="blocked",
+                display_summary="Task creation blocked by hook",
+                result_kind="subagent",
+            )
+        try:
+            llm_resolution = await self._prepare_subagent_llm_resolution(
+                context=context,
+                agent_type=agent_type,
+                subagent_metadata=subagent_metadata,
+            )
+        except ValueError as exc:
+            return ToolResult(
+                content=str(exc),
+                is_error=True,
+                status="blocked",
+                display_summary="Invalid subagent model configuration",
+                result_kind="subagent",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult(
+                content=f"Subagent LLM initialization failed: {exc}",
+                is_error=True,
+                status="failed",
+                display_summary="Subagent LLM initialization failed",
+                result_kind="subagent",
+            )
+        try:
+            subagent_id = self._spawn_background_subtask(
+                description=description,
+                prompt=prompt,
+                agent_type=agent_type,
+                context=context,
+                subagent_metadata=subagent_metadata,
+                subagent_id=subagent_id,
+                wait_for_slot=True,
+                task_created_checked=True,
+                prepared_llm_resolution=llm_resolution,
+            )
+        except RuntimeError as exc:
+            with suppress(Exception):
+                await _close_subagent_llm_resolution(llm_resolution)
+            path_conflict = "Agent path" in str(exc) and "already owned" in str(exc)
+            return ToolResult(
+                content=str(exc),
+                is_error=True,
+                status="blocked" if path_conflict else "failed",
+                display_summary=(
+                    "Duplicate agent task name"
+                    if path_conflict
+                    else "Subagent spawn failed"
+                ),
+                result_kind="subagent",
+            )
+        except BaseException:
+            with suppress(Exception):
+                await _close_subagent_llm_resolution(llm_resolution)
+            raise
         await asyncio.sleep(0)
+        result_metadata = {
+            "subagent_id": subagent_id,
+            "provider": str(llm_resolution.provider or ""),
+            "model": str(llm_resolution.model or ""),
+            "effort": str(llm_resolution.effort or ""),
+        }
+        try:
+            result_metadata["output_file"] = str(
+                runtime.execution_journal(subagent_id).path
+            )
+        except Exception:
+            # Advisory model-facing metadata must not roll back a child that
+            # has already been durably registered with the shared runtime.
+            result_metadata["output_file"] = ""
 
+        if is_teammate:
+            teammate_name = str(teammate_config.get("teammate_name") or "")
+            team_name = str(teammate_config.get("team_name") or "")
+            return ToolResult(
+                content=(
+                    "Spawned successfully.\n"
+                    f"agent_id: {subagent_id}\n"
+                    f"name: {teammate_name}\n"
+                    f"team_name: {team_name}\n"
+                    "The agent is now running and will receive instructions via mailbox."
+                ),
+                display_summary=f"Teammate running: {teammate_name}",
+                result_kind="subagent",
+                status="teammate_spawned",
+                runtime_metadata=result_metadata,
+            )
         return ToolResult(
             content=(
                 f"Started background subagent {subagent_id} ({agent_type}). "
@@ -1024,6 +1877,7 @@ class TaskTool(BaseTool):
             display_summary=f"Subagent running: {description[:60]}",
             result_kind="subagent",
             status="running",
+            runtime_metadata=result_metadata,
         )
 
     async def _start_background_subtasks(
@@ -1034,8 +1888,102 @@ class TaskTool(BaseTool):
     ) -> ToolResult:
         subagent_ids = [f"subagent-{uuid4().hex[:8]}" for _ in tasks]
         started: list[tuple[str, dict[str, str]]] = []
+        prepared_resolutions: list[_SubagentLLMResolution] = []
+        runtime = require_runtime_from_context(context)
+        parent_run_id = str(metadata_from_context(context).get("run_id") or "").strip()
         try:
+            # Validate every TaskCreated hook before queueing any worker.  A
+            # parallel TaskTool call is one user operation; allowing the
+            # first child to start and then returning a veto for the second
+            # would leave a partially-created batch with no stable parent
+            # result to reconcile.
             for subagent_id, task in zip(subagent_ids, tasks, strict=True):
+                task_config = _subagent_metadata(task)
+                task_created_result = await _run_task_created_hook(
+                    task_id=subagent_id,
+                    subject=task["description"],
+                    description=task["prompt"],
+                    teammate_name=str(
+                        task_config.get("teammate_name")
+                        or task.get("agent_type", "general-purpose")
+                    ),
+                    team_name=str(task_config.get("team_name") or ""),
+                )
+                task_created_blocked, task_created_message = _hook_veto(task_created_result)
+                if task_created_blocked:
+                    return ToolResult(
+                        content=(
+                            f"Task creation blocked for {task['description']}: "
+                            f"{task_created_message}"
+                        ),
+                        is_error=True,
+                        status="blocked",
+                        display_summary="Task creation blocked by hook",
+                        result_kind="subagent",
+                    )
+            # Validate every canonical child path before creating a worker or
+            # handing off an adapter. The same runtime method is called again
+            # by registration as the final ownership fence.
+            batch_paths: set[str] = set()
+            for subagent_id, task in zip(subagent_ids, tasks, strict=True):
+                canonical_task_name = _normalize_child_task_name(
+                    task.get("_task_name")
+                )
+                candidate_path = runtime.validate_subagent_task_registration(
+                    subagent_id,
+                    parent_run_id=parent_run_id,
+                    canonical_task_name=canonical_task_name,
+                    agent_path_segment=canonical_task_name,
+                )
+                if candidate_path in batch_paths:
+                    return ToolResult(
+                        content=f"Agent path {candidate_path!r} is duplicated in this batch.",
+                        is_error=True,
+                        status="blocked",
+                        display_summary="Duplicate agent task name",
+                        result_kind="subagent",
+                    )
+                batch_paths.add(candidate_path)
+            # Resolve every child config before publishing any member of a
+            # multi-agent spawn so an auth or
+            # adapter-factory failure cannot leave a partially-created queue.
+            try:
+                for task in tasks:
+                    prepared_resolutions.append(
+                        await self._prepare_subagent_llm_resolution(
+                            context=context,
+                            agent_type=task.get("agent_type", "general-purpose"),
+                            subagent_metadata=_subagent_metadata(task),
+                        )
+                    )
+            except ValueError as exc:
+                for resolution in prepared_resolutions:
+                    with suppress(Exception):
+                        await _close_subagent_llm_resolution(resolution)
+                return ToolResult(
+                    content=str(exc),
+                    is_error=True,
+                    status="blocked",
+                    display_summary="Invalid subagent model configuration",
+                    result_kind="subagent",
+                )
+            except Exception as exc:  # noqa: BLE001
+                for resolution in prepared_resolutions:
+                    with suppress(Exception):
+                        await _close_subagent_llm_resolution(resolution)
+                return ToolResult(
+                    content=f"Subagent LLM initialization failed: {exc}",
+                    is_error=True,
+                    status="failed",
+                    display_summary="Subagent LLM initialization failed",
+                    result_kind="subagent",
+                )
+            for subagent_id, task, resolution in zip(
+                subagent_ids,
+                tasks,
+                prepared_resolutions,
+                strict=True,
+            ):
                 self._spawn_background_subtask(
                     description=task["description"],
                     prompt=task["prompt"],
@@ -1044,10 +1992,36 @@ class TaskTool(BaseTool):
                     subagent_metadata=_subagent_metadata(task),
                     subagent_id=subagent_id,
                     wait_for_slot=True,
+                    task_created_checked=True,
+                    prepared_llm_resolution=resolution,
                 )
                 started.append((subagent_id, task))
-        except Exception:
-            raise
+        except Exception as exc:  # noqa: BLE001
+            # No await occurs during the publication loop, so none of the
+            # created workers can start before this rollback runs. Cancel every
+            # published task and close every prepared adapter as one failed
+            # batch instead of leaving an invisible partial spawn behind.
+            for subagent_id, _task in started:
+                with suppress(Exception):
+                    runtime.cancel_subagent_task(
+                        subagent_id,
+                        reason="batch_spawn_failed",
+                    )
+            for resolution in prepared_resolutions:
+                try:
+                    await _close_subagent_llm_resolution(resolution)
+                except Exception:
+                    logger.warning(
+                        "Failed closing a rolled-back queued child LLM adapter",
+                        exc_info=True,
+                    )
+            return ToolResult(
+                content=f"Subagent batch could not be published: {exc}",
+                is_error=True,
+                status="failed",
+                display_summary="Subagent batch spawn failed",
+                result_kind="subagent",
+            )
         await asyncio.sleep(0)
         lines = [
             f"Queued {len(started)} background subagents; up to four run concurrently.",
@@ -1072,69 +2046,427 @@ class TaskTool(BaseTool):
         subagent_metadata: dict[str, Any] | None = None,
         subagent_id: str | None = None,
         wait_for_slot: bool = False,
+        resume_snapshot: dict[str, Any] | None = None,
+        resume_workspace_root: Path | None = None,
+        task_created_checked: bool = False,
+        prepared_llm_resolution: _SubagentLLMResolution | None = None,
+        start_acknowledged: asyncio.Future[str] | None = None,
     ) -> str:
         subagent_id = subagent_id or f"subagent-{uuid4().hex[:8]}"
-        runtime = self._runtime_from_context(context) or default_runtime()
+        runtime = require_runtime_from_context(context)
         subagent_cancel_event = asyncio.Event()
 
         async def _run_background() -> ToolResult:
-            if wait_for_slot:
-                acquired = await runtime.acquire_subagent_slot(
-                    subagent_id,
-                    cancel_event=subagent_cancel_event,
-                )
-                if not acquired:
-                    return ToolResult(
-                        content=f"Background subagent {subagent_id} was cancelled before it started.",
-                        is_error=False,
-                        status="cancelled",
-                        display_summary=f"Subagent cancelled: {description[:60]}",
-                        result_kind="subagent",
+            resolution_handed_off = False
+            try:
+                if wait_for_slot:
+                    acquired = await runtime.acquire_subagent_slot(
+                        subagent_id,
+                        cancel_event=subagent_cancel_event,
                     )
-                runtime.mark_subagent_task_running(subagent_id)
-            return await self._run_single_subtask(
-                description=description,
-                prompt=prompt,
-                agent_type=agent_type,
-                context=context,
-                subagent_id=subagent_id,
-                cancel_event=subagent_cancel_event,
-                subagent_metadata=subagent_metadata,
-                background=True,
-            )
+                    if not acquired:
+                        return ToolResult(
+                            content=f"Background subagent {subagent_id} was cancelled before it started.",
+                            is_error=False,
+                            status="cancelled",
+                            display_summary=f"Subagent cancelled: {description[:60]}",
+                            result_kind="subagent",
+                        )
+                    runtime.mark_subagent_task_running(subagent_id)
+                resolution_handed_off = prepared_llm_resolution is not None
+                return await self._run_single_subtask(
+                    description=description,
+                    prompt=prompt,
+                    agent_type=agent_type,
+                    context=context,
+                    subagent_id=subagent_id,
+                    cancel_event=subagent_cancel_event,
+                    subagent_metadata=subagent_metadata,
+                    background=True,
+                    resume_snapshot=resume_snapshot,
+                    resume_workspace_root=resume_workspace_root,
+                    task_created_checked=task_created_checked,
+                    prepared_llm_resolution=prepared_llm_resolution,
+                    start_acknowledged=start_acknowledged,
+                )
+            finally:
+                if prepared_llm_resolution is not None and not resolution_handed_off:
+                    try:
+                        await _close_subagent_llm_resolution(prepared_llm_resolution)
+                    except Exception:
+                        logger.warning(
+                            "Failed closing queued child LLM adapter for %s",
+                            prepared_llm_resolution.model,
+                            exc_info=True,
+                        )
 
-        task = asyncio.create_task(
-            _run_background()
-        )
+        task = asyncio.create_task(_run_background())
         parent_metadata = metadata_from_context(context)
         parent_run_id = str(parent_metadata.get("run_id", "")).strip()
-        runtime.register_subagent_task(
-            subagent_id,
-            task,
-            cancel_event=subagent_cancel_event,
-            parent_run_id=parent_run_id,
-            owner_task_id=str(getattr(context, "task_id", "") or ""),
-            session_id=str(getattr(context, "session_id", "") or ""),
-            agent_type=agent_type,
-            prompt_summary=description,
-            background=True,
-            pending=wait_for_slot,
+        canonical_task_name = _normalize_child_task_name(
+            (subagent_metadata or {}).get("_task_name")
+            if isinstance(subagent_metadata, dict)
+            else ""
         )
+        try:
+            runtime.register_subagent_task(
+                subagent_id,
+                task,
+                cancel_event=subagent_cancel_event,
+                parent_run_id=parent_run_id,
+                owner_task_id=str(getattr(context, "task_id", "") or ""),
+                session_id=str(getattr(context, "session_id", "") or ""),
+                agent_type=agent_type,
+                prompt_summary=description,
+                background=True,
+                pending=wait_for_slot,
+                canonical_task_name=canonical_task_name,
+                agent_path_segment=canonical_task_name,
+            )
+            task_metadata = getattr(runtime, "_subagent_task_metadata", None)
+            if isinstance(task_metadata, dict):
+                task_metadata_entry = task_metadata.setdefault(subagent_id, {})
+                task_metadata_entry.update(
+                    {
+                        key: value
+                        for key, value in _subagent_metadata(subagent_metadata).items()
+                        if key in {
+                            "team_mode",
+                            "plan_mode_required",
+                            "plan_slug",
+                            "team_name",
+                            "teammate_name",
+                            "teammate_id",
+                            "mode",
+                        }
+                        and value not in ("", None)
+                    }
+                )
+                raw_profile = (
+                    (subagent_metadata or {}).get("_execution_profile")
+                    if isinstance(subagent_metadata, dict)
+                    else None
+                )
+                if isinstance(raw_profile, AgentExecutionProfile):
+                    task_metadata_entry["execution_profile"] = raw_profile.to_dict()
+                elif isinstance(raw_profile, dict):
+                    task_metadata_entry["execution_profile"] = (
+                        AgentExecutionProfile.from_mapping(raw_profile).to_dict()
+                    )
+                if canonical_task_name:
+                    task_metadata_entry["task_name"] = canonical_task_name
+        except BaseException:
+            # create_task() does not run the coroutine until control returns to
+            # the event loop. If publication fails, cancel the unpublished
+            # worker immediately and remove any partial runtime registration;
+            # the async caller still owns and closes the prepared adapter.
+            task.cancel()
+            try:
+                runtime.release_subagent_task(subagent_id, expected_task=task)
+            except Exception:
+                logger.exception(
+                    "Failed to release unpublished background subtask %s",
+                    subagent_id,
+                )
+            try:
+                runtime.release_subagent_slot(subagent_id)
+            except Exception:
+                logger.exception(
+                    "Failed to release capacity slot for unpublished background subtask %s",
+                    subagent_id,
+                )
+            raise
 
         def _release_background_task(done_task: asyncio.Task[ToolResult]) -> None:
-            runtime.release_subagent_task(subagent_id, expected_task=done_task)
-            runtime.release_subagent_slot(subagent_id)
+            completed_result: ToolResult | None = None
+            completed_error = ""
             try:
-                done_task.result()
+                completed_result = done_task.result()
             except asyncio.CancelledError:
-                pass
+                completed_error = "Background subagent was cancelled before it started."
+            except Exception as exc:  # noqa: BLE001
+                completed_error = f"Background subagent failed before it started: {exc}"
+            if start_acknowledged is not None and not start_acknowledged.done():
+                start_acknowledged.set_result(
+                    completed_error
+                    or str(
+                        getattr(completed_result, "content", "")
+                        or "Background subagent ended before claiming its runtime identity."
+                    )
+                )
+            try:
+                runtime.release_subagent_task(subagent_id, expected_task=done_task)
             except Exception:
+                logger.exception(
+                    "Failed to release completed background subtask %s",
+                    subagent_id,
+                )
+            try:
+                runtime.release_subagent_slot(subagent_id)
+            except Exception:
+                logger.exception(
+                    "Failed to release capacity slot for completed background subtask %s",
+                    subagent_id,
+                )
+            if completed_error and not done_task.cancelled():
                 # _run_single_subtask reports failures via subagent.done. The
                 # callback only prevents an unhandled task exception warning.
-                pass
+                logger.debug(
+                    "Background subtask %s completed with an error after reporting its failure",
+                    subagent_id,
+                    exc_info=True,
+                )
 
         task.add_done_callback(_release_background_task)
         return subagent_id
+
+    async def resume_background_subtask(
+        self,
+        *,
+        subagent_id: str,
+        prompt: str,
+        context: ToolExecutionContext | None,
+    ) -> str:
+        """Resume a stopped agent from its canonical context checkpoint."""
+
+        runtime = require_runtime_from_context(context)
+        record = runtime.get_subagent(subagent_id)
+        if record is not None and record.status == "running":
+            raise RuntimeError(f"Subagent {subagent_id} is already running.")
+        if record is None:
+            load_persisted = getattr(runtime, "load_persisted_subagent", None)
+            record = load_persisted(subagent_id) if callable(load_persisted) else None
+        if record is None:
+            raise RuntimeError(
+                f"Subagent {subagent_id} has no durable runtime record to resume."
+            )
+
+        from backend.agent.checkpoint import load_latest_run_checkpoint
+
+        conversation_id = str(
+            getattr(context, "conversation_id", "") if context is not None else ""
+        ).strip()
+        checkpoint = load_latest_run_checkpoint(
+            subagent_id,
+            conversation_id=conversation_id or None,
+        )
+        if checkpoint is None or not isinstance(checkpoint.context_snapshot, dict):
+            raise RuntimeError(
+                f"Subagent {subagent_id} has no canonical context checkpoint to resume."
+            )
+        resume_snapshot = dict(checkpoint.context_snapshot)
+        if not resume_snapshot:
+            raise RuntimeError(
+                f"Subagent {subagent_id} has an empty context checkpoint."
+            )
+
+        previous_config: dict[str, Any] = dict(record.resume_config)
+        runtime_config = runtime.get_subagent_task_metadata(subagent_id) or {}
+        previous_config.update(runtime_config)
+
+        agent_type = record.agent_type
+        prompt_summary = record.prompt_summary or f"Resume {agent_type}"
+
+        resume_workspace_root: Path | None = None
+        if str(previous_config.get("isolation") or "") == "worktree":
+            raw_worktree = str(previous_config.get("worktree_path") or "").strip()
+            current_root = Path(context.workspace_root).resolve() if context and context.workspace_root else None
+            if not raw_worktree or current_root is None:
+                raise RuntimeError(
+                    f"Subagent {subagent_id} used worktree isolation, but its worktree is unavailable."
+                )
+            candidate = Path(raw_worktree).resolve()
+            allowed_root = (current_root / ".minicode" / "worktrees").resolve()
+            try:
+                candidate.relative_to(allowed_root)
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"Subagent {subagent_id} has an invalid persisted worktree path."
+                ) from exc
+            if not candidate.is_dir():
+                raise RuntimeError(
+                    f"Subagent {subagent_id}'s persisted worktree no longer exists."
+                )
+            resume_workspace_root = candidate
+
+        raw_persisted_cwd = str(previous_config.get("cwd") or "").strip()
+        if raw_persisted_cwd:
+            current_root = (
+                Path(context.workspace_root).resolve()
+                if context and context.workspace_root
+                else None
+            )
+            candidate = Path(raw_persisted_cwd).expanduser().resolve()
+            if current_root is None:
+                raise RuntimeError(
+                    f"Subagent {subagent_id} used a cwd override without an active workspace."
+                )
+            try:
+                candidate.relative_to(current_root)
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"Subagent {subagent_id} has an invalid persisted cwd."
+                ) from exc
+            if not candidate.is_dir():
+                raise RuntimeError(
+                    f"Subagent {subagent_id}'s persisted cwd no longer exists."
+                )
+
+        subagent_metadata = {
+            "read_only": bool(
+                record.read_only
+            ),
+            "write_scope": list(
+                record.write_scope
+            ),
+            "cancel_with_parent": bool(
+                record.cancel_with_parent
+            ),
+            "detach_from_parent": bool(
+                record.detach_from_parent
+            ),
+            "team_mode": bool(previous_config.get("team_mode")),
+            "plan_mode_required": bool(previous_config.get("plan_mode_required")),
+            "plan_slug": str(previous_config.get("plan_slug") or ""),
+            "team_name": str(previous_config.get("team_name") or ""),
+            "cwd": str(previous_config.get("cwd") or ""),
+            **(
+                {"isolation": "worktree"}
+                if str(previous_config.get("isolation") or "") == "worktree"
+                else {}
+            ),
+            **(
+                {
+                    "model": (
+                        f"{previous_config.get('provider')}/{previous_config['model']}"
+                        if previous_config.get("provider")
+                        else str(previous_config["model"])
+                    )
+                }
+                if previous_config.get("model")
+                else {}
+            ),
+            **(
+                {
+                    "reasoning_effort": str(
+                        previous_config.get("reasoning_effort")
+                        or previous_config.get("effort")
+                    )
+                }
+                # A legacy/bare adapter may have no resolvable provider/model.
+                # Its persisted "off" value was inherited state, not an
+                # explicit override. Replaying effort without a model would
+                # manufacture an invalid child configuration on resume.
+                if previous_config.get("model")
+                and (
+                    previous_config.get("reasoning_effort")
+                    or previous_config.get("effort")
+                )
+                else {}
+            ),
+        }
+        if "session_toolset_policy" in previous_config:
+            try:
+                subagent_metadata[SESSION_TOOLSET_POLICY_METADATA_KEY] = (
+                    restore_toolset_policy(
+                        previous_config["session_toolset_policy"],
+                        label="persisted child session tool capability policy",
+                    )
+                )
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"Subagent {subagent_id} has an invalid persisted tool capability policy."
+                ) from exc
+        persisted_profile = previous_config.get("execution_profile")
+        if isinstance(persisted_profile, dict):
+            # Internal-only key: model-authored Task arguments are normalized
+            # through ``_subagent_metadata`` and cannot set execution
+            # capabilities.  Durable resume must nevertheless restore the
+            # original profile so a hierarchical child does not silently lose
+            # delegation capabilities after recovery.
+            subagent_metadata["_execution_profile"] = (
+                execution_profile_for_background_resume(
+                    AgentExecutionProfile.from_mapping(persisted_profile)
+                )
+            )
+        persisted_task_name = str(previous_config.get("task_name") or "").strip()
+        if persisted_task_name:
+            subagent_metadata["_task_name"] = persisted_task_name
+        llm_resolution = await self._prepare_subagent_llm_resolution(
+            context=context,
+            agent_type=agent_type,
+            subagent_metadata=subagent_metadata,
+        )
+        acquired = await runtime.acquire_subagent_slot(
+            subagent_id,
+            cancel_event=context.cancel_event if context is not None else None,
+        )
+        if not acquired:
+            with suppress(Exception):
+                await _close_subagent_llm_resolution(llm_resolution)
+            raise RuntimeError(f"Subagent {subagent_id} resume was cancelled before it started.")
+        spawned = False
+        start_acknowledged = asyncio.get_running_loop().create_future()
+        try:
+            self._spawn_background_subtask(
+                description=prompt_summary,
+                prompt=prompt,
+                agent_type=agent_type,
+                context=context,
+                subagent_metadata=subagent_metadata,
+                subagent_id=subagent_id,
+                wait_for_slot=False,
+                resume_snapshot=resume_snapshot,
+                resume_workspace_root=resume_workspace_root,
+                task_created_checked=True,
+                prepared_llm_resolution=llm_resolution,
+                start_acknowledged=start_acknowledged,
+            )
+            spawned = True
+            # Do not infer startup from one event-loop yield.  The explicit
+            # handshake is completed only after ``start_subagent`` has claimed
+            # the next mailbox epoch, so the caller can never observe a stale
+            # incarnation immediately after a successful resume.
+            start_error = await start_acknowledged
+            if start_error:
+                raise RuntimeError(start_error)
+        except BaseException:
+            if not spawned:
+                runtime.release_subagent_slot(subagent_id)
+                with suppress(Exception):
+                    await _close_subagent_llm_resolution(llm_resolution)
+            raise
+        return subagent_id
+
+    async def _prepare_subagent_llm_resolution(
+        self,
+        *,
+        context: ToolExecutionContext | None,
+        agent_type: str,
+        subagent_metadata: dict[str, Any] | None,
+    ) -> _SubagentLLMResolution:
+        """Build the canonical child config before the child is published."""
+
+        parent_metadata = self._metadata_from_context(context)
+        inherited_llm = (
+            (
+                parent_metadata.get("_subagent_parent_runtime", {}).get("llm")
+                if isinstance(parent_metadata.get("_subagent_parent_runtime"), dict)
+                else None
+            )
+            or (context.llm if context is not None else None)
+            or self._resolve_llm()
+        )
+        requested = _subagent_metadata(subagent_metadata)
+        return await _resolve_subagent_llm(
+            inherited_llm,
+            parent_metadata=parent_metadata,
+            agent_type=agent_type,
+            model_override=str(requested.get("model") or ""),
+            effort_override=str(requested.get("effort") or ""),
+            workspace_root=context.workspace_root if context is not None else None,
+            build_adapter=True,
+        )
 
     async def _run_single_subtask(
         self,
@@ -1149,39 +2481,251 @@ class TaskTool(BaseTool):
         cancel_event: asyncio.Event | None = None,
         subagent_metadata: dict[str, Any] | None = None,
         background: bool = False,
+        resume_snapshot: dict[str, Any] | None = None,
+        resume_workspace_root: Path | None = None,
+        task_created_checked: bool = False,
+        prepared_llm_resolution: _SubagentLLMResolution | None = None,
+        start_acknowledged: asyncio.Future[str] | None = None,
+    ) -> ToolResult:
+        llm_resolution = prepared_llm_resolution
+        try:
+            if llm_resolution is None:
+                llm_resolution = await self._prepare_subagent_llm_resolution(
+                    context=context,
+                    agent_type=agent_type,
+                    subagent_metadata=subagent_metadata,
+                )
+        except ValueError as exc:
+            return ToolResult(
+                content=str(exc),
+                is_error=True,
+                status="blocked",
+                display_summary="Invalid subagent model configuration",
+                result_kind="subagent",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult(
+                content=f"Subagent LLM initialization failed: {exc}",
+                is_error=True,
+                status="failed",
+                display_summary="Subagent LLM initialization failed",
+                result_kind="subagent",
+            )
+
+        assert llm_resolution is not None
+        effective_subagent_id = subagent_id or f"subagent-{uuid4().hex[:8]}"
+        parent_metadata = self._metadata_from_context(context)
+        rollout_budget = parent_metadata.get("_rollout_budget")
+        reservation_id = effective_subagent_id
+        reserved_quota = 0
+        if isinstance(rollout_budget, RolloutBudget) and rollout_budget.token_limit > 0:
+            child_settings = (
+                llm_resolution.config.agent
+                if isinstance(getattr(llm_resolution.config, "agent", None), AgentSettings)
+                else self._resolve_agent_settings()
+            )
+            requested_quota = max(0, int(child_settings.max_turn_tokens or 0))
+            reserved_quota = rollout_budget.reserve(
+                reservation_id,
+                requested_quota,
+            )
+            if reserved_quota <= 0:
+                if llm_resolution.owns_llm:
+                    with suppress(Exception):
+                        await _close_subagent_llm_resolution(llm_resolution)
+                return ToolResult(
+                    content=(
+                        "Subagent was not started because the root rollout token "
+                        "budget has no unreserved capacity."
+                    ),
+                    is_error=True,
+                    status="blocked",
+                    display_summary="Root rollout budget exhausted",
+                    result_kind="subagent",
+                )
+            if requested_quota <= 0 or reserved_quota < requested_quota:
+                bounded_settings = replace(
+                    child_settings,
+                    max_turn_tokens=reserved_quota,
+                )
+                llm_resolution = replace(
+                    llm_resolution,
+                    config=replace(
+                        llm_resolution.config,
+                        agent=bounded_settings,
+                    ),
+                )
+        try:
+            return await self._run_single_subtask_impl(
+                description=description,
+                prompt=prompt,
+                agent_type=agent_type,
+                context=context,
+                subtask_index=subtask_index,
+                total_subtasks=total_subtasks,
+                subagent_id=effective_subagent_id,
+                cancel_event=cancel_event,
+                subagent_metadata=subagent_metadata,
+                background=background,
+                resume_snapshot=resume_snapshot,
+                resume_workspace_root=resume_workspace_root,
+                task_created_checked=task_created_checked,
+                llm_resolution=llm_resolution,
+                start_acknowledged=start_acknowledged,
+                rollout_reservation_id=(reservation_id if reserved_quota > 0 else ""),
+            )
+        finally:
+            if reserved_quota > 0:
+                rollout_budget.release_reservation(reservation_id)
+            if llm_resolution.owns_llm:
+                try:
+                    await _close_subagent_llm_resolution(llm_resolution)
+                except Exception:
+                    logger.debug(
+                        "Failed closing child LLM adapter for %s",
+                        llm_resolution.model,
+                        exc_info=True,
+                    )
+
+    async def _run_single_subtask_impl(
+        self,
+        *,
+        description: str,
+        prompt: str,
+        agent_type: str,
+        context: ToolExecutionContext | None,
+        subtask_index: int | None = None,
+        total_subtasks: int | None = None,
+        subagent_id: str | None = None,
+        cancel_event: asyncio.Event | None = None,
+        subagent_metadata: dict[str, Any] | None = None,
+        background: bool = False,
+        resume_snapshot: dict[str, Any] | None = None,
+        resume_workspace_root: Path | None = None,
+        task_created_checked: bool = False,
+        llm_resolution: _SubagentLLMResolution,
+        start_acknowledged: asyncio.Future[str] | None = None,
+        rollout_reservation_id: str = "",
     ) -> ToolResult:
         """Run one isolated subagent loop with progress reporting.
 
         Returns a structured ``ToolResult`` that includes the subagent summary,
         duration, iteration count, and tool-call statistics.
         """
-        llm = self._resolve_llm()
+        llm = llm_resolution.llm
         tool_registry = self._resolve_tool_registry()
         permission_checker = self._resolve_permission_checker()
 
         subagent_id = subagent_id or f"subagent-{uuid4().hex[:8]}"
         parent_id = context.task_id if context and context.task_id else context.session_id if context else ""
         emit_event = context.emit_event if context else None
-        runtime = self._runtime_from_context(context) or default_runtime()
+        runtime = require_runtime_from_context(context)
         parent_metadata = self._metadata_from_context(context)
         subagent_config = _subagent_metadata(subagent_metadata)
-        # Honor a per-subagent model/effort override (from the task-call args or
-        # the custom agent definition). When present this replaces the inherited
-        # session adapter with a fresh one; otherwise ``llm`` is unchanged.
-        llm = _resolve_subagent_llm(
-            llm,
-            agent_type=agent_type,
-            model_override=subagent_config.get("model", ""),
-            effort_override=subagent_config.get("effort", ""),
-            workspace_root=context.workspace_root if context is not None else None,
+        restored_session_policy = (
+            (subagent_metadata or {}).get(SESSION_TOOLSET_POLICY_METADATA_KEY)
+            if isinstance(subagent_metadata, dict)
+            else None
         )
+        if restored_session_policy is not None:
+            try:
+                restored_session_policy = restore_toolset_policy(
+                    restored_session_policy,
+                    label="child session tool capability policy",
+                )
+            except ValueError as exc:
+                raise RuntimeError(
+                    "child session tool capability policy is invalid"
+                ) from exc
+        child_task_name = _normalize_child_task_name(
+            (subagent_metadata or {}).get("_task_name")
+            if isinstance(subagent_metadata, dict)
+            else ""
+        )
+        fork_turns = _normalize_fork_turns(
+            (subagent_metadata or {}).get("_fork_turns", "none")
+            if isinstance(subagent_metadata, dict)
+            else "none"
+        )
+        fork_snapshot = (
+            None
+            if resume_snapshot
+            else _fork_snapshot_for_child(parent_metadata, fork_turns)
+        )
+        # Journal and UI events carry the actual resolved child config, not the
+        # request spelling. Resume can therefore recreate the same durable
+        # child even if the parent's active model later changes.
+        subagent_config["provider"] = llm_resolution.provider
+        subagent_config["model"] = llm_resolution.model
+        subagent_config["effort"] = llm_resolution.effort
+        subagent_config["team_mode"] = team_mode = _is_team_subagent(subagent_config)
+        raw_execution_profile = (
+            (subagent_metadata or {}).get("_execution_profile")
+            if isinstance(subagent_metadata, dict)
+            else None
+        )
+        if isinstance(raw_execution_profile, AgentExecutionProfile):
+            execution_profile = raw_execution_profile
+        elif isinstance(raw_execution_profile, dict):
+            execution_profile = AgentExecutionProfile.from_mapping(
+                raw_execution_profile
+            )
+        else:
+            execution_profile = build_agent_execution_profile(
+                team_mode=team_mode,
+                background=background,
+                agent_triggers_enabled=feature_enabled("agent_triggers"),
+            )
+        if execution_profile.team_mode != team_mode:
+            raise ValueError(
+                "child execution profile role does not match teammate ownership metadata"
+            )
+        if background and execution_profile.delivery not in {"background", "persistent"}:
+            raise ValueError(
+                "background child requires a background or persistent execution profile"
+            )
+        if not background and execution_profile.delivery != "foreground":
+            raise ValueError(
+                "foreground child requires a foreground execution profile"
+            )
+        subagent_config["execution_profile"] = execution_profile.to_dict()
+        parent_session_policy = _persisted_session_toolset_policy(parent_metadata)
+        if restored_session_policy is not None:
+            parent_session_policy = restored_session_policy.to_mapping()
+        if parent_session_policy is not None:
+            subagent_config["session_toolset_policy"] = parent_session_policy
+        if child_task_name:
+            subagent_config["task_name"] = child_task_name
+        if fork_turns != "none":
+            subagent_config["fork_turns"] = fork_turns
         # A child owns its cancellation signal. Reusing the parent's event lets a
         # child deadline cancel the parent and every sibling sharing that context.
         subagent_cancel_event = cancel_event or asyncio.Event()
         parent_run_id = str(parent_metadata.get("run_id", ""))
+
+        # TaskCreated is a gate, not an audit-only notification. Run it before
+        # allocating the child runtime/worktree so a veto cannot
+        # leave a half-created task behind.  Background callers perform this
+        # gate before queueing; foreground callers do it here.
+        if not task_created_checked:
+            task_created_hook_result = await _run_task_created_hook(
+                task_id=subagent_id,
+                subject=description,
+                description=prompt,
+                teammate_name=agent_type,
+            )
+            task_created_blocked, task_created_message = _hook_veto(task_created_hook_result)
+            if task_created_blocked:
+                return ToolResult(
+                    content=task_created_message,
+                    is_error=True,
+                    status="blocked",
+                    display_summary="Task creation blocked by hook",
+                    result_kind="subagent",
+                )
         try:
-            # Explicit background work is detached by default, matching CC's
-            # unlinked async agent controller. Explicit flags always win.
+            # Explicit background work is detached by default. Explicit flags
+            # always win.
             cancel_with_parent = subagent_config.get("cancel_with_parent")
             detach_from_parent = subagent_config.get("detach_from_parent")
             if (
@@ -1197,11 +2741,86 @@ class TaskTool(BaseTool):
                 agent_type=agent_type,
                 prompt_summary=description,
                 background=background,
+                task_id=child_task_name,
+                session_id=str(getattr(context, "session_id", "") or ""),
+                objective=description,
                 cancel_with_parent=cancel_with_parent,
                 detach_from_parent=detach_from_parent,
                 read_only=subagent_config["read_only"],
                 write_scope=subagent_config["write_scope"],
+                resume_config={
+                    "read_only": bool(subagent_config.get("read_only")),
+                    "write_scope": list(subagent_config.get("write_scope") or []),
+                    "cancel_with_parent": bool(cancel_with_parent),
+                    "detach_from_parent": bool(detach_from_parent),
+                    "isolation": str(subagent_config.get("isolation") or ""),
+                    "cwd": str(subagent_config.get("cwd") or ""),
+                    "provider": str(subagent_config.get("provider") or ""),
+                    "model": str(subagent_config.get("model") or ""),
+                    "reasoning_effort": str(subagent_config.get("effort") or ""),
+                    "team_mode": bool(subagent_config.get("team_mode")),
+                    "plan_mode_required": bool(
+                        subagent_config.get("plan_mode_required")
+                    ),
+                    "plan_slug": str(subagent_config.get("plan_slug") or ""),
+                    "team_name": str(subagent_config.get("team_name") or ""),
+                    "teammate_name": str(
+                        subagent_config.get("teammate_name") or ""
+                    ),
+                    "mode": str(subagent_config.get("mode") or ""),
+                    "execution_profile": execution_profile.to_dict(),
+                    "session_toolset_policy": parent_session_policy,
+                    "task_name": child_task_name,
+                    "fork_turns": fork_turns,
+                },
+                teammate_name=str(subagent_config.get("teammate_name") or ""),
+                team_name=str(subagent_config.get("team_name") or ""),
+                permission_mode=str(subagent_config.get("mode") or "confirm"),
+                plan_mode_required=bool(subagent_config.get("plan_mode_required")),
+                agent_path_segment=child_task_name,
             ) if runtime is not None else None
+            if team_mode and runtime is not None:
+                team = runtime.add_swarm_team_member(
+                    conversation_id=str(getattr(context, "conversation_id", "") or ""),
+                    team_name=str(subagent_config.get("team_name") or ""),
+                    member={
+                        "id": subagent_id,
+                        "role": str(subagent_config.get("teammate_name") or ""),
+                        "agent_type": agent_type,
+                        "description": description,
+                    },
+                )
+                if team is None:
+                    runtime.complete_subagent(
+                        subagent_id,
+                        "failed",
+                        summary="Team disappeared before teammate start",
+                        agent_path=str(getattr(subagent_record, "agent_path", "") or ""),
+                        mailbox_epoch=int(getattr(subagent_record, "mailbox_epoch", 0) or 0),
+                    )
+                    return ToolResult(
+                        content=f'Team "{subagent_config.get("team_name")}" no longer exists.',
+                        is_error=True,
+                        status="failed",
+                        display_summary="Teammate team missing",
+                        result_kind="subagent",
+                    )
+                runtime_metadata = getattr(runtime, "_subagent_task_metadata", None)
+                if isinstance(runtime_metadata, dict):
+                    metadata_entry = runtime_metadata.setdefault(subagent_id, {})
+                    metadata_entry.update(
+                        {
+                            "team_mode": True,
+                            "plan_mode_required": bool(
+                                subagent_config.get("plan_mode_required")
+                            ),
+                            "plan_slug": str(subagent_config.get("plan_slug") or ""),
+                            "team_name": str(subagent_config.get("team_name") or ""),
+                            "teammate_name": str(subagent_config.get("teammate_name") or ""),
+                            "teammate_id": subagent_id,
+                            "mode": str(subagent_config.get("mode") or "confirm"),
+                        }
+                    )
         except RuntimeError as exc:
             return ToolResult(
                 content=str(exc),
@@ -1211,10 +2830,73 @@ class TaskTool(BaseTool):
                 result_kind="subagent",
             )
 
+        if start_acknowledged is not None and not start_acknowledged.done():
+            start_acknowledged.set_result("")
+
         subagent_fence = {
             "agent_path": str(getattr(subagent_record, "agent_path", "") or ""),
             "mailbox_epoch": int(getattr(subagent_record, "mailbox_epoch", 0) or 0),
         }
+        if team_mode and not str(subagent_config.get("plan_slug") or ""):
+            from backend.agent.plans import bind_plan_owner, plan_slug_from_snapshot
+
+            repository = parent_metadata.get("conversation_repository")
+            if repository is not None and context is not None:
+                parent_record = repository.get_conversation(context.conversation_id)
+                parent_snapshot = dict(
+                    getattr(parent_record, "context_snapshot", {}) or {}
+                )
+                slug = plan_slug_from_snapshot(parent_snapshot)
+                if not slug:
+                    slug, _plan_path = bind_plan_owner(
+                        repository,
+                        context.conversation_id,
+                        context.workspace_root,
+                    )
+                subagent_config["plan_slug"] = str(slug or "")
+                runtime_metadata = getattr(runtime, "_subagent_task_metadata", None)
+                if isinstance(runtime_metadata, dict):
+                    runtime_metadata.setdefault(subagent_id, {})["plan_slug"] = str(
+                        slug or ""
+                    )
+        journal_events: list[dict[str, Any]] = []
+        journal: ExecutionJournal | None = None
+        cached_transcript_seq = -1
+        cached_transcript_messages: list[dict[str, Any]] = []
+        emitted_transcript_seq = 0
+
+        def _record_journal_events(*events: Any) -> None:
+            for event in events:
+                if event is None:
+                    continue
+                to_dict = getattr(event, "to_dict", None)
+                payload = to_dict() if callable(to_dict) else event
+                if isinstance(payload, dict):
+                    journal_events.append(dict(payload))
+
+        def _current_transcript_snapshot() -> dict[str, Any] | None:
+            nonlocal cached_transcript_seq, cached_transcript_messages
+            source_events = journal_events
+            if journal is not None:
+                source_events = [event.to_dict() for event in journal.read_events()]
+                journal_events[:] = source_events
+            if not source_events:
+                return None
+            try:
+                seq = max(int(event.get("seq") or 0) for event in source_events)
+            except (TypeError, ValueError):
+                seq = len(source_events)
+            if seq != cached_transcript_seq:
+                from backend.services.subagent_service import build_subagent_transcript_messages
+
+                cached_transcript_messages = build_subagent_transcript_messages(
+                    {"events": source_events},
+                )
+                cached_transcript_seq = seq
+            # Event delivery may enqueue this payload while the child continues
+            # to append journal entries. Hand transport its own list object so a
+            # later cache refresh can never mutate an already-emitted snapshot.
+            return {"seq": seq, "messages": list(cached_transcript_messages)}
 
         def _accepts_current_incarnation(*, require_running: bool = True) -> bool:
             if runtime is None:
@@ -1230,27 +2912,39 @@ class TaskTool(BaseTool):
             data: dict[str, Any],
             *,
             require_running: bool = True,
+            transcript_snapshot: dict[str, Any] | None = None,
         ) -> bool:
+            nonlocal emitted_transcript_seq
             if emit_event is None or not _accepts_current_incarnation(
                 require_running=require_running
             ):
                 return False
             payload = {**data, **subagent_fence}
+            if transcript_snapshot is None:
+                transcript_snapshot = _current_transcript_snapshot()
+            if transcript_snapshot is not None:
+                transcript_seq = int(transcript_snapshot.get("seq") or 0)
+                if transcript_seq > emitted_transcript_seq or event_type == "subagent.done":
+                    payload["transcript_snapshot"] = transcript_snapshot
+                    emitted_transcript_seq = max(emitted_transcript_seq, transcript_seq)
             await emit_event(event_type, payload)
             return True
 
-        # ── Worktree isolation (cc AgentTool isolation: "worktree") ──
+        # Worktree isolation
         # Created after the capacity check so a blocked delegation never leaves
         # a stray worktree behind. Isolation is fail-closed: a caller that asks
         # for a worktree must never silently run in the shared workspace.
         agent_worktree = None
-        worktree_fallback_note = ""
         parent_workspace_root = (
             Path(context.workspace_root)
             if context is not None and context.workspace_root
             else Path.cwd()
         )
-        if subagent_config.get("isolation") == "worktree":
+        explicit_child_workspace = None
+        raw_child_cwd = str(subagent_config.get("cwd") or "").strip()
+        if raw_child_cwd:
+            explicit_child_workspace = Path(raw_child_cwd).resolve()
+        if subagent_config.get("isolation") == "worktree" and resume_workspace_root is None:
             from backend.agent.worktree import (
                 cleanup_stale_worktrees,
                 create_agent_worktree,
@@ -1280,26 +2974,100 @@ class TaskTool(BaseTool):
                     display_summary="Worktree isolation failed",
                     result_kind="subagent",
                 )
+            if runtime is not None and not runtime.register_subagent_cleanup_resource(
+                subagent_id,
+                resource_kind="worktree",
+                resource_id=str(agent_worktree.worktree_path),
+                metadata={
+                    "git_root": str(agent_worktree.git_root),
+                    "branch": agent_worktree.branch,
+                    "head_commit": agent_worktree.head_commit,
+                },
+            ):
+                from backend.agent.worktree import cleanup_agent_worktree
+
+                await asyncio.to_thread(cleanup_agent_worktree, agent_worktree)
+                runtime.complete_subagent(
+                    subagent_id,
+                    "failed",
+                    summary="Worktree ownership could not be persisted.",
+                    **subagent_fence,
+                )
+                return ToolResult(
+                    content="Worktree ownership could not be persisted; the subagent was not started.",
+                    is_error=True,
+                    status="failed",
+                    display_summary="Worktree ownership persistence failed",
+                    result_kind="subagent",
+                )
 
         async def _cleanup_worktree() -> str:
             """Remove the worktree when unchanged; return a keep-note otherwise."""
             nonlocal agent_worktree
             if agent_worktree is None:
                 return ""
-            from backend.agent.worktree import cleanup_agent_worktree
+            from backend.agent.worktree import cleanup_agent_worktree, has_worktree_changes
 
             info, agent_worktree = agent_worktree, None
             try:
+                had_changes = await asyncio.to_thread(has_worktree_changes, info)
                 kept, kept_path = await asyncio.to_thread(cleanup_agent_worktree, info)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Worktree cleanup failed for %s: %s", subagent_id, exc)
                 return f"Worktree left at {info.worktree_path} (branch {info.branch}); cleanup failed."
+            if runtime is not None and (not kept or had_changes):
+                runtime.settle_subagent_cleanup_resource(
+                    subagent_id,
+                    resource_kind="worktree",
+                    resource_id=str(info.worktree_path),
+                    state="retained" if kept else "released",
+                    receipt="retained_user_changes" if kept else "removed_clean_worktree",
+                )
             if kept:
                 return (
                     f"The subagent worked in an isolated git worktree with changes kept at: "
                     f"{kept_path} (branch {info.branch})."
                 )
             return ""
+
+        if runtime is not None and subagent_record is not None:
+            durable_resume_config = dict(subagent_record.resume_config)
+            durable_resume_config.update(
+                {
+                    "cancel_with_parent": bool(subagent_record.cancel_with_parent),
+                    "detach_from_parent": bool(subagent_record.detach_from_parent),
+                    "plan_slug": str(subagent_config.get("plan_slug") or ""),
+                    "worktree_path": str(
+                        resume_workspace_root
+                        or (
+                            agent_worktree.worktree_path
+                            if agent_worktree is not None
+                            else ""
+                        )
+                    ),
+                }
+            )
+            updated_record = runtime.update_subagent_resume_config(
+                subagent_id,
+                durable_resume_config,
+                **subagent_fence,
+            )
+            if updated_record is None:
+                await _cleanup_worktree()
+                runtime.complete_subagent(
+                    subagent_id,
+                    "failed",
+                    summary="Resume configuration could not be persisted.",
+                    **subagent_fence,
+                )
+                return ToolResult(
+                    content="Subagent resume configuration could not be persisted.",
+                    is_error=True,
+                    status="failed",
+                    display_summary="Subagent persistence failed",
+                    result_kind="subagent",
+                )
+            subagent_record = updated_record
 
         if emit_event is not None:
             start_event = AgentEvent.subagent_start(
@@ -1313,26 +3081,50 @@ class TaskTool(BaseTool):
                 **subagent_fence,
             )
             start_event.data.update(_nonempty_subagent_metadata(subagent_config))
+            if child_task_name:
+                start_event.data["task_name"] = child_task_name
+            if fork_turns != "none":
+                start_event.data["fork_turns"] = fork_turns
             if subagent_record is not None:
-                start_event.data["record"] = subagent_record.to_dict()
+                start_event.data["record"] = subagent_record.public_dict()
                 start_event.data["parent_run_id"] = parent_run_id
             await _emit_incarnation_event("subagent.start", start_event.data)
-        await _run_task_created_hook(
-            task_id=subagent_id,
-            subject=description,
-            description=prompt,
-            teammate_name=agent_type,
-        )
-        await _run_subagent_start_hook(subagent_id, agent_type)
+        start_hook_result = await _run_subagent_start_hook(subagent_id, agent_type)
+        start_hook_blocked, start_hook_message = _hook_veto(start_hook_result)
+        if start_hook_blocked:
+            raise RuntimeError(start_hook_message)
 
-        journal: ExecutionJournal | None = None
+        delegated_prompt = self._build_subagent_prompt(
+            agent_type,
+            prompt,
+            workspace_root=(
+                explicit_child_workspace
+                or (context.workspace_root if context is not None else None)
+            ),
+        )
+        hook_context = str(
+            getattr(start_hook_result, "additional_context", "") or ""
+        ).strip()
+        if hook_context:
+            delegated_prompt = (
+                f"{delegated_prompt}\n\n"
+                "Additional context from the SubagentStart hook:\n"
+                f"{hook_context}"
+            )
+        effective_user_prompt = prompt if resume_snapshot else delegated_prompt
+        if team_mode and not resume_snapshot:
+            effective_user_prompt = _format_teammate_message(
+                "team-lead",
+                delegated_prompt,
+                summary=description,
+            )
+        journal_user_metadata: dict[str, Any] = {}
         if runtime is not None:
             try:
                 journal = runtime.execution_journal(subagent_id)
-                journal.append(
-                    "user_prompt",
-                    {
-                        "content": prompt,
+                journal_events[:] = [event.to_dict() for event in journal.read_events()]
+                journal_user_metadata = {
+                        "provider_content": effective_user_prompt,
                         "description": description,
                         "agent_type": agent_type,
                         "background": background,
@@ -1346,19 +3138,61 @@ class TaskTool(BaseTool):
                             if subagent_record is not None
                             else subagent_config.get("detach_from_parent", False)
                         ),
-                    },
-                )
+                        "read_only": bool(subagent_config.get("read_only")),
+                        "write_scope": list(subagent_config.get("write_scope") or []),
+                        "isolation": str(subagent_config.get("isolation") or ""),
+                        "cwd": str(subagent_config.get("cwd") or ""),
+                        "provider": str(subagent_config.get("provider") or ""),
+                        "model": str(subagent_config.get("model") or ""),
+                        "reasoning_effort": str(subagent_config.get("effort") or ""),
+                        "team_mode": bool(subagent_config.get("team_mode")),
+                        "plan_mode_required": bool(
+                            subagent_config.get("plan_mode_required")
+                        ),
+                        "mode": str(subagent_config.get("mode") or ""),
+                        "execution_profile": execution_profile.to_dict(),
+                        "task_name": child_task_name,
+                        "fork_turns": fork_turns,
+                        "team_name": str(subagent_config.get("team_name") or ""),
+                        "teammate_name": str(
+                            subagent_config.get("teammate_name") or ""
+                        ),
+                        "plan_slug": str(subagent_config.get("plan_slug") or ""),
+                        "parent_run_id": parent_run_id,
+                        "conversation_id": str(
+                            getattr(context, "conversation_id", "") or ""
+                        ),
+                        "session_id": str(
+                            getattr(context, "session_id", "") or ""
+                        ),
+                        "worktree_path": str(
+                            resume_workspace_root
+                            or (agent_worktree.worktree_path if agent_worktree is not None else "")
+                        ),
+                        "worktree_branch": str(
+                            agent_worktree.branch if agent_worktree is not None else ""
+                        ),
+                }
             except Exception as journal_exc:
-                logger.debug("Failed opening subagent journal for %s: %s", subagent_id, journal_exc)
-                journal = None
+                raise RuntimeError(
+                    f"Subagent journal could not be opened for {subagent_id}; "
+                    "the child was not started."
+                ) from journal_exc
 
-        sub_settings = self._resolve_agent_settings()
-        sub_budget = self._resolve_token_budget()
+        sub_settings = (
+            llm_resolution.config.agent
+            if isinstance(getattr(llm_resolution.config, "agent", None), AgentSettings)
+            else self._resolve_agent_settings()
+        )
+        sub_budget = (
+            llm_resolution.config.token_budget
+            if isinstance(getattr(llm_resolution.config, "token_budget", None), TokenBudget)
+            else self._resolve_token_budget()
+        )
         # Apply a custom agent's tool restrictions (Agent editor). A custom
         # definition can declare a tools whitelist and/or disallowed_tools; those
         # must actually be enforced at runtime (deny rules block the call), not
-        # just stored on the definition. model override still inherits the
-        # session LLM (rebuilding an adapter per subagent is a separate change).
+        # just stored on the definition.
         custom_deny_rules = _custom_agent_deny_rules(
             agent_type,
             tool_registry,
@@ -1369,33 +3203,209 @@ class TaskTool(BaseTool):
             context,
             read_only=subagent_config["read_only"],
             extra_deny_rules=custom_deny_rules,
+            team_mode=team_mode,
+            background=background,
+            plan_mode_required=bool(subagent_config.get("plan_mode_required")),
+            requested_mode=str(subagent_config.get("mode") or ""),
+            agent_triggers_enabled=feature_enabled("agent_triggers"),
+            execution_profile=execution_profile,
         )
-        delegated_prompt = self._build_subagent_prompt(
-            agent_type,
-            prompt,
-            workspace_root=context.workspace_root if context is not None else None,
-        )
-        sub_state = AgentState(user_message=delegated_prompt, max_iterations=sub_settings.max_iterations)
-        # Subagents cannot delegate; the prompt builder drops the delegation
-        # section so the system prompt matches the denied toolset.
+        sub_state = AgentState(user_message=effective_user_prompt, max_iterations=sub_settings.max_iterations)
+        # The prompt/runtime surface is derived from the execution profile;
+        # ordinary children remain non-delegating while hierarchical profiles
+        # may opt into child delegation.
         sub_state.prompt_context["subagent"] = agent_type
+        # Preserve the delegated role in the prompt context. Without this,
+        # explore/plan children fall back to the parent's build-mode guidance
+        # even though their permission profile is read-only.
+        if agent_type in {"explore", "plan"}:
+            sub_state.prompt_context["agent_mode"] = agent_type
 
         sub_state.workspace_context = parent_metadata.get("workspace_context")
         if context is not None:
             sub_state.conversation_id = context.conversation_id
             sub_state.checkpoint_manager = context.checkpoint_manager
         parent_prompt_cache_safe_params = parent_metadata.get("prompt_cache_safe_params")
+        effective_child_workspace = (
+            resume_workspace_root
+            or (agent_worktree.worktree_path if agent_worktree is not None else None)
+            or explicit_child_workspace
+        )
+        inherited_subagent_metadata = sanitize_subagent_runtime_metadata(parent_metadata)
         subagent_metadata_payload = {
-            **sanitize_subagent_runtime_metadata(parent_metadata),
+            **inherited_subagent_metadata,
             "agent_runtime": runtime,
             "parent_run_id": parent_run_id,
             "agent_role": f"subagent:{agent_type}",
             "agent_mode": "subagent",
+            "query_source": "background" if background else "subagent",
             "run_id": subagent_id,
             **subagent_fence,
             "cancel_event": subagent_cancel_event,
-            **_nonempty_subagent_metadata(subagent_config),
+            "retain_completed_checkpoint": True,
+            "_journal_user_message": prompt,
+            "_journal_user_metadata": journal_user_metadata,
+            "_agent_execution_profile": execution_profile,
+            "task_name": child_task_name,
+            "fork_turns": fork_turns,
+            **_narrowed_subagent_scope_metadata(
+                inherited_subagent_metadata,
+                _nonempty_subagent_metadata(subagent_config),
+            ),
         }
+        child_session_policy = restored_session_policy
+        if child_session_policy is None and parent_session_policy is not None:
+            child_session_policy = restore_toolset_policy(
+                parent_session_policy,
+                label="parent session tool capability policy",
+            )
+        if child_session_policy is not None:
+            subagent_metadata_payload[SESSION_TOOLSET_POLICY_METADATA_KEY] = (
+                child_session_policy
+            )
+        if rollout_reservation_id:
+            subagent_metadata_payload["_rollout_reservation_id"] = (
+                rollout_reservation_id
+            )
+        if team_mode:
+            from backend.agent.plans import (
+                bind_plan_owner,
+                get_plan_file_path,
+                merge_plan_constraints,
+                plan_slug_from_snapshot,
+            )
+
+            teammate_plan_path: Path | None = None
+            parent_snapshot = {}
+            repository = parent_metadata.get("conversation_repository")
+            if repository is not None and context is not None:
+                parent_record = repository.get_conversation(context.conversation_id)
+                parent_snapshot = dict(getattr(parent_record, "context_snapshot", {}) or {})
+            slug = str(subagent_config.get("plan_slug") or "") or plan_slug_from_snapshot(parent_snapshot)
+            if not slug and repository is not None and context is not None:
+                slug, _main_plan_path = bind_plan_owner(
+                    repository,
+                    context.conversation_id,
+                    context.workspace_root,
+                )
+            if slug:
+                subagent_config["plan_slug"] = slug
+                subagent_metadata_payload["plan_slug"] = slug
+                runtime_metadata = getattr(runtime, "_subagent_task_metadata", None)
+                if isinstance(runtime_metadata, dict):
+                    runtime_metadata.setdefault(subagent_id, {})["plan_slug"] = slug
+                teammate_plan_path = get_plan_file_path(
+                    slug,
+                    effective_child_workspace or (context.workspace_root if context else None),
+                    agent_id=subagent_id,
+                )
+                sub_context = replace(
+                    sub_context,
+                    filesystem_constraints=merge_plan_constraints(
+                        sub_context.filesystem_constraints,
+                        teammate_plan_path,
+                    ),
+                )
+
+            async def _set_teammate_permission_mode(
+                mode: str,
+                *,
+                source: str = "teammate.plan",
+            ) -> None:
+                nonlocal sub_context
+                _ = source
+                # Reject an unsupported mode instead of silently weakening
+                # it to "default"; the parent ceiling is applied downstream.
+                target_mode = normalize_permission_mode_token(mode)
+                rebuilt = transition_subagent_permission_mode(
+                    agent_type,
+                    context,
+                    sub_context,
+                    target_mode,
+                    read_only=bool(subagent_config.get("read_only")),
+                    extra_deny_rules=custom_deny_rules,
+                    plan_mode_required=bool(subagent_config.get("plan_mode_required")),
+                    agent_triggers_enabled=feature_enabled("agent_triggers"),
+                    execution_profile=execution_profile,
+                )
+                if teammate_plan_path is not None:
+                    rebuilt = replace(
+                        rebuilt,
+                        filesystem_constraints=merge_plan_constraints(
+                            rebuilt.filesystem_constraints,
+                            teammate_plan_path,
+                        ),
+                    )
+                sub_context = rebuilt
+                runtime.update_subagent_lifecycle(
+                    subagent_id,
+                    permission_mode=target_mode,
+                    agent_path=str(subagent_fence.get("agent_path") or ""),
+                    mailbox_epoch=int(subagent_fence.get("mailbox_epoch") or 0),
+                )
+
+            subagent_metadata_payload["permission_mode_setter"] = _set_teammate_permission_mode
+
+            def _teammate_permission_context_provider() -> PermissionContext:
+                return sub_context
+
+            subagent_metadata_payload["permission_context_provider"] = (
+                _teammate_permission_context_provider
+            )
+
+            async def _request_teammate_plan_approval(
+                *,
+                plan: str,
+                plan_file_path: str,
+            ) -> dict[str, Any]:
+                request_id = f"plan_approval:{subagent_id}:{uuid4().hex[:12]}"
+                content = json.dumps(
+                    {
+                        "type": "plan_approval_request",
+                        "from": str(
+                            subagent_config.get("teammate_name") or subagent_id
+                        ),
+                        "timestamp": datetime.now(UTC).isoformat(),
+                        "plan_file_path": plan_file_path,
+                        "plan_content": plan,
+                        "request_id": request_id,
+                    },
+                    ensure_ascii=False,
+                )
+                recipient_epoch = None
+                try:
+                    runtime.send_swarm_message(
+                        sender_id=subagent_id,
+                        recipient_id="parent",
+                        content=content,
+                        conversation_id=str(getattr(context, "conversation_id", "") or ""),
+                        team_name=str(subagent_config.get("team_name") or ""),
+                        sender_mailbox_epoch=int(subagent_fence.get("mailbox_epoch") or 0),
+                        recipient_mailbox_epoch=recipient_epoch,
+                    )
+                except ValueError as exc:
+                    return {"queued": False, "feedback": str(exc)}
+
+                runtime.update_subagent_lifecycle(
+                    subagent_id,
+                    awaiting_plan_approval=True,
+                    active_plan_request_id=request_id,
+                    is_idle=False,
+                    current_activity="awaiting_plan_approval",
+                    agent_path=str(subagent_fence.get("agent_path") or ""),
+                    mailbox_epoch=int(subagent_fence.get("mailbox_epoch") or 0),
+                )
+                subagent_metadata_payload["active_plan_request_id"] = request_id
+                subagent_metadata_payload["awaiting_plan_approval"] = True
+                return {
+                    "queued": True,
+                    "awaiting_leader_approval": True,
+                    "request_id": request_id,
+                }
+
+            subagent_metadata_payload["teammate_plan_approval_requester"] = (
+                _request_teammate_plan_approval
+            )
         if background:
             request_metadata = subagent_metadata_payload.get("llm_request_metadata")
             if not isinstance(request_metadata, dict):
@@ -1407,12 +3417,12 @@ class TaskTool(BaseTool):
         rollout_budget = parent_metadata.get("_rollout_budget")
         if rollout_budget is not None:
             subagent_metadata_payload["_rollout_budget"] = rollout_budget
-        if agent_worktree is not None:
+        if effective_child_workspace is not None:
             # The child's toolchain follows AgentLoopSessionContext.workspace_root
             # (loop.py builds tool_ctx.workspace_root and metadata["cwd"] from it),
             # so pointing both at the worktree moves every filesystem/shell tool
             # and the path-escape boundary into the isolated copy.
-            subagent_metadata_payload["cwd"] = str(agent_worktree.worktree_path)
+            subagent_metadata_payload["cwd"] = str(effective_child_workspace)
             subagent_metadata_payload.pop("workspace_context", None)
             sub_state.workspace_context = None
         if isinstance(parent_prompt_cache_safe_params, dict):
@@ -1437,38 +3447,8 @@ class TaskTool(BaseTool):
         terminal_usage: dict[str, Any] = {}
         terminal_provider_raw: dict[str, Any] = {}
         last_error = ""
-        journal_terminal_written = False
-
-        def _close_journal(
-            *,
-            status: str,
-            summary: str = "",
-            reason: str = "",
-            extra: dict[str, Any] | None = None,
-        ) -> None:
-            nonlocal journal_terminal_written
-            if journal is None or journal_terminal_written:
-                return
-            try:
-                if summary:
-                    journal.append(
-                        "assistant",
-                        {
-                            "content": summary[:8000],
-                            "status": status,
-                            "reason": reason,
-                        },
-                    )
-                journal.close_unresolved_tool_uses(reason=reason or status)
-                journal.append_terminal(
-                    status=status,
-                    summary=summary[:2000],
-                    reason=reason or status,
-                    extra=extra,
-                )
-                journal_terminal_written = True
-            except Exception as journal_exc:
-                logger.debug("Journal terminal close failed for %s: %s", subagent_id, journal_exc)
+        cumulative_iterations = 0
+        cumulative_tool_calls = 0
 
         def _terminal_result_payload(
             *,
@@ -1478,7 +3458,7 @@ class TaskTool(BaseTool):
             reason: str = "",
         ) -> dict[str, Any]:
             """Match the durable SubagentResultRecord shape for every transport."""
-            return {
+            return project_public_subagent_result({
                 "subagent_id": subagent_id,
                 "status": status,
                 "content": content,
@@ -1492,9 +3472,9 @@ class TaskTool(BaseTool):
                 "total_tokens": (
                     int(terminal_usage.get("input_tokens") or 0)
                     + int(terminal_usage.get("output_tokens") or 0)
-                    + int(terminal_usage.get("reasoning_output_tokens") or 0)
                 ),
-            }
+                "usage": terminal_usage,
+            })
 
         sub_context_builder = self._build_subagent_context_builder(
             context=context,
@@ -1502,10 +3482,12 @@ class TaskTool(BaseTool):
             agent_settings=sub_settings,
             llm=llm,
         )
+        if resume_snapshot:
+            sub_context_builder.load_snapshot(resume_snapshot)
+        elif fork_snapshot is not None:
+            sub_context_builder.load_snapshot(fork_snapshot)
 
         try:
-            from backend.agent.loop import run_agent_loop
-
             parent_approval_handler = context.approval_handler if context is not None else None
             can_forward_approval = (
                 callable(parent_approval_handler)
@@ -1557,6 +3539,12 @@ class TaskTool(BaseTool):
                     waiters.add(deadline_wait)
                 try:
                     await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+                except asyncio.CancelledError:
+                    if not answer_task.done():
+                        answer_task.cancel()
+                    with suppress(asyncio.CancelledError, Exception):
+                        await asyncio.gather(answer_task, return_exceptions=True)
+                    raise
                 finally:
                     if deadline_wait is not None and not deadline_wait.done():
                         deadline_wait.cancel()
@@ -1583,7 +3571,10 @@ class TaskTool(BaseTool):
                     # approval map so parallel children cannot overwrite one
                     # another's pending Future.
                     parent_tool_call_id = f"{subagent_id}:{local_tool_call_id}"
-                    ready = approval_ready.setdefault(local_tool_call_id, asyncio.Event())
+                    ready = approval_ready.get(local_tool_call_id)
+                    if ready is None:
+                        ready = asyncio.Event()
+                        approval_ready[local_tool_call_id] = ready
                     # A child approval only reaches the user while this child owns
                     # the current incarnation, and only while the parent turn still
                     # has time to act on it. Waiting on `ready` alone would hang
@@ -1676,241 +3667,797 @@ class TaskTool(BaseTool):
                     progress_event.data["tool_call_id"] = tool_call_id
                 await _emit_incarnation_event("subagent.progress", progress_event.data)
 
-            # Keep the entire child query generator in ONE task.
-            # Advancing an async generator across per-event create_task()
-            # calls breaks ContextVar token continuity (bind in task A,
-            # unbind in task B) and crashes the child loop.
-            query_stream = QueryEngine(runner=run_agent_loop).submit(QuerySubmission(
-                        user_message=delegated_prompt,
-                        session=AgentSession(
-                            llm=llm,
-                            tool_registry=tool_registry,
-                            artifact_store=self._artifact_store,
-                            permission_checker=permission_checker,
-                            agent_settings=sub_settings,
-                            token_budget=sub_budget,
-                            context_builder=sub_context_builder,
-                            approval_handler=subagent_approval_handler,
-                        ),
-                        state=sub_state,
+            # A named teammate keeps one child context across its own turns.
+            # This is a child run/context owner inside the same MiniCode control
+            # plane, not a provider-specific harness/session.
+            child_agent_session = AgentSession(
+                llm=llm,
+                tool_registry=tool_registry,
+                artifact_store=self._artifact_store,
+                permission_checker=permission_checker,
+                agent_settings=sub_settings,
+                token_budget=sub_budget,
+                context_builder=sub_context_builder,
+                approval_handler=subagent_approval_handler,
+            )
+
+            async def _run_query_turn(turn_prompt: str, turn_state: AgentState) -> None:
+                nonlocal last_tool_name, terminal_status, terminal_reason
+                nonlocal terminal_usage, terminal_provider_raw, last_error
+
+                terminal_status = "completed"
+                terminal_reason = ""
+                terminal_usage = {}
+                terminal_provider_raw = {}
+                last_error = ""
+                summary_parts.clear()
+                if journal is not None:
+                    subagent_metadata_payload["_execution_journal"] = journal
+
+                async def _emit_live_transcript_snapshot(source_event_type: str) -> None:
+                    transcript_snapshot = _current_transcript_snapshot()
+                    if transcript_snapshot is None:
+                        return
+                    if int(transcript_snapshot.get("seq") or 0) <= emitted_transcript_seq:
+                        return
+                    progress_event = AgentEvent.subagent_progress(
+                        subagent_id=subagent_id,
+                        iteration=turn_state.iterations,
+                        max_iterations=sub_settings.max_iterations,
+                        tool_name="",
+                        detail="",
+                        current_activity=description,
+                        waiting_on="model",
+                        last_progress_at=int(time.time() * 1000),
+                        activity_kind="narration",
+                        activity_summary=description,
+                        user_visible=True,
+                        **subagent_fence,
+                    )
+                    progress_event.data["source_event_type"] = source_event_type
+                    await _emit_incarnation_event(
+                        "subagent.progress",
+                        progress_event.data,
+                        transcript_snapshot=transcript_snapshot,
+                    )
+                # Keep the entire child query generator in ONE task. Advancing
+                # it across per-event tasks breaks ContextVar token continuity.
+                query_stream = QueryEngine().submit(QuerySubmission(
+                        user_message=turn_prompt,
+                        session=child_agent_session,
+                        state=turn_state,
                         runtime=AgentLoopSessionContext(
                             permission_context=sub_context,
                             workspace_root=(
-                                agent_worktree.worktree_path
-                                if agent_worktree is not None
-                                else None
+                                resume_workspace_root
+                                or (
+                                    agent_worktree.worktree_path
+                                    if agent_worktree is not None
+                                    else None
+                                )
                             ),
                             session_id=subagent_id,
                             task_id=subagent_id,
                             task_manager=context.task_manager if context else None,
                             emit_event=subagent_event_bridge,
-                            metadata=subagent_metadata_payload,
+                            metadata=(
+                                {
+                                    **subagent_metadata_payload,
+                                    "parent_run_id": subagent_id,
+                                }
+                                if team_mode
+                                else subagent_metadata_payload
+                            ),
                         ),
                     ))
-            event_queue: asyncio.Queue[AgentEvent | BaseException | None] = asyncio.Queue()
+                # The producer must not advance the canonical query stream
+                # until this projection consumer has delivered the current
+                # event. Otherwise later durable facts can overtake the first
+                # live snapshot even with a one-slot queue.
+                event_queue: asyncio.Queue[
+                    tuple[AgentEvent, asyncio.Event] | BaseException | None
+                ] = asyncio.Queue(maxsize=1)
 
-            async def _pump_query_events() -> None:
+                async def _pump_query_events() -> None:
+                    try:
+                        async for event in query_stream:
+                            consumed = asyncio.Event()
+                            await event_queue.put((event, consumed))
+                            await consumed.wait()
+                        await event_queue.put(None)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        await event_queue.put(exc)
+
+                pump_task = asyncio.create_task(_pump_query_events())
+                pending_consumed: asyncio.Event | None = None
                 try:
-                    async for event in query_stream:
-                        await event_queue.put(event)
-                    await event_queue.put(None)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    await event_queue.put(exc)
-
-            pump_task = asyncio.create_task(_pump_query_events())
-            try:
-                while True:
-                    item = await event_queue.get()
-                    if item is None:
-                        break
-                    if isinstance(item, BaseException):
-                        raise item
-                    event = item
-                    if event.type == "item.completed":
-                        message_item = (
-                            event.data.get("item")
-                            if isinstance(event.data.get("item"), dict)
-                            else {}
-                        )
-                        if message_item.get("type") == "agent_message":
-                            content = str(message_item.get("text") or "")
-                            if content:
-                                summary_parts[:] = [content]
-                    elif event.type == "approval_request":
-                        if (
-                            can_forward_approval
-                            and emit_event is not None
-                            and _accepts_current_incarnation()
-                        ):
-                            local_tool_call_id = str(
-                                event.data.get("tool_call_id") or event.data.get("id") or ""
-                            ).strip()
-                            parent_tool_call_id = f"{subagent_id}:{local_tool_call_id}"
-                            approval_ready.setdefault(local_tool_call_id, asyncio.Event())
-                            bridged_data = {
-                                **event.data,
-                                "tool_call_id": parent_tool_call_id,
-                                "subagent_id": subagent_id,
-                                "source_agent": subagent_id,
-                            }
-                            await emit_event("approval_request", {
-                                **bridged_data,
-                            })
-                            approval_ready[local_tool_call_id].set()
-                    elif event.type == "tool_call":
-                        tool_name = str(
-                            event.data.get("tool_name")
-                            or event.data.get("name")
-                            or "tool"
-                        )
-                        call_id = str(
-                            event.data.get("tool_call_id")
-                            or event.data.get("id")
-                            or ""
-                        ).strip()
-                        arguments = event.data.get("arguments") or event.data.get("args") or {}
-                        if journal is not None:
-                            try:
-                                journal.append(
-                                    "tool_use",
-                                    {
-                                        "tool_call": {
-                                            "id": call_id,
-                                            "name": tool_name,
-                                            "arguments": arguments,
-                                        },
-                                        "content": str(event.data.get("content") or ""),
-                                    },
-                                )
-                            except Exception as journal_exc:
-                                logger.debug("Journal tool_use append failed: %s", journal_exc)
-                    elif event.type == "agent.item" and event.data.get("kind") == "process_text":
-                        # Forward explicit model commentary to the Agents panel.
-                        # Raw provider reasoning uses ``thinking_delta`` and is
-                        # intentionally excluded. Previously child progress only
-                        # exposed tool names, so a research/implementation agent
-                        # could work for minutes with no intermediate explanation.
-                        process_text = _user_visible_progress_text(
-                            event.data.get("content")
-                            or event.data.get("summary")
-                            or event.data.get("title")
-                        )
-                        if process_text and emit_event is not None:
-                            progress_event = AgentEvent.subagent_progress(
-                                subagent_id=subagent_id,
-                                iteration=sub_state.iterations,
-                                max_iterations=sub_settings.max_iterations,
-                                tool_name="",
-                                detail=process_text,
-                                current_activity=process_text,
-                                waiting_on="model",
-                                last_progress_at=int(time.time() * 1000),
-                                activity_kind="narration",
-                                activity_summary=process_text,
-                                user_visible=True,
-                                **subagent_fence,
+                    while True:
+                        if pending_consumed is not None:
+                            pending_consumed.set()
+                            pending_consumed = None
+                        item = await event_queue.get()
+                        if item is None:
+                            break
+                        if isinstance(item, BaseException):
+                            raise item
+                        event, pending_consumed = item
+                        if event.type == "item.completed":
+                            message_item = (
+                                event.data.get("item")
+                                if isinstance(event.data.get("item"), dict)
+                                else {}
                             )
-                            progress_event.data["source_event_type"] = "agent.item"
-                            item_id = str(event.data.get("item_id") or event.data.get("id") or "")
-                            if item_id:
-                                progress_event.data["item_id"] = item_id
-                            await _emit_incarnation_event(
-                                "subagent.progress", progress_event.data
-                            )
-                    elif event.type == "error":
-                        last_error = str(event.data.get("message", ""))
-                    elif event.type == "tool_result":
-                        last_tool_name = str(
-                            event.data.get("tool_name")
-                            or event.data.get("name")
-                            or event.data.get("id")
-                            or ""
-                        )
-                        evidence = str(
-                            event.data.get("content")
-                            or event.data.get("result")
-                            or event.data.get("output")
-                            or event.data.get("summary")
-                            or ""
-                        ).strip()
-                        if journal is not None:
-                            try:
-                                call_id = str(
+                            if message_item.get("type") == "agent_message":
+                                content = str(message_item.get("text") or "")
+                                if content:
+                                    summary_parts[:] = [content]
+                                    turn_state.prompt_context[
+                                        "last_completed_assistant_text"
+                                    ] = content
+                                    turn_state.reply = content
+                                await _emit_live_transcript_snapshot("item.completed")
+                        elif event.type == "agent_message.delta":
+                            await _emit_live_transcript_snapshot("agent_message.delta")
+                        elif event.type == "approval_request":
+                            if (
+                                can_forward_approval
+                                and emit_event is not None
+                                and _accepts_current_incarnation()
+                            ):
+                                local_tool_call_id = str(
                                     event.data.get("tool_call_id")
                                     or event.data.get("id")
                                     or ""
                                 ).strip()
-                                journal.append(
-                                    "tool_result",
-                                    {
-                                        "tool_call_id": call_id,
-                                        "tool_name": last_tool_name or "tool",
-                                        "content": evidence[:4000],
-                                        "status": str(event.data.get("status") or "completed"),
+                                parent_tool_call_id = f"{subagent_id}:{local_tool_call_id}"
+                                if local_tool_call_id not in approval_ready:
+                                    approval_ready[local_tool_call_id] = asyncio.Event()
+                                bridged_data = {
+                                    **event.data,
+                                    "tool_call_id": parent_tool_call_id,
+                                    "subagent_id": subagent_id,
+                                    "source_agent": subagent_id,
+                                }
+                                await emit_event("approval_request", bridged_data)
+                                approval_ready[local_tool_call_id].set()
+                        elif event.type == "tool_call":
+                            tool_name = str(
+                                event.data.get("tool_name")
+                                or event.data.get("name")
+                                or "tool"
+                            )
+                            call_id = str(
+                                event.data.get("tool_call_id")
+                                or event.data.get("id")
+                                or ""
+                            ).strip()
+                            tool_snapshot = None
+                            if journal is not None:
+                                current_events = journal.read_events()
+                                claimed_events = [
+                                    persisted.to_dict()
+                                    for persisted in current_events
+                                    if (
+                                        persisted.event_type != "tool_result"
+                                        or str(
+                                            persisted.payload.get("tool_call_id")
+                                            or persisted.payload.get("call_id")
+                                            or ""
+                                        ).strip() != call_id
+                                    )
+                                ]
+                                claimed_seq = max(
+                                    (int(item.get("seq") or 0) for item in claimed_events),
+                                    default=0,
+                                )
+                                from backend.services.subagent_service import build_subagent_transcript_messages
+
+                                tool_snapshot = {
+                                    "seq": claimed_seq,
+                                    "messages": build_subagent_transcript_messages(
+                                        {"events": claimed_events}
+                                    ),
+                                }
+                            if emit_event is not None:
+                                progress_event = AgentEvent.subagent_progress(
+                                    subagent_id=subagent_id,
+                                    iteration=turn_state.iterations,
+                                    max_iterations=sub_settings.max_iterations,
+                                    tool_name=tool_name,
+                                    detail="",
+                                    current_activity=description,
+                                    waiting_on="tool",
+                                    last_progress_at=int(time.time() * 1000),
+                                    activity_kind="tool",
+                                    activity_summary=description,
+                                    user_visible=bool(description),
+                                    **subagent_fence,
+                                )
+                                progress_event.data["source_event_type"] = "tool_call"
+                                if call_id:
+                                    progress_event.data["tool_call_id"] = call_id
+                                await _emit_incarnation_event(
+                                    "subagent.progress",
+                                    progress_event.data,
+                                    transcript_snapshot=tool_snapshot,
+                                )
+                        elif (
+                            event.type == "agent.item"
+                            and event.data.get("kind") == "process_text"
+                        ):
+                            process_text = _user_visible_progress_text(
+                                event.data.get("content")
+                                or event.data.get("summary")
+                                or event.data.get("title")
+                            )
+                            if process_text:
+                                if journal is not None:
+                                    _record_journal_events(journal.append(
+                                        "system",
+                                        {
+                                            "kind": "process_text",
+                                            "content": process_text,
+                                            "source": str(
+                                                event.data.get("source")
+                                                or "model_preamble"
+                                            ),
+                                            "transcript_only": True,
+                                        },
+                                    ))
+                                if emit_event is None:
+                                    continue
+                                progress_event = AgentEvent.subagent_progress(
+                                    subagent_id=subagent_id,
+                                    iteration=turn_state.iterations,
+                                    max_iterations=sub_settings.max_iterations,
+                                    tool_name="",
+                                    detail=process_text,
+                                    current_activity=process_text,
+                                    waiting_on="model",
+                                    last_progress_at=int(time.time() * 1000),
+                                    activity_kind="narration",
+                                    activity_summary=process_text,
+                                    user_visible=True,
+                                    **subagent_fence,
+                                )
+                                progress_event.data["source_event_type"] = "agent.item"
+                                item_id = str(
+                                    event.data.get("item_id") or event.data.get("id") or ""
+                                )
+                                if item_id:
+                                    progress_event.data["item_id"] = item_id
+                                await _emit_incarnation_event(
+                                    "subagent.progress", progress_event.data
+                                )
+                        elif event.type == "error":
+                            last_error = str(event.data.get("message", ""))
+                        elif event.type == "tool_result":
+                            call_id = str(
+                                event.data.get("tool_call_id")
+                                or event.data.get("id")
+                                or ""
+                            ).strip()
+                            last_tool_name = str(
+                                event.data.get("tool_name")
+                                or event.data.get("name")
+                                or ""
+                            ).strip()
+                            if journal is not None:
+                                journal_events[:] = [
+                                    persisted.to_dict()
+                                    for persisted in journal.read_events()
+                                ]
+                                await _emit_incarnation_event(
+                                    "subagent.progress",
+                                    AgentEvent.subagent_progress(
+                                        subagent_id=subagent_id,
+                                        iteration=turn_state.iterations,
+                                        max_iterations=sub_settings.max_iterations,
+                                        tool_name=last_tool_name,
+                                        detail="",
+                                        current_activity=description,
+                                        waiting_on="tool",
+                                        last_progress_at=int(time.time() * 1000),
+                                        activity_kind="tool_result",
+                                        activity_summary=description,
+                                        user_visible=bool(description),
+                                        **subagent_fence,
+                                    ).data,
+                                )
+                            try:
+                                from backend.agent.checkpoint import save_run_checkpoint
+
+                                checkpoint_snapshot = (
+                                    sub_context_builder.export_snapshot()
+                                )
+                                checkpoint_receipt: dict[str, Any] = {}
+                                save_run_checkpoint(
+                                    receipt=checkpoint_receipt,
+                                    session_id=subagent_id,
+                                    user_message=turn_prompt,
+                                    iterations=turn_state.iterations,
+                                    reply=turn_state.reply,
+                                    messages=checkpoint_snapshot.get("history", []),
+                                    context_snapshot=checkpoint_snapshot,
+                                    tool_calls=turn_state.tool_calls,
+                                    active_skills=turn_state.active_skills,
+                                    disabled_tools=turn_state.disabled_tools,
+                                    stopped_reason="in_progress",
+                                    last_mutation_index=turn_state._last_mutation_index,
+                                    run_id=subagent_id,
+                                    conversation_id=str(turn_state.conversation_id or ""),
+                                    resume_payload={
+                                        "run_id": subagent_id,
+                                        "role": f"subagent:{agent_type}",
+                                        **(
+                                            {
+                                                "worktree_path": str(
+                                                    agent_worktree.worktree_path
+                                                )
+                                            }
+                                            if agent_worktree is not None
+                                            else {}
+                                        ),
                                     },
                                 )
-                            except Exception as journal_exc:
-                                logger.debug("Journal tool_result append failed: %s", journal_exc)
-                        try:
-                            from backend.agent.checkpoint import save_run_checkpoint
-
-                            save_run_checkpoint(
-                                session_id=subagent_id,
-                                user_message=delegated_prompt,
-                                iterations=sub_state.iterations,
-                                reply=sub_state.reply,
-                                messages=sub_context_builder.export_snapshot().get("history", []),
-                                tool_calls=sub_state.tool_calls,
-                                active_skills=sub_state.active_skills,
-                                disabled_tools=sub_state.disabled_tools,
-                                stopped_reason="in_progress",
-                                last_mutation_index=sub_state._last_mutation_index,
-                                run_id=subagent_id,
-                                conversation_id=str(sub_state.conversation_id or ""),
-                                resume_payload={
-                                    "run_id": subagent_id,
-                                    "role": f"subagent:{agent_type}",
-                                    **(
-                                        {"worktree_path": str(agent_worktree.worktree_path)}
-                                        if agent_worktree is not None
-                                        else {}
-                                    ),
-                                },
+                                if journal is not None:
+                                    _record_journal_events(
+                                        journal.append_lifecycle(
+                                            "checkpoint_saved",
+                                            {
+                                                "sequence": int(
+                                                    checkpoint_receipt.get("sequence")
+                                                    or 0
+                                                ),
+                                                "context_revision": str(
+                                                    checkpoint_receipt.get(
+                                                        "context_revision"
+                                                    )
+                                                    or ""
+                                                ),
+                                            },
+                                        )
+                                    )
+                            except Exception as checkpoint_exc:
+                                turn_state.mark_transition(
+                                    "checkpoint_save_failed",
+                                    error_type=type(checkpoint_exc).__name__,
+                                )
+                                if journal is not None:
+                                    _record_journal_events(
+                                        journal.append_lifecycle(
+                                            "checkpoint_save_failed",
+                                            {
+                                                "error_type": type(
+                                                    checkpoint_exc
+                                                ).__name__,
+                                                "error": str(checkpoint_exc),
+                                            },
+                                        )
+                                    )
+                                raise RuntimeError(
+                                    "Subagent mutation completed but its recovery checkpoint could not be persisted"
+                                ) from checkpoint_exc
+                        elif event.type == "done":
+                            terminal_status = str(
+                                event.data.get("status") or "completed"
                             )
-                        except Exception as checkpoint_exc:
-                            logger.debug("Incremental subagent checkpoint failed: %s", checkpoint_exc)
-                    elif event.type == "done":
-                        terminal_status = str(event.data.get("status") or "completed")
-                        terminal_reason = str(event.data.get("reason") or "")
-                        if isinstance(event.data.get("usage"), dict):
-                            terminal_usage = dict(event.data["usage"])
-                        if isinstance(event.data.get("providerRaw"), dict):
-                            terminal_provider_raw = dict(event.data["providerRaw"])
-                    if emit_event is not None and event.type == "tool_result":
-                        await _emit_incarnation_event(
-                            "subagent.progress",
-                            AgentEvent.subagent_progress(
-                                subagent_id=subagent_id,
-                                iteration=sub_state.iterations,
-                                max_iterations=sub_settings.max_iterations,
-                                tool_name=last_tool_name,
-                                detail="",
-                                current_activity=description,
-                                waiting_on="tool",
-                                last_progress_at=int(time.time() * 1000),
-                                activity_kind="tool_result",
-                                activity_summary=description,
-                                user_visible=bool(description),
-                                **subagent_fence,
-                            ).data,
+                            terminal_reason = str(event.data.get("reason") or "")
+                            if isinstance(event.data.get("usage"), dict):
+                                terminal_usage = dict(event.data["usage"])
+                            if isinstance(event.data.get("providerRaw"), dict):
+                                terminal_provider_raw = dict(event.data["providerRaw"])
+                finally:
+                    if pending_consumed is not None:
+                        pending_consumed.set()
+                    if not pump_task.done():
+                        pump_task.cancel()
+                        # QueryEngine commits its cancelled terminal before it
+                        # re-raises CancelledError.  During that commit it may
+                        # yield the final run/terminal events through this
+                        # acknowledged queue.  Waiting for the pump without
+                        # consuming those events deadlocks cancellation: the
+                        # pump waits for ``consumed`` while this task waits for
+                        # the pump.  Keep draining and acknowledging until the
+                        # canonical query stream has finished its terminal
+                        # commit.  The owning background subagent task remains
+                        # registered for the whole drain, so outer cancellation
+                        # boundaries can apply their normal bounded wait and
+                        # cleanup_pending contract.
+                        while not pump_task.done():
+                            queued_item = asyncio.create_task(event_queue.get())
+                            completed, _pending = await asyncio.wait(
+                                {pump_task, queued_item},
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            if queued_item in completed:
+                                drained = queued_item.result()
+                                if isinstance(drained, tuple):
+                                    _event, consumed = drained
+                                    consumed.set()
+                            else:
+                                queued_item.cancel()
+                                with suppress(asyncio.CancelledError, Exception):
+                                    await queued_item
+                        with suppress(asyncio.CancelledError, Exception):
+                            await pump_task
+            await _run_query_turn(effective_user_prompt, sub_state)
+
+            if team_mode:
+                teammate_name = str(
+                    subagent_config.get("teammate_name") or agent_type
+                ).strip()
+                team_name = str(subagent_config.get("team_name") or "").strip()
+                conversation_id = str(
+                    getattr(context, "conversation_id", "") or ""
+                ).strip()
+                current_prompt = effective_user_prompt
+                last_summary = ""
+                shutdown_requested = False
+                while True:
+                    streamed_summary = "".join(summary_parts).strip()
+                    turn_summary = streamed_summary or sub_state.reply.strip()
+                    if terminal_status == "cancelled":
+                        raise asyncio.CancelledError
+                    if terminal_status == "failed":
+                        raise RuntimeError(
+                            last_error or terminal_reason or "Teammate turn failed"
                         )
-            finally:
-                if not pump_task.done():
-                    pump_task.cancel()
-                    with suppress(asyncio.CancelledError, Exception):
-                        await pump_task
+                    if not turn_summary:
+                        raise RuntimeError("Teammate turn ended without a final response.")
+
+                    last_summary = turn_summary
+                    cumulative_iterations += sub_state.iterations
+                    cumulative_tool_calls += len(sub_state.tool_calls)
+
+                    # MiniCode runs SubagentStop first, then TaskCompleted for
+                    # currently-owned in-progress tasks, then TeammateIdle. A
+                    # blocking hook becomes the next model prompt; it does not
+                    # seal the teammate.
+                    stop_result = await _run_subagent_stop_hook(
+                        subagent_id,
+                        "completed",
+                        turn_summary,
+                        agent_type=agent_type,
+                    )
+                    hook_blocked, hook_feedback = _hook_veto(stop_result)
+                    if not hook_blocked:
+                        owned_tasks = runtime.list_swarm_tasks(
+                            assignee=teammate_name,
+                            status="in_progress",
+                            team_name=team_name,
+                            conversation_id=conversation_id,
+                            limit=100,
+                        )
+                        for owned_task in owned_tasks:
+                            completed_result = await _run_task_completed_hook(
+                                task_id=owned_task.task_id,
+                                subject=owned_task.title,
+                                description=owned_task.description,
+                                teammate_name=teammate_name,
+                                team_name=team_name,
+                            )
+                            hook_blocked, hook_feedback = _hook_veto(completed_result)
+                            if hook_blocked:
+                                break
+                    if not hook_blocked:
+                        idle_result = await _run_teammate_idle_hook(
+                            teammate_name=teammate_name,
+                            team_name=team_name,
+                        )
+                        hook_blocked, hook_feedback = _hook_veto(idle_result)
+
+                    if hook_blocked:
+                        current_prompt = hook_feedback
+                    else:
+                        if bool(subagent_metadata_payload.get("awaiting_plan_approval")):
+                            runtime.update_subagent_lifecycle(
+                                subagent_id,
+                                is_idle=False,
+                                current_activity="awaiting_plan_approval",
+                                **subagent_fence,
+                            )
+                        else:
+                            runtime.update_subagent_lifecycle(
+                                subagent_id,
+                                is_idle=True,
+                                current_activity="idle",
+                                **subagent_fence,
+                            )
+                        idle_notification = {
+                            "type": "idle_notification",
+                            "from": teammate_name,
+                            "timestamp": datetime.now(UTC).isoformat(),
+                            "idleReason": "available",
+                            "summary": _subagent_display_summary(turn_summary),
+                        }
+                        runtime.send_swarm_message(
+                            sender_id=subagent_id,
+                            recipient_id="parent",
+                            content=json.dumps(idle_notification, ensure_ascii=False),
+                            conversation_id=conversation_id,
+                            team_name=team_name,
+                            sender_mailbox_epoch=int(
+                                subagent_fence.get("mailbox_epoch") or 0
+                            ),
+                        )
+                        if emit_event is not None:
+                            await _emit_incarnation_event(
+                                "subagent.progress",
+                                AgentEvent.subagent_progress(
+                                    subagent_id=subagent_id,
+                                    iteration=cumulative_iterations,
+                                    max_iterations=sub_settings.max_iterations,
+                                    tool_name="",
+                                    detail="",
+                                    current_activity=(
+                                        "Awaiting team leader plan approval"
+                                        if bool(
+                                            subagent_metadata_payload.get(
+                                                "awaiting_plan_approval"
+                                            )
+                                        )
+                                        else "Idle"
+                                    ),
+                                    waiting_on=(
+                                        "approval"
+                                        if bool(
+                                            subagent_metadata_payload.get(
+                                                "awaiting_plan_approval"
+                                            )
+                                        )
+                                        else "message"
+                                    ),
+                                    last_progress_at=int(time.time() * 1000),
+                                    activity_kind="status",
+                                    activity_summary="Idle",
+                                    user_visible=True,
+                                    **subagent_fence,
+                                ).data,
+                            )
+
+                        selected_claim = None
+                        selected_message = None
+                        while not subagent_cancel_event.is_set():
+                            claims = runtime.claim_swarm_messages(
+                                participant_id=subagent_id,
+                                mailbox_epoch=int(
+                                    subagent_fence.get("mailbox_epoch") or 0
+                                ),
+                                conversation_id=conversation_id,
+                                since_seq=0,
+                                limit=100,
+                            )
+                            if not claims:
+                                try:
+                                    await asyncio.wait_for(
+                                        subagent_cancel_event.wait(), timeout=0.5
+                                    )
+                                except asyncio.TimeoutError:
+                                    continue
+                                break
+
+                            parsed: list[tuple[Any, dict[str, Any] | None]] = []
+                            for claim in claims:
+                                try:
+                                    value = json.loads(str(claim.message.content or ""))
+                                except (TypeError, ValueError):
+                                    value = None
+                                parsed.append((claim, value if isinstance(value, dict) else None))
+
+                            active_request_id = str(
+                                subagent_metadata_payload.get(
+                                    "active_plan_request_id"
+                                )
+                                or ""
+                            ).strip()
+                            plan_claim = next(
+                                (
+                                    (claim, payload)
+                                    for claim, payload in parsed
+                                    if payload is not None
+                                    and payload.get("type") == "plan_approval_response"
+                                    and str(payload.get("request_id") or "")
+                                    == active_request_id
+                                    and str(claim.message.sender_id or "")
+                                    == parent_run_id
+                                    and str(claim.message.team_name or "") == team_name
+                                    and int(
+                                        claim.message.recipient_mailbox_epoch or 0
+                                    )
+                                    == int(subagent_fence.get("mailbox_epoch") or 0)
+                                    and isinstance(payload.get("approved"), bool)
+                                ),
+                                None,
+                            )
+                            if plan_claim is not None:
+                                claim, payload = plan_claim
+                                approved = bool(payload.get("approved"))
+                                if approved:
+                                    target_mode = str(
+                                        payload.get("permission_mode") or "confirm"
+                                    ).strip()
+                                    if target_mode not in {
+                                        "confirm",
+                                        "auto",
+                                        "bypass",
+                                        "plan",
+                                    }:
+                                        target_mode = "confirm"
+                                    await _set_teammate_permission_mode(
+                                        target_mode,
+                                        source="teammate.plan_approved",
+                                    )
+                                runtime.update_subagent_lifecycle(
+                                    subagent_id,
+                                    awaiting_plan_approval=False,
+                                    active_plan_request_id="",
+                                    current_activity=(
+                                        "approved" if approved else "plan_rejected"
+                                    ),
+                                    **subagent_fence,
+                                )
+                                subagent_metadata_payload[
+                                    "awaiting_plan_approval"
+                                ] = False
+                                subagent_metadata_payload[
+                                    "active_plan_request_id"
+                                ] = ""
+                                runtime.ack_swarm_message_claims([claim])
+                                remaining = [
+                                    item
+                                    for item in claims
+                                    if item.claim_token != claim.claim_token
+                                ]
+                                if remaining:
+                                    runtime.release_swarm_message_claims(remaining)
+                                if approved:
+                                    current_prompt = _format_teammate_message(
+                                        "team-lead",
+                                        "Your plan was approved. Continue with implementation.",
+                                    )
+                                    selected_claim = claim
+                                    selected_message = claim.message
+                                    break
+                                feedback = str(
+                                    payload.get("feedback")
+                                    or "Plan needs revision"
+                                ).strip()
+                                current_prompt = _format_teammate_message(
+                                    "team-lead", feedback
+                                )
+                                selected_claim = claim
+                                selected_message = claim.message
+                                break
+
+                            shutdown_claim = next(
+                                (
+                                    (claim, payload)
+                                    for claim, payload in parsed
+                                    if payload is not None
+                                    and payload.get("type") == "shutdown_request"
+                                    and str(claim.message.sender_id or "")
+                                    == parent_run_id
+                                    and str(claim.message.team_name or "") == team_name
+                                    and int(
+                                        claim.message.recipient_mailbox_epoch or 0
+                                    )
+                                    == int(subagent_fence.get("mailbox_epoch") or 0)
+                                    and str(payload.get("request_id") or "").strip()
+                                    and str(payload.get("from") or "").strip()
+                                    == parent_run_id
+                                ),
+                                None,
+                            )
+                            if shutdown_claim is not None:
+                                claim, payload = shutdown_claim
+                                request_id = str(payload.get("request_id") or "").strip()
+                                reservation = runtime.reserve_lifecycle_response(
+                                    response_kind="shutdown_response",
+                                    participant_id=subagent_id,
+                                    mailbox_epoch=int(subagent_fence.get("mailbox_epoch") or 0),
+                                    request_id=request_id,
+                                    target_id=parent_run_id,
+                                )
+                                if reservation:
+                                    response = json.dumps(
+                                        {
+                                            "type": "shutdown_response",
+                                            "request_id": request_id,
+                                            "from": teammate_name,
+                                            "approve": True,
+                                        },
+                                        ensure_ascii=False,
+                                    )
+                                    runtime.send_swarm_message(
+                                        sender_id=subagent_id,
+                                        recipient_id="parent",
+                                        content=response,
+                                        conversation_id=conversation_id,
+                                        team_name=team_name,
+                                        sender_mailbox_epoch=int(
+                                            subagent_fence.get("mailbox_epoch") or 0
+                                        ),
+                                    )
+                                    runtime.commit_lifecycle_response(
+                                        response_kind="shutdown_response",
+                                        participant_id=subagent_id,
+                                        mailbox_epoch=int(subagent_fence.get("mailbox_epoch") or 0),
+                                        request_id=request_id,
+                                        reservation_token=reservation,
+                                    )
+                                runtime.ack_swarm_message_claims([claim])
+                                remaining = [
+                                    item for item in claims if item.claim_token != claim.claim_token
+                                ]
+                                if remaining:
+                                    runtime.release_swarm_message_claims(remaining)
+                                shutdown_requested = True
+                                break
+                            leader_claim = next(
+                                (
+                                    (claim, payload)
+                                    for claim, payload in parsed
+                                    if str(claim.message.sender_id or "")
+                                    == parent_run_id
+                                ),
+                                None,
+                            )
+                            selected_claim, _ = (
+                                shutdown_claim
+                                or leader_claim
+                                or parsed[0]
+                            )
+                            selected_message = selected_claim.message
+                            current_prompt = _format_teammate_message(
+                                (
+                                    "team-lead"
+                                    if str(selected_message.sender_id or "")
+                                    == parent_run_id
+                                    else str(selected_message.sender_id or "unknown")
+                                ),
+                                str(selected_message.content or ""),
+                            )
+                            runtime.ack_swarm_message_claims([selected_claim])
+                            remaining = [
+                                item
+                                for item in claims
+                                if item.claim_token != selected_claim.claim_token
+                            ]
+                            if remaining:
+                                runtime.release_swarm_message_claims(remaining)
+                            break
+
+                        if subagent_cancel_event.is_set():
+                            raise asyncio.CancelledError
+                        if shutdown_requested:
+                            break
+                        if selected_message is None and not current_prompt:
+                            continue
+
+                    if shutdown_requested:
+                        break
+
+                    runtime.update_subagent_lifecycle(
+                        subagent_id,
+                        is_idle=False,
+                        current_activity=description,
+                        **subagent_fence,
+                    )
+                    sub_state = AgentState(
+                        user_message=current_prompt,
+                        max_iterations=sub_settings.max_iterations,
+                    )
+                    sub_state.prompt_context["subagent"] = agent_type
+                    sub_state.workspace_context = parent_metadata.get(
+                        "workspace_context"
+                    )
+                    if context is not None:
+                        sub_state.conversation_id = context.conversation_id
+                        sub_state.checkpoint_manager = context.checkpoint_manager
+                    await _run_query_turn(current_prompt, sub_state)
 
             elapsed_ms = int((time.perf_counter() - start_time) * 1000)
             streamed_summary = "".join(summary_parts).strip()
@@ -1935,6 +4482,16 @@ class TaskTool(BaseTool):
                     output_tokens=int(terminal_usage.get("output_tokens") or 0),
                     cache_creation_input_tokens=int(terminal_usage.get("cache_creation_input_tokens") or 0),
                     cache_read_input_tokens=int(terminal_usage.get("cache_read_input_tokens") or 0),
+                    ordinary_input_tokens=(
+                        int(terminal_usage.get("ordinary_input_tokens") or 0)
+                        if "ordinary_input_tokens" in terminal_usage
+                        else None
+                    ),
+                    prompt_cache_total_tokens=(
+                        int(terminal_usage.get("prompt_cache_total_tokens") or 0)
+                        if "prompt_cache_total_tokens" in terminal_usage
+                        else None
+                    ),
                     reasoning_output_tokens=int(terminal_usage.get("reasoning_output_tokens") or 0),
                     model_id=getattr(llm, "_model", None),
                     provider=provider,
@@ -1945,9 +4502,17 @@ class TaskTool(BaseTool):
                     input_includes_cache_read=bool(
                         terminal_usage.get("input_includes_cache_read", True)
                     ),
+                    input_includes_cache_write=bool(
+                        terminal_usage.get("input_includes_cache_write", True)
+                    ),
+                    cost_usd=float(terminal_usage.get("cost_usd") or 0.0),
                 )
             display_summary = _subagent_display_summary(summary)
-            tool_call_count = len(sub_state.tool_calls)
+            tool_call_count = (
+                cumulative_tool_calls + len(sub_state.tool_calls)
+                if team_mode
+                else len(sub_state.tool_calls)
+            )
 
             if terminal_status == "cancelled":
                 raise asyncio.CancelledError
@@ -1956,11 +4521,34 @@ class TaskTool(BaseTool):
 
             result_status = "partial" if terminal_status == "partial" else "completed"
             result_text = summary
+            if result_status == "partial" and last_error and last_error not in result_text:
+                result_text = f"{result_text}\n\n{last_error}".strip()
             worktree_note = await _cleanup_worktree()
-            for note in (worktree_note, worktree_fallback_note):
-                if note:
-                    result_text += f"\n\n{note}"
+            if worktree_note:
+                result_text += f"\n\n{worktree_note}"
             full_result_text = result_text
+            # Stop/TaskCompleted/TeammateIdle are lifecycle gates.  Consume
+            # their HookResults before sealing the durable subagent record so a
+            # veto cannot be reported as a successful completion. The bounded
+            # child reports an explicit failed transition with hook feedback.
+            # TaskCompleted/TeammateIdle only advance after the stop boundary
+            # passes, so a veto cannot emit completion/idle side effects.
+            terminal_hook_blocked, terminal_hook_message = await _run_terminal_lifecycle_hooks(
+                subagent_id=subagent_id,
+                status=result_status,
+                summary=result_text,
+                subject=description,
+                agent_type=agent_type,
+                team_mode=team_mode,
+            )
+            if terminal_hook_blocked:
+                result_status = "failed"
+                terminal_reason = "hook_blocked"
+                result_text = (
+                    f"Subagent completion blocked by lifecycle hook: {terminal_hook_message}\n\n"
+                    f"{result_text}"
+                ).strip()
+                full_result_text = result_text
             result_text, result_artifact_id = _externalize_large_subagent_result(
                 self._artifact_store,
                 subagent_id=subagent_id,
@@ -1968,16 +4556,6 @@ class TaskTool(BaseTool):
             )
             result_record = None
             completed_record = None
-            _close_journal(
-                status=result_status,
-                summary=result_text,
-                reason=terminal_reason or result_status,
-                extra={
-                    "iterations": sub_state.iterations,
-                    "tool_call_count": tool_call_count,
-                    "duration_ms": elapsed_ms,
-                },
-            )
             if runtime is not None:
                 result_record = runtime.store_subagent_result(
                     subagent_id,
@@ -2022,7 +4600,7 @@ class TaskTool(BaseTool):
                     **subagent_fence,
                 )
                 done_event.data["result"] = (
-                    {**result_record.to_dict(), "content": result_text}
+                    result_record.public_dict(content_override=result_text)
                     if result_record is not None
                     else _terminal_result_payload(
                         status=result_status,
@@ -2033,37 +4611,36 @@ class TaskTool(BaseTool):
                 if result_artifact_id:
                     done_event.data["artifact_id"] = result_artifact_id
                 if completed_record is not None:
-                    done_event.data["record"] = completed_record.to_dict()
+                    done_event.data["record"] = completed_record.public_dict()
                 prompt_cache_fork = prompt_cache_fork_diagnostic()
                 if prompt_cache_fork:
                     done_event.data["prompt_cache_fork"] = prompt_cache_fork
                 await _emit_incarnation_event(
                     "subagent.done", done_event.data, require_running=False
                 )
-            await _run_subagent_stop_hook(
-                subagent_id,
-                result_status,
-                result_text,
-                agent_type=agent_type,
-            )
-            await _run_task_completed_hook(
-                task_id=subagent_id,
-                subject=description,
-                description=result_text,
-                teammate_name=agent_type,
-            )
-            await _run_teammate_idle_hook(teammate_name=agent_type)
             return ToolResult(
                 content=result_text,
-                is_error=False,
+                is_error=terminal_hook_blocked,
                 duration_ms=elapsed_ms,
-                display_summary=f"Subagent ({agent_type}): {description[:60]}",
+                display_summary=(
+                    "Subagent completion blocked by hook"
+                    if terminal_hook_blocked
+                    else f"Subagent ({agent_type}): {description[:60]}"
+                ),
                 result_kind="subagent",
                 status=result_status,
                 artifact_id=result_artifact_id or None,
             )
         except asyncio.CancelledError:
             elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+            task_runtime_metadata = (
+                runtime.get_subagent_task_metadata(subagent_id)
+                if runtime is not None
+                else None
+            )
+            cancel_reason = str(
+                (task_runtime_metadata or {}).get("cancel_reason") or "cancelled"
+            ).strip()[:128]
             record = None
             retained = "".join(summary_parts).strip()
             cancel_summary = retained
@@ -2071,18 +4648,8 @@ class TaskTool(BaseTool):
                 worktree_note = await _cleanup_worktree()
                 if worktree_note:
                     logger.info("Subagent %s cleanup: %s", subagent_id, worktree_note)
-            _close_journal(
-                status="cancelled",
-                summary=cancel_summary,
-                reason="cancelled",
-                extra={
-                    "iterations": sub_state.iterations,
-                    "tool_call_count": len(sub_state.tool_calls),
-                    "duration_ms": elapsed_ms,
-                },
-            )
             if runtime is not None:
-                runtime.store_subagent_result(
+                result_record = runtime.store_subagent_result(
                     subagent_id,
                     status="cancelled",
                     content=retained,
@@ -2090,10 +4657,14 @@ class TaskTool(BaseTool):
                     duration_ms=elapsed_ms,
                     iterations=sub_state.iterations,
                     tool_call_count=len(sub_state.tool_calls),
-                    terminal_reason="cancelled",
+                    terminal_reason=cancel_reason,
                     usage=terminal_usage,
                     **subagent_fence,
                 )
+                if result_record is None:
+                    raise RuntimeError(
+                        f"Durable cancellation result could not be stored for subagent {subagent_id}."
+                    )
                 record = runtime.complete_subagent(
                     subagent_id,
                     "cancelled",
@@ -2108,19 +4679,19 @@ class TaskTool(BaseTool):
                     subagent_id=subagent_id,
                     error="cancelled",
                     status="cancelled",
-                    termination_reason="cancelled",
+                    termination_reason=cancel_reason,
                     duration_ms=elapsed_ms,
                     iterations=sub_state.iterations,
                     usage=terminal_usage,
                     **subagent_fence,
                 )
                 if record is not None:
-                    done_event.data["record"] = record.to_dict()
+                    done_event.data["record"] = record.public_dict()
                 done_event.data["result"] = _terminal_result_payload(
                     status="cancelled",
                     content=retained,
                     error="cancelled",
-                    reason="cancelled",
+                    reason=cancel_reason,
                 )
                 prompt_cache_fork = prompt_cache_fork_diagnostic()
                 if prompt_cache_fork:
@@ -2128,19 +4699,22 @@ class TaskTool(BaseTool):
                 await _emit_incarnation_event(
                     "subagent.done", done_event.data, require_running=False
                 )
-            await _run_subagent_stop_hook(
-                subagent_id,
-                "cancelled",
-                retained,
-                agent_type=agent_type,
-            )
-            await _run_task_completed_hook(
-                task_id=subagent_id,
+            cancellation_hook_blocked, cancellation_hook_message = await _run_terminal_lifecycle_hooks(
+                subagent_id=subagent_id,
+                status="cancelled",
+                summary=retained,
                 subject=description,
-                description=retained,
-                teammate_name=agent_type,
+                agent_type=agent_type,
+                run_completion=False,
+                run_idle=False,
+                team_mode=team_mode,
             )
-            await _run_teammate_idle_hook(teammate_name=agent_type)
+            if cancellation_hook_blocked:
+                logger.info(
+                    "Subagent %s cancellation hook returned veto: %s",
+                    subagent_id,
+                    cancellation_hook_message,
+                )
             raise
         except Exception as exc:
             elapsed_ms = int((time.perf_counter() - start_time) * 1000)
@@ -2166,18 +4740,8 @@ class TaskTool(BaseTool):
                 if worktree_note:
                     error_content += f"\n{worktree_note}"
             record = None
-            _close_journal(
-                status=failure_status,
-                summary=error_content,
-                reason=type(exc).__name__,
-                extra={
-                    "iterations": sub_state.iterations,
-                    "tool_call_count": len(sub_state.tool_calls),
-                    "duration_ms": elapsed_ms,
-                },
-            )
             if runtime is not None:
-                runtime.store_subagent_result(
+                result_record = runtime.store_subagent_result(
                     subagent_id,
                     status=failure_status,
                     content=partial_text,
@@ -2189,6 +4753,18 @@ class TaskTool(BaseTool):
                     usage=terminal_usage,
                     **subagent_fence,
                 )
+                if result_record is None:
+                    return ToolResult(
+                        content=(
+                            f"Subagent {subagent_id} failed, but its durable result could not be stored. "
+                            "Completion was withheld pending runtime recovery."
+                        ),
+                        is_error=True,
+                        status="failed",
+                        error_kind="subagent_result_persistence",
+                        recoverable=False,
+                        result_kind="subagent",
+                    )
                 record = runtime.complete_subagent(
                     subagent_id,
                     failure_status,
@@ -2218,7 +4794,7 @@ class TaskTool(BaseTool):
                     **subagent_fence,
                 )
                 if record is not None:
-                    done_event.data["record"] = record.to_dict()
+                    done_event.data["record"] = record.public_dict()
                 done_event.data["result"] = _terminal_result_payload(
                     status=failure_status,
                     content=partial_text,
@@ -2231,14 +4807,19 @@ class TaskTool(BaseTool):
                 await _emit_incarnation_event(
                     "subagent.done", done_event.data, require_running=False
                 )
-            await _run_subagent_stop_hook(subagent_id, failure_status, error_content, agent_type=agent_type)
-            await _run_task_completed_hook(
-                task_id=subagent_id,
+            failure_hook_blocked, failure_hook_message = await _run_terminal_lifecycle_hooks(
+                subagent_id=subagent_id,
+                status=failure_status,
+                summary=error_content,
                 subject=description,
-                description=error_content,
-                teammate_name=agent_type,
+                agent_type=agent_type,
+                team_mode=team_mode,
             )
-            await _run_teammate_idle_hook(teammate_name=agent_type)
+            if failure_hook_blocked:
+                error_content = (
+                    f"Subagent lifecycle hook blocked terminal transition: {failure_hook_message}\n\n"
+                    f"{error_content}"
+                ).strip()
             return ToolResult(
                 content=error_content,
                 is_error=not has_partial_output,
@@ -2264,50 +4845,88 @@ class TaskTool(BaseTool):
         """Run multiple independent subtasks concurrently."""
         total = len(tasks)
         start_time = time.perf_counter()
-        runtime = self._runtime_from_context(context) or default_runtime()
+        runtime = require_runtime_from_context(context)
         subagent_ids = [f"subagent-{uuid4().hex[:8]}" for _ in tasks]
         results: list[ToolResult | Exception | None] = [None] * total
-        next_index = 0
-        index_lock = asyncio.Lock()
+        parent_cancel_event = context.cancel_event if context is not None else None
 
-        async def run_next() -> None:
-            nonlocal next_index
-            while True:
-                async with index_lock:
-                    if next_index >= total:
-                        return
-                    index = next_index
-                    next_index += 1
-                subagent_id = subagent_ids[index]
-                if not await runtime.acquire_subagent_slot(subagent_id):
+        async def run_one(index: int) -> None:
+            subagent_id = subagent_ids[index]
+            try:
+                acquired = await runtime.acquire_subagent_slot(
+                    subagent_id,
+                    cancel_event=parent_cancel_event,
+                )
+                if not acquired:
                     results[index] = ToolResult(
-                        content=_SUBAGENT_CAPACITY_MESSAGE,
-                        is_error=True,
-                        status="blocked",
-                        display_summary="Subagent capacity reached",
+                        content="Subagent was cancelled before it started.",
+                        is_error=False,
+                        status="cancelled",
+                        display_summary="Subagent cancelled before start",
                         result_kind="subagent",
                     )
-                    continue
-                try:
-                    results[index] = await self._run_single_subtask(
-                        description=tasks[index]["description"],
-                        prompt=tasks[index]["prompt"],
-                        agent_type=tasks[index].get("agent_type", "general-purpose"),
-                        context=context,
-                        subtask_index=index,
-                        total_subtasks=total,
-                        subagent_id=subagent_id,
-                        subagent_metadata=_subagent_metadata(tasks[index]),
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    results[index] = exc
-                finally:
-                    # start_subagent consumes a reservation; this is a no-op
-                    # after a normal run and releases it on early failure.
-                    runtime.release_subagent_slot(subagent_id)
+                    return
+                results[index] = await self._run_single_subtask(
+                    description=tasks[index]["description"],
+                    prompt=tasks[index]["prompt"],
+                    agent_type=tasks[index].get("agent_type", "general-purpose"),
+                    context=context,
+                    subtask_index=index,
+                    total_subtasks=total,
+                    subagent_id=subagent_id,
+                    subagent_metadata=_subagent_metadata(tasks[index]),
+                )
+            except asyncio.CancelledError:
+                if parent_cancel_event is not None and parent_cancel_event.is_set():
+                    raise
+                results[index] = ToolResult(
+                    content="Subagent was stopped.",
+                    is_error=False,
+                    status="cancelled",
+                    display_summary="Subagent stopped",
+                    result_kind="subagent",
+                )
+            except Exception as exc:  # noqa: BLE001
+                results[index] = exc
+            finally:
+                runtime.release_subagent_slot(subagent_id)
+                current_task = asyncio.current_task()
+                if current_task is not None:
+                    runtime.release_subagent_task(subagent_id, expected_task=current_task)
 
-        worker_count = min(MAX_PARALLEL_CONCURRENCY, total)
-        await asyncio.gather(*(run_next() for _ in range(worker_count)))
+        worker_tasks = [asyncio.create_task(run_one(index)) for index in range(total)]
+        parent_metadata = metadata_from_context(context)
+        registered_count = 0
+        try:
+            for index, worker_task in enumerate(worker_tasks):
+                runtime.register_subagent_task(
+                    subagent_ids[index],
+                    worker_task,
+                    parent_run_id=str(parent_metadata.get("run_id") or ""),
+                    owner_task_id=str(getattr(context, "task_id", "") or ""),
+                    session_id=str(getattr(context, "session_id", "") or ""),
+                    agent_type=tasks[index].get("agent_type", "general-purpose"),
+                    prompt_summary=tasks[index]["description"],
+                    pending=True,
+                )
+                registered_count += 1
+        except Exception as exc:  # noqa: BLE001
+            for worker_task in worker_tasks:
+                worker_task.cancel()
+            for index in range(registered_count):
+                runtime.release_subagent_task(
+                    subagent_ids[index],
+                    expected_task=worker_tasks[index],
+                )
+            await asyncio.gather(*worker_tasks, return_exceptions=True)
+            return ToolResult(
+                content=f"Parallel subagents could not be registered: {exc}",
+                is_error=True,
+                status="failed",
+                display_summary="Parallel subagent registration failed",
+                result_kind="subagent",
+            )
+        await asyncio.gather(*worker_tasks)
 
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
 
@@ -2377,12 +4996,24 @@ class TaskTool(BaseTool):
         *,
         read_only: bool = False,
         extra_deny_rules: list[str] | None = None,
+        team_mode: bool = False,
+        background: bool = False,
+        plan_mode_required: bool = False,
+        requested_mode: str = "",
+        agent_triggers_enabled: bool = False,
+        execution_profile: AgentExecutionProfile | None = None,
     ) -> PermissionContext:
         return build_subagent_permission_context(
             agent_type,
             parent_context,
             read_only=read_only,
             extra_deny_rules=extra_deny_rules,
+            team_mode=team_mode,
+            background=background,
+            plan_mode_required=plan_mode_required,
+            requested_mode=requested_mode,
+            agent_triggers_enabled=agent_triggers_enabled,
+            execution_profile=execution_profile,
         )
 
     @staticmethod
@@ -2390,7 +5021,12 @@ class TaskTool(BaseTool):
         if context is None:
             return False
         permission = context.permission
-        if permission.source.startswith("subagent:"):
+        if resolve_agent_execution_profile(permission, context.metadata) is not None:
+            return True
+        # Legacy/durable fallback for runs created before execution profiles
+        # were persisted.  New authorization decisions are made from the
+        # resolved profile in ``execute`` rather than these identity strings.
+        if str(permission.source or "").startswith(("subagent:", "teammate:")):
             return True
         if "task" in permission.tool_deny_rules:
             return True
@@ -2408,10 +5044,6 @@ class TaskTool(BaseTool):
             prompt,
             get_custom_agent=lambda name: get_custom_agent(name, workspace_root),
         )
-
-    @staticmethod
-    def _runtime_from_context(context: ToolExecutionContext | None):
-        return runtime_from_context(context)
 
     @staticmethod
     def _metadata_from_context(context: ToolExecutionContext | None) -> dict[str, Any]:

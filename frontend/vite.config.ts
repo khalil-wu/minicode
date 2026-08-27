@@ -24,6 +24,21 @@ const configureQuietProxy = (label: string) => (proxy: { on: (event: "error", ha
   });
 };
 
+// Dev-only: index.html ships a strict CSP (script-src 'self') for the packaged
+// Electron build, but Vite's react-refresh preamble is an inline module script
+// and would be blocked, black-screening the dev renderer. Relax script-src for
+// `vite serve` only; production builds keep the strict policy untouched.
+const devCspRelaxPlugin = {
+  name: "minicode-dev-csp-relax",
+  apply: "serve" as const,
+  transformIndexHtml(html: string): string {
+    return html.replace(
+      "script-src 'self';",
+      "script-src 'self' 'unsafe-inline' http://localhost:* http://127.0.0.1:*;",
+    );
+  },
+};
+
 export default defineConfig(async ({ command, mode }) => {
   // Always resolve env files from the frontend project directory.
   const env = loadEnv(mode, __dirname, "");
@@ -70,9 +85,9 @@ export default defineConfig(async ({ command, mode }) => {
 
   return {
     base: useRelativeBase ? "./" : "./",
-    plugins: [react()],
+    plugins: [react(), devCspRelaxPlugin],
     test: {
-      exclude: ["tests/**", "node_modules/**"],
+      exclude: ["tests/**", "node_modules/**", ".minicode/**"],
       testTimeout: 10_000,
     },
     resolve: {

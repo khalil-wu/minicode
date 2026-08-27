@@ -62,7 +62,9 @@ class ControlToolRouter:
             answer_data = await self.await_response(tc)
         else:
             answer_data = await self.approval_handler(tc.id)
-        answer = answer_data.get("answer", answer_data.get("guidance", ""))
+        answer = str(
+            answer_data.get("answer", answer_data.get("guidance", "")) or ""
+        ).strip()
         from backend.hooks import get_hook_manager
 
         hook_mgr = get_hook_manager()
@@ -77,6 +79,24 @@ class ControlToolRouter:
                 )
             except Exception as exc:
                 logger.debug("MCP elicitation response failed (harmless): %s", exc)
+        if not answer:
+            # A dismissed question is not an answer. Reporting ``User answer: ``
+            # as a successful reply let the model invent the decision it had just
+            # asked about and act on it. cc treats an unanswered prompt as a
+            # refusal, so say so explicitly instead.
+            dismissed = str(answer_data.get("action") or "").strip().lower() == "reject"
+            return RoutedToolResult(
+                result=ToolResult(
+                    content=(
+                        "The user dismissed the question without answering."
+                        if dismissed
+                        else "The user did not answer the question."
+                    )
+                    + " Do not assume an answer: stop and report what you need,"
+                    " or ask one narrower question.",
+                    status="partial",
+                ),
+            )
         return RoutedToolResult(
             result=ToolResult(content=f"User answer: {answer}"),
         )

@@ -69,12 +69,16 @@ export function isCompletedAgentMessageBlock(
     && (block.status === "completed" || block.status === "partial");
 }
 
+export function isExplicitFinalAnswerSource(source: string | undefined): boolean {
+  return Boolean(source && ["model_final", "reply", "recovery", "partial"].includes(source));
+}
+
 export function isFinalAnswerBlock(block: ContentBlock): boolean {
   if (!isCompletedAgentMessageBlock(block) || block.type !== "text") return false;
   // Typed provider commentary is an assistant-message item too, but it is not
   // part of the terminal answer. Legacy/replayed blocks may use reply or omit
   // source, so retain those as final-answer compatible.
-  return !block.source || ["model_final", "reply", "recovery", "partial"].includes(block.source);
+  return !block.source || isExplicitFinalAnswerSource(block.source);
 }
 
 export function getAnswerTextFromBlocks(blocks: ContentBlock[]): string {

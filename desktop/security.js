@@ -25,30 +25,21 @@ const SAFE_USER_OUTPUT_EXTENSIONS = new Set([
   ".yaml", ".yml", ".zip",
 ]);
 
-function init({ initialRoots, approvedRoots, readOnlyRoots, userOutputRoots: outputRoots, logger, trustedRootsFile: rootsFile }) {
-  trustedWorkspaceRoots = new Set(
-    Array.from(initialRoots || [], (root) => canonicalizePath(root)).filter(isSafeWorkspacePath),
-  );
+function canonicalizeRootSet(roots) {
+  const result = new Set();
+  for (const root of roots || []) {
+    const canonical = tryCanonicalizePath(root);
+    if (canonical && isSafeWorkspacePath(canonical)) result.add(canonical);
+  }
+  return result;
+}
+
+function init({ initialRoots, readOnlyRoots, userOutputRoots: outputRoots, logger, trustedRootsFile: rootsFile }) {
+  trustedWorkspaceRoots = canonicalizeRootSet(initialRoots);
   trustedRootsFile = typeof rootsFile === "string" ? rootsFile : "";
   approvedWorkspaceRoots = readApprovedWorkspaceRoots();
-  appReadOnlyRoots = new Set(
-    Array.from(readOnlyRoots || [], (root) => canonicalizePath(root)).filter(isSafeWorkspacePath),
-  );
-  userOutputRoots = new Set(
-    Array.from(outputRoots || [], (root) => canonicalizePath(root)).filter(isSafeWorkspacePath),
-  );
-  for (const root of approvedRoots || []) {
-    const canonical = canonicalizePath(root);
-    if (!isSafeWorkspacePath(canonical)) continue;
-    try {
-      if (fs.statSync(canonical).isDirectory()) approvedWorkspaceRoots.add(canonical);
-    } catch {
-      // Ignore stale roots during migration from the legacy active workspace.
-    }
-  }
-  if (approvedRoots && approvedWorkspaceRoots.size > 0) {
-    persistApprovedWorkspaceRoots();
-  }
+  appReadOnlyRoots = canonicalizeRootSet(readOnlyRoots);
+  userOutputRoots = canonicalizeRootSet(outputRoots);
   if (typeof logger === "function") {
     appendDesktopLog = logger;
   }
@@ -108,7 +99,8 @@ function canonicalizePath(targetPath) {
   const resolved = path.resolve(targetPath);
   try {
     return fs.realpathSync.native(resolved);
-  } catch {
+  } catch (error) {
+    if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") throw error;
     const suffix = [];
     let cursor = resolved;
     while (!fs.existsSync(cursor)) {
@@ -122,6 +114,14 @@ function canonicalizePath(targetPath) {
   }
 }
 
+function tryCanonicalizePath(targetPath) {
+  try {
+    return canonicalizePath(targetPath);
+  } catch {
+    return null;
+  }
+}
+
 function readApprovedWorkspaceRoots() {
   const roots = new Set();
   if (!trustedRootsFile) return roots;
@@ -131,8 +131,8 @@ function readApprovedWorkspaceRoots() {
     if (!Array.isArray(values)) return roots;
     for (const value of values) {
       if (typeof value !== "string" || !value.trim()) continue;
-      const canonical = canonicalizePath(value);
-      if (!isSafeWorkspacePath(canonical)) continue;
+      const canonical = tryCanonicalizePath(value);
+      if (!canonical || !isSafeWorkspacePath(canonical)) continue;
       try {
         if (fs.statSync(canonical).isDirectory()) roots.add(canonical);
       } catch {
@@ -160,9 +160,9 @@ function rememberTrustedWorkspaceRoot(targetPath) {
   if (typeof targetPath !== "string" || !targetPath.trim()) {
     return "";
   }
-  const resolved = canonicalizePath(targetPath);
-  if (!isSafeWorkspacePath(resolved)) {
-    appendDesktopLog(`[desktop] rejected unsafe workspace path: ${resolved}`);
+  const resolved = tryCanonicalizePath(targetPath);
+  if (!resolved || !isSafeWorkspacePath(resolved)) {
+    appendDesktopLog(`[desktop] rejected unsafe or inaccessible workspace path: ${path.resolve(targetPath)}`);
     return "";
   }
   try {
@@ -177,7 +177,8 @@ function rememberTrustedWorkspaceRoot(targetPath) {
 }
 
 function isTrustedWorkspaceRootPath(targetPath) {
-  const resolved = canonicalizePath(targetPath);
+  const resolved = tryCanonicalizePath(targetPath);
+  if (!resolved) return false;
   for (const root of trustedWorkspaceRoots) {
     if (isSamePath(resolved, root)) return true;
   }
@@ -189,7 +190,8 @@ function isWithinTrustedWorkspace(targetPath) {
 }
 
 function isWithinRootSet(targetPath, roots) {
-  const resolved = canonicalizePath(targetPath);
+  const resolved = tryCanonicalizePath(targetPath);
+  if (!resolved) return false;
   const isWindows = process.platform === "win32";
   for (const root of roots) {
     if (isWindows) {
@@ -212,7 +214,8 @@ function isWithinAppReadOnlyData(targetPath) {
 }
 
 function isReadableUserOutput(targetPath) {
-  const resolved = canonicalizePath(targetPath);
+  const resolved = tryCanonicalizePath(targetPath);
+  if (!resolved) return false;
   if (!isWithinRootSet(resolved, userOutputRoots)) return false;
   if (!SAFE_USER_OUTPUT_EXTENSIONS.has(path.extname(resolved).toLowerCase())) return false;
   try {
@@ -254,15 +257,20 @@ function restoreTrustedWorkspaceRoot(targetPath) {
 function trustedPathCandidates(targetPath) {
   const rawPath = targetPath.trim();
   if (path.isAbsolute(rawPath)) {
-    return [canonicalizePath(rawPath)];
+    const canonical = tryCanonicalizePath(rawPath);
+    return canonical ? [canonical] : [];
   }
-  return Array.from(trustedWorkspaceRoots, (root) => canonicalizePath(path.resolve(root, rawPath)));
+  return Array.from(
+    trustedWorkspaceRoots,
+    (root) => tryCanonicalizePath(path.resolve(root, rawPath)),
+  ).filter(Boolean);
 }
 
 const IPC_CAPABILITIES = new Set([
   "minicode:browser:captureScreenshot", "minicode:browser:click", "minicode:browser:discover",
   "minicode:browser:navigate", "minicode:browser:type", "minicode:deepLink:ack",
   "minicode:embeddedBrowser:activate", "minicode:embeddedBrowser:clearSiteData", "minicode:embeddedBrowser:close",
+  "minicode:embeddedBrowser:closeConversation",
   "minicode:embeddedBrowser:create", "minicode:embeddedBrowser:list", "minicode:embeddedBrowser:navigate",
   "minicode:embeddedBrowser:getSettings", "minicode:embeddedBrowser:inspect",
   "minicode:embeddedBrowser:runAction", "minicode:embeddedBrowser:setBounds", "minicode:embeddedBrowser:setSettings",
@@ -271,11 +279,12 @@ const IPC_CAPABILITIES = new Set([
   "minicode:fs:listTree", "minicode:fs:readFile", "minicode:fs:renamePath",
   "minicode:fs:searchFiles", "minicode:fs:writeFile", "minicode:notify",
   "minicode:openExternal", "minicode:openPath", "minicode:pickDirectory",
-  "minicode:pty:ackExit", "minicode:pty:kill", "minicode:pty:killConversation", "minicode:pty:list",
+  "minicode:pty:ackExit", "minicode:pty:clear", "minicode:pty:kill", "minicode:pty:killConversation", "minicode:pty:list", "minicode:pty:restart",
   "minicode:pty:resize", "minicode:pty:snapshot", "minicode:pty:spawn",
   "minicode:pty:write", "minicode:revealPath", "minicode:startup:getState",
   "minicode:startup:openLogs", "minicode:startup:quit", "minicode:startup:retry",
-  "minicode:update:check", "minicode:update:download", "minicode:update:install", "minicode:update:status:get",
+  "minicode:update:activity", "minicode:update:check", "minicode:update:download", "minicode:update:install",
+  "minicode:update:preflight", "minicode:update:status:get",
   "minicode:window:close", "minicode:window:maximize", "minicode:window:minimize",
   "minicode:workspace:trust",
 ]);
@@ -311,7 +320,7 @@ function assertReadablePath(targetPath, label = "Path") {
   }
   const rawPath = targetPath.trim();
   const candidates = trustedPathCandidates(rawPath);
-  const absoluteCandidate = path.isAbsolute(rawPath) ? canonicalizePath(rawPath) : null;
+  const absoluteCandidate = path.isAbsolute(rawPath) ? tryCanonicalizePath(rawPath) : null;
   const resolved = candidates.find((candidate) => isReadablePath(candidate) && fs.existsSync(candidate))
     || (absoluteCandidate && isReadablePath(absoluteCandidate) ? absoluteCandidate : null)
     || candidates.find((candidate) => isReadablePath(candidate))
@@ -327,10 +336,10 @@ function assertReadablePath(targetPath, label = "Path") {
 // ---------------------------------------------------------------------------
 
 const PROTECTED_WRITE_FILE_NAMES = new Set([
-  ".gitconfig", ".gitmodules", ".mcp.json", ".claude.json",
-  ".codex.json", "settings.json", "settings.local.json",
+  ".gitconfig", ".gitmodules", ".mcp.json", ".minicode.json",
+  "settings.json", "settings.local.json",
 ]);
-const PROTECTED_WRITE_PATH_PARTS = new Set([".git", ".claude", ".codex"]);
+const PROTECTED_WRITE_PATH_PARTS = new Set([".git", ".minicode"]);
 
 function isProtectedWritePath(resolvedPath) {
   const basename = path.basename(resolvedPath).toLowerCase();

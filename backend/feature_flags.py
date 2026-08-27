@@ -1,8 +1,4 @@
-"""Small feature-flag layer for experimental MiniCode capabilities.
-
-Precedence is:
-default < settings.json `feature_flags` < `MINICODE_FEATURE_<FLAG>` env.
-"""
+"""Feature projection from the effective config layer stack."""
 
 from __future__ import annotations
 
@@ -19,10 +15,6 @@ DEFAULT_FEATURE_FLAGS: dict[str, bool] = {
     "plugin_skills": True,
     "sdk_query": True,
     "mcp_roots": True,
-    # Host-side LLM sampling lets an MCP server ask MiniCode to call the model.
-    # Keep it opt-in: every enabled request still needs a turn/session owner and
-    # policy checks before it can run.
-    "mcp_sampling": False,
     "mcp_elicitation": True,
     "mcp_websocket_transport": True,
     "mcp_streamable_http_transport": True,
@@ -79,12 +71,16 @@ def _settings_flags(settings_data: Mapping[str, Any] | None) -> Mapping[str, Any
     return raw if isinstance(raw, Mapping) else {}
 
 
-def load_feature_flags(settings_data: Mapping[str, Any] | None = None) -> FeatureFlags:
+def load_feature_flags(
+    settings_data: Mapping[str, Any] | None = None,
+    *,
+    managed_requirements: Mapping[str, bool] | None = None,
+) -> FeatureFlags:
     if settings_data is None:
         try:
-            from backend.config import _load_settings_json
+            from backend.config import _load_effective_settings_json
 
-            settings_data = _load_settings_json()
+            settings_data = _load_effective_settings_json()
         except Exception:
             settings_data = {}
 
@@ -104,6 +100,18 @@ def load_feature_flags(settings_data: Mapping[str, Any] | None = None) -> Featur
             continue
         flags[name] = coerce_feature_bool(raw_value, flags.get(name, False))
 
+    if managed_requirements is None:
+        try:
+            from backend.config import get_config_requirements
+
+            managed_requirements = get_config_requirements().feature_requirements
+        except Exception:
+            managed_requirements = {}
+    for raw_name, required in managed_requirements.items():
+        name = normalize_feature_name(str(raw_name))
+        if name:
+            flags[name] = bool(required)
+
     return FeatureFlags(flags=flags)
 
 
@@ -111,8 +119,15 @@ def feature_enabled(name: str, default: bool | None = None) -> bool:
     return load_feature_flags().enabled(name, default)
 
 
-def feature_flags_payload(settings_data: Mapping[str, Any] | None = None) -> dict[str, dict[str, Any]]:
-    feature_flags = load_feature_flags(settings_data)
+def feature_flags_payload(
+    settings_data: Mapping[str, Any] | None = None,
+    *,
+    managed_requirements: Mapping[str, bool] | None = None,
+) -> dict[str, dict[str, Any]]:
+    feature_flags = load_feature_flags(
+        settings_data,
+        managed_requirements=managed_requirements,
+    )
     names = sorted(feature_flags.flags.keys())
     return {
         name: {

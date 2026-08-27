@@ -12,9 +12,9 @@ import { FooterRow } from "./FooterRow";
 import { PromptHistoryOverlay } from "./PromptHistoryOverlay";
 import { QueuedMessageList } from "./QueuedMessageList";
 import { appendPromptHistory, clearPromptHistory, readPromptHistory } from "./prompt-history";
-import { uploadComposerFiles } from "./uploads";
+import { acceptAttachmentConversationOwner, uploadComposerFiles } from "./uploads";
 import { InlineAgentPrompt } from "../chat/InlineAgentPrompt";
-import { InlineTaskList } from "../chat/components/InlineTaskList";
+import { TurnPlanProgress } from "../chat/components/TurnPlanProgress";
 import { MessageQuote } from "../chat/components/MessageQuote";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { pushToast } from "../overlays/ToastContainer";
@@ -27,8 +27,87 @@ import {
   resolveRuntimeSlashMenuSelection,
   syncRuntimeSlashPanelForDraft,
 } from "../lib/runtime-commands";
+import { buildInterruptCommand, hasInterruptFence } from "../lib/interrupt-command";
+import { workspaceFilePathsEqual } from "../lib/workspace-path";
 
 let initialCatalogRequested = false;
+
+// Shared pre-send pipeline for both user messages and runtime slash messages:
+// resolves the target conversation, uploads @mention/skill context attachments,
+// and guards against conversation switches mid-upload. Returns null when the
+// send must abort (a toast has already been shown).
+const buildOutgoingContext = async (requestedConversationId: string) => {
+  const stateAtSend = useAppStore.getState();
+  const targetConversationId = String(
+    requestedConversationId || stateAtSend.conversationId || "",
+  ).trim();
+  const contextRefs = [
+    ...stateAtSend.selectedMentions,
+    ...stateAtSend.selectedSkills,
+  ];
+  const skillInvocations = buildSkillInvocationLine(stateAtSend.selectedSkills);
+  let contextPayload = "";
+  try {
+    contextPayload = await buildContextPayload(contextRefs);
+  } catch (error) {
+    // Log the error for debugging
+    console.warn("Failed to build context payload for @mentions, using fallback:", error);
+    contextPayload = "";
+  }
+  let nativeContext: Awaited<ReturnType<typeof buildContextNativeAttachments>> = {
+    attachments: [] as Record<string, unknown>[],
+    attachmentRefs: [] as MessageAttachmentRef[],
+    notes: "",
+    conversationId: targetConversationId || undefined,
+  };
+  try {
+    nativeContext = await buildContextNativeAttachments(
+      contextRefs,
+      getWebSocket()?.sessionId,
+      targetConversationId,
+      stateAtSend.workingDirectory,
+    );
+  } catch (error) {
+    console.warn("Failed to build native context attachments:", error);
+    pushToast(
+      error instanceof Error ? error.message : "上下文附件上传失败，请重试。",
+      "error",
+      4500,
+    );
+    return null;
+  }
+  if (nativeContext.notes) {
+    pushToast("部分上下文附件无法读取，已在消息中标明。", "warning", 4200);
+  }
+  const resolvedConversationId = String(
+    nativeContext.conversationId || targetConversationId,
+  ).trim();
+  if (
+    targetConversationId
+    && resolvedConversationId
+    && resolvedConversationId !== targetConversationId
+  ) {
+    pushToast("附件所属会话已变化，请切回原会话后重试。", "error", 4500);
+    return null;
+  }
+  if (
+    !targetConversationId
+    && resolvedConversationId
+    && !acceptAttachmentConversationOwner(resolvedConversationId)
+  ) {
+    pushToast("附件已绑定到另一个会话，请切回该会话后发送。", "warning", 4500);
+    return null;
+  }
+  const prefix = [skillInvocations, contextPayload, nativeContext.notes].filter(Boolean).join("\n\n");
+  return {
+    stateAtSend,
+    contextRefs,
+    prefix,
+    attachments: nativeContext.attachments,
+    attachmentRefs: nativeContext.attachmentRefs,
+    conversationId: resolvedConversationId || targetConversationId || undefined,
+  };
+};
 
 export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const draft = useAppStore((s) => s.draft);
@@ -37,7 +116,6 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const clearQuotedMessage = useAppStore((s) => s.clearQuotedMessage);
   const isStreaming = useAppStore((s) => s.isStreaming);
   const isConnected = useAppStore((s) => s.isConnected);
-  const interrupt = useAppStore((s) => s.interrupt);
   const slashPanelOpen = useAppStore((s) => s.slashPanelOpen);
   const mentionPanelOpen = useAppStore((s) => s.mentionPanelOpen);
   const openSlashPanel = useAppStore((s) => s.openSlashPanel);
@@ -131,40 +209,26 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       backendContent?: string;
       displayContent?: string;
       attachmentRefs?: MessageAttachmentRef[];
+      conversationId?: string;
       allowWhileStreaming?: boolean;
+      busyBehavior?: "queue" | "steer";
     },
   ) => {
-    const contextRefs = [
-      ...useAppStore.getState().selectedMentions,
-      ...useAppStore.getState().selectedSkills,
-    ];
-    const skillInvocations = buildSkillInvocationLine(useAppStore.getState().selectedSkills);
-    let contextPayload = "";
-    try {
-      contextPayload = await buildContextPayload(contextRefs);
-    } catch (error) {
-      // Log the error for debugging
-      console.warn("Failed to build context payload for @mentions, using fallback:", error);
-      contextPayload = "";
-    }
-    let nativeContext = { attachments: [] as Record<string, unknown>[], attachmentRefs: [] as MessageAttachmentRef[], notes: "" };
-    try {
-      nativeContext = await buildContextNativeAttachments(contextRefs, getWebSocket()?.sessionId, workingDirectory);
-    } catch (error) {
-      console.warn("Failed to build native context attachments:", error);
-    }
-    const prefix = [skillInvocations, contextPayload, nativeContext.notes].filter(Boolean).join("\n\n");
-    const mergedAttachments = [...readyAttachments, ...nativeContext.attachments];
-    const mergedAttachmentRefs = [...(options?.attachmentRefs ?? []), ...nativeContext.attachmentRefs];
-    const effectiveContent = [prefix, content].filter(Boolean).join("\n\n").trim();
+    const outgoing = await buildOutgoingContext(options?.conversationId || "");
+    if (!outgoing) return false;
+    const mergedAttachments = [...readyAttachments, ...outgoing.attachments];
+    const mergedAttachmentRefs = [...(options?.attachmentRefs ?? []), ...outgoing.attachmentRefs];
+    const effectiveContent = [outgoing.prefix, content].filter(Boolean).join("\n\n").trim();
     if (!effectiveContent && mergedAttachments.length === 0) return false;
     return sendChatMessage({
       displayContent: options?.displayContent ?? content,
-      backendContent: [prefix, options?.backendContent ?? content].filter(Boolean).join("\n\n").trim(),
+      backendContent: [outgoing.prefix, options?.backendContent ?? content].filter(Boolean).join("\n\n").trim(),
       attachments: mergedAttachments,
       attachmentRefs: mergedAttachmentRefs,
-      contextRefs,
+      conversationId: outgoing.conversationId,
+      contextRefs: outgoing.contextRefs,
       allowWhileStreaming: options?.allowWhileStreaming,
+      busyBehavior: options?.busyBehavior,
     });
   };
 
@@ -173,33 +237,17 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     backendContent: string;
     skipLocalAppend: boolean;
   }) => {
-    const contextRefs = [
-      ...useAppStore.getState().selectedMentions,
-      ...useAppStore.getState().selectedSkills,
-    ];
-    const skillInvocations = buildSkillInvocationLine(useAppStore.getState().selectedSkills);
-    let contextPayload = "";
-    try {
-      contextPayload = await buildContextPayload(contextRefs);
-    } catch (error) {
-      // Log the error for debugging
-      console.warn("Failed to build context payload for @mentions, using fallback:", error);
-      contextPayload = "";
-    }
-    let nativeContext = { attachments: [] as Record<string, unknown>[], attachmentRefs: [] as MessageAttachmentRef[], notes: "" };
-    try {
-      nativeContext = await buildContextNativeAttachments(contextRefs, getWebSocket()?.sessionId, workingDirectory);
-    } catch (error) {
-      console.warn("Failed to build native context attachments:", error);
-    }
-    const prefix = [skillInvocations, contextPayload, nativeContext.notes].filter(Boolean).join("\n\n");
+    const outgoing = await buildOutgoingContext("");
+    if (!outgoing) return false;
     return sendChatMessage({
       ...options,
-      backendContent: [prefix, options.backendContent].filter(Boolean).join("\n\n").trim(),
-      attachments: nativeContext.attachments,
-      attachmentRefs: nativeContext.attachmentRefs,
-      contextRefs,
-      allowWhileStreaming: useAppStore.getState().isStreaming,
+      backendContent: [outgoing.prefix, options.backendContent].filter(Boolean).join("\n\n").trim(),
+      attachments: outgoing.attachments,
+      attachmentRefs: outgoing.attachmentRefs,
+      conversationId: outgoing.conversationId,
+      contextRefs: outgoing.contextRefs,
+      allowWhileStreaming: outgoing.stateAtSend.isStreaming,
+      busyBehavior: outgoing.stateAtSend.followUpBehavior,
     });
   };
 
@@ -220,11 +268,31 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   };
 
   const stopRun = () => {
-    const conversationId = useAppStore.getState().conversationId;
-    interrupt();
-    sendClientCommand({
-      type: "interrupt",
-      ...(conversationId ? { conversation_id: conversationId } : {}),
+    const state = useAppStore.getState();
+    const command = buildInterruptCommand(state);
+    // Before agent.run.started binds a turn/message fence, the backend must
+    // reject an unfenced interrupt rather than guessing which run to stop.
+    // Finish the local optimistic state in that narrow window so Stop never
+    // appears to do nothing; a fenced command still waits for the server's
+    // authoritative terminal event.
+    if (!hasInterruptFence(command)) state.interrupt();
+    sendClientCommand(command);
+  };
+
+  const composerFingerprint = () => {
+    const state = useAppStore.getState();
+    return JSON.stringify({
+      conversationId: String(state.conversationId || ""),
+      draft: state.draft,
+      attachments: state.attachments.map((item) => ({
+        id: item.id,
+        status: item.status,
+        artifactId: item.artifactId || item.attachment?.artifact_id || item.attachment?.id || "",
+      })),
+      mentions: state.selectedMentions.map((item) => ({ path: item.path, name: item.name })),
+      skills: state.selectedSkills.map((item) => ({ path: item.path, name: item.name })),
+      quotedMessageId: state.quotedMessage?.id || "",
+      selectedSlashCommand,
     });
   };
 
@@ -248,13 +316,52 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     const composerAttachments = useAppStore.getState().attachments;
     const blockingAttachment = composerAttachments.find((a) => a.status !== "ready" || !a.attachment);
     if (blockingAttachment) {
-      const verb = blockingAttachment.status === "uploading" ? "finish uploading" : "be removed or uploaded again";
-      pushToast(`Wait for "${blockingAttachment.name}" to ${verb} before sending.`, "warning", 3500);
+      const message = blockingAttachment.status === "uploading"
+        ? `“${blockingAttachment.name}”仍在上传，请等待完成后发送。`
+        : blockingAttachment.error
+          ? `“${blockingAttachment.name}”${blockingAttachment.error}`
+          : `“${blockingAttachment.name}”上传失败，请移除或重试后发送。`;
+      pushToast(message, "warning", 3500);
       return;
     }
 
     const readyComposerAttachments = useAppStore.getState().attachments
       .filter((a) => a.status === "ready" && a.attachment);
+    const missingOwner = readyComposerAttachments.find((attachment) => (
+      !String(attachment.conversationId || "").trim()
+    ));
+    if (missingOwner) {
+      pushToast(`“${missingOwner.name}”没有绑定会话，请重新上传。`, "error", 4200);
+      return;
+    }
+    const attachmentOwners = new Set(
+      readyComposerAttachments
+        .map((attachment) => String(attachment.conversationId || "").trim())
+        .filter(Boolean),
+    );
+    if (attachmentOwners.size > 1) {
+      pushToast("这些附件来自不同会话，请移除后在同一会话重新上传。", "error", 4500);
+      return;
+    }
+    const attachmentConversationId = [...attachmentOwners][0] || "";
+    const currentConversationId = String(useAppStore.getState().conversationId || "").trim();
+    if (
+      attachmentConversationId
+      && currentConversationId
+      && attachmentConversationId !== currentConversationId
+    ) {
+      pushToast("附件属于另一个会话，请切回附件所在会话后发送。", "warning", 4500);
+      return;
+    }
+    if (
+      attachmentConversationId
+      && !currentConversationId
+      && !acceptAttachmentConversationOwner(attachmentConversationId)
+    ) {
+      pushToast("附件已绑定到另一个会话，请切回该会话后发送。", "warning", 4500);
+      return;
+    }
+    const sendConversationId = attachmentConversationId || currentConversationId;
     const readyAttachments = readyComposerAttachments.map((a) => a.attachment as Record<string, unknown>);
     const attachmentRefs = readyComposerAttachments.map((a) => {
       const payload = a.attachment as Record<string, unknown>;
@@ -276,6 +383,8 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     });
 
     const finalContent = content;
+    const composerStateAtSend = composerFingerprint();
+    const conversationAtSend = String(useAppStore.getState().conversationId || "").trim();
     const quoteContext = quotedMessage ? formatQuotedMessageForBackend(quotedMessage) : "";
     const mentions = useAppStore.getState().selectedMentions;
     const mentionSuffix = mentions.length > 0
@@ -285,12 +394,22 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
 
     if (!await sendUserMessage(finalContent, readyAttachments, {
       attachmentRefs,
+      conversationId: sendConversationId || undefined,
       displayContent,
       backendContent: [quoteContext, finalContent].filter(Boolean).join("\n\n"),
       allowWhileStreaming: queueWhileStreaming,
+      busyBehavior: useAppStore.getState().followUpBehavior,
     })) return;
-    if (finalContent.trim()) appendPromptHistory(workingDirectory, finalContent);
-    resetComposer();
+    const stateAfterSend = useAppStore.getState();
+    const currentConversation = String(stateAfterSend.conversationId || "").trim();
+    const sameConversation = currentConversation === conversationAtSend;
+    // Upload/context preparation is asynchronous.  If the user edited the
+    // draft, changed attachments, or switched conversations while it was in
+    // flight, preserve the new composer state instead of clearing it.
+    if (sameConversation && composerFingerprint() === composerStateAtSend) {
+      if (finalContent.trim()) appendPromptHistory(workingDirectory, finalContent);
+      resetComposer();
+    }
   };
 
   const executeSlashCommand = async (commandLine: string) => {
@@ -303,9 +422,9 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       confirmClear: async () => {
         const { showConfirm } = await import("../overlays/DialogService");
         return showConfirm({
-          title: "Clear conversation",
-          message: "Clear all messages in the current conversation view? This cannot be undone.",
-          confirmLabel: "Clear",
+          title: "清空会话",
+          message: "清空当前会话视图中的全部消息？此操作无法撤销。",
+          confirmLabel: "清空",
           danger: true,
         });
       },
@@ -383,7 +502,9 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       const skillPath = encodedPath ? decodeURIComponent(encodedPath) : "";
       const skillName = encodedName ? decodeURIComponent(encodedName) : value.replace(/^\$/, "");
       const skill = useAppStore.getState().availableSkills.find((item) => (
-        skillPath ? item.path === skillPath : item.name === skillName
+        skillPath
+          ? workspaceFilePathsEqual(item.path, skillPath, workingDirectory)
+          : item.name === skillName
       ));
       if (skill) {
         addSelectedSkill({
@@ -402,6 +523,13 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
 
     if (slashPanelOpen) {
       const selection = resolveRuntimeSlashMenuSelection(value, useAppStore.getState());
+      if (selection.kind === "skill_picker") {
+        setSelectedSlashCommand(null);
+        setDraft("/skill ");
+        setMenuFilter("/skill ");
+        sendClientCommand({ type: "skills.list" });
+        return;
+      }
       if (selection.kind === "skill") {
         addSelectedSkill(selection.skill);
         setSelectedSlashCommand(null);
@@ -489,7 +617,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
 
   return (
     <>
-      {!minimal && <InlineTaskList wide={wideMode} />}
+      {!minimal && <TurnPlanProgress wide={wideMode} />}
       <QueuedMessageList wide={wideMode} minimal={minimal} />
       <div
         ref={containerRef}
@@ -505,19 +633,19 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
           left: undefined,
           bottom: undefined,
           transform: undefined,
-          zIndex: minimal ? undefined : 6,
+          zIndex: minimal ? undefined : "var(--z-composer)",
           display: "flex",
           flexDirection: "column",
           width: minimal ? "100%" : wideMode ? "var(--chat-wide-axis-width)" : "var(--chat-composer-axis-width)",
           marginBottom: codeLayout ? "14px" : 0,
           padding: codeLayout ? "0" : "8px 10px 10px",
-          background: commandModeActive ? commandComposerBackground : "var(--surface-page)",
+          background: commandModeActive ? commandComposerBackground : "transparent",
           border: dragOver
             ? "2px dashed var(--command-accent, var(--state-info))"
             : commandModeActive
               ? "1px solid var(--command-border, var(--state-info))"
               : "1px solid var(--border-subtle)",
-          borderRadius: codeLayout ? "var(--radius-md, 8px)" : "var(--radius-lg, 8px)",
+          borderRadius: "var(--radius-lg, 16px)",
           boxShadow: commandModeActive
             ? "0 0 0 1px color-mix(in oklch, var(--command-accent, var(--state-info)) 10%, transparent)"
             : "none",
@@ -551,7 +679,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
           const last = useAppStore.getState().selectedSkills.at(-1);
           if (last) removeSelectedSkill(last.name);
         }}
-        placeholder={selectedSlashCommand ? "补充指令…" : "随心输入"}
+        placeholder={selectedSlashCommand ? "补充指令…" : "描述任务或提出问题…"}
       />
       <MenuOverlay
         open={slashPanelOpen || mentionPanelOpen || skillPanelOpen}
@@ -603,18 +731,18 @@ const GoalBar = () => {
   return (
     <div className="min-h-[34px] flex items-center gap-2 px-3" style={{ borderBottom: "1px solid var(--border-subtle)", background: "color-mix(in oklch, var(--accent-primary) 8%, var(--surface-page))" }}>
       <span
-        className="flex-none text-[11px] font-bold uppercase"
+        className="flex-none text-3xs font-bold uppercase"
         style={{ color: paused ? "var(--text-muted)" : "var(--accent-primary)" }}
       >
-        {paused ? "Paused" : "Goal"}
+        {paused ? "已暂停" : "目标"}
       </span>
       <span className="flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-sm" style={{ color: "var(--text-primary)" }} title={goal.text}>
         {goal.text}
       </span>
       <button
         type="button"
-        title={paused ? "Resume goal" : "Pause goal"}
-        aria-label={paused ? "Resume goal" : "Pause goal"}
+        title={paused ? "继续目标" : "暂停目标"}
+        aria-label={paused ? "继续目标" : "暂停目标"}
         className="w-6 h-6 inline-flex items-center justify-center rounded-sm cursor-pointer"
         style={{ border: "1px solid var(--border-subtle)", background: "var(--surface-soft)", color: "var(--text-secondary)" }}
         onClick={() => sendGoalAction(paused ? "resume" : "pause")}
@@ -623,8 +751,8 @@ const GoalBar = () => {
       </button>
       <button
         type="button"
-        title="Clear goal"
-        aria-label="Clear goal"
+        title="清除目标"
+        aria-label="清除目标"
         className="w-6 h-6 inline-flex items-center justify-center rounded-sm cursor-pointer"
         style={{ border: "1px solid var(--border-subtle)", background: "var(--surface-soft)", color: "var(--text-secondary)" }}
         onClick={() => sendGoalAction("clear")}

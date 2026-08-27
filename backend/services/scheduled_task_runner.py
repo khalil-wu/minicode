@@ -12,8 +12,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from backend.agent.conversation_query_guard import (
+    ConversationQueryClaim,
+    conversation_query_guards,
+)
 from backend.conversations.repository import ConversationRepository
-from backend.services.chat_api_service import run_rest_chat
+from backend.services.chat_api_service import run_owned_rest_chat
 from backend.services.workspace_service import git_branch_for, main_worktree_root
 
 
@@ -37,8 +41,7 @@ async def run_scheduled_task(
     repository = ConversationRepository()
     from backend.services.scheduler_service import scheduled_permission_mode
 
-    # Persisted legacy records are also fenced at execution time. A stale
-    # full_access/bypass value degrades to confirm instead of regaining power.
+    # Scheduled runs use the same explicit MiniCode permission tokens.
     permission_mode = scheduled_permission_mode(getattr(task, "permission_mode", "confirm"))
     requested_conversation_id = str(getattr(task, "conversation_id", "") or "").strip()
     conversation = repository.get_conversation(requested_conversation_id) if requested_conversation_id else None
@@ -68,6 +71,45 @@ async def run_scheduled_task(
             git_branch=git_branch_for(workspace_root),
             permission_mode=permission_mode,
         )
+
+    query_guards = conversation_query_guards()
+    query_claim = query_guards.try_start(
+        conversation.id,
+        owner_id=f"scheduled:{str(getattr(run, 'id', '') or '')}",
+    )
+    if query_claim is None:
+        return {
+            "status": "failed",
+            "workspace_root": str(workspace_root.resolve()),
+            "conversation_id": conversation.id,
+            "error": "The heartbeat conversation already has an active turn.",
+        }
+    try:
+        return await _run_scheduled_task_owned(
+            task,
+            run,
+            bootstrap=bootstrap,
+            repository=repository,
+            conversation=conversation,
+            workspace_root=workspace_root,
+            permission_mode=permission_mode,
+            query_claim=query_claim,
+        )
+    finally:
+        query_guards.end(query_claim)
+
+
+async def _run_scheduled_task_owned(
+    task: Any,
+    run: Any,
+    *,
+    bootstrap: Any,
+    repository: ConversationRepository,
+    conversation: Any,
+    workspace_root: Path,
+    permission_mode: str,
+    query_claim: ConversationQueryClaim,
+) -> dict[str, Any]:
     execution_root = workspace_root.resolve()
     isolation = str(getattr(task, "isolation", "worktree") or "worktree").strip().lower()
     if isolation == "worktree":
@@ -130,21 +172,26 @@ async def run_scheduled_task(
         },
     )
 
-    config = getattr(bootstrap, "config", None)
-    agent_settings = getattr(config, "agent", None)
-    # Zero is the intentional open-ended default. A scheduled task may provide
-    # an explicit iteration budget, but this runner must not invent one.
-    max_iterations = max(0, int(getattr(agent_settings, "max_iterations", 0) or 0))
-    result = await run_rest_chat(
+    result = await run_owned_rest_chat(
         message=str(getattr(task, "prompt", "") or ""),
-        max_iterations=max_iterations,
+        max_iterations=None,
         bootstrap=bootstrap,
         query_engine=None,
         workspace_root=execution_root,
         permission_mode=permission_mode,
         conversation_id=conversation.id,
         run_id=str(getattr(run, "id", "")),
+        query_claim=query_claim,
     )
+    if not conversation_query_guards().owns(query_claim):
+        return {
+            "status": "cancelled",
+            "conversation_id": conversation.id,
+            "workspace_root": str(workspace_root.resolve()),
+            "execution_workspace_root": str(execution_root),
+            "summary": "",
+            "error": "The heartbeat conversation query generation changed before terminal commit.",
+        }
     stopped_reason = str(result.get("stopped_reason") or "completed")
     reported_status = str(result.get("status") or "").strip().lower()
     status = (
@@ -176,17 +223,27 @@ async def run_scheduled_task(
             },
         },
     )
-    repository.save_context_snapshot(
-        conversation.id,
-        {
-            "scheduled_task": {
-                "task_id": str(getattr(task, "id", "")),
-                "run_id": str(getattr(run, "id", "")),
-                "status": status,
-                "stopped_reason": stopped_reason,
-            }
-        },
-    )
+    snapshot_patch = {
+        "scheduled_task": {
+            "task_id": str(getattr(task, "id", "")),
+            "run_id": str(getattr(run, "id", "")),
+            "status": status,
+            "stopped_reason": stopped_reason,
+        }
+    }
+    patch_snapshot = getattr(repository, "patch_context_snapshot", None)
+    if callable(patch_snapshot):
+        patch_snapshot(conversation.id, snapshot_patch)
+    else:
+        # Keep older repository adapters usable without erasing concurrent
+        # snapshot fields: merge against the latest record before saving.
+        get_conversation = getattr(repository, "get_conversation", None)
+        save_snapshot = getattr(repository, "save_context_snapshot", None)
+        record = get_conversation(conversation.id) if callable(get_conversation) else None
+        if callable(save_snapshot):
+            snapshot = dict(getattr(record, "context_snapshot", {}) or {})
+            snapshot.update(snapshot_patch)
+            save_snapshot(conversation.id, snapshot)
     return {
         "status": status,
         "conversation_id": conversation.id,

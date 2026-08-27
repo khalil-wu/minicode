@@ -1,7 +1,9 @@
-"""Codex-compatible apply_patch envelope parser and applier.
+"""Parser for the Codex-compatible patch envelope used at the tool boundary.
 
-Mirrors OpenAI Codex's `apply-patch` crate format so models trained on Codex's
-patch grammar work unchanged. The envelope is:
+Accepts the established multi-file patch envelope syntax at the model/tool
+boundary. MiniCode owns grammar validation, path resolution, and file mutation
+semantics; this module never delegates application to another patch engine.
+The envelope is:
 
     *** Begin Patch
     *** Add File: path/to/new.py
@@ -22,7 +24,7 @@ context, ``@@`` change-context marker. Add-File hunks contain only ``+`` lines.
 This module is pure (no I/O, no workspace knowledge). The tool wrapper resolves
 paths, enforces permissions, and writes files. Parsing is deliberately strict:
 a malformed envelope raises ApplyPatchError with an actionable message so the
-model can correct the call, matching Codex's parser behavior.
+model can correct the call without entering a second execution path.
 """
 from __future__ import annotations
 
@@ -118,11 +120,14 @@ def parse_patch(text: str) -> list[FileChange]:
                     )
                 content_lines.append(row[1:])
                 i += 1
+            # Every '+' line is newline-terminated, so an added file always
+            # ends with a trailing newline.
+            new_content = ("\n".join(content_lines) + "\n") if content_lines else ""
             changes.append(
                 FileChange(
                     kind=ChangeKind.ADD,
                     path=path,
-                    new_content="\n".join(content_lines),
+                    new_content=new_content,
                 )
             )
         elif line.startswith(DELETE_FILE):
@@ -201,10 +206,10 @@ def _parse_update_hunks(
     while i < n and not _is_section_header(body[i]):
         row = body[i]
         if row.startswith(CHANGE_MARKER):
-            # New change block. Codex treats text after @@ as an orientation
-            # anchor (for example ``@@ class Media:``), then searches for the
-            # hunk after that line. Keeping the anchor materially improves
-            # patches against files with repeated short blocks.
+            # New change block. Text after @@ is an orientation anchor (for
+            # example ``@@ class Media:``); the hunk is then searched for after
+            # that line. Keeping the anchor materially improves patches against
+            # files with repeated short blocks.
             flush()
             current = PatchHunk(change_context=row[len(CHANGE_MARKER):].strip() or None)
             i += 1
@@ -243,8 +248,9 @@ def apply_update_hunks(original: str, hunks: list[PatchHunk], path: str) -> str:
     """Apply Update hunks to original file content, returning the new content.
 
     Each hunk's ``old_lines`` block is located in the file (in order, no overlap)
-    and replaced by its ``new_lines`` block. Locating is whitespace-exact, like
-    Codex. Raises ApplyPatchError if a hunk's context cannot be found.
+    and replaced by its ``new_lines`` block. Location prefers an exact match and
+    only then relaxes whitespace/punctuation (see ``_find_block``). Raises
+    ApplyPatchError if a hunk's context cannot be found.
     """
     orig_lines = original.split("\n")
     result: list[str] = []
@@ -263,8 +269,8 @@ def apply_update_hunks(original: str, hunks: list[PatchHunk], path: str) -> str:
                         label="change context",
                     )
                 )
-            # Match the hunk after the orientation line, matching Codex's
-            # change-context semantics. Preserve everything through the anchor.
+            # Match the hunk after the orientation line. Preserve everything
+            # through the anchor.
             anchor_end = context_at + 1
             result.extend(orig_lines[cursor:anchor_end])
             cursor = anchor_end
@@ -317,10 +323,10 @@ def apply_update_hunks(original: str, hunks: list[PatchHunk], path: str) -> str:
 def _find_block(haystack: list[str], block: list[str], start: int) -> int:
     """Return the index where ``block`` matches in ``haystack`` at/after ``start``.
 
-    Match with the same descending strictness used by Codex apply_patch: exact,
-    trailing-whitespace-insensitive, fully stripped, then common Unicode
-    punctuation/space normalization. The search remains ordered and bounded by
-    ``start``; this is context location, not approximate edit generation.
+    Match with a descending strictness ladder: exact, trailing-whitespace-
+    insensitive, fully stripped, then common Unicode punctuation/space
+    normalization. The search remains ordered and bounded by ``start``; this is
+    context location, not approximate edit generation.
     """
     if not block:
         return start

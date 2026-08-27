@@ -16,7 +16,8 @@ class ToolSchemaView:
     ToolsetPolicy, and DeferredToolCatalog. ``schema`` is the materialized
     model-facing function schema only when the tool belongs in this turn's
     direct tools array; deferred tools expose a lightweight catalog record and
-    materialize their schema only through tool_describe. ``runtime_metadata``
+    materialize their schema only when tool_search activates them for the next
+    model iteration. ``runtime_metadata``
     carries permission/UI hints that must never leak into ``schema``.
     """
 

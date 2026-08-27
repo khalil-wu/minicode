@@ -14,15 +14,17 @@ from backend.agent.loop_runtime_helpers import (
     terminal_reason_from_error_type,
 )
 from backend.agent.message import AgentEvent
+from backend.agent.provider_attempt import provider_progress_id
 from backend.agent.provider_protocol import add_usage
 from backend.agent.recovery_controller import RecoveryProfile
 from backend.agent.stream_sanitizer import scrub_thinking_tags
+from backend.agent.terminal_projection import TurnTerminalProjection
 from backend.llm.errors import classify_llm_error
 
 
 logger = logging.getLogger(__name__)
 
-Degrade = Callable[..., AsyncIterator[AgentEvent]]
+Degrade = Callable[..., AsyncIterator[AgentEvent | TurnTerminalProjection]]
 ErrorRecovery = Callable[..., Awaitable[bool]]
 
 
@@ -55,19 +57,47 @@ async def handle_provider_error_event(
     cancel_event: Any,
     degrade_and_finish: Degrade,
     recover_withheld_error: ErrorRecovery,
-) -> AsyncIterator[AgentEvent | ProviderErrorEventResult]:
+    total_attempts: int = 0,
+    query_source: str | None = None,
+    retry_state: Any | None = None,
+) -> AsyncIterator[AgentEvent | TurnTerminalProjection | ProviderErrorEventResult]:
     """Resolve a provider-declared stream error through the bounded ladder."""
 
-    classification = classify_llm_error(event.content)
-    await turn_kernel.close_provider_attempt(
-        provider_attempt,
-        status="failed",
-        summary="Provider stream returned an error",
-        data={
-            "error_type": classification.error_type,
-            "provider_error_type": classification.provider_error_type,
-        },
-    )
+    raw = getattr(event, "raw", {}) or {}
+    classification_parts = [str(getattr(event, "content", "") or "")]
+    provider_error_type = str(raw.get("provider_error_type") or "").strip()
+    if provider_error_type:
+        classification_parts.append(
+            f"provider_error_type={provider_error_type}"
+        )
+    status_code = raw.get("status_code")
+    if status_code is not None:
+        classification_parts.append(f"status={status_code}")
+    provider_error_code = str(raw.get("provider_error_code") or "").strip()
+    if provider_error_code:
+        classification_parts.append(
+            f"provider_error_code={provider_error_code}"
+        )
+    provider_error_schema_type = str(
+        raw.get("provider_error_schema_type") or ""
+    ).strip()
+    if provider_error_schema_type:
+        classification_parts.append(
+            f"provider_error_schema_type={provider_error_schema_type}"
+        )
+    classification_input = " ".join(classification_parts)
+    classification = classify_llm_error(classification_input)
+    provider_failure_data = {
+        "error_type": classification.error_type,
+        "provider_error_type": classification.provider_error_type,
+        **({"status_code": status_code} if status_code is not None else {}),
+        **({"provider_error_code": provider_error_code} if provider_error_code else {}),
+        **(
+            {"provider_error_schema_type": provider_error_schema_type}
+            if provider_error_schema_type
+            else {}
+        ),
+    }
     incomplete_tool_stream = stream_state.incomplete_tool_stream
     if (
         not stream_text.full_text
@@ -77,18 +107,30 @@ async def handle_provider_error_event(
     ):
         new_attempt, retry_delay = plan_stream_retry(
             stream_retry_policy,
-            event.content,
+            classification_input,
             stream_attempt,
+            query_source=query_source,
+            retry_state=retry_state,
         )
         if retry_delay is not None:
-            provider_retry_after = float(
-                (getattr(event, "raw", {}) or {}).get("retry_after_seconds") or 0.0
-            )
+            try:
+                provider_retry_after = max(
+                    0.0,
+                    float(raw.get("retry_after_seconds") or 0.0),
+                )
+            except (TypeError, ValueError):
+                provider_retry_after = 0.0
             if provider_retry_after > 0:
                 retry_delay = max(retry_delay, provider_retry_after)
             retry_boundary = budget_runtime.consume_retry("stream_error")
             if retry_boundary is not None:
                 logger.warning("%s", retry_boundary.detail)
+                await turn_kernel.close_provider_attempt(
+                    provider_attempt,
+                    status="failed",
+                    summary="Provider retry budget exhausted",
+                    data=provider_failure_data,
+                )
                 yield ProviderErrorEventResult(
                     action="finish",
                     stream_attempt=stream_attempt,
@@ -96,6 +138,13 @@ async def handle_provider_error_event(
                     stream_recovery_attempted=stream_recovery_attempted,
                 )
                 return
+            await turn_kernel.close_provider_attempt(
+                provider_attempt,
+                status="failed",
+                summary="Provider stream returned an error; retrying",
+                data=provider_failure_data,
+                project_progress=False,
+            )
             await turn_kernel.emit_runtime_span(
                 "recovery.retry.started",
                 span_id=f"recovery:{iteration_id_value}:{new_attempt}",
@@ -110,9 +159,26 @@ async def handle_provider_error_event(
                     "error_type": classification.error_type,
                 },
             )
+            next_attempt_number = new_attempt + 1
+            attempt_label = (
+                f"第 {next_attempt_number}/{total_attempts} 次"
+                if total_attempts > 0
+                else f"第 {next_attempt_number} 次"
+            )
+            yield AgentEvent.progress(
+                f"连接失败，正在重试（{attempt_label}）",
+                stage="status",
+                status="running",
+                id=provider_progress_id(iteration_id_value),
+                phase="recover",
+                label="provider",
+                count=next_attempt_number,
+                detail=f"{classification_input[:320]} · {retry_delay:.1f} 秒后重试",
+                summary="Provider stream interrupted; retrying",
+            )
             if classification.provider_error_type == "rate_limit":
                 yield AgentEvent.rate_limit(
-                    provider=str((getattr(event, "raw", {}) or {}).get("provider") or ""),
+                    provider=str(raw.get("provider") or ""),
                     retry_after_seconds=retry_delay,
                     message="Provider rate limit reached; retrying after the requested delay.",
                 )
@@ -143,6 +209,12 @@ async def handle_provider_error_event(
             )
             if retry_boundary is not None:
                 logger.warning("%s", retry_boundary.detail)
+                await turn_kernel.close_provider_attempt(
+                    provider_attempt,
+                    status="failed",
+                    summary="Provider recovery budget exhausted",
+                    data=provider_failure_data,
+                )
                 yield ProviderErrorEventResult(
                     action="finish",
                     stream_attempt=stream_attempt,
@@ -150,6 +222,23 @@ async def handle_provider_error_event(
                     stream_recovery_attempted=stream_recovery_attempted,
                 )
                 return
+            await turn_kernel.close_provider_attempt(
+                provider_attempt,
+                status="failed",
+                summary="Provider request will be rebuilt for recovery",
+                data=provider_failure_data,
+                project_progress=False,
+            )
+            yield AgentEvent.progress(
+                "正在调整请求上下文后重试",
+                stage="status",
+                status="running",
+                id=provider_progress_id(iteration_id_value),
+                phase="recover",
+                label="provider",
+                detail=classification_input[:400],
+                summary="Provider error recovery is rebuilding model context",
+            )
             yield ProviderErrorEventResult(
                 action="rebuild_context",
                 stream_attempt=stream_attempt,
@@ -158,6 +247,12 @@ async def handle_provider_error_event(
             )
             return
 
+    await turn_kernel.close_provider_attempt(
+        provider_attempt,
+        status="failed",
+        summary="Provider stream returned an error",
+        data=provider_failure_data,
+    )
     async for recovery_event in degrade_and_finish(
         state=state,
         ctx=context_builder,

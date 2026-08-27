@@ -27,12 +27,27 @@ const isPrivateIpv4 = (host: string): boolean => {
   const parts = parseIpv4(host);
   if (!parts) return false;
   const [a, b] = parts;
-  return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+  return (
+    a === 10
+    || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 168)
+    || (a === 169 && b === 254)
+    // cc ssrfGuard blocks carrier-grade NAT 100.64.0.0/10 explicitly.
+    || (a === 100 && b >= 64 && b <= 127)
+  );
 };
 
 const isPrivateIpv6 = (host: string): boolean => {
-  const normalized = host.toLowerCase();
-  return normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe80");
+  const normalized = host.toLowerCase().replace(/^\[|\]$/g, "");
+  if (normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe80")) {
+    return true;
+  }
+  // cc ssrfGuard: IPv4-mapped v6 (::ffff:a.b.c.d) inherits the v4 verdict.
+  const mapped = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (mapped) {
+    return isLocalIpv4(mapped[1]) || isPrivateIpv4(mapped[1]);
+  }
+  return normalized === "::1" || normalized === "::";
 };
 
 export const assessNetworkTargetUrl = (rawUrl: string): NetworkTargetAssessment => {

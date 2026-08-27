@@ -5,6 +5,10 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
+from backend.agent.provider_protocol import provider_raw_for_projection
+from backend.conversations.public_projection import project_public_tool_call
+from backend.secret_redaction import redact_secrets
+
 
 COMMAND_OUTPUT_PREVIEW_LIMIT = 60_000
 FINAL_TEXT_SOURCES = {'model_final', 'reply', 'partial'}
@@ -21,7 +25,12 @@ def _is_answer_text_block(block: dict[str, Any]) -> bool:
     if block.get('type') != 'text' or block.get('isStreaming') is True:
         return False
     source = str(block.get('source') or '').strip().lower()
-    return source in FINAL_TEXT_SOURCES or str(block.get('status') or '') in {'completed', 'partial'}
+    if source:
+        return source in FINAL_TEXT_SOURCES
+    # Pre-phase transcripts did not carry a source. Preserve their completed
+    # answer semantics, but never let explicitly typed commentary into the
+    # copyable/persisted answer merely because its lifecycle completed.
+    return str(block.get('status') or '') in {'completed', 'partial'}
 
 
 def start_agent_message_block(
@@ -32,13 +41,14 @@ def start_agent_message_block(
         block for block in blocks
         if not (block.get('type') == 'text' and block.get('itemId') == item_id)
     ]
-    blocks.append({
+    block = {
         'type': 'text',
         'itemId': item_id,
         'content': '',
         'status': 'in_progress',
         'isStreaming': True,
-    })
+    }
+    blocks.append(block)
 
 
 def append_agent_message_delta(
@@ -80,8 +90,9 @@ def complete_agent_message_block(
     }
     if finish_reason:
         block['finishReason'] = finish_reason
-    if provider_raw:
-        block['providerRaw'] = dict(provider_raw)
+    safe_provider_raw = provider_raw_for_projection(provider_raw)
+    if safe_provider_raw:
+        block['providerRaw'] = safe_provider_raw
     for index in range(len(blocks) - 1, -1, -1):
         existing = blocks[index]
         if existing.get('type') == 'text' and existing.get('itemId') == item_id:
@@ -101,12 +112,12 @@ def append_thinking_block(
     if blocks and blocks[-1].get('type') == 'thinking':
         previous_metadata = {
             key: blocks[-1].get(key)
-            for key in ('source', 'visibility', 'is_raw_provider_reasoning', 'provider_reasoning_type', 'phase')
+            for key in ('source', 'visibility', 'phase')
             if key in blocks[-1]
         }
         incoming_metadata = {
             key: normalized.get(key)
-            for key in ('source', 'visibility', 'is_raw_provider_reasoning', 'provider_reasoning_type', 'phase')
+            for key in ('source', 'visibility', 'phase')
             if key in normalized
         }
         if previous_metadata == incoming_metadata:
@@ -162,6 +173,8 @@ class AgentTurnState:
             finish_reason=finish_reason,
             provider_raw=provider_raw,
         )
+        if isinstance(provider_raw, dict):
+            self.record_provider_citations(provider_raw.get('citations'))
 
     def append_thinking(self, content: str, metadata: dict[str, Any] | None = None) -> None:
         append_thinking_block(self._blocks, content, metadata)
@@ -221,6 +234,7 @@ class AgentTurnState:
             'input_summary': record.get('inputSummary', ''),
             'result_kind': record.get('resultKind', ''),
             'activity_kind': record.get('activityKind', ''),
+            'visibility': record.get('visibility', 'timeline'),
             'group_id': record.get('groupId', ''),
             'step_id': record.get('stepId', ''),
             'turn_id': record.get('turnId', ''),
@@ -247,6 +261,7 @@ class AgentTurnState:
         for source_key, target_key in (
             ('result_kind', 'resultKind'),
             ('activity_kind', 'activityKind'),
+            ('visibility', 'visibility'),
             ('group_id', 'groupId'),
             ('step_id', 'stepId'),
             ('turn_id', 'turnId'),
@@ -255,6 +270,7 @@ class AgentTurnState:
         ):
             if data.get(source_key):
                 record[target_key] = str(data.get(source_key) or '')
+        record = project_public_tool_call(record)
         self._replace_tool_call_record(record)
         return record
 
@@ -317,11 +333,17 @@ class AgentTurnState:
         self._blocks.append(progress)
 
     def record_process_item(self, data: dict[str, Any]) -> dict[str, Any] | None:
-        content = str(data.get('content') or data.get('summary') or '').strip()
-        if not content or data.get('visibility') == 'debug':
-            return None
         item_id = str(data.get('item_id') or data.get('id') or '').strip()
         if not item_id:
+            return None
+        if (
+            str(data.get('status') or '').strip().lower() == 'retracted'
+            or data.get('visibility') == 'debug'
+        ):
+            self._remove_process(item_id)
+            return None
+        content = str(data.get('content') or data.get('summary') or '').strip()
+        if not content:
             return None
         process: dict[str, Any] = {
             'type': 'process',
@@ -377,6 +399,19 @@ class AgentTurnState:
         self._upsert_process(process)
         return process
 
+    def _remove_process(self, process_id: str) -> None:
+        target_id = str(process_id or '').strip()
+        if not target_id:
+            return
+        self._blocks[:] = [
+            block
+            for block in self._blocks
+            if not (
+                block.get('type') == 'process'
+                and str(block.get('id') or '').strip() == target_id
+            )
+        ]
+
     def _upsert_process(self, process: dict[str, Any]) -> None:
         process_id = str(process.get('id') or '').strip()
         if not process_id:
@@ -406,7 +441,7 @@ class AgentTurnState:
             str(updated_record.get(preview_key) or ''),
             output,
         )
-        self._replace_tool_call_record(updated_record)
+        self._replace_tool_call_record(project_public_tool_call(updated_record))
 
     def record_tool_result(self, data: dict[str, Any]) -> None:
         tool_id = str(data.get('id') or '').strip()
@@ -419,7 +454,7 @@ class AgentTurnState:
         updated_record['status'] = str(data.get('status') or '') or (
             'failed' if bool(data.get('is_error')) else 'success'
         )
-        updated_record['summary'] = str(data.get('summary') or '')
+        updated_record['summary'] = redact_secrets(str(data.get('summary') or ''))
         if data.get('duration_ms') is not None:
             updated_record['durationMs'] = int(data.get('duration_ms') or 0)
         if data.get('artifact_id'):
@@ -456,6 +491,7 @@ class AgentTurnState:
             ('display_summary', 'displaySummary'),
             ('result_kind', 'resultKind'),
             ('activity_kind', 'activityKind'),
+            ('visibility', 'visibility'),
             ('group_id', 'groupId'),
             ('step_id', 'stepId'),
             ('turn_id', 'turnId'),
@@ -484,7 +520,7 @@ class AgentTurnState:
             if data.get(source_key):
                 updated_record[target_key] = data.get(source_key)
         updated_record['finishedAt'] = self._now_ms()
-        self._replace_tool_call_record(updated_record)
+        self._replace_tool_call_record(project_public_tool_call(updated_record))
 
         superseded_ids = {
             str(item).strip()
@@ -519,10 +555,59 @@ class AgentTurnState:
             'url': source_url,
             'label': label,
             'title': label,
-            'range': (0, 0),
+            # Citation projections are persisted and can be returned from the
+            # repository's warm cache before a JSON round-trip normalizes
+            # Python tuples. Keep the in-memory representation wire-native so
+            # warm and restored conversations expose the same schema.
+            'range': [0, 0],
         }
         self._citations.append(citation)
         return citation
+
+    def record_provider_citations(self, value: Any) -> list[dict[str, Any]]:
+        """Promote already-sanitized provider locations to durable citations."""
+
+        if not isinstance(value, list):
+            return []
+        added: list[dict[str, Any]] = []
+        for raw in value:
+            if not isinstance(raw, dict):
+                continue
+            source = str(raw.get('source') or raw.get('url') or '').strip()
+            if not source:
+                continue
+            location_range = raw.get('range')
+            if isinstance(location_range, (list, tuple)) and len(location_range) == 2:
+                try:
+                    normalized_range = [
+                        max(0, int(location_range[0])),
+                        max(0, int(location_range[1])),
+                    ]
+                except (TypeError, ValueError):
+                    normalized_range = [0, 0]
+            else:
+                normalized_range = [0, 0]
+            citation: dict[str, Any] = {
+                'source': source,
+                'range': normalized_range,
+                'providerNative': True,
+            }
+            for key in ('url', 'title', 'label'):
+                text = ' '.join(str(raw.get(key) or '').split())
+                if text:
+                    citation[key] = text
+            location_type = str(raw.get('location_type') or '').strip()
+            if location_type:
+                citation['locationType'] = location_type
+            if any(
+                existing.get('source') == source
+                and existing.get('range') == normalized_range
+                for existing in self._citations
+            ):
+                continue
+            self._citations.append(citation)
+            added.append(dict(citation))
+        return added
 
     def record_done(self, data: dict[str, Any]) -> dict[str, int]:
         usage = data.get('usage') if isinstance(data.get('usage'), dict) else {}

@@ -21,6 +21,7 @@ export type TerminalServerEventType =
   | "terminal.snapshot"
   | "terminal.resized"
   | "background.started"
+  | "background.stalled"
   | "background.completed";
 
 // ──────────────────────────────────────────────────────────────────
@@ -32,8 +33,10 @@ export type TerminalClientCommandType =
   | "terminal.input"
   | "terminal.resize"
   | "terminal.kill"
+  | "terminal.restart"
   | "terminal.list"
   | "terminal.snapshot.request"
+  | "terminal.clear"
   | "terminal.mirror.created"
   | "terminal.mirror.output"
   | "terminal.mirror.exit"
@@ -122,6 +125,7 @@ export interface BackgroundCompletedEvent {
   command_id: string;
   command?: string;
   description?: string;
+  output?: string;
   exit_code?: number;
   status: string;
   duration?: number;
@@ -140,6 +144,20 @@ export interface BackgroundCompletedEvent {
   completed_at_ms?: number | null;
   result?: Record<string, unknown>;
   error?: Record<string, unknown>;
+  /** The backend could not prove the process tree exited; the PID is
+   * retained for a later reaper. Must not render as a clean exit. */
+  cleanup_pending?: boolean;
+  cleanup_reason?: string;
+}
+
+export interface BackgroundStalledEvent {
+  type: "background.stalled";
+  command_id: string;
+  command?: string;
+  description?: string;
+  conversation_id: string;
+  tail: string;
+  advice: string;
 }
 
 export interface BackgroundStartedEvent {
@@ -169,33 +187,52 @@ export interface BackgroundStartedEvent {
 // Client command payloads (terminal domain)
 // ──────────────────────────────────────────────────────────────────
 
-export interface TerminalCreateCommand {
+interface TerminalOwnedCommand {
+  conversation_id?: string;
+  workspace_root?: string;
+}
+
+export interface TerminalCreateCommand extends TerminalOwnedCommand {
   type: "terminal.create";
   cwd?: string;
 }
 
-export interface TerminalInputCommand {
+export interface TerminalListCommand extends TerminalOwnedCommand {
+  type: "terminal.list";
+}
+
+export interface TerminalInputCommand extends TerminalOwnedCommand {
   type: "terminal.input";
   session_id: string;
   data: string;
 }
 
-export interface TerminalResizeCommand {
+export interface TerminalResizeCommand extends TerminalOwnedCommand {
   type: "terminal.resize";
   session_id: string;
   cols: number;
   rows: number;
 }
 
-export interface TerminalKillCommand {
+export interface TerminalKillCommand extends TerminalOwnedCommand {
   type: "terminal.kill";
   session_id: string;
 }
 
-export interface TerminalSnapshotRequestCommand {
+export interface TerminalRestartCommand extends TerminalOwnedCommand {
+  type: "terminal.restart";
+  session_id: string;
+}
+
+export interface TerminalSnapshotRequestCommand extends TerminalOwnedCommand {
   type: "terminal.snapshot.request";
   session_id?: string;
   max_chars?: number;
+}
+
+export interface TerminalClearCommand extends TerminalOwnedCommand {
+  type: "terminal.clear";
+  session_id: string;
 }
 
 export interface TerminalMirrorCreatedCommand {
@@ -225,7 +262,7 @@ export interface TerminalMirrorExitCommand {
   exit_code?: number;
 }
 
-export interface TerminalExecCommand {
+export interface TerminalExecCommand extends TerminalOwnedCommand {
   type: "terminal.exec";
   command: string;
   cwd?: string;

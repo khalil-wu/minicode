@@ -1,5 +1,6 @@
 import type { StateCreator } from "zustand";
 import type { AppStore, ApprovalSlice } from "./types";
+import { promptTargetsConversation, visibleDiffReviewForConversation } from "./shared-helpers";
 
 export const createApprovalSlice: StateCreator<AppStore, [], [], ApprovalSlice> = (set, get) => ({
   pendingApproval: null,
@@ -83,23 +84,36 @@ export const createApprovalSlice: StateCreator<AppStore, [], [], ApprovalSlice> 
       if (!s.pendingDiffReview) {
         return {
           pendingDiffReview: d,
-          ...(d.reviewState ? { diffReview: d.reviewState } : {}),
+          ...(d.reviewState && promptTargetsConversation(d, s.conversationId)
+            ? { diffReview: d.reviewState }
+            : {}),
         };
       }
-      return { diffReviewQueue: [...s.diffReviewQueue, d] };
+      return {
+        diffReviewQueue: [...s.diffReviewQueue, d],
+        ...(d.reviewState
+          && promptTargetsConversation(d, s.conversationId)
+          && !promptTargetsConversation(s.pendingDiffReview, s.conversationId)
+          ? { diffReview: d.reviewState }
+          : {}),
+      };
     }),
   clearDiffReview: (requestId) =>
     set((s) => {
       if (requestId && s.pendingDiffReview?.requestId !== requestId) {
+        const nextQueue = s.diffReviewQueue.filter((queued) => queued.requestId !== requestId);
         return {
-          diffReviewQueue: s.diffReviewQueue.filter((queued) => queued.requestId !== requestId),
+          diffReviewQueue: nextQueue,
+          ...(s.diffReview?.requestId === requestId
+            ? { diffReview: visibleDiffReviewForConversation(s.conversationId, s.pendingDiffReview, nextQueue) }
+            : {}),
         };
       }
       const [next, ...rest] = s.diffReviewQueue;
       return {
         pendingDiffReview: next ?? null,
         diffReviewQueue: rest,
-        ...(next?.reviewState ? { diffReview: next.reviewState } : {}),
+        diffReview: visibleDiffReviewForConversation(s.conversationId, next ?? null, rest),
       };
     }),
   clearDiffReviews: (requestIds) =>
@@ -110,12 +124,20 @@ export const createApprovalSlice: StateCreator<AppStore, [], [], ApprovalSlice> 
         ? null
         : s.pendingDiffReview;
       const queue = s.diffReviewQueue.filter((queued) => !ids.has(queued.requestId));
-      if (pending) return { pendingDiffReview: pending, diffReviewQueue: queue };
+      if (pending) {
+        return {
+          pendingDiffReview: pending,
+          diffReviewQueue: queue,
+          ...(s.diffReview && ids.has(s.diffReview.requestId)
+            ? { diffReview: visibleDiffReviewForConversation(s.conversationId, pending, queue) }
+            : {}),
+        };
+      }
       const [next, ...rest] = queue;
       return {
         pendingDiffReview: next ?? null,
         diffReviewQueue: rest,
-        ...(next?.reviewState ? { diffReview: next.reviewState } : {}),
+        diffReview: visibleDiffReviewForConversation(s.conversationId, next ?? null, rest),
       };
     }),
   setAskUser: (a) =>

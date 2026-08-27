@@ -13,7 +13,7 @@ Conventions:
 
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -38,11 +38,9 @@ ServerEventType = Literal[
     "agent.progress",
     "runtime.span",
     "task.update",
-    "approval_request",
     "permission.decision",
     "approval.cancelled",
     "approval.file_diff",
-    "ask_user",
     # Context lifecycle
     "context_usage",
     "context_compacted",
@@ -64,19 +62,19 @@ ServerEventType = Literal[
     "stream_event",             # raw provider stream event passthrough (SDK mode)
     "rate_limit",               # rate-limit / quota event for differentiated UI
     "session.state_changed",    # idle/working state signal
-    # Tool-use summary (user-facing, async-generated)
-    "tool_use_summary",
     # MCP
     "mcp_status",
     "mcp.lifecycle",
     "mcp.progress",
+    "llm.provider.oauth.auth",
+    "llm.provider.oauth.device_code",
+    "llm.provider.oauth.info",
+    "llm.provider.oauth.progress",
     # Environment / Git status
     "env.list",
     "git.pr_status",
     # Scheduler
     "scheduler.list",
-    # Connectors marketplace
-    "connectors.marketplace.list",
     # Checkpoints
     "checkpoint.created",
     "checkpoint.list",
@@ -95,6 +93,7 @@ ServerEventType = Literal[
     "terminal.resized",
     # Background commands
     "background.started",
+    "background.stalled",
     "background.completed",
     # Guidelines / permissions
     "guidelines.updated",
@@ -121,13 +120,17 @@ ServerEventType = Literal[
     "pong",
     "control_request",
     # Wave 1+ new: Subagents + Inspector + Citations
-    "plan_step_updated",
-    "plan_updated",
+    "turn.plan.updated",
+    "turn.diff.updated",
     "subagent.start",
     "subagent.event",
     "subagent.mailbox",
     "subagent.progress",
     "subagent.done",
+    # A teammate plan awaiting the user's decision. Answered by the
+    # `subagent.plan_review` client command; it is the only approval path for a
+    # session whose permission mode does not pre-authorize broad execution.
+    "subagent.plan_approval_requested",
     "parent.notifications",
     "citation.add",
     "inspector.update",
@@ -170,8 +173,6 @@ ClientCommandType = Literal[
     "user_message",
     "user_message.queue.cancel",
     "user_message.queue.steer",
-    "approval",
-    "answer",
     "interrupt",
     "ping",
     # Control plane
@@ -194,6 +195,7 @@ ClientCommandType = Literal[
     "conversation.unarchive",
     "conversation.rename",
     "conversation.memory_mode.set",
+    "memory.reset",
     "conversation.permission_mode.set",
     "conversation.goal.set",
     "conversation.worktree.cleanup",
@@ -212,6 +214,9 @@ ClientCommandType = Literal[
     "runtime.capabilities.inspect",
     # LLM
     "llm.model.set",
+    "llm.provider.oauth.login",
+    "llm.provider.oauth.logout",
+    "llm.provider.oauth.status",
     # Permission rules
     "conversation.permission.rules.list",
     "conversation.permission.rules.add",
@@ -227,8 +232,10 @@ ClientCommandType = Literal[
     "terminal.input",
     "terminal.resize",
     "terminal.kill",
+    "terminal.restart",
     "terminal.list",
     "terminal.snapshot.request",
+    "terminal.clear",
     "terminal.mirror.created",
     "terminal.mirror.output",
     "terminal.mirror.exit",
@@ -236,15 +243,16 @@ ClientCommandType = Literal[
     "workspace.import",
     "workspace.switch",
     "workspace.recent",
+    "workspace.recent.remove",
+    "workspace.recent.clear",
     # Session restore / sync
     "session.restore",
     "session.sync",
     # Wave 1+ new
-    "task.edit",                 # legacy todo-state edit command
-    "plan.edit",                 # user accepts/rejects a proposed plan
-    "task.stop",
     "subagent.cancel",           # user kills a subagent
     "subagent.status",           # user refreshes/collects a subagent result
+    "subagent.transcript",       # user opens a read-only child-thread replay
+    "subagent.plan_review",      # user approves/rejects a teammate plan
     "send_message",              # user steers a running subagent through its mailbox
     "inspector.focus",           # UI tells backend which target the user is viewing
     # Frontend UI commands
@@ -273,10 +281,18 @@ ClientCommandType = Literal[
     "diff.git_revert_file",
     # MCP / Environment / Git status
     "mcp.list",
+    "mcp.inventory.list",
+    "mcp.inventory.cancel",
     "mcp.add",
+    "mcp.update",
+    "mcp.toggle",
     "mcp.remove",
     "mcp.restart",
     "mcp.oauth.login",
+    "mcp.oauth.logout",
+    "mcp.project.approve",
+    "mcp.project.approve_all",
+    "mcp.project.reject",
     "env.list",
     "env.set",
     "env.delete",
@@ -290,9 +306,6 @@ ClientCommandType = Literal[
     "scheduler.run_now",
     "scheduler.retry",
     "scheduler.cancel",
-    # Connectors marketplace
-    "connectors.marketplace.list",
-    "connectors.marketplace.install",
 ]
 
 
@@ -305,7 +318,7 @@ class AgentMessageItemData(TypedDict, total=False):
     id: str
     type: Literal["agent_message"]
     text: str
-    source: Literal["model_final", "reply", "partial"]
+    source: Literal["model_final", "reply", "partial", "commentary", "cancelled"]
     status: Literal["in_progress", "completed", "partial"]
 
 
@@ -330,6 +343,14 @@ class TaskUpdateData(TypedDict, total=False):
     status: Literal["pending", "in_progress", "completed", "blocked"]
     content: str
     activeForm: str
+
+
+class TurnDiffUpdatedData(TypedDict):
+    """MiniCode ``turn/diff/updated`` notification payload."""
+
+    thread_id: str
+    turn_id: str
+    diff: str
 
 
 class AgentProgressData(TypedDict, total=False):
@@ -375,6 +396,24 @@ class RuntimeSpanData(TypedDict, total=False):
     data: dict[str, Any]
 
 
+class ImageChunkLiveData(TypedDict):
+    conversation_id: str
+    message_id: str
+    image_data: str
+    media_type: str
+
+
+class ImageChunkReplayData(TypedDict):
+    conversation_id: str
+    message_id: str
+    media_type: str
+    image_data_omitted: Literal[True]
+    image_data_size: int
+
+
+ImageChunkData = ImageChunkLiveData | ImageChunkReplayData
+
+
 class AgentLoopData(TypedDict, total=False):
     loop_id: str
     iteration_id: str
@@ -410,7 +449,7 @@ class AgentItemData(TypedDict, total=False):
     loop_id: str
     iteration_id: str
     parent_id: str
-    kind: Literal["process_text", "action_summary", "observation", "status", "plan", "tool_group", "skill"]
+    kind: Literal["process_text", "observation", "status", "plan", "tool_group", "skill"]
     role: Literal["assistant", "runtime", "system", "tool"]
     source: Literal["model", "runtime", "system", "tool"]
     status: Literal["running", "completed", "failed", "info"]
@@ -436,8 +475,6 @@ class ThinkingDeltaData(TypedDict, total=False):
     content: str
     source: Literal["provider", "model_preamble", "post_tool", "runtime"]
     visibility: Literal["debug", "timeline", "compact"]
-    is_raw_provider_reasoning: bool
-    provider_reasoning_type: str
 
 
 class ToolCallData(TypedDict, total=False):
@@ -450,6 +487,7 @@ class ToolCallData(TypedDict, total=False):
     input_summary: str
     result_kind: str
     activity_kind: str
+    visibility: Literal["timeline", "compact", "debug"]
     group_id: str
     step_id: str
     turn_id: str
@@ -466,6 +504,16 @@ class ToolOutputDeltaData(TypedDict, total=False):
     step_id: str
 
 
+class CommandOutputChunkData(TypedDict):
+    conversation_id: str
+    message_id: str
+    content: str
+    stream: Literal["stdout", "stderr"]
+    turn_id: NotRequired[str]
+    id: NotRequired[str]
+    tool_call_id: NotRequired[str]
+
+
 class ToolResultData(TypedDict, total=False):
     id: str
     summary: str
@@ -480,6 +528,8 @@ class ToolResultData(TypedDict, total=False):
     duration_ms: int
     display_summary: str
     result_kind: str
+    activity_kind: str
+    visibility: Literal["timeline", "compact", "debug"]
     group_id: str
     step_id: str
     limitation: str
@@ -527,6 +577,12 @@ class SubagentDoneData(TypedDict, total=False):
     prompt_cache_fork: dict[str, Any]
 
 
+class ParentNotificationsData(TypedDict):
+    count: int
+    parent_run_id: str
+    conversation_id: str
+
+
 class CitationData(TypedDict, total=False):
     message_id: str
     source: str
@@ -541,10 +597,110 @@ class ArtifactPreviewData(TypedDict, total=False):
     kind: Literal["file", "diff", "image", "json", "code", "text"]
     summary: str
     bytes: int
+    media_type: str
+    url: str
+    conversation_id: str
+    message_id: str
+
+
+class CommandAvailabilityData(TypedDict):
+    kind: str
+    scope: str
+    reason: NotRequired[str]
+
+
+class CommandArgumentData(TypedDict):
+    value: str
+    description: str
+
+
+class CommandCatalogEntryData(TypedDict):
+    name: str
+    command: str
+    label: str
+    description: str
+    type: Literal["local", "template", "protocol"]
+    source: str
+    enabled: bool
+    availability: CommandAvailabilityData
+    id: NotRequired[str]
+    kind: NotRequired[str]
+    panel: NotRequired[str]
+    args: NotRequired[list[CommandArgumentData]]
+    extension_path: NotRequired[str]
+    source_path: NotRequired[str]
+    template: NotRequired[str]
+    search_text: NotRequired[str]
+    argument_hint: NotRequired[str]
+    argument_names: NotRequired[list[str]]
+    base_dir: NotRequired[str]
+    is_skill_file: NotRequired[bool]
+
+
+class CommandsListData(TypedDict):
+    conversation_id: str | None
+    commands: list[CommandCatalogEntryData]
+    request_id: NotRequired[str]
+
+
+class CheckpointOriginData(TypedDict):
+    run_id: str
+    conversation_id: str
+    session_id: str
+    sequence: int
+    timestamp: int | float
+    stopped_reason: str
+
+
+class SystemNoticeData(TypedDict):
+    conversation_id: str
+    content: NotRequired[str]
+    title: NotRequired[str]
+    message: NotRequired[str]
+    data: NotRequired[dict[str, Any]]
+    checkpoint_origin: NotRequired[CheckpointOriginData]
+
+
+class PongData(TypedDict):
+    pass
+
+
+class WorkspaceProjectData(TypedDict):
+    root_path: str
+    project_type: str
+    name: str
+    description: str
+    file_count: int
+    total_size: int
+    has_project_instructions: bool
+    index_truncated: bool
+
+
+class WorkspaceImportedData(TypedDict):
+    conversation_id: str
+    workspace_root: str
+    project: WorkspaceProjectData
+    summary: str
+    file_count: int
+    request_id: NotRequired[str]
 
 
 class InspectorUpdateData(TypedDict, total=False):
-    target_kind: Literal["message", "tool_call", "artifact", "file", "diff", "subagent", "budget", "provider"]
+    target_kind: Literal[
+        "message",
+        "tool_call",
+        "artifact",
+        "file",
+        "diff",
+        "subagent",
+        "budget",
+        "provider",
+        "permission",
+        "checkpoint",
+        "workspace",
+        "guidelines",
+        "session",
+    ]
     target_id: str
     payload: dict[str, Any]
 
@@ -556,40 +712,240 @@ class BudgetWarningData(TypedDict, total=False):
     threshold: float
 
 
-class StreamEventData(TypedDict, total=False):
+class ConversationHydrationUpdatedData(TypedDict):
+    conversation_id: str
+    is_hydrating: bool
+
+
+class ConversationCompactionUpdatedData(TypedDict):
+    conversation_id: str
+    state: Literal["compacted"]
+    summary: str
+
+
+class ConversationSummaryUpdatedData(TypedDict):
+    conversation_id: str
+    summary: str
+    title: str
+    updated_at: str
+    memory_mode: Literal["enabled", "disabled", "polluted"]
+    memory_polluted: bool
+    memory_pollution_sources: list[str]
+
+
+class ContextForkedData(TypedDict):
+    conversation_id: str
+    fork_id: str
+    message_index: int
+    context_history_index: int
+    history_length: int
+    estimated_tokens: int
+    parent_conversation_id: str
+    branch_created: bool
+    branch_activated: bool
+    message_id: NotRequired[str]
+    created_at: NotRequired[str]
+    status: NotRequired[str]
+    branch_conversation_id: NotRequired[str]
+
+
+ContextLedgerCategory = Literal[
+    "system_runtime",
+    "guidelines",
+    "skills",
+    "files_attachments",
+    "history",
+    "tool_results",
+    "memory",
+    "compaction_summaries",
+]
+
+
+class ContextLedgerEntryData(TypedDict):
+    category: ContextLedgerCategory
+    label: str
+    estimated_tokens: int
+    item_count: int
+    source_count: int
+    sources: list[str]
+
+
+class ContextLedgerData(TypedDict):
+    conversation_id: str
+    schema_version: Literal[1]
+    estimated_tokens: int
+    actual_tokens: int
+    compaction_count: int
+    native_attachment_tokens: int
+    native_attachment_count: int
+    entries: list[ContextLedgerEntryData]
+
+
+class ContextSideQueryResultData(TypedDict):
+    conversation_id: str
+    query: str
+    result: str
+    focus: str
+
+
+class ControlCanUseToolRequestData(TypedDict):
+    subtype: Literal["can_use_tool"]
+    tool_name: str
+    input: dict[str, Any]
+    tool_use_id: str
+    diff: NotRequired[str | dict[str, Any]]
+    source_agent: NotRequired[str]
+    source_thread: NotRequired[str]
+    source_tool: NotRequired[str]
+
+
+class ControlElicitationRequestData(TypedDict):
+    subtype: Literal["elicitation"]
+    tool_use_id: str
+    prompt: str
+    question: str
+    schema: NotRequired[dict[str, Any]]
+    options: NotRequired[list[Any]]
+    choices: NotRequired[list[Any]]
+    allowed_values: NotRequired[list[Any]]
+
+
+class ControlProviderAuthPromptRequestData(TypedDict):
+    subtype: Literal["provider_auth_prompt"]
+    prompt: str
+    provider: str
+    prompt_type: Literal["text", "secret", "select", "manual_code"]
+    placeholder: NotRequired[str]
+    allow_empty: bool
+    allow_custom: bool
+    options: NotRequired[list[dict[str, str]]]
+
+
+class ProviderOAuthAuthEventData(TypedDict):
+    conversation_id: str
+    provider: str
+    url: str
+    instructions: NotRequired[str]
+
+
+class ProviderOAuthDeviceCodeEventData(TypedDict):
+    conversation_id: str
+    provider: str
+    userCode: str
+    verificationUri: str
+    intervalSeconds: NotRequired[int | float]
+    expiresInSeconds: NotRequired[int | float]
+
+
+class ProviderOAuthInfoLinkData(TypedDict):
+    url: str
+    label: NotRequired[str]
+
+
+class ProviderOAuthInfoEventData(TypedDict):
+    conversation_id: str
+    provider: str
+    message: str
+    links: NotRequired[list[ProviderOAuthInfoLinkData]]
+
+
+class ProviderOAuthProgressEventData(TypedDict):
+    conversation_id: str
+    provider: str
+    message: str
+
+
+class ControlRequestData(TypedDict):
+    request_id: str
+    conversation_id: str
+    request: (
+        ControlCanUseToolRequestData
+        | ControlElicitationRequestData
+        | ControlProviderAuthPromptRequestData
+    )
+    turn_id: NotRequired[str]
+    message_id: NotRequired[str]
+    workspace_root: NotRequired[str]
+    permission_mode: NotRequired[str]
+    workspace_scope: NotRequired[str]
+    timeout_seconds: NotRequired[float]
+    expires_at: NotRequired[int]
+
+
+class BackgroundStalledData(TypedDict):
+    command_id: str
+    conversation_id: str
+    tail: str
+    advice: str
+    command: NotRequired[str]
+    description: NotRequired[str]
+
+
+class CheckpointRecordData(TypedDict):
+    id: str
+    conversation_id: str
+    session_id: str
+    tool_call_id: str
+    tool_name: str
+    workspace_root: str
+    paths: list[str]
+    created_at: str
+    metadata: dict[str, Any]
+
+
+class GuidelinesUpdatedData(TypedDict, total=False):
+    message: str
+    conversation_id: str
+    workspace_root: str
+    path: str
+    cache_cleared: bool
+    effective_from: Literal["next_turn"]
+    source_kind: Literal["direct", "import"]
+    parent_path: str
+
+
+class PermissionRuleData(TypedDict, total=False):
+    pattern: str
+    source: str
+    level: str
+    tool: str
+    rule_content: str
+    behavior: str
+    destination: str
+
+
+class PermissionRulesData(TypedDict):
+    mode: str
+    context_source: str
+    system_deny: list[PermissionRuleData]
+    session_deny: list[PermissionRuleData]
+    session_overrides: list[PermissionRuleData]
+    session_prompt_rules: list[PermissionRuleData]
+
+
+class StreamEventData(TypedDict):
     provider: str
     event_type: str          # e.g. "message_start", "content_block_delta", "message_delta"
     data: dict[str, Any]     # raw provider event payload
-    sdk_only: bool           # if True, UI should not render this
+    sdk_only: NotRequired[bool]           # if True, UI should not render this
+    conversation_id: NotRequired[str]
 
 
-class RateLimitData(TypedDict, total=False):
+class RateLimitData(TypedDict):
     provider: str
     error_type: str          # "rate_limit" | "quota_exceeded" | "concurrency_limit"
-    retry_after_seconds: float
-    retry_at: int            # epoch ms when retry is expected
-    message: str
     recoverable: bool
+    retry_after_seconds: NotRequired[float]
+    retry_at: NotRequired[int]            # epoch ms when retry is expected
+    message: NotRequired[str]
+    conversation_id: NotRequired[str]
 
 
-class SessionStateData(TypedDict, total=False):
+class SessionStateData(TypedDict):
     state: Literal["idle", "working"]
-    conversation_id: str
-    run_id: str
-    reason: str
-
-
-class ToolUseSummaryData(TypedDict, total=False):
-    summary: str
-    iteration_id: str
-    tool_call_ids: list[str]
-    tool_count: int
-    generated_by: Literal["runtime", "llm"]
-
-
-class TaskEditCommand(TypedDict, total=False):
-    todo_id: str
-    status: Literal["pending", "in_progress", "completed", "blocked"]
+    conversation_id: NotRequired[str]
+    run_id: NotRequired[str]
+    reason: NotRequired[str]
 
 
 class PreviewServerDetectedData(TypedDict, total=False):
@@ -664,6 +1020,7 @@ class McpLifecycleData(TypedDict, total=False):
     message: str
     recoverable: bool
     requires_user_action: bool
+    auth_status: Literal["unsupported", "not_logged_in", "oauth"]
 
 
 class McpProgressData(TypedDict, total=False):
@@ -708,7 +1065,11 @@ __all__ = [
     "ItemStartedData",
     "AgentMessageDeltaData",
     "ItemCompletedData",
+    "ImageChunkLiveData",
+    "ImageChunkReplayData",
+    "ImageChunkData",
     "TaskUpdateData",
+    "TurnDiffUpdatedData",
     "AgentProgressData",
     "AgentLoopData",
     "AgentRunData",
@@ -717,19 +1078,50 @@ __all__ = [
     "ThinkingDeltaData",
     "ToolCallData",
     "ToolOutputDeltaData",
+    "CommandOutputChunkData",
     "ToolResultData",
     "SubagentStartData",
     "SubagentEventData",
     "SubagentDoneData",
+    "ParentNotificationsData",
     "CitationData",
     "ArtifactPreviewData",
+    "CommandAvailabilityData",
+    "CommandArgumentData",
+    "CommandCatalogEntryData",
+    "CommandsListData",
+    "CheckpointOriginData",
+    "SystemNoticeData",
+    "PongData",
+    "WorkspaceProjectData",
+    "WorkspaceImportedData",
     "InspectorUpdateData",
     "BudgetWarningData",
+    "ConversationHydrationUpdatedData",
+    "ConversationCompactionUpdatedData",
+    "ConversationSummaryUpdatedData",
+    "ContextForkedData",
+    "ContextLedgerCategory",
+    "ContextLedgerEntryData",
+    "ContextLedgerData",
+    "ContextSideQueryResultData",
+    "ControlCanUseToolRequestData",
+    "ControlElicitationRequestData",
+    "ControlProviderAuthPromptRequestData",
+    "ControlRequestData",
+    "ProviderOAuthAuthEventData",
+    "ProviderOAuthDeviceCodeEventData",
+    "ProviderOAuthInfoLinkData",
+    "ProviderOAuthInfoEventData",
+    "ProviderOAuthProgressEventData",
+    "BackgroundStalledData",
+    "CheckpointRecordData",
+    "GuidelinesUpdatedData",
+    "PermissionRuleData",
+    "PermissionRulesData",
     "StreamEventData",
     "RateLimitData",
     "SessionStateData",
-    "ToolUseSummaryData",
-    "TaskEditCommand",
     "PreviewServerDetectedData",
     "PreviewServersUpdatedData",
     "PreviewNavigateCommand",

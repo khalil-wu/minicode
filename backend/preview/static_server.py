@@ -25,6 +25,11 @@ class PreviewRequestHandler(SimpleHTTPRequestHandler):
         if not decoded.startswith(prefix):
             return None
         relative_text = decoded[len(prefix):]
+        # ``Path.resolve`` rejects embedded NUL bytes.  Treat an encoded NUL as
+        # an ordinary invalid preview path instead of letting a malformed HTTP
+        # request escape the handler as ``ValueError``.
+        if "\x00" in relative_text:
+            return None
         relative = Path(relative_text)
         if not relative_text or relative.is_absolute() or ".." in relative.parts:
             return None
@@ -32,12 +37,12 @@ class PreviewRequestHandler(SimpleHTTPRequestHandler):
             return None
         if is_sensitive_file(relative) or is_protected_write_path(relative):
             return None
-        candidate = (self._preview_root / relative).resolve()
         try:
+            candidate = (self._preview_root / relative).resolve()
             candidate.relative_to(self._preview_root)
-        except ValueError:
+            return candidate if candidate.is_file() else None
+        except (OSError, RuntimeError, ValueError):
             return None
-        return candidate if candidate.is_file() else None
 
     def send_head(self):  # type: ignore[no-untyped-def]
         target = self._requested_file()

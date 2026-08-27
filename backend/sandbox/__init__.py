@@ -1,5 +1,23 @@
-"""Sandbox execution layer — OS-level isolation for subprocess commands."""
-from backend.sandbox.policy import SandboxPolicy
+"""Sandbox execution layer - OS-level isolation for subprocess commands."""
+from backend.sandbox.policy import (
+    AdditionalPermissionProfile,
+    FileSystemAccessMode,
+    FileSystemPath,
+    FileSystemPermissions,
+    FileSystemSandboxEntry,
+    FileSystemSandboxKind,
+    FileSystemSandboxPolicy,
+    FileSystemSpecialPath,
+    NetworkPermissions,
+    NetworkSandboxPolicy,
+    PermissionProfile,
+    ResolvedSandboxPolicy,
+    SandboxEnforcement,
+    SandboxPolicy,
+    WritableRoot,
+    sandbox_policy_from_config_snapshot,
+    sandbox_policy_for_permission_context,
+)
 from backend.sandbox.result import SandboxResult
 from backend.sandbox.runner import (
     SandboxCapability,
@@ -8,9 +26,25 @@ from backend.sandbox.runner import (
 )
 
 __all__ = [
+    "AdditionalPermissionProfile",
+    "FileSystemAccessMode",
+    "FileSystemPath",
+    "FileSystemPermissions",
+    "FileSystemSandboxEntry",
+    "FileSystemSandboxKind",
+    "FileSystemSandboxPolicy",
+    "FileSystemSpecialPath",
+    "NetworkPermissions",
+    "NetworkSandboxPolicy",
+    "PermissionProfile",
+    "ResolvedSandboxPolicy",
     "SandboxCapability",
+    "SandboxEnforcement",
     "SandboxPolicy",
     "SandboxResult",
     "SandboxRunner",
     "SandboxUnavailableError",
+    "WritableRoot",
+    "sandbox_policy_from_config_snapshot",
+    "sandbox_policy_for_permission_context",
 ]

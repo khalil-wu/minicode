@@ -86,6 +86,7 @@ const Backdrop = ({ children, label, onDismiss }: { children: React.ReactNode; l
   return (
     <div
       role="presentation"
+      className="mc-dialog-backdrop"
       onClick={onDismiss}
       style={backdropStyle}
     >
@@ -95,6 +96,7 @@ const Backdrop = ({ children, label, onDismiss }: { children: React.ReactNode; l
         aria-modal="true"
         aria-label={label}
         tabIndex={-1}
+        className="mc-dialog-panel"
         onClick={(e) => e.stopPropagation()}
         style={panelStyle}
       >
@@ -107,8 +109,8 @@ const Backdrop = ({ children, label, onDismiss }: { children: React.ReactNode; l
 const ConfirmDialog = ({
   title,
   message,
-  confirmLabel = "Confirm",
-  cancelLabel = "Cancel",
+  confirmLabel = "确认",
+  cancelLabel = "取消",
   danger,
   onResult,
 }: ConfirmOptions & { onResult: (ok: boolean) => void }) => {
@@ -121,15 +123,16 @@ const ConfirmDialog = ({
   }, [onResult]);
 
   return (
-    <Backdrop label={title || "Confirm action"} onDismiss={() => onResult(false)}>
+    <Backdrop label={title || "确认操作"} onDismiss={() => onResult(false)}>
       {title && <div style={titleStyle}>{title}</div>}
       <div style={messageStyle}>{message}</div>
       <div style={actionsStyle}>
-        <button type="button" onClick={() => onResult(false)} autoFocus={Boolean(danger)} style={cancelBtnStyle}>
+        <button type="button" className="mc-dialog-btn" onClick={() => onResult(false)} autoFocus={Boolean(danger)} style={cancelBtnStyle}>
           {cancelLabel}
         </button>
         <button
           type="button"
+          className="mc-dialog-btn"
           onClick={() => onResult(true)}
           autoFocus={!danger}
           style={{ ...confirmBtnStyle, background: danger ? "var(--state-danger)" : "var(--accent-primary)" }}
@@ -144,7 +147,7 @@ const ConfirmDialog = ({
 const AlertDialog = ({
   title,
   message,
-  confirmLabel = "OK",
+  confirmLabel = "确定",
   onClose,
 }: AlertOptions & { onClose: () => void }) => {
   useEffect(() => {
@@ -156,11 +159,11 @@ const AlertDialog = ({
   }, [onClose]);
 
   return (
-    <Backdrop label={title || "Alert"} onDismiss={onClose}>
+    <Backdrop label={title || "提示"} onDismiss={onClose}>
       {title && <div style={titleStyle}>{title}</div>}
       <div style={messageStyle}>{message}</div>
       <div style={actionsStyle}>
-        <button type="button" onClick={onClose} autoFocus style={confirmBtnStyle}>
+        <button type="button" className="mc-dialog-btn" onClick={onClose} autoFocus style={confirmBtnStyle}>
           {confirmLabel}
         </button>
       </div>
@@ -173,8 +176,8 @@ const PromptDialog = ({
   message,
   defaultValue = "",
   placeholder,
-  confirmLabel = "OK",
-  cancelLabel = "Cancel",
+  confirmLabel = "确定",
+  cancelLabel = "取消",
   onResult,
 }: PromptOptions & { onResult: (val: string | null) => void }) => {
   const [value, setValue] = useState(defaultValue);
@@ -188,7 +191,7 @@ const PromptDialog = ({
   const submit = () => onResult(value || null);
 
   return (
-    <Backdrop label={title || "Input required"} onDismiss={() => onResult(null)}>
+    <Backdrop label={title || "需要输入"} onDismiss={() => onResult(null)}>
       {title && <div style={titleStyle}>{title}</div>}
       <div style={messageStyle}>{message}</div>
       <input
@@ -204,10 +207,10 @@ const PromptDialog = ({
         style={inputStyle}
       />
       <div style={actionsStyle}>
-        <button type="button" onClick={() => onResult(null)} style={cancelBtnStyle}>
+        <button type="button" className="mc-dialog-btn" onClick={() => onResult(null)} style={cancelBtnStyle}>
           {cancelLabel}
         </button>
-        <button type="button" onClick={submit} style={confirmBtnStyle}>
+        <button type="button" className="mc-dialog-btn" onClick={submit} style={confirmBtnStyle}>
           {confirmLabel}
         </button>
       </div>
@@ -231,15 +234,15 @@ const panelStyle: CSSProperties = {
   width: "min(380px, 100%)",
   background: "var(--surface-raised)",
   border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-md, 8px)",
-  boxShadow: "var(--shadow-strong, var(--shadow-md))",
+  borderRadius: "var(--radius-lg)",
+  boxShadow: "var(--shadow-strong-overlay)",
   padding: 16,
 };
 
 const titleStyle: CSSProperties = {
   fontSize: "var(--text-md)",
   color: "var(--text-primary)",
-  fontWeight: 700,
+  fontWeight: "var(--fw-bold)",
   marginBottom: 6,
 };
 
@@ -275,7 +278,7 @@ const confirmBtnStyle: CSSProperties = {
   padding: "6px 12px",
   cursor: "pointer",
   fontSize: "var(--text-xs)",
-  fontWeight: 700,
+  fontWeight: "var(--fw-bold)",
 };
 
 const inputStyle: CSSProperties = {
@@ -283,7 +286,7 @@ const inputStyle: CSSProperties = {
   marginTop: 12,
   padding: "8px 10px",
   fontSize: "var(--text-sm)",
-  fontFamily: "var(--font-mono)",
+  fontFamily: "var(--font-ui)",
   background: "var(--surface-page)",
   border: "1px solid var(--border-subtle)",
   borderRadius: "var(--radius-sm, 4px)",

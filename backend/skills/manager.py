@@ -1,4 +1,4 @@
-"""Codex-compatible Skill discovery and turn-scoped selection."""
+"""MiniCode Skill discovery and turn-scoped selection."""
 
 from __future__ import annotations
 
@@ -47,6 +47,13 @@ class SkillManager:
         self._discovered = False
         self.discover()
 
+    def _resolve_invocation_meta(self, skill_name: str) -> SkillMeta | None:
+        """Resolve a name while keeping lightweight loader doubles compatible."""
+        resolver = getattr(self._loader, "get_invocation_meta", None)
+        if callable(resolver):
+            return resolver(skill_name)
+        return self._loader.get_unambiguous_meta(skill_name)
+
     def detect(
         self,
         user_message: str,
@@ -58,7 +65,7 @@ class SkillManager:
         匹配逻辑：
           1. 将 user_message 转小写
           2. 只接受 $skill-name 或 /skill-name
-          3. 普通匹配由 Codex-style available-skills instructions 引导模型
+             3. 普通匹配由 MiniCode 的 available-skills 指令引导模型
              读取对应 SKILL.md，不增加私有 skill 工具协议
 
         Args:
@@ -80,7 +87,7 @@ class SkillManager:
             name = str(selected.get("name") or "").strip()
             source_path = str(selected.get("path") or "").strip()
             meta = self._loader.get_meta_by_path(source_path)
-            if meta is None or (name and meta.name != name):
+            if meta is None or not meta.user_invocable or (name and meta.name != name):
                 continue
             key = self._skill_key(meta.source_path)
             if key in selected_paths:
@@ -95,10 +102,11 @@ class SkillManager:
 
         all_skills = self._loader.list_skill_names()
         for name in all_skills:
-            metas = self._loader.get_metas(name)
-            if len(metas) != 1:
+            meta = self._resolve_invocation_meta(name)
+            if meta is None:
                 continue
-            meta = metas[0]
+            if not meta.user_invocable:
+                continue
             if self._skill_key(meta.source_path) in selected_paths:
                 continue
 
@@ -113,10 +121,6 @@ class SkillManager:
 
         return candidates
 
-    def auto_detect(self, user_message: str) -> list[str]:
-        """Compatibility wrapper returning only skill names."""
-        return [detection.name for detection in self.detect(user_message)]
-
     def load_skill_payload(
         self,
         skill_name: str,
@@ -126,7 +130,7 @@ class SkillManager:
         if not self._discovered:
             self.discover()
 
-        meta = self._loader.get_meta_by_path(source_path) if source_path else self._loader.get_unambiguous_meta(skill_name)
+        meta = self._loader.get_meta_by_path(source_path) if source_path else self._resolve_invocation_meta(skill_name)
         if meta is None:
             logger.warning("Skill '%s' 不存在或名称不唯一", skill_name)
             return None
@@ -161,13 +165,19 @@ class SkillManager:
         """
         return self._loader.get_all_layer1()
 
+    def list_metas(self) -> list[SkillMeta]:
+        """Expose the discovered catalog for budget-aware prompt rendering."""
+        if not self._discovered:
+            self.discover()
+        return self._loader.list_metas()
+
     def readable_roots(self) -> list[Path]:
         """Return the exact discovered Skill directories as read-only roots.
 
-        Codex exposes absolute Skill locations in the catalog and lets the
-        model read the selected ``SKILL.md`` plus its referenced files.  Keep
-        that access limited to directories already admitted by discovery;
-        disabled or malformed plugins therefore never become readable roots.
+        The catalog exposes absolute Skill locations so the model can read the
+        selected ``SKILL.md`` and its referenced files. Keep that access limited
+        to directories already admitted by discovery; disabled or malformed
+        plugins therefore never become readable roots.
         """
         if not self._discovered:
             self.discover()
@@ -230,6 +240,7 @@ class SkillManager:
                     "source_level": meta.source_level,
                     "mcp_dependencies": getattr(meta, "mcp_dependencies", []),
                     "allow_implicit_invocation": getattr(meta, "allow_implicit_invocation", True),
+                    "user_invocable": getattr(meta, "user_invocable", True),
                     "default_prompt": getattr(meta, "default_prompt", ""),
                 }
                 result.append(entry)
@@ -245,7 +256,7 @@ class SkillManager:
         return str(path)
 
 def _message_explicitly_invokes_skill_name(message: str, skill_name: str) -> bool:
-    """Detect explicit Codex $skill or CC-compatible /skill invocation."""
+    """Detect explicit ``$skill`` or ``/skill`` invocation."""
     normalized = skill_name.strip().lower()
     if not normalized:
         return False

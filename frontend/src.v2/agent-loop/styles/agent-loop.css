@@ -1,242 +1,163 @@
-:root {
-  --agent-loop-text-main: var(--text-primary);
-  --agent-loop-text-secondary: var(--text-secondary);
-  --agent-loop-text-muted: var(--text-muted);
-  --agent-loop-text-subtle: var(--text-muted);
-  --agent-loop-line: var(--border-subtle);
-  --agent-loop-surface: var(--surface-page);
-  --agent-loop-surface-subtle: var(--surface-soft);
-  --agent-loop-surface-code: var(--surface-soft);
-  --agent-loop-running: var(--state-info);
-  --agent-loop-success: var(--state-success);
-  --agent-loop-danger: var(--state-danger);
-}
+/*
+ * agent-loop.css — Agent 循环区（turn / process / reply / 文件变更卡片）。
+ *
+ * 单一事实源约定：
+ *  - 本文件只拥有 `agent-loop-*` 选择器，及对少量 cells 类的 scoped 覆盖。
+ *  - 排版 / 表面 / 圆角的最终权威是 styles/ui-polish.css（它用 !important
+ *    接管了 work-area / process-summary / thinking-indicator / user-cell-content
+ *    等的字号字重）。本文件不再重复那些属性，只保留 polish 未管的布局、定位、
+ *    结构与独有元素。
+ *  - 颜色一律引用全局 token，无 hex/rgba 字面量；无 --agent-loop-* 别名层。
+ *
+ * 加载顺序（main.tsx）：cells.css → agent-loop.css → composer → shell → ui-polish。
+ * 因此本文件里与 cells 同优先级、非 !important 的声明会覆盖 cells。与 ui-polish
+ * 冲突的两处历史覆盖（user-cell-bubble 表面、answer-cell 正文字号/行高）已全部
+ * 让位于 polish。唯一保留的 !important 是 ≤820px 响应式回答字号收敛——polish 的
+ * 正文规则带 !important，只有同级权重才能在该断点覆盖；另有 reduced-motion 守卫。
+ */
 
-html[data-theme="light"] {
-  --agent-loop-text-main: var(--text-primary);
-  --agent-loop-text-secondary: var(--text-secondary);
-  --agent-loop-text-muted: var(--text-muted);
-  --agent-loop-text-subtle: var(--text-muted);
-  --agent-loop-line: var(--border-subtle);
-  --agent-loop-surface: var(--surface-base);
-  --agent-loop-surface-subtle: var(--surface-soft);
-  --agent-loop-surface-code: var(--surface-panel);
-}
+/* ── Turn / Process / Work & Reply areas ─────────────────────────────── */
 
 .agent-loop-turn {
-  color: var(--agent-loop-text-main);
+  color: var(--text-primary);
 }
 
 .agent-loop-process {
-  color: var(--agent-loop-text-secondary);
+  color: var(--text-secondary);
 }
 
-.agent-loop-user-cell .user-cell-wrap {
-  align-items: flex-end;
-  align-self: flex-end;
-  width: min(72%, 740px) !important;
-  max-width: min(72%, 740px) !important;
-  margin: 10px 0 14px auto !important;
-
-}
-
-.agent-loop-user-cell .edit-bubble-wrap {
-  justify-content: flex-end !important;
-  max-width: 100% !important;
-}
-
-.agent-loop-user-cell .user-cell-bubble {
-  width: fit-content;
-  max-width: 100%;
-  border: 1px solid var(--agent-loop-line);
-  border-radius: 8px;
-  background: var(--message-user-bg);
-  box-shadow: none;
-
-}
-
-.agent-loop-user-cell .user-cell-content {
-  font-size: var(--text-md);
-  line-height: var(--leading-relaxed);
-
-}
-
-.agent-loop-process.chat-turn-process {
-  margin: 8px 0 0 !important;
-  padding: 0 !important;
-  background: transparent !important;
-  border: 0 !important;
-
-}
-
-/* Work area: keep compact and visually subordinate to the reply area so the
-   main answer reads as the primary content. */
+/* Work area: 进程时间线在视觉上从属于回答区（字号由 ui-polish 定为 secondary）。 */
 .agent-loop-work-area {
-  color: var(--agent-loop-text-secondary);
-  font-size: 13px;
+  color: var(--text-secondary);
 }
 
-/* Reply area: lift above the work area with extra top spacing so the main
-   answer is visually separated from the folded process timeline. */
+/* Reply area: 与折叠的进程时间线之间留出顶部间距，让主回答读作一级内容。 */
 .agent-loop-reply-area {
   margin-top: 4px;
 }
 
+/* The aggregate diff is the durable outcome of file mutations. It lives
+   after the reply and remains rendered even when the work timeline collapses. */
+.agent-loop-diff-area {
+  width: 100%;
+  margin-top: 4px;
+}
+
+/* 进程容器在 chat-turn 内被拉平（宽高/间距由 ui-polish 接管），这里只去边框与底色。 */
+.agent-loop-process.chat-turn-process {
+  width: 100%;
+  max-width: 100%;
+  border: 0;
+  background: transparent;
+}
+
+.chat-turn-process,
+.agent-loop-process.chat-turn-process,
+.chat-turn-process-stack,
+.agent-loop-timeline {
+  border: 0;
+  box-shadow: none;
+}
+
+/* 进程容器不渲染 cc 风格的 ::before/::after 装饰条。 */
+.chat-turn-process::before,
+.chat-turn-process::after,
 .agent-loop-process.chat-turn-process::before,
 .agent-loop-process.chat-turn-process::after {
-  content: none !important;
-  display: none !important;
+  content: none;
+  display: none;
 }
 
-.agent-loop-process.chat-turn-process::before {
-  background: transparent !important;
+/* ── User cell（scoped 覆盖 cells 的 user-cell）───────────────────────── */
 
+.agent-loop-user-cell .user-cell-wrap {
+  align-items: flex-end;
+  align-self: flex-end;
+  width: min(72%, 760px);
+  max-width: min(72%, 760px);
+  margin: 10px 0 14px auto;
 }
 
-.agent-loop-process.chat-turn-process[data-active="true"]::before {
-  background: transparent;
-
+.agent-loop-user-cell .edit-bubble-wrap {
+  justify-content: flex-end;
+  max-width: 100%;
 }
 
-.agent-loop-process.chat-turn-process[data-active="true"]::after {
-  background: transparent !important;
-  box-shadow: none !important;
-
+/* 用户气泡的表面/几何由 ui-polish 的 .user-cell-bubble 单一定义
+   (--message-user-bg + radius-lg + border-soft + 无影)。本文件不再重复覆盖。 */
+.agent-loop-user-cell .user-cell-bubble {
+  width: fit-content;
+  max-width: 100%;
 }
 
-.agent-loop-running-summary {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  min-height: 24px;
-  color: var(--agent-loop-text-muted);
-  font-size: 13px;
-  line-height: 1.5;
-}
-
-/* ── Thinking indicator (spinner + shimmer text) ────────────────────
- * When the model is working but hasn't produced visible output yet,
- * show a rotating spinner alongside "正在思考" with a fade-in entrance
- * and a subtle breathing pulse so the user always knows the model is
- * actively processing. Mirrors cc's SpinnerAnimationRow pattern.
- */
-.agent-loop-thinking-indicator {
-  animation: agent-loop-thinking-fade-in var(--duration-slow) cubic-bezier(0.22, 0.68, 0.26, 1) both;
-}
-
-.agent-loop-thinking-spinner {
-  color: var(--agent-loop-text-subtle, var(--text-muted));
-  animation: agent-loop-thinking-spin 0.9s linear infinite;
-  flex-shrink: 0;
-}
-
-@keyframes agent-loop-thinking-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@keyframes agent-loop-thinking-fade-in {
-  0% {
-    opacity: 0;
-    transform: translateY(4px);
-  }
-  100% {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.agent-loop-running-dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 999px;
-  background: var(--agent-loop-text-subtle);
-  box-shadow: none;
-  animation: agent-loop-soft-blink 2.4s cubic-bezier(0.42, 0, 0.18, 1) infinite;
-}
-
-.agent-loop-thinking-shimmer {
-  position: relative;
-  display: inline-block;
-  overflow: hidden;
-  padding: 0 1px;
-  color: var(--agent-loop-text-muted);
-  font-weight: 500;
-  letter-spacing: 0;
-  contain: paint;
-}
-
-.agent-loop-thinking-shimmer::after {
-  content: "";
-  position: absolute;
-  top: 0.1em;
-  bottom: 0.1em;
-  left: -42%;
-  width: 38%;
-  border-radius: 999px;
-  background:
-    linear-gradient(
-      90deg,
-      transparent,
-      color-mix(in oklch, var(--accent-primary) 20%, transparent) 45%,
-      color-mix(in oklch, var(--accent-primary) 32%, transparent) 52%,
-      transparent
-    );
-  opacity: 0.78;
-  transform: translate3d(-115%, 0, 0);
-  will-change: transform;
-  pointer-events: none;
-  animation: agent-loop-thinking-sheen 2.65s cubic-bezier(0.22, 0.68, 0.26, 1) infinite;
-}
-
-@keyframes agent-loop-thinking-sheen {
-  0% {
-    transform: translate3d(-115%, 0, 0);
-  }
-  12% {
-    transform: translate3d(-115%, 0, 0);
-  }
-  100% {
-    transform: translate3d(385%, 0, 0);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .agent-loop-thinking-shimmer::after {
-    content: none;
-    animation: none;
-  }
-  .agent-loop-thinking-indicator {
-    animation: none;
-  }
-  .agent-loop-thinking-spinner {
-    animation: none;
-  }
-}
-
-.agent-loop-running-meta {
-  color: var(--agent-loop-text-subtle);
-}
+/* ── Process summary（尺寸/字重由 ui-polish 接管，仅保留布局与图标色）─── */
 
 .agent-loop-process-summary {
   display: inline-flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
-  min-height: 26px !important;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--agent-loop-text-muted) !important;
-  font-size: 13px !important;
-  font-weight: 500 !important;
-
 }
 
-.agent-loop-process-summary:hover {
-  color: var(--agent-loop-text-secondary) !important;
+.agent-loop-process-summary-static {
+  cursor: default;
+}
 
+.agent-loop-process-summary-body {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.agent-loop-process-summary-status {
+  display: inline-block;
+  --agent-loop-processing-rest: var(--text-muted);
+  --agent-loop-processing-glint: color-mix(in oklch, var(--text-primary) 28%, white);
+  color: var(--text-muted);
+}
+
+/* Light surfaces need a wider luminance gap between the waiting and swept
+   states. Keep the animated text readable while making the transition clear. */
+html[data-theme="light"] .agent-loop-process-summary-status {
+  --agent-loop-processing-rest: color-mix(in oklch, var(--text-muted) 78%, white);
+  --agent-loop-processing-glint: var(--text-secondary);
+}
+
+.agent-loop-process-summary-status-label {
+  display: inline-block;
+  font-size: var(--text-base);
+  line-height: 1.45;
+}
+
+.agent-loop-process-summary-failure {
+  display: inline-block;
+  margin-left: 0.35em;
+  color: var(--state-danger);
+  font-size: var(--text-base);
+  line-height: 1.45;
+}
+
+.agent-loop-process-summary-status[data-running="true"]
+  .agent-loop-process-summary-status-label {
+  /* The text itself is the mask: the left side becomes primary text only after
+     the sweep has crossed it. This avoids revealing a rectangular black layer
+     (the old clip-path overlay looked like a black block in Chromium). */
+  color: var(--text-primary);
+  background-image: linear-gradient(
+    90deg,
+    var(--text-primary) 0%,
+    var(--text-primary) 32%,
+    var(--agent-loop-processing-glint) 33%,
+    var(--agent-loop-processing-rest) 35%,
+    var(--agent-loop-processing-rest) 100%
+  );
+  background-position: 100% 0;
+  background-size: 300% 100%;
+  background-repeat: no-repeat;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: agent-loop-processing-sheen var(--duration-status-sweep)
+    var(--easing-status-sweep) infinite both;
 }
 
 .agent-loop-process-summary-icon {
@@ -248,2052 +169,337 @@ html[data-theme="light"] {
 }
 
 .agent-loop-process-summary svg {
-  color: var(--agent-loop-text-subtle) !important;
-}
-
-.agent-loop-process-summary .agent-loop-done-icon {
-  color: var(--agent-loop-text-subtle);
-
-}
-
-.agent-loop-process-summary .agent-loop-failed-icon {
-  color: var(--agent-loop-danger) !important;
-
-}
-
-.agent-loop-process-summary-meta {
-  color: var(--agent-loop-text-secondary);
-  font-weight: 400;
-}
-
-.agent-loop-timeline {
-  gap: 6px !important;
-  padding: 2px 0 0 !important;
-  border: 0 !important;
-  border-radius: 0 !important;
-  background: transparent !important;
-  box-shadow: none !important;
-}
-
-.agent-loop-process[data-active="true"] .agent-loop-timeline {
-  border-color: transparent;
-
-}
-
-.agent-loop-process[data-collapsed="true"] .agent-loop-timeline {
-  display: none !important;
-
-}
-
-.agent-loop-process-note {
-  max-width: 100%;
-  color: var(--agent-loop-text-muted);
-  /* Match .agent-loop-live-narration size/leading so a narration line doesn't
-     visibly shrink when it settles from the streaming message into a process
-     note (the "放大→变小" jump). One streaming size for the process area. */
-  font-size: 14px;
-  line-height: 1.72;
-  padding: 2px 0;
-  border-left: 0;
-}
-
-.agent-loop-process-note p {
-  margin: 0 0 6px;
-}
-
-.agent-loop-process-note p:last-child,
-.agent-loop-process-note ul:last-child,
-.agent-loop-process-note ol:last-child {
-  margin-bottom: 0;
-}
-
-.agent-loop-process-note h1,
-.agent-loop-process-note h2,
-.agent-loop-process-note h3 {
-  margin: 8px 0 4px;
-  font-size: 13px;
-  line-height: 1.55;
-  font-weight: 650;
-}
-
-.agent-loop-process-note ul,
-.agent-loop-process-note ol {
-  margin: 4px 0 6px;
-  padding-left: 20px;
-}
-
-.agent-loop-process-note hr {
-  margin: 8px 0;
-}
-
-.agent-loop-process-note[data-source="runtime"],
-.agent-loop-process-note[data-kind="observation"] {
-  color: var(--agent-loop-text-muted);
-}
-
-.agent-loop-process-note[data-source="model"] {
-  color: var(--agent-loop-text-secondary);
-}
-
-.agent-loop-process-note[data-source="provider"] {
-  color: var(--agent-loop-text-muted);
-}
-
-.agent-loop-process-note[data-status="running"] p:last-child::after,
-.agent-loop-process-note[data-status="running"]:not(:has(p))::after {
-  content: "";
-  display: inline-block;
-  width: 0.42em;
-  height: 1em;
-  margin-left: 4px;
-  border-radius: 999px;
-  background: linear-gradient(
-    180deg,
-    color-mix(in oklch, var(--accent-primary) 35%, transparent),
-    color-mix(in oklch, var(--agent-loop-text-subtle) 70%, transparent)
-  );
-  vertical-align: -0.14em;
-  animation: agent-loop-process-caret 1.1s ease-in-out infinite;
-}
-
-@keyframes agent-loop-process-caret {
-  0%, 100% {
-    opacity: 0.25;
-    transform: translateY(1px) scaleY(0.78);
-  }
-  50% {
-    opacity: 0.9;
-    transform: translateY(0) scaleY(1);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .agent-loop-process-note[data-status="running"] p:last-child::after,
-  .agent-loop-process-note[data-status="running"]:not(:has(p))::after,
-  .agent-loop-live-narration[data-status="running"]::before {
-    animation: none;
-    opacity: 0.55;
-  }
-}
-
-.agent-loop-activity-group {
-  display: grid;
-  gap: 6px;
-  color: var(--agent-loop-text-muted);
-}
-
-.agent-loop-activity-row {
-  display: inline-grid;
-  grid-template-columns: 14px 14px minmax(0, 1fr) max-content 14px;
-  align-items: center;
-  column-gap: 8px;
-  width: 100%;
-  max-width: 100%;
-  min-height: 30px;
-  padding: 4px 0;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--agent-loop-text-muted);
-  font: inherit;
-  font-size: 13px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.agent-loop-activity-row[data-source-like="true"] {
-  grid-template-columns: 14px 14px minmax(0, 1fr) 14px;
-}
-
-.agent-loop-activity-row[data-status-icon="false"] {
-  grid-template-columns: 14px minmax(0, 1fr) max-content 14px;
-}
-
-.agent-loop-activity-row[data-source-like="true"][data-status-icon="false"] {
-  grid-template-columns: 14px minmax(0, 1fr) 14px;
-}
-
-.agent-loop-activity-row[data-has-summary="true"] {
-  min-height: 42px;
-  padding-top: 5px;
-  padding-bottom: 5px;
-}
-
-.agent-loop-activity-row:hover {
-  color: var(--agent-loop-text-secondary);
-}
-
-.agent-loop-activity-row > svg {
-  color: currentColor;
-}
-
-.agent-loop-activity-kind-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: currentColor;
-  line-height: 0;
-}
-
-.agent-loop-activity-copy {
-  display: grid;
-  min-width: 0;
-  gap: 1px;
-}
-
-.agent-loop-activity-title {
-  min-width: 0;
-  overflow: hidden;
-  color: inherit;
-  font-weight: 460;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-loop-activity-summary {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--agent-loop-text-subtle);
-  font-size: 12.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-loop-activity-duration {
-  justify-self: end;
-  color: var(--agent-loop-text-subtle);
-  font-size: 14px;
-  white-space: nowrap;
-}
-
-.agent-loop-activity-duration[data-empty="true"] {
-  width: 0;
-  overflow: hidden;
+  color: var(--text-muted);
 }
 
 .agent-loop-done-icon {
-  color: var(--agent-loop-text-subtle) !important;
-
+  color: var(--text-muted);
 }
 
 .agent-loop-failed-icon {
-  color: var(--agent-loop-danger);
-
+  color: var(--state-danger);
 }
 
-.agent-loop-spin-icon {
-  color: var(--agent-loop-running) !important;
-  animation: agent-loop-spin 1s linear infinite;
+/* 每轮只从左向右刷新；不反向、不呼吸，末段短暂停在主文字色。 */
+@keyframes agent-loop-processing-sheen {
+  0%, 8% {
+    background-position: 100% 0;
+  }
 
-}
-
-.agent-loop-status-dot {
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  margin: 4px;
-  border-radius: 999px;
-  background: var(--agent-loop-text-subtle);
-  box-shadow: none;
-  animation: agent-loop-soft-blink 2.4s cubic-bezier(0.42, 0, 0.18, 1) infinite;
-  flex: 0 0 auto;
-}
-
-@keyframes agent-loop-spin {
-  to {
-    transform: rotate(360deg);
+  82%, 100% {
+    background-position: 0 0;
   }
 }
 
-.agent-loop-activity-details {
-  display: grid;
-  gap: 6px;
-  padding: 3px 0 9px 22px;
-  animation: agent-loop-details-in var(--transition-fast);
-}
+/* ── Timeline ────────────────────────────────────────────────────────── */
 
-@keyframes agent-loop-details-in {
-  from {
-    opacity: 0;
-    transform: translateY(-3px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.agent-loop-shell-detail,
-.agent-loop-source-detail,
-.agent-loop-text-detail {
-  min-width: 0;
-  overflow: visible;
+.agent-loop-timeline {
+  gap: 10px;
+  padding: 4px 0 0;
   border: 0;
   border-radius: 0;
   background: transparent;
-  color: var(--agent-loop-text-muted);
   box-shadow: none;
 }
 
-.agent-loop-file-detail-row {
-  display: inline-grid;
-  grid-template-columns: 14px auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 7px;
-  min-height: 23px;
-  width: 100%;
-  max-width: 100%;
-  padding: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-  font: inherit;
-  font-size: 13px;
-  text-align: left;
-  cursor: pointer;
-  animation: agent-loop-detail-row-in var(--transition-fast);
+.agent-loop-process[data-collapsed="true"] .agent-loop-timeline {
+  display: none;
 }
 
-.agent-loop-file-detail-row:hover {
-  background: transparent;
-  color: var(--agent-loop-text-main);
-}
-
-.agent-loop-file-detail-row:focus-visible {
-  outline: 2px solid color-mix(in oklch, var(--accent-primary) 65%, transparent);
-  outline-offset: 2px;
-}
-
-.agent-loop-file-detail-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--agent-loop-text-subtle);
-}
-
-.agent-loop-file-detail-icon svg,
-.agent-loop-file-inline-icon svg,
-.agent-loop-file-icon svg,
-.agent-loop-file-button svg,
-.agent-loop-activity-kind-icon svg,
-.agent-loop-detail-chevron svg {
-  stroke-width: 1.75;
-}
-
-.agent-loop-file-detail-action {
-  color: var(--agent-loop-text-muted);
-  white-space: nowrap;
-}
-
-.agent-loop-file-detail-path {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--agent-loop-text-secondary);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-@keyframes agent-loop-detail-row-in {
-  from {
-    opacity: 0;
-    transform: translateY(3px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.agent-loop-detail-header {
-  display: inline-grid;
-  grid-template-columns: 14px auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 7px;
-  min-height: 23px;
-  width: 100%;
-  max-width: 100%;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-size: 13px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.agent-loop-detail-header:disabled {
-  cursor: default;
-}
-
-.agent-loop-detail-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-size: 14px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.agent-loop-detail-toggle:disabled {
-  cursor: default;
-}
-
-.agent-loop-detail-chevron {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  color: var(--agent-loop-text-subtle);
-  line-height: 0;
-}
-
-.agent-loop-detail-meta {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  margin-left: 0;
-  color: var(--agent-loop-text-subtle);
-  font-size: 13px;
-  white-space: nowrap;
-}
-
-.agent-loop-detail-hint {
-  color: var(--agent-loop-text-subtle);
-  font-size: 13px;
-}
-
-.agent-loop-detail-exit {
-  color: var(--agent-loop-text-muted);
-}
-
-.agent-loop-detail-exit[data-ok="false"] {
-  color: var(--agent-loop-danger);
-}
-
-.agent-loop-shell-command {
-  min-width: 0;
-  margin: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
-  font-size: 13px;
-  color: var(--agent-loop-text-secondary);
-}
-
-.agent-loop-shell-output {
-  margin: 4px 0 1px 21px;
-  padding: 3px 0 3px 10px;
-  max-height: 320px;
-  overflow: auto;
-  border-left: 1px solid color-mix(in oklch, var(--agent-loop-line) 75%, transparent);
-  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
-  font-size: 14px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--agent-loop-text-secondary);
-}
-
-.agent-loop-detail-empty {
-  padding: 3px 0 4px 21px;
-  color: var(--agent-loop-text-subtle);
-  font-size: 14px;
-}
-
-.agent-loop-source-detail {
-  display: grid;
-  gap: 2px;
-  padding: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-  color: var(--agent-loop-text-muted);
-}
-
-.agent-loop-text-detail {
-  display: grid;
-  gap: 2px;
-  padding: 0;
-  color: var(--agent-loop-text-muted);
-}
-
-.agent-loop-text-row {
-  display: grid;
-  grid-template-columns: 14px auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 7px;
-  min-height: 23px;
-  width: 100%;
-  max-width: 100%;
-  padding: 0;
-  color: var(--agent-loop-text-muted);
-  font-size: 13px;
-}
-
-.agent-loop-source-row {
-  display: grid;
-  grid-template-columns: 14px auto minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: 7px;
-  min-height: 23px;
-  width: 100%;
-  max-width: 100%;
-  padding: 0;
-  color: var(--agent-loop-text-muted);
-  font-size: 13px;
-}
-
-.agent-loop-source-row:hover {
-  color: var(--agent-loop-text-secondary);
-}
-
-.agent-loop-detail-title {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--agent-loop-text-muted);
-  font-size: 13px;
-  font-weight: 400;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-loop-source-link,
-.agent-loop-detail-text {
-  min-width: 0;
-  overflow: hidden;
-  overflow-wrap: anywhere;
-  color: var(--agent-loop-text-secondary);
-  font-size: 13px;
-  line-height: 1.55;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-loop-source-link {
-  width: fit-content;
-  max-width: min(860px, 72vw);
-  margin-left: 0;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  font: inherit;
-  font-size: 13px;
-  text-align: left;
-  text-decoration: none;
-  cursor: pointer;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-loop-source-link:hover:not(:disabled) {
-  color: var(--agent-loop-text-secondary);
-  text-decoration: underline;
-}
-
-.agent-loop-source-link:disabled {
-  cursor: default;
-  color: var(--agent-loop-text-muted);
-}
-
-.agent-loop-source-meta {
-  min-width: 0;
-  color: var(--agent-loop-text-subtle);
-  font-size: 14px;
-  font-variant-numeric: tabular-nums;
-  line-height: 1.55;
-  white-space: nowrap;
-}
-
-.agent-loop-source-detail .agent-loop-detail-toggle {
-  gap: 7px;
-  min-height: 23px;
-  color: inherit;
-  font-size: 13px;
-}
-
-.agent-loop-source-detail .agent-loop-detail-chevron {
-  width: 14px;
-  color: var(--agent-loop-text-subtle);
-}
-
-.agent-loop-source-detail .agent-loop-detail-text {
-  max-width: min(780px, 100%);
-  padding-left: 21px;
-  color: var(--agent-loop-text-subtle);
-  font-size: 13px;
-  line-height: 1.55;
-  white-space: normal;
-}
-
-.agent-loop-source-detail[data-source-type="web"] .agent-loop-source-link {
-  color: var(--agent-loop-text-subtle);
-}
-
-.agent-loop-source-detail[data-source-type="web"] .agent-loop-source-link:hover:not(:disabled) {
-  color: var(--agent-loop-text-secondary);
-}
-
-.agent-loop-system-status,
-.agent-loop-browser-preview {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 28px;
-  width: fit-content;
-  max-width: 100%;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--agent-loop-text-muted);
-  font: inherit;
-  font-size: 13px;
-  line-height: 1.5;
-  text-align: left;
-}
-
-.agent-loop-browser-preview {
-  cursor: pointer;
-}
-
-.agent-loop-browser-preview:hover {
-  color: var(--agent-loop-text-secondary);
-}
-
-.agent-loop-system-status[data-tone="warning"] {
-  color: var(--agent-loop-warning, var(--state-warning));
-}
-
-.agent-loop-system-status[data-tone="error"],
-.agent-loop-browser-preview[data-status="failed"] {
-  color: var(--agent-loop-danger);
-}
-
-.agent-loop-system-status-detail,
-.agent-loop-browser-url {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--agent-loop-text-subtle);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-loop-process-cell > .thinking-cell .thinking-cell-process-content {
-  color: var(--agent-loop-text-secondary) !important;
-  font-size: var(--text-md) !important;
-  line-height: var(--leading-relaxed) !important;
-
-}
-
-.agent-loop-live-narration {
-  position: relative;
-  max-width: 100%;
-  padding: 3px 0 4px 14px;
-  color: var(--agent-loop-text-main);
-  font-size: 14px;
-  line-height: 1.72;
-}
-
-.agent-loop-live-narration::before {
-  content: "";
-  position: absolute;
-  left: 1px;
-  top: 0.62em;
-  width: 6px;
-  height: 6px;
-  border-radius: 999px;
-  background: color-mix(in oklch, var(--agent-loop-text-subtle) 75%, transparent);
-}
-
-.agent-loop-live-narration[data-status="running"]::before {
-  background: color-mix(in oklch, var(--accent-primary) 48%, var(--agent-loop-text-subtle));
-  animation: agent-loop-narration-pulse 2.2s cubic-bezier(0.42, 0, 0.18, 1) infinite;
-}
-
-.agent-loop-live-narration p {
-  margin: 0 0 6px;
-}
-
-@keyframes agent-loop-narration-pulse {
-  0%, 100% {
-    opacity: 0.45;
-    transform: scale(0.88);
-  }
-  50% {
-    opacity: 1;
-    transform: scale(1.08);
-  }
-}
-
-.agent-loop-process-cell > .activity-group-cell,
-.agent-loop-process-cell > .exec-group-cell {
-  color: var(--agent-loop-text-muted);
-  border-left: 0;
-  padding-left: 0;
-}
-
-.agent-loop-process-cell .activity-group-title,
-.agent-loop-process-cell .exec-group-title {
-  color: var(--agent-loop-text-muted) !important;
-  font-size: 13px !important;
-  font-weight: 500 !important;
-}
-
-.agent-loop-process-cell .activity-group-header,
-.agent-loop-process-cell .exec-group-header {
-  min-height: 28px;
-  padding: 2px 0;
-  border-radius: 4px;
-  color: var(--agent-loop-text-muted);
-  transform: none;
-}
-
-.agent-loop-process-cell .activity-group-header:hover,
-.agent-loop-process-cell .exec-group-header:hover {
-  background: var(--agent-loop-surface-subtle);
-  color: var(--agent-loop-text-secondary) !important;
-
-}
-
-.agent-loop-process-cell .activity-group-pill {
-  border: 0 !important;
-  background: transparent !important;
-  padding: 0 !important;
-
-}
-
-.agent-loop-process-cell .activity-group-body,
-.agent-loop-process-cell .exec-group-body {
-  padding: 2px 0 6px 22px;
-
-}
+/* ── Process-cell 对 cells 类的 scoped 覆盖（拉平时间线 / 统一表面）─────
+   cells.css 以 (0,1,0) 非 !important 定义基值，本文件 (0,2,0) 非 !important 且加载
+   更晚，故无需 !important 即生效。 */
 
 .agent-loop-process-cell .activity-cell,
 .agent-loop-process-cell .exec-cell {
-  border-left: 0;
-  padding-left: 0;
   margin-left: 0;
+  padding: 0;
+  border: 0;
   background: transparent;
 }
 
-.agent-loop-process-cell .exec-group-status-running,
-.agent-loop-process-cell .activity-cell-dot[data-running="true"] {
-  color: var(--agent-loop-running) !important;
-}
-
-.agent-loop-process-cell .exec-cell-output-stack {
-  max-height: none;
+.agent-loop-process-cell .activity-cell-main-button,
+.agent-loop-process-cell .exec-cell-header-button {
+  flex-wrap: nowrap;
   overflow: hidden;
-  background: var(--surface-base) !important;
-  border-color: var(--agent-loop-line) !important;
-  color: var(--agent-loop-text-secondary) !important;
-
+  min-height: 38px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  font-size: var(--text-md);
+  white-space: nowrap;
+  transition:
+    border-color var(--transition-fast),
+    background-color var(--transition-fast);
 }
+
+.agent-loop-process-cell .activity-cell-main-button:disabled {
+  border-color: var(--border-subtle);
+  background: var(--surface-raised);
+  opacity: 1;
+}
+
+.agent-loop-process-cell .activity-cell-main-button[data-clickable="true"]:hover,
+.agent-loop-process-cell .exec-cell-header-button:hover {
+  border-color: var(--border-soft);
+  background: var(--surface-soft);
+}
+
+.agent-loop-process-cell .exec-cell-header-row {
+  gap: 6px;
+}
+
+.agent-loop-process-cell .exec-cell-stop-button {
+  min-height: 32px;
+}
+
+.agent-loop-process-cell .activity-cell-name,
+.agent-loop-process-cell .exec-cell-title,
+.agent-loop-process-cell .exec-cell-command-preview,
+.agent-loop-process-cell .activity-cell-detail {
+  font-size: var(--text-md);
+  line-height: 1.5;
+}
+
+.agent-loop-process-cell .activity-cell-file-change-target,
+.agent-loop-process-cell .activity-cell-file-change-stats,
+.agent-loop-process-cell .exec-cell-meta {
+  font-size: var(--text-base);
+}
+
+.agent-loop-process-cell :is(
+  .activity-cell-tool-record-target,
+  .activity-cell-change-card-path,
+  .activity-cell-inline-output,
+  .activity-cell-output-pre,
+  .activity-cell-detail-row,
+  .activity-cell-detail-path,
+  .activity-cell-plan-summary,
+  .activity-cell-plan-step,
+  .activity-cell-error-label,
+  .activity-cell-error-pre,
+  .exec-cell-expanded-heading,
+  .exec-cell-shell-label,
+  .exec-cell-output-pre,
+  .inline-diff
+) {
+  font-size: var(--text-base);
+}
+
+.agent-loop-process-cell :is(
+  .activity-cell-progress,
+  .activity-cell-elapsed,
+  .activity-cell-long-running,
+  .activity-cell-detail-meta,
+  .activity-cell-detail-count,
+  .activity-cell-detail-duration,
+  .exec-cell-meta,
+  .exec-cell-no-output
+) {
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+
+.agent-loop-diff-area :is(.diff-cell-title, .diff-cell-file-path) {
+  font-size: var(--text-md);
+}
+
+.agent-loop-diff-area .diff-cell-stats {
+  font-size: var(--text-base);
+}
+
+.agent-loop-diff-area :is(.diff-cell-action-button, .diff-cell-more-files) {
+  font-size: var(--text-base);
+}
+
+.agent-loop-process-cell .activity-cell-read-target,
+.agent-loop-process-cell .activity-cell-detail,
+.agent-loop-process-cell .exec-cell-command-preview {
+  max-width: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
+.agent-loop-process-cell .activity-cell-running .activity-cell-name,
+.agent-loop-process-cell .activity-cell-running .activity-cell-detail,
+.agent-loop-process-cell .exec-cell-running .exec-cell-title,
+.agent-loop-process-cell .exec-cell-running .exec-cell-command-preview {
+  background-image: linear-gradient(
+    90deg,
+    var(--text-primary) 0%,
+    var(--text-primary) 34%,
+    color-mix(in oklch, var(--text-primary) 22%, white) 38%,
+    var(--text-muted) 43%,
+    var(--text-muted) 100%
+  );
+  background-position: 100% 0;
+  background-size: 300% 100%;
+  background-repeat: no-repeat;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: agent-loop-processing-sheen var(--duration-status-sweep) var(--easing-status-sweep) infinite both;
+}
+
+.agent-loop-process-cell .activity-cell-dot[data-running="true"] {
+  color: var(--state-info);
+}
+
+/* thinking 正文在进程区内放大一档（cells 默认 text-sm）。 */
+.agent-loop-process-cell > .thinking-cell-live {
+  color: var(--text-secondary);
+  font-size: var(--text-md);
+  line-height: var(--leading-relaxed);
+}
+
+.agent-loop-process-cell > .thinking-cell-commentary {
+  padding: 7px 0 5px;
+  color: var(--text-primary);
+  font-size: var(--text-base);
+  line-height: var(--leading-relaxed);
+}
+
+/* ── Final answer（回答正文 + 流式光标）───────────────────────────────── */
 
 .agent-loop-final-answer {
-  margin-top: 12px !important;
-  padding-top: 4px;
-}
-
-.agent-loop-reply-area[data-zone="reply"] .agent-loop-final-answer {
+  margin-top: 10px;
+  padding-top: 0;
   border-top: 0;
-  padding-top: 4px;
-}
-
-.agent-loop-answer-cell .assistant-cell-content,
-.agent-loop-answer-cell .md-prose {
-  color: var(--agent-loop-text-main) !important;
-  font-size: 15px !important;
-  line-height: 1.85;
-
-}
-
-.agent-loop-final-answer[data-streaming="true"] .assistant-cell-content::after,
-.agent-loop-answer-cell .streaming-cursor {
-  background: var(--agent-loop-text-subtle) !important;
   box-shadow: none;
 }
 
-@keyframes agent-loop-soft-blink {
-  0%, 100% { opacity: 0.36; transform: scale(0.94); }
-  50% { opacity: 0.9; transform: scale(1); }
-}
-
-.agent-loop-artifacts {
-  display: grid;
-  gap: 12px;
-  margin-top: 12px;
-}
-
-.agent-loop-file-inline {
-  display: grid;
-  gap: 6px;
-  min-width: 0;
-}
-
-.agent-loop-file-inline-row {
-  display: inline-grid;
-  grid-template-columns: 16px minmax(0, 1fr) auto 14px;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-  width: 100%;
-  max-width: 100%;
-  min-height: 25px;
-  padding: 1px 0;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--agent-loop-text-secondary);
-  font: inherit;
-  font-size: 13.5px;
-  text-align: left;
-  cursor: pointer;
-  animation: agent-loop-file-row-in var(--duration-base) var(--easing-enter);
-}
-
-.agent-loop-file-inline-row:hover {
-  background: transparent;
-  color: var(--agent-loop-text-main);
-}
-
-.agent-loop-file-inline-row:focus-visible,
-.agent-loop-file-inline-file:focus-visible {
-  outline: 2px solid color-mix(in oklch, var(--accent-primary) 65%, transparent);
-  outline-offset: 2px;
-}
-
-.agent-loop-file-inline-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--agent-loop-text-subtle);
-  line-height: 0;
-}
-
-.agent-loop-file-inline-title {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-loop-file-inline-stats {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--agent-loop-text-muted);
-  font-size: 14px;
-  font-weight: 650;
-  white-space: nowrap;
-}
-
-.agent-loop-file-inline-panel {
-  display: grid;
-  gap: 6px;
-  max-width: 100%;
-  margin-left: 26px;
-  padding: 5px 0 4px;
-}
-
-.agent-loop-file-inline-panel-title {
-  color: var(--agent-loop-text-muted);
-  font-size: 13px;
-}
-
-.agent-loop-file-inline-list {
-  display: grid;
-  gap: 2px;
-}
-
-.agent-loop-file-inline-file-wrap {
-  display: grid;
-  gap: 6px;
-}
-
-.agent-loop-file-inline-file {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(42px, auto) minmax(52px, auto) 14px;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  min-height: 30px;
-  padding: 3px 6px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--agent-loop-text-secondary);
-  font: inherit;
-  font-size: 13px;
-  text-align: left;
-  cursor: pointer;
-  animation: agent-loop-file-row-in var(--duration-base) var(--easing-enter);
-}
-
-.agent-loop-file-inline-file:hover {
-  background: var(--agent-loop-surface-subtle);
-  color: var(--agent-loop-text-main);
-}
-
-.agent-loop-file-inline-path {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-loop-file-inline-more {
-  padding: 3px 6px;
-  color: var(--agent-loop-text-muted);
-  font-size: 14px;
-}
-
-.agent-loop-file-card {
-  min-width: 0;
-  overflow: hidden;
-  border: 1px solid var(--agent-loop-line);
-  border-radius: 8px;
-  background: var(--agent-loop-surface);
-  box-shadow: 0 1px 2px rgb(17 24 39 / 0.04);
-  animation: agent-loop-file-card-in var(--duration-base) var(--easing-enter);
-}
-
-.agent-loop-file-card-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 72px;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--agent-loop-line);
-}
-
-.agent-loop-file-card-main {
-  display: grid;
-  grid-template-columns: 44px minmax(0, 1fr);
-  align-items: center;
-  gap: 12px;
-  min-width: 0;
-  color: var(--agent-loop-text-secondary);
-}
-
-.agent-loop-file-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 44px;
-  height: 44px;
-  border: 1px solid var(--agent-loop-line);
-  border-radius: 10px;
-  background: color-mix(in oklch, var(--agent-loop-surface-subtle) 62%, transparent);
-  color: var(--agent-loop-text-subtle);
-}
-
-.agent-loop-file-card-title {
-  display: grid;
-  gap: 5px;
-  justify-items: start;
-  min-width: 0;
-  color: var(--agent-loop-text-main);
-  font-size: 15px;
-  font-weight: 650;
-}
-
-.agent-loop-file-meta-row {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.agent-loop-file-breakdown {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--agent-loop-text-muted);
-  font-size: 14px;
-  font-weight: 500;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-loop-file-stats,
-.agent-loop-file-row-stats {
-  display: inline-flex;
-  align-items: center;
-  justify-self: end;
-  gap: 6px;
-  color: var(--agent-loop-text-muted);
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.agent-loop-file-card-stats {
-  justify-self: start;
-}
-
-.agent-loop-file-added {
-  color: var(--agent-loop-success);
-}
-
-.agent-loop-file-removed {
-  color: var(--agent-loop-danger);
-}
-
-.agent-loop-file-more {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  min-height: 28px;
-  padding: 0 9px;
-  border: 1px solid var(--agent-loop-line);
-  border-radius: 8px;
-  background: var(--agent-loop-surface);
-  color: var(--agent-loop-text-secondary);
-  font: inherit;
-  font-size: 13px;
-  font-weight: 550;
-  cursor: pointer;
-}
-
-.agent-loop-file-more:hover {
-  border-color: var(--agent-loop-line-strong, var(--border-soft));
-  color: var(--agent-loop-text-main);
-}
-
-.agent-loop-file-actions {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
-.agent-loop-file-action {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  min-height: 32px;
-  padding: 0 10px;
-  border: 1px solid var(--agent-loop-line);
-  border-radius: 8px;
-  background: var(--agent-loop-surface);
-  color: var(--agent-loop-text-main);
-  font: inherit;
-  font-size: 13px;
-  font-weight: 550;
-  cursor: pointer;
-  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
-}
-
-.agent-loop-file-action:hover {
-  border-color: var(--agent-loop-line-strong, var(--border-soft));
-  background: color-mix(in oklch, var(--agent-loop-surface-subtle) 72%, transparent);
-}
-
-.agent-loop-file-list {
-  display: grid;
-  padding: 4px 16px 12px;
-}
-
-.agent-loop-file-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 16px;
-  min-height: 42px;
-  padding: 0 2px;
-  animation: agent-loop-file-row-in var(--duration-base) var(--easing-enter);
-  transition: background var(--transition-fast);
-}
-
-.agent-loop-file-row + .agent-loop-file-row,
-.agent-loop-file-more {
-  border-top: 1px solid rgb(229 231 235 / 0.78);
-}
-
-.agent-loop-file-button {
-  display: inline-flex;
-  align-items: center;
-  width: 100%;
-  min-width: 0;
-  min-height: 34px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--agent-loop-text-main);
-  font: inherit;
-  font-size: 14px;
-  text-align: left;
-  cursor: pointer;
-  transition: background var(--transition-fast), color var(--transition-fast);
-}
-
-.agent-loop-file-button:hover:not(:disabled),
-.agent-loop-file-button:focus-visible {
-  background: color-mix(in oklch, var(--agent-loop-surface-subtle) 72%, transparent);
-  outline: none;
-}
-
-.agent-loop-file-button:disabled {
-  cursor: default;
-}
-
-.agent-loop-file-button svg {
-  flex-shrink: 0;
-  color: var(--agent-loop-text-subtle);
-}
-
-.agent-loop-file-button span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-loop-file-chevron {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  margin-left: auto;
-  color: var(--agent-loop-text-subtle);
-}
-
-.agent-loop-file-kind {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 34px;
-  min-height: 18px;
-  padding: 0 6px;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--agent-loop-text-muted);
-  font-size: 14px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.agent-loop-file-kind-created {
-  color: var(--agent-loop-success);
-}
-
-.agent-loop-file-kind-deleted {
-  color: var(--agent-loop-danger);
-}
-
-.agent-loop-file-inline-diff {
-  grid-column: 1 / -1;
-  margin: 5px 0 8px;
-  overflow: hidden;
-  border: 1px solid color-mix(in oklch, var(--agent-loop-line) 92%, transparent);
-  border-radius: 8px;
-  background: var(--agent-loop-surface);
-  color: var(--agent-loop-text-secondary);
-  box-shadow: 0 1px 2px rgb(17 24 39 / 0.03);
-  animation: agent-loop-file-diff-in var(--transition-fast);
-}
-
-.agent-loop-file-inline-diff-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  min-height: 32px;
-  padding: 0 10px;
-  border-bottom: 1px solid color-mix(in oklch, var(--agent-loop-line) 78%, transparent);
-  background: color-mix(in oklch, var(--agent-loop-surface-subtle) 62%, var(--agent-loop-surface));
-}
-
-.agent-loop-file-inline-diff-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-  color: var(--agent-loop-text-secondary);
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.agent-loop-file-inline-diff-title svg {
-  flex-shrink: 0;
-  color: var(--agent-loop-text-subtle);
-  stroke-width: 1.75;
-}
-
-.agent-loop-file-inline-diff-title span:first-of-type {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-loop-file-inline-diff-meta {
-  flex-shrink: 0;
-  color: var(--agent-loop-text-subtle);
-  font-size: 13px;
-  font-weight: 500;
-}
-
-.agent-loop-file-inline-diff-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  flex-shrink: 0;
-}
-
-.agent-loop-file-inline-diff-copy {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--agent-loop-text-subtle);
-  cursor: pointer;
-}
-
-.agent-loop-file-inline-diff-copy:hover {
-  background: color-mix(in oklch, var(--agent-loop-surface-subtle) 80%, transparent);
-  color: var(--agent-loop-text-main);
-}
-
-.agent-loop-file-inline-diff-copy svg {
-  stroke-width: 1.75;
-}
-
-.agent-loop-file-inline-diff-body {
-  max-height: min(360px, 48vh);
-  overflow: auto;
-  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
-  font-size: 14px;
-  line-height: 1.55;
-  background: color-mix(in oklch, var(--agent-loop-surface-code) 88%, var(--agent-loop-surface));
-}
-
-.agent-loop-file-inline-diff-line {
-  display: grid;
-  grid-template-columns: 74px minmax(0, 1fr);
-  min-height: 21px;
-  color: var(--agent-loop-text-secondary);
-  animation: agent-loop-file-line-in var(--transition-fast) both;
-}
-
-.agent-loop-file-inline-diff-line[data-kind="meta"],
-.agent-loop-file-inline-diff-line[data-kind="hunk"] {
-  color: var(--agent-loop-text-muted);
-  background: color-mix(in oklch, var(--agent-loop-surface-subtle) 76%, transparent);
-}
-
-.agent-loop-file-inline-diff-line[data-kind="add"] {
-  background: color-mix(in oklch, var(--agent-loop-success) 10%, var(--agent-loop-surface));
-}
-
-.agent-loop-file-inline-diff-line[data-kind="remove"] {
-  background: color-mix(in oklch, var(--agent-loop-danger) 9%, var(--agent-loop-surface));
-}
-
-.agent-loop-file-inline-diff-gutter {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 7px;
-  padding: 0 9px;
-  border-right: 1px solid color-mix(in oklch, var(--agent-loop-line) 70%, transparent);
-  color: var(--agent-loop-text-subtle);
-  text-align: right;
-  user-select: none;
-}
-
-.agent-loop-file-inline-diff-code {
-  min-width: 0;
-  overflow: hidden;
-  padding: 0 10px;
-  color: inherit;
-  font: inherit;
-  text-overflow: ellipsis;
-  white-space: pre;
-}
-
-.agent-loop-file-inline-diff-line[data-kind="add"] .agent-loop-file-inline-diff-code {
-  color: color-mix(in oklch, var(--agent-loop-success) 62%, var(--agent-loop-text-main));
-}
-
-.agent-loop-file-inline-diff-line[data-kind="remove"] .agent-loop-file-inline-diff-code {
-  color: color-mix(in oklch, var(--agent-loop-danger) 68%, var(--agent-loop-text-main));
-}
-
-.agent-loop-file-inline-diff-folded {
-  padding: 6px 10px 8px 84px;
-  border-top: 1px solid color-mix(in oklch, var(--agent-loop-line) 70%, transparent);
-  color: var(--agent-loop-text-subtle);
-  font-family: var(--font-ui, system-ui, sans-serif);
-  font-size: 14px;
-}
-
-.agent-loop-file-more {
-  justify-self: flex-start;
-  margin: 8px 0 2px;
+.chat-turn-answer-zone,
+.chat-turn-answer {
   border-top: 0;
-  gap: 7px;
+  box-shadow: none;
 }
 
-@keyframes agent-loop-file-card-in {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
+/* 回答正文的字号/行高由 ui-polish 统一为全站正文刻度(--mc-font-reading/1.62),
+   不再单独放大一档——对话区与全局保持一致。仅保留字色与字重。 */
+.agent-loop-answer-cell .assistant-cell-content,
+.agent-loop-answer-cell .md-prose {
+  color: var(--text-primary);
+  font-weight: var(--fw-medium);
 }
 
-@keyframes agent-loop-file-row-in {
-  from { opacity: 0; transform: translateY(3px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-@keyframes agent-loop-file-diff-in {
-  from { opacity: 0; transform: translateY(-2px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-@keyframes agent-loop-file-line-in {
-  from { opacity: 0; transform: translateX(-3px); }
-  to { opacity: 1; transform: translateX(0); }
-}
+/* ── Reduced motion ──────────────────────────────────────────────────── */
 
 @media (prefers-reduced-motion: reduce) {
-  .agent-loop-file-card,
-  .agent-loop-file-row,
-  .agent-loop-file-inline-row,
-  .agent-loop-file-inline-file,
-  .agent-loop-file-inline-diff,
-  .agent-loop-file-inline-diff-line,
-  .agent-loop-file-detail-row {
-    animation: none !important;
-    transition: none !important;
+  /* 无障碍模式不播放扫光，直接显示最终主文字色。 */
+  .agent-loop-process-summary-status[data-running="true"] {
+    color: var(--text-primary);
   }
+
+  .agent-loop-process-summary-status[data-running="true"]
+    .agent-loop-process-summary-status-label {
+    color: var(--text-primary);
+    background: none;
+    -webkit-text-fill-color: currentColor;
+  }
+
+  .agent-loop-process-cell .activity-cell-running .activity-cell-name,
+  .agent-loop-process-cell .activity-cell-running .activity-cell-detail,
+  .agent-loop-process-cell .exec-cell-running .exec-cell-title,
+  .agent-loop-process-cell .exec-cell-running .exec-cell-command-preview {
+    color: var(--text-primary);
+    background: none;
+    -webkit-text-fill-color: currentColor;
+    animation: none;
+  }
+
+}
+
+.agent-loop-timeline-group {
+  margin: 4px 0 6px;
+}
+
+.agent-loop-timeline-group-title {
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+  width: 100%;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  font-size: var(--text-md);
+  font-weight: var(--fw-medium);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--transition-fast),
+    background-color var(--transition-fast);
+}
+
+.agent-loop-timeline-group-title:hover {
+  border-color: var(--border-soft);
+  background: var(--surface-soft);
+}
+
+.agent-loop-timeline-group[data-group-expanded="true"] > .agent-loop-timeline-group-title {
+  border-color: var(--border-soft);
+}
+
+.agent-loop-timeline-group-title svg {
+  flex: 0 0 auto;
+}
+
+.agent-loop-timeline-group-icon,
+.agent-loop-timeline-group-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  color: var(--text-muted);
+}
+
+.agent-loop-timeline-group-chevron {
+  margin-left: auto;
+}
+
+.agent-loop-timeline-group-items {
+  display: grid;
+  gap: 6px;
+  margin: 7px 0 0 22px;
+  padding-left: 0;
+}
+
+.agent-loop-open-work-group {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.agent-loop-open-work-group > .agent-loop-timeline-group-items {
+  margin-left: 0;
+}
+
+.agent-loop-open-work-group > .agent-loop-timeline-group {
+  margin: 0;
 }
 
 @media (max-width: 820px) {
-  .agent-loop-file-card-header {
-    align-items: flex-start;
-    flex-wrap: wrap;
+  .agent-loop-timeline-group-items {
+    margin-left: 12px;
+  }
+}
+
+/* ── Responsive ──────────────────────────────────────────────────────── */
+
+@media (max-width: 820px) {
+  .agent-loop-user-cell .user-cell-wrap {
+    width: min(92%, 760px);
+    max-width: min(92%, 760px);
   }
 
   .agent-loop-answer-cell .assistant-cell-content,
   .agent-loop-answer-cell .md-prose {
-    font-size: 14px !important;
-  }
-}
-
-
-
-/* ════════════════════════════════════════════════════════
-   Migrated from workbench-polish.css — Agent-loop visual overrides
-   ════════════════════════════════════════════════════════ */
-.agent-loop-turn {
-  color: var(--text-primary) !important;
-
-}
-
-
-
-.agent-loop-user-cell .user-cell-wrap {
-  width: min(72%, 760px) !important;
-  max-width: min(72%, 760px) !important;
-  margin: 8px 0 18px auto;
-
-}
-
-
-
-.agent-loop-user-cell .user-cell-bubble {
-  padding: 11px 14px !important;
-  background: var(--message-user-bg) !important;
-  border-color: var(--border-soft) !important;
-  border-radius: 14px !important;
-  color: var(--text-primary) !important;
-
-}
-
-
-
-.agent-loop-process.chat-turn-process {
-  margin: 10px 0 0;
-  width: var(--chat-wide-axis-width) !important;
-  max-width: var(--chat-wide-axis-width) !important;
-
-}
-
-
-
-.agent-loop-process-summary,
-.chat-turn-process-summary {
-  min-height: 26px;
-  color: var(--text-muted) !important;
-  font-size: 13px;
-  font-weight: 500;
-}
-
-
-
-.agent-loop-process-summary:hover,
-.chat-turn-process-summary:hover {
-  color: var(--text-secondary);
-
-}
-
-
-
-.agent-loop-timeline {
-  gap: 5px !important;
-  padding: 4px 0 0 !important;
-  border: 0 !important;
-  border-radius: 0 !important;
-  background: transparent !important;
-  box-shadow: none !important;
-}
-
-
-
-.agent-loop-activity-row {
-  min-height: 24px;
-  padding: 0;
-  color: var(--text-muted) !important;
-
-}
-
-
-
-.agent-loop-activity-row:hover {
-  background: transparent !important;
-  color: var(--text-secondary) !important;
-
-}
-
-
-
-.agent-loop-activity-details {
-  gap: 8px;
-  padding: 5px 0 7px 26px;
-
-}
-
-
-
-.agent-loop-shell-detail,
-.agent-loop-source-detail,
-.agent-loop-text-detail {
-  border: 0;
-  border-radius: 10px;
-  background: var(--surface-soft);
-  color: var(--text-secondary);
-}
-
-
-
-.agent-loop-detail-header {
-  min-height: 30px;
-  padding: 4px 10px;
-  color: var(--text-secondary) !important;
-  font-weight: 500;
-
-}
-
-
-
-.agent-loop-detail-chevron {
-  color: var(--text-muted) !important;
-}
-
-
-
-.agent-loop-detail-meta,
-.agent-loop-detail-hint,
-.agent-loop-detail-exit {
-  color: var(--text-muted);
-
-}
-
-
-
-.agent-loop-detail-exit[data-ok="false"] {
-  color: var(--state-danger) !important;
-
-}
-
-
-
-.agent-loop-shell-command {
-  color: var(--text-primary) !important;
-  font-size: 14px;
-
-}
-
-
-
-.agent-loop-shell-output,
-.agent-loop-detail-text {
-  padding: 8px 10px;
-  color: var(--text-secondary);
-  font-size: 14px;
-  line-height: 1.6;
-}
-
-
-
-.agent-loop-shell-output {
-  border-top: 1px solid rgb(0 0 0 / 0.04);
-
-}
-
-
-
-.agent-loop-final-answer {
-  margin-top: 16px !important;
-  padding-top: 14px !important;
-  border-top: 1px solid var(--border-subtle) !important;
-
-}
-
-
-
-.agent-loop-answer-cell .assistant-cell-content,
-.agent-loop-answer-cell .md-prose,
-.assistant-cell-content,
-.streaming-tail-cell {
-  color: var(--text-primary) !important;
-  font-size: var(--text-md) !important;
-  line-height: var(--leading-relaxed) !important;
-  font-weight: 500;
-
-}
-
-
-
-.agent-loop-artifacts {
-  gap: 14px !important;
-  margin-top: 14px !important;
-
-}
-
-
-
-.agent-loop-file-inline-row {
-  color: var(--agent-loop-text-secondary) !important;
-}
-
-
-
-.agent-loop-file-inline-row:hover,
-.agent-loop-file-inline-file:hover {
-  background: var(--agent-loop-surface-subtle);
-}
-
-
-
-.agent-loop-file-inline-panel-title,
-.agent-loop-file-inline-more {
-  color: var(--agent-loop-text-subtle) !important;
-}
-
-
-
-.agent-loop-file-card {
-  border-color: var(--agent-loop-line) !important;
-  border-radius: 10px !important;
-  box-shadow: none !important;
-
-}
-
-
-
-.agent-loop-file-card-header {
-  min-height: 50px;
-  padding: 9px 14px;
-
-}
-
-
-
-.agent-loop-file-icon {
-  width: 30px !important;
-  height: 30px !important;
-  border: 1px solid var(--agent-loop-line) !important;
-  border-radius: 7px !important;
-  background: var(--agent-loop-surface-subtle) !important;
-  color: var(--agent-loop-text-muted) !important;
-
-}
-
-
-
-.agent-loop-file-action,
-.agent-loop-file-more {
-  border-color: var(--agent-loop-line);
-  background: var(--agent-loop-surface);
-  color: var(--agent-loop-text-secondary);
-  border-radius: 8px;
-
-}
-
-
-
-.agent-loop-file-inline-diff {
-  border-color: var(--agent-loop-line) !important;
-  background: var(--agent-loop-surface) !important;
-  color: var(--agent-loop-text-secondary) !important;
-
-}
-
-
-
-.agent-loop-file-inline-diff-header {
-  border-bottom-color: var(--agent-loop-line);
-  background: var(--agent-loop-surface-subtle);
-
-}
-
-
-
-.agent-loop-file-inline-diff-title {
-  color: var(--agent-loop-text-secondary) !important;
-
-}
-
-
-
-.agent-loop-file-inline-diff-title svg,
-.agent-loop-file-inline-diff-meta,
-.agent-loop-file-inline-diff-gutter {
-  color: var(--agent-loop-text-subtle) !important;
-}
-
-
-
-.agent-loop-file-inline-diff-copy {
-  color: var(--agent-loop-text-subtle) !important;
-
-}
-
-
-
-.agent-loop-file-inline-diff-copy:hover {
-  background: var(--agent-loop-surface-code);
-  color: var(--agent-loop-text-secondary);
-
-}
-
-
-
-.agent-loop-file-inline-diff-body {
-  background: var(--agent-loop-surface-subtle) !important;
-
-}
-
-
-
-.agent-loop-file-inline-diff-line[data-kind="meta"],
-.agent-loop-file-inline-diff-line[data-kind="hunk"] {
-  background: var(--agent-loop-surface-subtle);
-  color: var(--text-secondary);
-
-}
-
-
-
-.agent-loop-file-inline-diff-line[data-kind="add"] {
-  background: var(--diff-add-bg) !important;
-
-}
-
-
-
-.agent-loop-file-inline-diff-line[data-kind="remove"] {
-  background: var(--diff-del-bg);
-
-}
-
-
-
-.agent-loop-file-inline-diff-line[data-kind="add"] .agent-loop-file-inline-diff-code {
-  color: var(--diff-add-text) !important;
-
-}
-
-
-
-.agent-loop-file-inline-diff-line[data-kind="remove"] .agent-loop-file-inline-diff-code {
-  color: var(--diff-del-text);
-
-}
-
-
-
-.agent-loop-file-inline-diff-gutter {
-  border-right-color: var(--agent-loop-line) !important;
-
-}
-
-
-
-.agent-loop-file-inline-diff-folded {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  width: 100%;
-  border: 0;
-  border-top: 1px solid var(--agent-loop-line);
-  background: transparent;
-  color: var(--agent-loop-text-subtle) !important;
-  font: inherit;
-  font-size: 14px;
-  padding: 6px 12px;
-  cursor: pointer;
-
-}
-
-
-.agent-loop-file-inline-diff-folded:hover {
-  color: var(--accent-primary) !important;
-
-}
-
-
-.rotated-180 {
-  transform: rotate(180deg);
-}
-
-
-
-.chat-turn-answer-zone,
-.chat-turn-answer,
-.agent-loop-reply-area,
-.agent-loop-final-answer,
-.agent-loop-reply-area[data-zone="reply"] .agent-loop-final-answer {
-  border-top: 0;
-  box-shadow: none;
-}
-
-
-
-.agent-loop-final-answer {
-  margin-top: 10px !important;
-  padding-top: 0 !important;
-}
-
-
-
-.thinking-cell-content,
-.agent-loop-process-cell > .thinking-cell .thinking-cell-content {
-  margin-left: 0;
-  padding-left: 0;
-  border-left: 0;
-}
-
-
-
-.chat-turn-process,
-.agent-loop-process.chat-turn-process,
-.chat-turn-process-stack,
-.agent-loop-timeline {
-  border: 0;
-  box-shadow: none;
-
-}
-
-
-
-.agent-loop-process.chat-turn-process {
-  width: var(--chat-wide-axis-width) !important;
-  max-width: var(--chat-wide-axis-width) !important;
-}
-
-
-
-.chat-turn-process::before,
-.chat-turn-process::after,
-.agent-loop-process.chat-turn-process::before,
-.agent-loop-process.chat-turn-process::after {
-  content: none !important;
-  display: none !important;
-}
-
-
-
-.assistant-cell-wrap[data-streaming="true"] .assistant-cell-content::after,
-.agent-loop-final-answer[data-streaming="true"] .assistant-cell-content::after,
-.streaming-cursor,
-.agent-loop-answer-cell .streaming-cursor {
-  width: 5px;
-  height: 5px;
-  margin-left: 7px;
-  background: var(--text-muted) !important;
-  box-shadow: none;
-  animation: agent-loop-soft-blink 2.4s cubic-bezier(0.42, 0, 0.18, 1) infinite;
-}
-
-
-
-.activity-cell-dot[data-running="true"],
-.agent-loop-process-cell .activity-cell-dot[data-running="true"],
-.exec-group-status-running {
-  color: var(--text-muted) !important;
-}
-
-
-
-.chat-turn-process-stack,
-.agent-loop-timeline {
-  gap: 10px !important;
-}
-
-
-
-.agent-loop-process-note {
-  padding: 4px 0;
-  line-height: 1.72;
-
-}
-
-
-
-.agent-loop-process.chat-turn-process {
-  width: 100% !important;
-  max-width: 100% !important;
-}
-
-
-
-/* ── Dark mode agent-loop overrides ── */
-html:not([data-theme="light"]) .sidebar-animate [role="tablist"],
-html:not([data-theme="light"]) .composer-container,
-html:not([data-theme="light"]) .composer-menu-list,
-html:not([data-theme="light"]) .user-cell-bubble,
-html:not([data-theme="light"]) .agent-loop-shell-detail,
-html:not([data-theme="light"]) .agent-loop-source-detail,
-html:not([data-theme="light"]) .agent-loop-text-detail,
-html:not([data-theme="light"]) .agent-loop-file-detail-row,
-html:not([data-theme="light"]) .agent-loop-file-card,
-html:not([data-theme="light"]) [aria-label="Agent is waiting for input"] section {
-  background: var(--surface-page);
-  border-color: var(--border-subtle);
-  box-shadow: none;
-
-}
-
-/* Dark overrides for the file icon / action buttons. Their base rules (~1826)
-   hardcode light hex with !important and were the only file-* pieces the dark
-   patch block missed, so they rendered as near-white blocks in dark mode.
-   !important here is required to beat the !important base rules. */
-html:not([data-theme="light"]) .agent-loop-file-icon {
-  background: var(--surface-elevated) !important;
-  border-color: var(--border-subtle) !important;
-  color: var(--text-muted) !important;
-}
-
-html:not([data-theme="light"]) .agent-loop-file-action,
-html:not([data-theme="light"]) .agent-loop-file-more {
-  background: var(--surface-elevated);
-  border-color: var(--border-subtle);
-  color: var(--text-secondary);
-}
-
-html:not([data-theme="light"]) .agent-loop-file-action:hover,
-html:not([data-theme="light"]) .agent-loop-file-more:hover {
-  background: var(--surface-raised);
-  color: var(--text-primary);
-}
-
-
-
-html:not([data-theme="light"]) .agent-loop-file-inline-row,
-html:not([data-theme="light"]) .agent-loop-file-inline-file {
-  color: var(--text-secondary);
-}
-
-
-
-html:not([data-theme="light"]) .agent-loop-file-inline-row:hover,
-html:not([data-theme="light"]) .agent-loop-file-inline-file:hover {
-  background: var(--surface-elevated);
-  color: var(--text-primary);
-
-}
-
-
-
-html:not([data-theme="light"]) .agent-loop-file-inline-panel-title,
-html:not([data-theme="light"]) .agent-loop-file-inline-more {
-  color: var(--text-muted);
-}
-
-
-
-html:not([data-theme="light"]) .agent-loop-file-detail-row:hover {
-  background: var(--surface-elevated);
-
-}
-
-
-
-html:not([data-theme="light"]) .agent-loop-file-detail-path {
-  color: var(--text-primary) !important;
-
-}
-
-
-
-html:not([data-theme="light"]) .agent-loop-file-inline-diff {
-  background: var(--surface-page);
-  border-color: var(--border-subtle);
-  color: var(--text-secondary);
-
-}
-
-
-
-html:not([data-theme="light"]) .agent-loop-file-inline-diff-header {
-  background: var(--surface-soft) !important;
-  border-bottom-color: var(--border-subtle) !important;
-
-}
-
-
-
-html:not([data-theme="light"]) .agent-loop-file-inline-diff-title {
-  color: var(--text-secondary);
-
-}
-
-
-
-html:not([data-theme="light"]) .agent-loop-file-inline-diff-title svg,
-html:not([data-theme="light"]) .agent-loop-file-inline-diff-meta,
-html:not([data-theme="light"]) .agent-loop-file-inline-diff-gutter,
-html:not([data-theme="light"]) .agent-loop-file-inline-diff-copy,
-html:not([data-theme="light"]) .agent-loop-file-inline-diff-folded {
-  color: var(--text-muted);
-}
-
-
-
-html:not([data-theme="light"]) .agent-loop-file-inline-diff-copy:hover {
-  background: var(--surface-hover);
-  color: var(--text-primary);
-
-}
-
-
-
-html:not([data-theme="light"]) .agent-loop-file-inline-diff-body {
-  background: var(--surface-sunken) !important;
-
-}
-
-
-
-html:not([data-theme="light"]) .agent-loop-file-inline-diff-line[data-kind="meta"],
-html:not([data-theme="light"]) .agent-loop-file-inline-diff-line[data-kind="hunk"] {
-  background: var(--surface-soft);
-  color: var(--text-muted);
-
-}
-
-
-
-html:not([data-theme="light"]) .agent-loop-file-inline-diff-line[data-kind="add"] {
-  background: var(--diff-add-bg) !important;
-
-}
-
-
-
-html:not([data-theme="light"]) .agent-loop-file-inline-diff-line[data-kind="remove"] {
-  background: var(--diff-del-bg);
-
-}
-
-
-
-html:not([data-theme="light"]) .agent-loop-file-inline-diff-line[data-kind="add"] .agent-loop-file-inline-diff-code {
-  color: var(--diff-add-text) !important;
-
-}
-
-
-
-html:not([data-theme="light"]) .agent-loop-file-inline-diff-line[data-kind="remove"] .agent-loop-file-inline-diff-code {
-  color: var(--diff-del-text);
-
-}
-
-
-
-html:not([data-theme="light"]) .agent-loop-file-inline-diff-gutter,
-html:not([data-theme="light"]) .agent-loop-file-inline-diff-folded {
-  border-color: var(--border-subtle);
-}
-
-
-
-html:not([data-theme="light"]) .agent-loop-final-answer,
-html:not([data-theme="light"]) .agent-loop-shell-output {
-  border-color: var(--border-subtle);
-
-}
-
-
-
-html:not([data-theme="light"]) .assistant-cell-content,
-html:not([data-theme="light"]) .streaming-tail-cell,
-html:not([data-theme="light"]) .agent-loop-answer-cell .assistant-cell-content,
-html:not([data-theme="light"]) .agent-loop-answer-cell .md-prose,
-html:not([data-theme="light"]) .agent-loop-shell-command,
-html:not([data-theme="light"]) .user-cell-bubble {
-  color: var(--text-primary);
-}
-
-
-
-html:not([data-theme="light"]) .agent-loop-activity-row,
-html:not([data-theme="light"]) .agent-loop-detail-header,
-html:not([data-theme="light"]) .agent-loop-shell-output,
-html:not([data-theme="light"]) .agent-loop-detail-text,
-html:not([data-theme="light"]) .header-bar .btn-ghost,
-html:not([data-theme="light"]) .btn-ghost {
-  color: var(--text-secondary);
-
-}
-
-
-
-html:not([data-theme="light"]) .chat-turn-process-summary,
-html:not([data-theme="light"]) .agent-loop-process-summary,
-html:not([data-theme="light"]) .turn-summary-detail,
-html:not([data-theme="light"]) .turn-summary-label,
-html:not([data-theme="light"]) .agent-loop-detail-meta,
-html:not([data-theme="light"]) .agent-loop-detail-hint {
-  color: var(--text-muted);
-}
-
-
-
-/* -- Migrated mixed @media: agent-loop responsive -- */
-
-@media (max-width: 820px) {
-  .agent-loop-user-cell .user-cell-wrap {
-    width: min(92%, 760px) !important;
-    max-width: min(92%, 760px) !important;
+    font-size: var(--text-sm) !important;
   }
 }

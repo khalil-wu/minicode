@@ -10,6 +10,61 @@ const SERIAL_MAIN_PROGRESS_STAGES = new Set<ProgressContentBlock["stage"]>([
   "status",
 ]);
 
+const PROVIDER_PROGRESS_STATUS_RANK: Record<string, number> = {
+  info: 0,
+  running: 1,
+  partial: 1,
+  completed: 2,
+  failed: 3,
+};
+
+function mergeProgressDetail(previous?: string, incoming?: string): string | undefined {
+  const parts: string[] = [];
+  const seen = new Set<string>();
+  for (const detail of [previous, incoming]) {
+    for (const rawPart of String(detail ?? "").split(" · ")) {
+      const part = rawPart.trim();
+      if (!part || seen.has(part)) continue;
+      seen.add(part);
+      parts.push(part);
+    }
+  }
+  return parts.length > 0 ? parts.join(" · ") : undefined;
+}
+
+function mergeProgressEntry(
+  previous: AgentProgressEntry | undefined,
+  progress: Omit<ProgressContentBlock, "type" | "timestamp">,
+  timestamp: number,
+  conversationId: string,
+): AgentProgressEntry {
+  const incoming = Object.fromEntries(
+    Object.entries(progress).filter(([, value]) => value !== undefined),
+  ) as Omit<ProgressContentBlock, "type" | "timestamp">;
+  const entry: AgentProgressEntry = {
+    ...previous,
+    ...incoming,
+    type: "progress",
+    timestamp,
+    conversationId,
+  };
+  const detail = mergeProgressDetail(previous?.detail, progress.detail);
+  if (detail) entry.detail = detail;
+
+  if (previous && progress.id.startsWith("provider:")) {
+    const previousRank = PROVIDER_PROGRESS_STATUS_RANK[previous.status] ?? 0;
+    const incomingRank = PROVIDER_PROGRESS_STATUS_RANK[progress.status] ?? 0;
+    if (previousRank > incomingRank) {
+      entry.status = previous.status;
+      entry.message = previous.message;
+      entry.summary = previous.summary;
+      entry.ephemeral = previous.ephemeral;
+    }
+  }
+  if (entry.status !== "running") delete entry.ephemeral;
+  return entry;
+}
+
 function shouldSerializeMainAgentProgress(progress: Omit<ProgressContentBlock, "type" | "timestamp">): boolean {
   return (
     progress.status === "running" &&
@@ -103,6 +158,7 @@ function storeConversationAgentState(
 
 export const createAgentSlice: StateCreator<AppStore, [], [], AgentSlice> = (set, get) => ({
   plan: null,
+  turnDiffs: {},
   todos: [],
   subagents: [],
   agentProgress: [],
@@ -137,24 +193,14 @@ export const createAgentSlice: StateCreator<AppStore, [], [], AgentSlice> = (set
       };
       return patch;
     }),
-  updatePlanStep: (idx, status) =>
+  setTurnDiff: (conversationId, diff) =>
     set((s) => {
-      if (!s.plan) return s;
-      const steps = s.plan.steps.slice();
-      if (idx < 0 || idx >= steps.length) return s;
-      steps[idx] = { ...steps[idx], status };
-      const plan = { ...s.plan, steps };
-      return {
-        plan,
-        ...(s.conversationId
-          ? {
-              conversationAgentStates: storeConversationAgentState(s, s.conversationId, {
-                ...liveConversationAgentState(s),
-                plan,
-              }),
-            }
-          : {}),
-      };
+      const owner = conversationId.trim();
+      if (!owner) return s;
+      const next = { ...s.turnDiffs };
+      if (diff) next[owner] = diff;
+      else delete next[owner];
+      return { turnDiffs: next };
     }),
   setTodos: (t, conversationId) =>
     set((s) => {
@@ -383,16 +429,12 @@ export const createAgentSlice: StateCreator<AppStore, [], [], AgentSlice> = (set
       const active = isActiveConversationTarget(s, targetId);
       const key = progressConversationKey(targetId);
       const targetState = active ? liveConversationAgentState(s) : targetId ? getStoredConversationAgentState(s, targetId) : liveConversationAgentState(s);
-      const entry = {
-        ...progress,
-        type: "progress" as const,
-        timestamp,
-        conversationId: key,
-      };
       const existingIdx = targetState.agentProgress.findIndex((item) =>
         item.conversationId === key && item.id === progress.id,
       );
       const serializedProgress = completePreviousMainAgentProgress(targetState.agentProgress, key, progress, timestamp);
+      const previous = existingIdx >= 0 ? serializedProgress[existingIdx] : undefined;
+      const entry = mergeProgressEntry(previous, progress, timestamp, key);
       let agentProgress: AgentProgressEntry[];
       if (existingIdx >= 0) {
         const next = serializedProgress.slice();
@@ -508,14 +550,17 @@ export const createAgentSlice: StateCreator<AppStore, [], [], AgentSlice> = (set
   clearConversationAgentState: (conversationId) =>
     set((s) => {
       const next = { ...(s.conversationAgentStates ?? {}) };
+      const nextTurnDiffs = { ...s.turnDiffs };
       delete next[conversationId];
-      if (s.conversationId !== conversationId) return { conversationAgentStates: next };
+      delete nextTurnDiffs[conversationId];
+      if (s.conversationId !== conversationId) return { conversationAgentStates: next, turnDiffs: nextTurnDiffs };
       return {
         plan: null,
         todos: [],
         subagents: [],
         agentProgress: [],
         conversationAgentStates: next,
+        turnDiffs: nextTurnDiffs,
       };
     }),
   setBudget: (buckets, total) =>

@@ -5,29 +5,47 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 
-ConversationMemoryMode = Literal["none", "summary", "profile"]
+ConversationMemoryMode = Literal["enabled", "disabled", "polluted"]
 ConversationCompactionState = Literal["clean", "compacted", "retrieved"]
-ConversationPermissionMode = Literal["default", "plan", "confirm", "bypass", "auto", "accept_edits"]
+ConversationType = Literal["main", "side_chat"]
+ConversationPermissionMode = Literal[
+    "plan", "confirm", "bypass", "auto"
+]
 ConversationPermissionRuleLevel = Literal["auto", "confirm", "diff", "deny"]
 DEFAULT_CONVERSATION_PERMISSION_MODE: ConversationPermissionMode = "confirm"
+DEFAULT_CONVERSATION_TYPE: ConversationType = "main"
+
+
+def normalize_conversation_type(value: Any) -> ConversationType:
+    conversation_type = str(value or "").strip().lower().replace("-", "_")
+    if conversation_type == "side_chat":
+        return "side_chat"
+    return DEFAULT_CONVERSATION_TYPE
+
+
+def normalize_memory_mode(
+    value: Any,
+    *,
+    conversation_type: ConversationType | str = DEFAULT_CONVERSATION_TYPE,
+    polluted: bool = False,
+) -> ConversationMemoryMode:
+    """Normalize the single MiniCode memory generation mode."""
+
+    if polluted:
+        return "polluted"
+    mode = str(value or "").strip().lower()
+    if mode in {"enabled", "disabled", "polluted"}:
+        return mode  # type: ignore[return-value]
+    if normalize_conversation_type(conversation_type) == "side_chat":
+        return "disabled"
+    return "enabled"
 
 
 def normalize_permission_mode(value: Any) -> ConversationPermissionMode:
     mode = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-    aliases = {
-        "ask": "confirm",
-        "ask_permissions": "confirm",
-        "bypass_permissions": "bypass",
-        "full_access": "bypass",
-        "fullaccess": "bypass",
-        "danger_full_access": "bypass",
-        "dangerfullaccess": "bypass",
-        "acceptedits": "accept_edits",
-    }
-    mode = aliases.get(mode, mode)
-    if mode in {"default", "plan", "confirm", "bypass", "auto", "accept_edits"}:
+    if mode in {"plan", "confirm", "bypass", "auto"}:
         return mode
-    return "default"
+    raise ValueError(f"Unsupported permission mode: {value!r}")
 
 
 def _normalize_previous_permission_mode(value: Any) -> ConversationPermissionMode | str:
@@ -82,6 +100,30 @@ def normalize_permission_overrides(value: Any) -> dict[str, ConversationPermissi
     return normalized
 
 
+def _normalize_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = str(item or "").strip().lower()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        normalized.append(text)
+    return normalized
+
+
+def _normalize_revision(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        revision = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, revision)
+
+
 def utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -92,7 +134,11 @@ class ConversationSummary:
     title: str
     created_at: str
     updated_at: str
-    memory_mode: ConversationMemoryMode = "none"
+    revision: int = 0
+    conversation_type: ConversationType = DEFAULT_CONVERSATION_TYPE
+    memory_mode: ConversationMemoryMode = "enabled"
+    memory_polluted: bool = False
+    memory_pollution_sources: list[str] = field(default_factory=list)
     permission_mode: ConversationPermissionMode = DEFAULT_CONVERSATION_PERMISSION_MODE
     summary: str = ""
     compaction_state: ConversationCompactionState = "clean"
@@ -116,12 +162,28 @@ class ConversationSummary:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ConversationSummary":
+        conversation_type = normalize_conversation_type(payload.get("conversation_type"))
+        memory_polluted = bool(
+            payload.get("memory_polluted")
+            or payload.get("memory_pollution_sources")
+            or payload.get("memory_generation_mode") == "polluted"
+        )
         return cls(
             id=str(payload["id"]),
             title=str(payload.get("title") or "New chat"),
             created_at=str(payload.get("created_at") or utc_now_iso()),
             updated_at=str(payload.get("updated_at") or utc_now_iso()),
-            memory_mode=payload.get("memory_mode", "none"),
+            revision=_normalize_revision(payload.get("revision")),
+            conversation_type=conversation_type,
+            memory_mode=normalize_memory_mode(
+                payload.get("memory_generation_mode", payload.get("memory_mode")),
+                conversation_type=conversation_type,
+                polluted=memory_polluted,
+            ),
+            memory_polluted=memory_polluted,
+            memory_pollution_sources=_normalize_string_list(
+                payload.get("memory_pollution_sources")
+            ),
             permission_mode=normalize_permission_mode(
                 payload.get("permission_mode", DEFAULT_CONVERSATION_PERMISSION_MODE)
             ),
@@ -154,7 +216,11 @@ class ConversationRecord:
     title: str
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
-    memory_mode: ConversationMemoryMode = "none"
+    revision: int = 0
+    conversation_type: ConversationType = DEFAULT_CONVERSATION_TYPE
+    memory_mode: ConversationMemoryMode = "enabled"
+    memory_polluted: bool = False
+    memory_pollution_sources: list[str] = field(default_factory=list)
     permission_mode: ConversationPermissionMode = DEFAULT_CONVERSATION_PERMISSION_MODE
     permission_previous_mode: ConversationPermissionMode | str = ""
     permission_deny_rules: list[str] = field(default_factory=list)
@@ -162,8 +228,6 @@ class ConversationRecord:
     summary: str = ""
     compaction_state: ConversationCompactionState = "clean"
     compaction_summary: str = ""
-    inherited_facts: list[dict[str, Any]] = field(default_factory=list)
-    local_facts: list[dict[str, Any]] = field(default_factory=list)
     message_count: int = 0
     transcript: list[dict[str, Any]] = field(default_factory=list)
     context_snapshot: dict[str, Any] = field(default_factory=dict)
@@ -187,7 +251,11 @@ class ConversationRecord:
             title=self.title,
             created_at=self.created_at,
             updated_at=self.updated_at,
+            revision=self.revision,
+            conversation_type=self.conversation_type,
             memory_mode=self.memory_mode,
+            memory_polluted=self.memory_polluted,
+            memory_pollution_sources=list(self.memory_pollution_sources),
             permission_mode=self.permission_mode,
             summary=self.summary,
             compaction_state=self.compaction_state,
@@ -222,12 +290,28 @@ class ConversationRecord:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "ConversationRecord":
         transcript = list(payload.get("transcript") or [])
+        conversation_type = normalize_conversation_type(payload.get("conversation_type"))
+        memory_polluted = bool(
+            payload.get("memory_polluted")
+            or payload.get("memory_pollution_sources")
+            or payload.get("memory_generation_mode") == "polluted"
+        )
         return cls(
             id=str(payload["id"]),
             title=str(payload.get("title") or "New chat"),
             created_at=str(payload.get("created_at") or utc_now_iso()),
             updated_at=str(payload.get("updated_at") or utc_now_iso()),
-            memory_mode=payload.get("memory_mode", "none"),
+            revision=_normalize_revision(payload.get("revision")),
+            conversation_type=conversation_type,
+            memory_mode=normalize_memory_mode(
+                payload.get("memory_generation_mode", payload.get("memory_mode")),
+                conversation_type=conversation_type,
+                polluted=memory_polluted,
+            ),
+            memory_polluted=memory_polluted,
+            memory_pollution_sources=_normalize_string_list(
+                payload.get("memory_pollution_sources")
+            ),
             permission_mode=normalize_permission_mode(
                 payload.get("permission_mode", DEFAULT_CONVERSATION_PERMISSION_MODE)
             ),
@@ -237,8 +321,6 @@ class ConversationRecord:
             summary=str(payload.get("summary") or ""),
             compaction_state=payload.get("compaction_state", "clean"),
             compaction_summary=str(payload.get("compaction_summary") or ""),
-            inherited_facts=list(payload.get("inherited_facts") or []),
-            local_facts=list(payload.get("local_facts") or []),
             message_count=int(payload.get("message_count") or len(transcript)),
             transcript=transcript,
             context_snapshot=dict(payload.get("context_snapshot") or {}),

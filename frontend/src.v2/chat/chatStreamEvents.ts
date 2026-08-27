@@ -1,10 +1,19 @@
 import { useAppStore } from "../stores";
-import type { ServerEvent, ToolOutputDeltaEvent, ToolResultEvent } from "../protocol/events";
+import type {
+  CommandOutputChunkEvent,
+  ImageChunkEvent,
+  ServerEvent,
+  ToolOutputDeltaEvent,
+  ToolResultEvent,
+} from "../protocol/events";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { applyUserMessageQueueUpdate } from "./sessionEvents";
 import type { StreamBuffer } from "../lib/stream-buffer";
 import { getToolCallsFromMessage } from "../lib/content-blocks";
 import {
+  isCommandToolRecord,
+  isTerminalToolCallStatus,
+  normalizeToolDiff,
   reduceToolCallResult,
   reduceToolCallStart,
   type ToolCallRecord,
@@ -16,10 +25,10 @@ import { resetSendDeduplication } from "./sendChatMessage";
 import { addInspectorPayload } from "./inspectorEntries";
 import { providerTracePayloadFromDone, type ProviderUsageSummary } from "./providerTrace";
 import { normalizeContentBlocks } from "./transcriptHydration";
+import { projectArtifactPreviewEvent } from "./artifactEvents";
 
 interface ChatStreamHandlers {
   textStreamBuffer: StreamBuffer;
-  /** @deprecated thinking goes directly to appendThinkingChunk. Remove in v0.4.0 */
   thinkingStreamBuffer?: StreamBuffer;
 }
 
@@ -37,7 +46,7 @@ const adoptGeneratedConversation = (conversationId?: string) => {
     const messages = state.messages;
     const conversations = state.conversations.some((conversation) => conversation.id === targetId)
       ? state.conversations
-      : [{ id: targetId, title: "New chat", updatedAt: new Date().toISOString() }, ...state.conversations];
+      : [{ id: targetId, title: "新会话", updatedAt: new Date().toISOString() }, ...state.conversations];
     return {
       conversationId: targetId,
       conversations,
@@ -60,7 +69,6 @@ const clearMissingWorkspaceBinding = (conversationId?: string) => {
   useAppStore.setState((state) => {
     const targetId = owner;
     return {
-      appMode: "cowork",
       workingDirectory: "",
       workspaceGit: null,
       fileTreeVersion: state.fileTreeVersion + 1,
@@ -84,7 +92,9 @@ const isTransientCommandBacklogError = (err: { error_type?: string; error_code?:
 // survive until the terminal `done` arrives and decides the real status.
 // Keyed by the same conversation/message identity as the typed stream items so
 // concurrent turns in one conversation cannot consume each other's error.
-const pendingRecoverableFailureText = new Map<string, string>();
+type PendingRecoverableFailure = { text: string; recoverable: true };
+const pendingRecoverableFailures = new Map<string, PendingRecoverableFailure>();
+const MAX_PENDING_RECOVERABLE_FAILURES = 256;
 
 const recoverableFailureKey = (conversationId?: string, messageId?: string) =>
   `${conversationId?.trim() || "__unowned__"}:${messageId?.trim() || "__latest__"}`;
@@ -95,20 +105,31 @@ const rememberRecoverableFailureText = (
   text: string,
 ) => {
   const key = recoverableFailureKey(conversationId, messageId);
-  if (text.trim()) pendingRecoverableFailureText.set(key, text);
+  if (!text.trim()) return;
+  // A provider can disconnect after a recoverable error and before DONE. Keep
+  // a bounded FIFO so those orphaned entries cannot grow for the lifetime of
+  // the desktop process.
+  if (!pendingRecoverableFailures.has(key)) {
+    while (pendingRecoverableFailures.size >= MAX_PENDING_RECOVERABLE_FAILURES) {
+      const oldest = pendingRecoverableFailures.keys().next().value;
+      if (typeof oldest !== "string") break;
+      pendingRecoverableFailures.delete(oldest);
+    }
+  }
+  pendingRecoverableFailures.set(key, { text, recoverable: true });
 };
 
-const takeRecoverableFailureText = (
+const takeRecoverableFailure = (
   conversationId: string | undefined,
   messageId: string | undefined,
-): string | undefined => {
+): PendingRecoverableFailure | undefined => {
   const key = recoverableFailureKey(conversationId, messageId);
   const fallbackKey = recoverableFailureKey(conversationId);
-  const text = pendingRecoverableFailureText.get(key)
-    ?? pendingRecoverableFailureText.get(fallbackKey);
-  pendingRecoverableFailureText.delete(key);
-  if (fallbackKey !== key) pendingRecoverableFailureText.delete(fallbackKey);
-  return text;
+  const failure = pendingRecoverableFailures.get(key)
+    ?? pendingRecoverableFailures.get(fallbackKey);
+  pendingRecoverableFailures.delete(key);
+  if (fallbackKey !== key) pendingRecoverableFailures.delete(fallbackKey);
+  return failure;
 };
 
 const recoverMissingConversation = (conversationId?: string) => {
@@ -145,6 +166,7 @@ const CHAT_SCOPED_EVENT_TYPES = new Set<string>([
   "agent_message.delta",
   "item.started",
   "item.completed",
+  "image_chunk",
   "tool_call",
   "tool_output_delta",
   "command_output_chunk",
@@ -152,7 +174,6 @@ const CHAT_SCOPED_EVENT_TYPES = new Set<string>([
   "permission.decision",
   "agent.item",
   "done",
-  "error",
   "stream_resume",
 ]);
 
@@ -183,10 +204,66 @@ const eventMessageId = (event: unknown): string | undefined => {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 };
 
+const stableTextHash = (value: string): string => {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
+};
+
+const legacyImageArtifactId = (
+  event: ServerEvent,
+  conversationId: string,
+  image: ImageChunkEvent,
+): string => {
+  const imageData = "image_data" in image && typeof image.image_data === "string"
+    ? image.image_data
+    : "";
+  const eventIdentity = event.event_id
+    || (Number.isSafeInteger(event.seq) ? `seq:${event.seq}` : "")
+    || event.timestamp
+    || `${imageData.length}:${imageData.slice(0, 64)}:${imageData.slice(-64)}`;
+  return `legacy-image-${stableTextHash(
+    `${conversationId}:${image.message_id}:${image.media_type}:${eventIdentity}`,
+  )}`;
+};
+
+const decodedBase64ByteLength = (value: string): number => {
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((value.length * 3) / 4) - padding);
+};
+
 const eventTurnId = (event: unknown): string | undefined => {
   const value = (event as { turn_id?: unknown; turnId?: unknown }).turn_id
     ?? (event as { turn_id?: unknown; turnId?: unknown }).turnId;
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+};
+
+const isReplayedChatEvent = (event: ServerEvent): boolean =>
+  (event as ServerEvent & { __replayed?: boolean }).__replayed === true;
+
+const isLegacyRawProviderReasoningEvent = (event: unknown): boolean => {
+  if (!event || typeof event !== "object") return false;
+  const payload = event as Record<string, unknown>;
+  if (payload.type !== "thinking" && payload.type !== "thinking_delta") return false;
+  if (payload.is_raw_provider_reasoning === true || payload.isRawProviderReasoning === true) {
+    return true;
+  }
+  const visibility = String(payload.visibility ?? "").trim().toLowerCase();
+  if (["hidden", "internal", "redacted"].includes(visibility)) return true;
+  const reasoningType = String(
+    payload.provider_reasoning_type ?? payload.providerReasoningType ?? "",
+  ).trim().toLowerCase();
+  return new Set([
+    "reasoning_text",
+    "reasoning_content",
+    "raw_reasoning",
+    "raw_provider_reasoning",
+    "thinking",
+    "thinking_delta",
+  ]).has(reasoningType);
 };
 
 const messagesForConversation = (conversationId?: string, messageId?: string): ChatMessage[] => {
@@ -244,43 +321,142 @@ const findToolCall = (id: string, conversationId?: string, scope?: ToolCallScope
   return undefined;
 };
 
-const isCommandLikeTool = (record: ReturnType<typeof getToolCallsFromMessage>[number]): boolean =>
-  String(record.resultKind || "").toLowerCase() === "command" ||
-  record.activityKind === "commandExecution";
-
 const latestRunningCommandTool = (conversationId?: string, messageId?: string) => {
   const records = messagesForConversation(conversationId, messageId).flatMap(getToolCallsFromMessage);
   return records
     .filter((record) =>
-      isCommandLikeTool(record) &&
+      isCommandToolRecord(record) &&
       (record.status === "running" || record.status === "pending"),
     )
     .at(-1);
 };
 
 const appendBoundedOutput = (current: string | undefined, chunk: string): string => {
-  // The backend owns the Pi-compatible output budget and emits normalized
-  // chunks/results. The renderer must not invent a second character budget or
-  // silently replace the authoritative head/tail semantics with a local slice.
-  return `${current ?? ""}${chunk}`;
+  const maxChars = 64 * 1024;
+  const omissionPattern = /\n\[\.\.\. (\d+) characters omitted \.\.\.\]\n/;
+  const existing = current ?? "";
+  const previousMarker = existing.match(omissionPattern);
+  const previousOmitted = Number(previousMarker?.[1] ?? 0) || 0;
+  const retained = previousMarker
+    ? existing.replace(omissionPattern, "")
+    : existing;
+  const combined = `${retained}${chunk}`;
+  const totalChars = previousOmitted + combined.length;
+  if (totalChars <= maxChars) return combined;
+
+  let marker = "";
+  let retainedChars = maxChars;
+  let omitted = Math.max(0, totalChars - retainedChars);
+  // The marker width depends on the omitted count. Two passes reach a stable
+  // width even when the count crosses a decimal boundary.
+  for (let pass = 0; pass < 2; pass += 1) {
+    marker = `\n[... ${omitted} characters omitted ...]\n`;
+    retainedChars = Math.max(0, maxChars - marker.length);
+    omitted = Math.max(0, totalChars - retainedChars);
+  }
+  marker = `\n[... ${omitted} characters omitted ...]\n`;
+  retainedChars = Math.max(0, maxChars - marker.length);
+  const headChars = Math.floor(retainedChars / 2);
+  const tailChars = retainedChars - headChars;
+  return `${combined.slice(0, headChars)}${marker}${combined.slice(-tailChars)}`;
 };
 
 const staleTurnEventKeys = new Set<string>();
+const MAX_STALE_TURN_EVENT_KEYS = 256;
+const latestResumeEventSeqs = new Map<string, number>();
+const MAX_RESUME_EVENT_SEQ_KEYS = 256;
 
 const turnEventKey = (conversationId?: string, messageId?: string) =>
   `${conversationId?.trim() || "__unowned__"}:${messageId?.trim() || ""}`;
+
+const rememberResumeEventSeq = (key: string, eventSeq: number) => {
+  if (latestResumeEventSeqs.has(key)) latestResumeEventSeqs.delete(key);
+  latestResumeEventSeqs.set(key, eventSeq);
+  while (latestResumeEventSeqs.size > MAX_RESUME_EVENT_SEQ_KEYS) {
+    const oldest = latestResumeEventSeqs.keys().next().value;
+    if (typeof oldest !== "string") break;
+    latestResumeEventSeqs.delete(oldest);
+  }
+};
+
+const streamResumeRejectionReason = (
+  event: {
+    turn_id?: string;
+    stream_status?: string;
+    last_event_type?: string;
+    event_seq?: number;
+  },
+  conversationId: string,
+  messageId?: string,
+): string | undefined => {
+  const owner = conversationId.trim();
+  const targetMessageId = messageId?.trim();
+  if (!owner || !targetMessageId) return "missing_owner_or_message";
+
+  const target = messagesForConversation(owner, targetMessageId).find((message) =>
+    message.role === "assistant",
+  );
+  if (target?.terminalStatus || (target && !target.isStreaming && target.completedAt)) {
+    return "target_already_terminal";
+  }
+  const incomingTurnId = String(event.turn_id || "").trim();
+  if (incomingTurnId && target?.turnId && target.turnId !== incomingTurnId) {
+    return "turn_mismatch";
+  }
+  const otherStreamingAssistant = messagesForConversation(owner).some((message) =>
+    message.role === "assistant"
+    && message.id !== targetMessageId
+    && Boolean(message.isStreaming || message.isThinkingStreaming),
+  );
+  if (otherStreamingAssistant && !target?.isStreaming && !target?.isThinkingStreaming) {
+    return "newer_turn_is_streaming";
+  }
+
+  const streamStatus = String(event.stream_status || "").trim().toLowerCase();
+  if (["completed", "partial", "failed", "cancelled", "interrupted"].includes(streamStatus)) {
+    return "snapshot_is_terminal";
+  }
+  const lastEventType = String(event.last_event_type || "").trim().toLowerCase();
+  if (["done", "error", "agent.run.completed"].includes(lastEventType)) {
+    return "snapshot_crossed_terminal_fence";
+  }
+
+  const eventSeq = Number(event.event_seq);
+  if (Number.isSafeInteger(eventSeq) && eventSeq >= 0) {
+    const key = `${turnEventKey(owner, targetMessageId)}:${incomingTurnId}`;
+    const previous = latestResumeEventSeqs.get(key);
+    if (previous !== undefined && eventSeq <= previous) return "stale_event_seq";
+  }
+  return undefined;
+};
+
+const rememberStaleTurnEventKey = (key: string) => {
+  // A stale key is only consumed when its late event actually arrives. A turn
+  // that is abandoned mid-flight (disconnect, conversation delete) never
+  // delivers one, so keep a bounded FIFO instead of growing for the lifetime
+  // of the desktop process.
+  if (staleTurnEventKeys.has(key)) return;
+  while (staleTurnEventKeys.size >= MAX_STALE_TURN_EVENT_KEYS) {
+    const oldest = staleTurnEventKeys.values().next().value;
+    if (typeof oldest !== "string") break;
+    staleTurnEventKeys.delete(oldest);
+  }
+  staleTurnEventKeys.add(key);
+};
 
 const markStaleTurnEventIfMissing = (conversationId?: string, messageId?: string): boolean => {
   // An event without an owner is inspector-only. Never compare it with the
   // active conversation's stream or add it to the stale-turn fence.
   if (!conversationId?.trim()) return false;
   if (!messageId) return false;
+  // DONE is the turn's delivery fence. Replayed or delayed item/tool events
+  // must never mutate an assistant message that already crossed it.
+  if (hasTerminalAssistantForConversation(conversationId, messageId)) return true;
   if (hasStreamingAssistantForConversation(conversationId, messageId)) return false;
   if (!hasStreamingAssistantForConversation(conversationId)) return false;
-  staleTurnEventKeys.add(turnEventKey(conversationId, messageId));
+  rememberStaleTurnEventKey(turnEventKey(conversationId, messageId));
   return true;
 };
-
 const activateQueuedTurnFromFirstStreamEvent = (conversationId?: string, messageId?: string): void => {
   const targetConversationId = conversationId?.trim();
   const targetMessageId = messageId?.trim();
@@ -315,6 +491,9 @@ const resolveTerminalEventTarget = (
   messageId?: string,
   turnId?: string,
 ): { stale: boolean; messageId?: string } => {
+  if (messageId && hasTerminalAssistantForConversation(conversationId, messageId)) {
+    return { stale: true, messageId };
+  }
   const streamingAssistants = messagesForConversation(conversationId).filter((message) =>
     message.role === "assistant" && (message.isStreaming || message.isThinkingStreaming),
   );
@@ -354,37 +533,14 @@ const outputPreviewUpdates = (
   };
 };
 
-const appendSystemMessage = (message: ChatMessage, conversationId?: string) => {
-  const state = useAppStore.getState();
-  const targetId = conversationId?.trim();
-  if (!targetId) return;
-  if (state.sideChats[targetId]) {
-    const thread = state.sideChats[targetId];
-    useAppStore.setState({
-      sideChats: {
-        ...state.sideChats,
-        [targetId]: { ...thread, messages: [...thread.messages, message] },
-      },
-    });
-    return;
-  }
-  if (targetId === state.conversationId) {
-    state.hydrateConversationMessages(targetId, [...state.messages, message], { activate: true });
-    return;
-  }
-  useAppStore.setState({
-    conversationMessages: {
-      ...state.conversationMessages,
-      [targetId]: [...(state.conversationMessages[targetId] ?? []), message],
-    },
-  });
-};
-
 const usageFromDoneEvent = (e: ServerEvent): NonNullable<ChatSlice["lastUsage"]> | undefined => {
-  const usage = (e as unknown as { usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number; cache_deleted_input_tokens?: number; prompt_cache_total_tokens?: number; prompt_cache_hit_rate?: number; reasoning_output_tokens?: number } }).usage;
+  const usage = (e as unknown as { usage?: { input_tokens?: number; ordinary_input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number; cache_deleted_input_tokens?: number; prompt_cache_total_tokens?: number; prompt_cache_hit_rate?: number; reasoning_output_tokens?: number; input_includes_cache_read?: boolean; input_includes_cache_write?: boolean } }).usage;
   if (!usage) return undefined;
   const result: NonNullable<ChatSlice["lastUsage"]> = {
     input: usage.input_tokens ?? 0,
+    ordinaryInput: usage.ordinary_input_tokens,
+    inputIncludesCacheRead: usage.input_includes_cache_read,
+    inputIncludesCacheWrite: usage.input_includes_cache_write,
     output: usage.output_tokens ?? 0,
     cacheRead: usage.cache_read_input_tokens ?? 0,
     cacheWrite: usage.cache_creation_input_tokens ?? 0,
@@ -403,8 +559,7 @@ const usageFromDoneEvent = (e: ServerEvent): NonNullable<ChatSlice["lastUsage"]>
 };
 
 const providerRawFromDoneEvent = (e: ServerEvent): Record<string, unknown> | undefined => {
-  const value = (e as unknown as { providerRaw?: unknown; provider_raw?: unknown }).providerRaw
-    ?? (e as unknown as { providerRaw?: unknown; provider_raw?: unknown }).provider_raw;
+  const value = (e as unknown as { provider_raw?: unknown }).provider_raw;
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined;
@@ -415,6 +570,9 @@ const providerUsageFromDoneUsage = (
 ): ProviderUsageSummary | undefined =>
   usage ? {
     input: usage.input,
+    ordinaryInput: usage.ordinaryInput,
+    inputIncludesCacheRead: usage.inputIncludesCacheRead,
+    inputIncludesCacheWrite: usage.inputIncludesCacheWrite,
     output: usage.output,
     cacheRead: usage.cacheRead,
     cacheWrite: usage.cacheWrite,
@@ -431,9 +589,16 @@ export const handleChatStreamEvent = (
 ): boolean => {
   try {
   const eventOwner = (e as unknown as { conversation_id?: unknown }).conversation_id;
-  conversationId = typeof eventOwner === "string" && eventOwner.trim()
+  const explicitConversationId = typeof eventOwner === "string" && eventOwner.trim()
     ? eventOwner.trim()
-    : conversationId?.trim() || undefined;
+    : undefined;
+  const fallbackConversationId = conversationId?.trim() || undefined;
+  // Errors may legitimately be session/global. Never borrow the renderer's
+  // active conversation for an unowned error, otherwise an invalid command or
+  // transport failure can terminate an unrelated in-flight turn.
+  conversationId = e.type === "error"
+    ? explicitConversationId
+    : explicitConversationId ?? fallbackConversationId;
   if (CHAT_SCOPED_EVENT_TYPES.has(e.type) && !conversationId) {
     addInspectorPayload("message", `unowned:${e.type}:${eventMessageId(e) || "event"}`, {
       event: e.type,
@@ -443,23 +608,33 @@ export const handleChatStreamEvent = (
     return true;
   }
   const { textStreamBuffer, thinkingStreamBuffer } = handlers;
-  adoptGeneratedConversation(conversationId);
-  activateQueuedTurnFromFirstStreamEvent(conversationId, eventMessageId(e));
   const s = useAppStore.getState();
-  s.bindStreamingTurn(conversationId, eventMessageId(e), eventTurnId(e));
+  if (conversationId && e.type !== "done" && e.type !== "error") {
+    adoptGeneratedConversation(conversationId);
+    activateQueuedTurnFromFirstStreamEvent(conversationId, eventMessageId(e));
+    s.bindStreamingTurn(conversationId, eventMessageId(e), eventTurnId(e));
+  }
   switch (e.type) {
     case "thinking_delta":
     case "thinking": {
+      // Upgrade safety for reconnects from pre-alignment builds. Raw provider
+      // reasoning was once persisted as a public thinking event; acknowledge
+      // the ordered event without rendering or storing its content.
+      if (isLegacyRawProviderReasoningEvent(e)) return true;
       const ev = e as unknown as {
         content?: string;
         source?: string;
         visibility?: string;
-        is_raw_provider_reasoning?: boolean;
-        provider_reasoning_type?: string;
         phase?: string;
+        item_id?: string;
+        content_index?: number;
+        lifecycle?: "start" | "delta" | "end" | string;
       };
       const messageId = eventMessageId(e);
       if (markStaleTurnEventIfMissing(conversationId, messageId)) return true;
+      if (ev.lifecycle === "start" || ev.lifecycle === "end") {
+        flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
+      }
       if (ev.content) {
         // Don't force-flush the text buffer here: thinking is a parallel visual
         // channel, not a sequence boundary. The text buffer flushes on its own
@@ -472,9 +647,10 @@ export const handleChatStreamEvent = (
         const thinkingMeta = {
           source: ev.source,
           visibility: ev.visibility,
-          is_raw_provider_reasoning: ev.is_raw_provider_reasoning,
-          provider_reasoning_type: ev.provider_reasoning_type,
           phase: ev.phase,
+          item_id: ev.item_id,
+          content_index: ev.content_index,
+          lifecycle: ev.lifecycle,
         };
         if (thinkingStreamBuffer) {
           thinkingStreamBuffer.push(ev.content, conversationId, undefined, thinkingMeta, messageId);
@@ -486,18 +662,26 @@ export const handleChatStreamEvent = (
     }
     case "item.started": {
       const ev = e as unknown as {
-        item?: { id?: string; type?: string };
+        item?: { id?: string; type?: string; source?: string };
       };
       const messageId = eventMessageId(e);
       if (markStaleTurnEventIfMissing(conversationId, messageId)) return true;
       if (ev.item?.type === "agent_message") {
-        textStreamBuffer.flush();
-        s.startAgentMessage(ev.item.id || "agent-message", conversationId, messageId);
+        // An item start is an ordered content boundary. Settle reasoning first
+        // so a pending final reasoning delta cannot land behind the empty text
+        // block created below and split one reasoning item into two cells.
+        flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
+        s.startAgentMessage(
+          ev.item.id || "agent-message",
+          conversationId,
+          messageId,
+          ev.item.source,
+        );
       }
       return true;
     }
     case "agent_message.delta": {
-      const ev = e as unknown as { item_id?: string; delta?: string };
+      const ev = e as unknown as { item_id?: string; delta?: string; source?: string };
       const messageId = eventMessageId(e);
       if (markStaleTurnEventIfMissing(conversationId, messageId)) return true;
       if (ev.delta) {
@@ -505,7 +689,7 @@ export const handleChatStreamEvent = (
           ev.delta,
           conversationId,
           ev.item_id || "agent-message",
-          undefined,
+          { source: ev.source },
           messageId,
         );
       }
@@ -548,11 +732,49 @@ export const handleChatStreamEvent = (
       return true;
     }
     case "image_chunk": {
+      const ev = e as ImageChunkEvent;
       const messageId = eventMessageId(e);
+      const artifactId = legacyImageArtifactId(e, conversationId || "", ev);
+      if ("image_data_omitted" in ev && ev.image_data_omitted) {
+        addInspectorPayload("artifact", artifactId, {
+          event: ev.type,
+          conversation_id: conversationId,
+          message_id: ev.message_id,
+          media_type: ev.media_type,
+          image_data_size: ev.image_data_size,
+          image_data_omitted: true,
+          replayed: true,
+          projected: false,
+        });
+        return true;
+      }
       if (markStaleTurnEventIfMissing(conversationId, messageId)) return true;
-      // Current backends convert provider image chunks to artifact.preview.
-      // Ignore a legacy raw chunk rather than corrupting the agent-message
-      // lifecycle with synthetic Markdown text.
+      if (!("image_data" in ev) || typeof ev.image_data !== "string") return true;
+      const imageData = ev.image_data;
+      const imageFormat = ev.media_type.replace(/^image\//, "").toUpperCase();
+      const projected = projectArtifactPreviewEvent({
+        type: "artifact.preview",
+        conversation_id: conversationId || ev.conversation_id,
+        message_id: ev.message_id,
+        artifact_id: artifactId,
+        kind: "image",
+        summary: `Generated ${imageFormat} image (legacy stream)`,
+        bytes: decodedBase64ByteLength(imageData),
+        media_type: ev.media_type,
+        url: `data:${ev.media_type};base64,${imageData}`,
+      }, conversationId || ev.conversation_id);
+      if (!projected) {
+        addInspectorPayload("artifact", artifactId, {
+          event: ev.type,
+          conversation_id: conversationId,
+          message_id: ev.message_id,
+          media_type: ev.media_type,
+          image_data_size: imageData.length,
+          decoded_bytes: decodedBase64ByteLength(imageData),
+          replayed: false,
+          projected: false,
+        });
+      }
       return true;
     }
     case "tool_call": {
@@ -562,10 +784,7 @@ export const handleChatStreamEvent = (
       const scope = toolCallScopeFromEvent(e);
       const existing = findToolCall(e.id, conversationId, scope, messageId);
       if (existing) {
-        const terminalStatuses = new Set<string>([
-          "success", "completed", "failed", "error", "cancelled", "blocked", "denied", "timeout",
-        ]);
-        const nextStatus = terminalStatuses.has(existing.status)
+        const nextStatus = isTerminalToolCallStatus(existing.status)
           ? existing.status
           : e.status === "pending"
             ? "pending"
@@ -577,11 +796,13 @@ export const handleChatStreamEvent = (
           inputSummary: e.input_summary ?? existing.inputSummary,
           resultKind: e.result_kind ?? existing.resultKind,
           activityKind: e.activity_kind ?? existing.activityKind,
+          visibility: e.visibility ?? existing.visibility,
           groupId: e.group_id ?? existing.groupId,
           stepId: e.step_id ?? existing.stepId,
           turnId: e.turn_id ?? existing.turnId,
           iterationId: e.iteration_id ?? existing.iterationId,
           phase: e.phase ?? existing.phase,
+          diff: normalizeToolDiff(e.diff) ?? existing.diff,
         }, conversationId, scope, messageId);
       } else {
         const record = reduceToolCallStart(new Map(), e).get(e.id);
@@ -593,6 +814,7 @@ export const handleChatStreamEvent = (
         args: e.args ?? {},
         result_kind: e.result_kind,
         activity_kind: e.activity_kind,
+        visibility: e.visibility,
         display_hint: e.display_hint,
         input_summary: e.input_summary,
         turn_id: e.turn_id,
@@ -621,24 +843,39 @@ export const handleChatStreamEvent = (
       return true;
     }
     case "command_output_chunk": {
-      const ev = e as unknown as { content?: string; stream?: string; tool_call_id?: string; id?: string };
+      const ev = e as CommandOutputChunkEvent;
       const messageId = eventMessageId(e);
       if (markStaleTurnEventIfMissing(conversationId, messageId)) return true;
       flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
-      if (ev.content) {
-        const toolCallId = String(ev.tool_call_id || ev.id || "").trim();
-        const commandTool = toolCallId
-          ? findToolCall(toolCallId, conversationId, undefined, messageId)
-          : latestRunningCommandTool(conversationId, messageId);
-        if (commandTool) {
-          s.updateToolCall(commandTool.id, outputPreviewUpdates(commandTool, ev.content, ev.stream), conversationId, undefined, messageId);
-          addInspectorPayload("tool_call", commandTool.id, {
-            event: "command_output_chunk",
-            stream: ev.stream ?? "stdout",
-            output: ev.content,
-          });
-        }
+      const toolCallId = String(ev.tool_call_id || ev.id || "").trim();
+      const scope = toolCallScopeFromEvent(ev);
+      const commandTool = toolCallId
+        ? findToolCall(toolCallId, conversationId, scope, messageId)
+        : latestRunningCommandTool(conversationId, messageId);
+      if (commandTool && ev.content) {
+        s.updateToolCall(
+          commandTool.id,
+          outputPreviewUpdates(commandTool, ev.content, ev.stream),
+          conversationId,
+          scope,
+          messageId,
+        );
       }
+      addInspectorPayload(
+        toolCallId || commandTool ? "tool_call" : "message",
+        toolCallId || commandTool?.id || messageId || "command-output",
+        {
+          event: ev.type,
+          conversation_id: conversationId,
+          message_id: ev.message_id,
+          turn_id: ev.turn_id,
+          id: ev.id,
+          tool_call_id: ev.tool_call_id,
+          stream: ev.stream,
+          output: ev.content,
+          projected: Boolean(commandTool),
+        },
+      );
       return true;
     }
     case "tool_result": {
@@ -682,6 +919,7 @@ export const handleChatStreamEvent = (
         error_info: e.error_info,
         developer_detail: e.developer_detail,
         projection: e.projection,
+        visibility: e.visibility,
         output_files: e.output_files,
         superseded_tool_call_ids: e.superseded_tool_call_ids,
         removed_file_paths: e.removed_file_paths,
@@ -709,16 +947,16 @@ export const handleChatStreamEvent = (
       if (markStaleTurnEventIfMissing(conversationId, messageId)) return true;
       flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
       const decision = ev.decision || "ask";
-      const toolName = ev.tool_name || "tool";
-      const ruleLabel = ev.matched_rule?.rule || ev.source || "policy";
+      const toolName = ev.tool_name || "工具";
+      const ruleLabel = ev.matched_rule?.rule || ev.source || "策略";
       const summary = ev.message || (decision === "allow"
-        ? "Allowed automatically"
+        ? "已自动允许"
         : decision === "ask"
-          ? `Approval required by ${ruleLabel}`
-          : `Blocked by ${ruleLabel}`);
+          ? `${ruleLabel}要求审批`
+          : `已被${ruleLabel}阻止`);
       if (ev.tool_call_id) {
         const existing = findToolCall(ev.tool_call_id, conversationId, undefined, messageId);
-        if (existing) {
+        if (existing && !isTerminalToolCallStatus(existing.status)) {
           const patch = decision === "ask"
             ? {
                 status: "pending" as const,
@@ -784,12 +1022,37 @@ export const handleChatStreamEvent = (
         token_estimate?: number;
         created_at?: number;
         order?: number;
-        seq?: number;
       };
       const messageId = eventMessageId(e);
       if (markStaleTurnEventIfMissing(conversationId, messageId)) return true;
       const content = ev.content || ev.summary || "";
       const itemId = ev.item_id || ev.id;
+      if (
+        itemId
+        && (ev.status === "retracted" || ev.visibility === "debug")
+      ) {
+        textStreamBuffer.flush();
+        thinkingStreamBuffer?.flush();
+        addInspectorPayload("message", itemId, {
+          event: "agent.item",
+          conversation_id: conversationId,
+          message_id: messageId,
+          item_id: itemId,
+          kind: ev.kind,
+          status: ev.status,
+          visibility: ev.visibility,
+          title: ev.title,
+          summary: ev.summary,
+          content: ev.content,
+          source: ev.source,
+          reason: ev.reason,
+          tool_call_ids: ev.tool_call_ids,
+          retracted: ev.status === "retracted",
+          replayed: isReplayedChatEvent(e),
+        });
+        s.removeProcessItem(itemId, conversationId, messageId);
+        return true;
+      }
       if (itemId && content.trim() && ev.visibility !== "debug") {
         textStreamBuffer.flush();
         thinkingStreamBuffer?.flush();
@@ -817,7 +1080,6 @@ export const handleChatStreamEvent = (
           tokenEstimate: ev.token_estimate,
           timestamp: ev.created_at,
           order: ev.order,
-          seq: ev.seq,
         }, conversationId, messageId);
         // File preparation is already represented by the file-change card and
         // diff stream. Do not mirror it into the composer/task progress area.
@@ -837,7 +1099,8 @@ export const handleChatStreamEvent = (
       textStreamBuffer.flush();
       thinkingStreamBuffer?.flush();
       const usage = usageFromDoneEvent(e);
-      if (usage && (!conversationId || conversationId === useAppStore.getState().conversationId)) {
+      const replayed = isReplayedChatEvent(e);
+      if (!replayed && usage && (!conversationId || conversationId === useAppStore.getState().conversationId)) {
         s.setLastUsage(usage);
       }
       const providerRaw = providerRawFromDoneEvent(e);
@@ -847,11 +1110,16 @@ export const handleChatStreamEvent = (
       );
       if (providerTracePayload) {
         const traceId = String(providerTracePayload.trace_id || `${terminalMessageId || messageId || conversationId || "provider"}:provider:done`);
-        addInspectorPayload("provider", traceId, {
-          ...providerTracePayload,
-          conversationId,
-          messageId: terminalMessageId || messageId,
-        });
+        const hasAuthoritativeTrace = useAppStore.getState().inspectorEntries.some((entry) => (
+          entry.targetKind === "provider" && entry.targetId === traceId
+        ));
+        if (!hasAuthoritativeTrace) {
+          addInspectorPayload("provider", traceId, {
+            ...providerTracePayload,
+            conversationId,
+            messageId: terminalMessageId || messageId,
+          });
+        }
       }
       const doneStatus = (e as unknown as { status?: string }).status;
       const terminalStatus =
@@ -862,7 +1130,19 @@ export const handleChatStreamEvent = (
       // Carry the sanitized text of any recoverable error the loop reported
       // earlier in this turn; it only becomes user-visible if the turn in fact
       // ended as failed.
-      const recoverableFailureText = takeRecoverableFailureText(conversationId, terminalMessageId || messageId);
+      const recoverableFailure = takeRecoverableFailure(conversationId, terminalMessageId || messageId);
+      const doneFailureRecoverable = (e as unknown as {
+        failure_recoverable?: unknown;
+        failureRecoverable?: unknown;
+      }).failure_recoverable ?? (e as unknown as {
+        failure_recoverable?: unknown;
+        failureRecoverable?: unknown;
+      }).failureRecoverable;
+      const failureRecoverable = terminalStatus === "failed"
+        ? typeof doneFailureRecoverable === "boolean"
+          ? doneFailureRecoverable
+          : recoverableFailure?.recoverable
+        : undefined;
       const durationMs = Number((e as unknown as { duration_ms?: unknown; durationMs?: unknown }).duration_ms
         ?? (e as unknown as { duration_ms?: unknown; durationMs?: unknown }).durationMs);
       s.finishAgentProgress(
@@ -878,119 +1158,148 @@ export const handleChatStreamEvent = (
         usage,
         terminalStatus,
         terminalMessageId,
-        recoverableFailureText,
+        recoverableFailure?.text,
+        failureRecoverable,
         Number.isFinite(durationMs) ? durationMs : undefined,
+        String((e as unknown as { reason?: unknown }).reason || "").trim() || undefined,
       );
       // approval.cancelled is authoritative, but DONE is the terminal fence
       // for the turn. Clear prompts owned by this conversation as a fallback
       // for cancellation races, reconnect gaps, or out-of-order delivery.
-      const latest = useAppStore.getState();
-      const promptTargetsConversation = (prompt: { conversationId?: string } | null | undefined) =>
-        Boolean(prompt) && (
-          prompt?.conversationId === conversationId ||
-          (!prompt?.conversationId && latest.conversationId === conversationId)
-        );
-      const approvalIds = [latest.pendingApproval, ...latest.approvalQueue]
-        .filter(promptTargetsConversation)
-        .map((approval) => approval!.requestId);
-      if (approvalIds.length > 0) {
-        latest.clearApprovals(approvalIds);
+      if (!replayed) {
+        const latest = useAppStore.getState();
+        const promptTargetsConversation = (prompt: { conversationId?: string } | null | undefined) =>
+          Boolean(prompt) && (
+            prompt?.conversationId === conversationId ||
+            (!prompt?.conversationId && latest.conversationId === conversationId)
+          );
+        const approvalIds = [latest.pendingApproval, ...latest.approvalQueue]
+          .filter(promptTargetsConversation)
+          .map((approval) => approval!.requestId);
+        if (approvalIds.length > 0) {
+          latest.clearApprovals(approvalIds);
+        }
+        const diffReviewIds = [latest.pendingDiffReview, ...latest.diffReviewQueue]
+          .filter(promptTargetsConversation)
+          .map((review) => review!.requestId);
+        if (diffReviewIds.length > 0) {
+          latest.clearDiffReviews(diffReviewIds);
+        }
+        const askUserIds = [latest.pendingAskUser, ...latest.askUserQueue]
+          .filter(promptTargetsConversation)
+          // A teammate plan review is answered by the teammate's own run, not
+          // by this turn. Clearing it here would strand that teammate until its
+          // deadline rejects the plan, so only turn-owned questions expire.
+          .filter((prompt) => !prompt?.planReview)
+          .map((prompt) => prompt!.requestId);
+        if (askUserIds.length > 0) {
+          latest.clearAskUsers(askUserIds);
+        }
+        useAppStore.setState((state) => ({
+          diffReview: promptTargetsConversation(state.diffReview)
+            ? null
+            : state.diffReview,
+        }));
       }
-      const diffReviewIds = [latest.pendingDiffReview, ...latest.diffReviewQueue]
-        .filter(promptTargetsConversation)
-        .map((review) => review!.requestId);
-      if (diffReviewIds.length > 0) {
-        latest.clearDiffReviews(diffReviewIds);
-      }
-      const askUserIds = [latest.pendingAskUser, ...latest.askUserQueue]
-        .filter(promptTargetsConversation)
-        .map((prompt) => prompt!.requestId);
-      if (askUserIds.length > 0) {
-        latest.clearAskUsers(askUserIds);
-      }
-      useAppStore.setState((state) => ({
-        diffReview: promptTargetsConversation(state.diffReview)
-          ? null
-          : state.diffReview,
-      }));
-      const replayed = Boolean((e as unknown as { __replayed?: boolean }).__replayed);
       if (!replayed && typeof document !== "undefined" && (document.hidden || !document.hasFocus())) {
         const conversation = s.conversations.find((item) => item.id === conversationId);
         void import("../desktop/runtime").then(({ desktop }) => desktop()?.notify({
-          title: terminalStatus === "completed" ? "MiniCode task completed" : "MiniCode task stopped",
-          body: conversation?.title || "Your response is ready.",
+          title: terminalStatus === "completed" ? "MiniCode 任务已完成" : "MiniCode 任务已停止",
+          body: conversation?.title || "答复已就绪。",
           ...(conversationId ? { target: { kind: "conversation" as const, conversationId } } : {}),
         }));
       }
       // Refresh the authoritative context/budget snapshot so the usage ring
       // reflects the turn that just completed (done carries token counts but
       // not the budget breakdown). silent: indicator-only, no chat notice.
-      sendClientCommand({ type: "session.usage.inspect", silent: true });
-      resetSendDeduplication();
+      if (!replayed) {
+        sendClientCommand({ type: "session.usage.inspect", silent: true });
+        resetSendDeduplication();
+      }
       return true;
     }
     case "error": {
       const messageId = eventMessageId(e);
+      const turnId = eventTurnId(e);
+      const replayed = isReplayedChatEvent(e);
+      if (!conversationId) {
+        const globalError = e as unknown as {
+          message?: string;
+          error_type?: string;
+          error_code?: string;
+        };
+        const rawGlobalMessage = globalError.message ?? "An unexpected error occurred.";
+        if (!isStaleApprovalResponseError(rawGlobalMessage) && !replayed) {
+          const globalMessage = normalizeAgentErrorMessage(rawGlobalMessage);
+          const transient = isTransientCommandBacklogError(globalError, rawGlobalMessage);
+          pushToast(globalMessage, transient ? "warning" : "error", transient ? 3000 : 6000);
+        }
+        return true;
+      }
+      if (replayed && !messageId && !turnId) {
+        const replayError = e as unknown as {
+          message?: string;
+          error_type?: string;
+          error_code?: string;
+          recoverable?: boolean;
+        };
+        addInspectorPayload("message", `error:${conversationId}:${e.event_id || e.seq || "replay"}`, {
+          event: "error",
+          conversation_id: conversationId,
+          error_type: replayError.error_type,
+          error_code: replayError.error_code,
+          message: normalizeAgentErrorMessage(replayError.message ?? "An unexpected error occurred.", { includeProviderDetails: false }),
+          recoverable: replayError.recoverable,
+          replayed: true,
+          projected: false,
+        });
+        return true;
+      }
       if (consumeKnownStaleTurnEvent(conversationId, messageId)) return true;
-      const target = resolveTerminalEventTarget(conversationId, messageId, eventTurnId(e));
+      const target = resolveTerminalEventTarget(conversationId, messageId, turnId);
       if (target.stale) return true;
       const terminalMessageId = terminalMessageIdForEvent(conversationId, target.messageId);
       textStreamBuffer.flush();
       thinkingStreamBuffer?.flush();
       const err = e as unknown as { conversation_id?: string; message_id?: string; message?: string; tool_call_id?: string; request_id?: string; error_type?: string; error_code?: string; provider_error_type?: string; recoverable?: boolean };
-      const rawMessage = err.message ?? "An error occurred.";
+      const rawMessage = err.message ?? "发生了错误。";
       if (isStaleApprovalResponseError(rawMessage)) {
         return true;
       }
       if (err.error_code === "conversation.not_found") {
-        recoverMissingConversation(conversationId);
-        resetSendDeduplication();
+        if (!replayed) {
+          recoverMissingConversation(conversationId);
+          resetSendDeduplication();
+        }
         return true;
       }
       const message = normalizeAgentErrorMessage(rawMessage);
       const transcriptMessage = normalizeAgentErrorMessage(rawMessage, { includeProviderDetails: false });
       if (isTransientCommandBacklogError(err, rawMessage)) {
-        pushToast(message, "warning", 3000);
+        if (!replayed) pushToast(message, "warning", 3000);
         return true;
       }
-      if (
-        !err.conversation_id && !err.message_id && !err.tool_call_id && !err.request_id &&
-        !err.error_type && !err.error_code && useAppStore.getState().isStreaming
-      ) {
-        pushToast(message, "error", 6000);
-        return true;
-      }
-      pushToast(message, "error", 6000);
+      if (!replayed) pushToast(message, "error", 6000);
       if (err.error_code === "workspace_missing") {
-        clearMissingWorkspaceBinding(conversationId);
+        if (!replayed) clearMissingWorkspaceBinding(conversationId);
         s.finishAgentProgress(conversationId, "failed");
-        s.finishStreaming(conversationId, undefined, "failed", terminalMessageId, transcriptMessage);
-        resetSendDeduplication();
+        s.finishStreaming(conversationId, undefined, "failed", terminalMessageId, transcriptMessage, err.recoverable === true);
+        if (!replayed) resetSendDeduplication();
         return true;
       }
       if (err.error_code === "agent.busy") {
         s.removeEmptyStreamingAssistant(conversationId, target.messageId);
         if (target.messageId && hasStreamingAssistantForConversation(conversationId, target.messageId)) {
           s.finishAgentProgress(conversationId, "failed");
-          s.finishStreaming(conversationId, undefined, "failed", terminalMessageId, transcriptMessage);
+          s.finishStreaming(conversationId, undefined, "failed", terminalMessageId, transcriptMessage, err.recoverable === true);
         } else {
           clearStreamingFlagIfNoLiveAssistant(conversationId);
         }
-        resetSendDeduplication();
+        if (!replayed) resetSendDeduplication();
         return true;
       }
-      const isProviderApiError = err.error_type === "api" && !err.tool_call_id && !err.request_id;
-      if (err.recoverable !== true && err.error_type !== "blocked" && err.error_type !== "billing" && !isProviderApiError) {
-        appendSystemMessage({
-          id: `m-${Date.now().toString(36)}-err`,
-          role: "system",
-          content: `Error: ${message}`,
-          artifacts: [],
-          timestamp: Date.now(),
-        }, conversationId);
-      }
       const requestId = err.tool_call_id ?? err.request_id;
-      if (requestId) {
+      if (requestId && !replayed) {
         s.clearDiffReview(requestId);
         s.clearAskUser(requestId);
         useAppStore.setState((state) => ({
@@ -1024,8 +1333,8 @@ export const handleChatStreamEvent = (
         return true;
       }
       s.finishAgentProgress(conversationId, "failed");
-      s.finishStreaming(conversationId, undefined, "failed", terminalMessageId, transcriptMessage);
-      resetSendDeduplication();
+      s.finishStreaming(conversationId, undefined, "failed", terminalMessageId, transcriptMessage, err.recoverable === true);
+      if (!replayed) resetSendDeduplication();
       return true;
     }
     case "stream_resume": {
@@ -1034,6 +1343,9 @@ export const handleChatStreamEvent = (
         conversation_id?: string;
         turn_id?: string;
         phase?: string;
+        stream_status?: string;
+        event_seq?: number;
+        last_event_type?: string;
         content_blocks?: Array<Record<string, unknown>>;
         tool_calls_pending?: PendingToolCallResume[];
         tool_states?: PendingToolCallResume[];
@@ -1046,7 +1358,24 @@ export const handleChatStreamEvent = (
         ? normalizeContentBlocks(ev.content_blocks) ?? []
         : undefined;
       const snapshotBlocks = normalizedSnapshotBlocks;
-      if (hasTerminalAssistantForConversation(resumeConversationId, messageId)) {
+      const rejectionReason = streamResumeRejectionReason(
+        ev,
+        resumeConversationId,
+        messageId,
+      );
+      if (rejectionReason) {
+        addInspectorPayload("message", messageId || `${resumeConversationId}:stream_resume`, {
+          event: "stream_resume",
+          conversation_id: resumeConversationId,
+          message_id: messageId,
+          turn_id: ev.turn_id,
+          event_seq: ev.event_seq,
+          stream_status: ev.stream_status,
+          last_event_type: ev.last_event_type,
+          ignored: true,
+          reason: rejectionReason,
+          replayed: isReplayedChatEvent(e),
+        });
         return true;
       }
       if (
@@ -1057,6 +1386,13 @@ export const handleChatStreamEvent = (
         return true;
       }
       s.resumeStreaming(resumeConversationId, toolStates, messageId, ev.turn_id, snapshotBlocks);
+      const eventSeq = Number(ev.event_seq);
+      if (Number.isSafeInteger(eventSeq) && eventSeq >= 0) {
+        rememberResumeEventSeq(
+          `${turnEventKey(resumeConversationId, messageId)}:${String(ev.turn_id || "").trim()}`,
+          eventSeq,
+        );
+      }
       return true;
     }
     default:
@@ -1064,10 +1400,12 @@ export const handleChatStreamEvent = (
   }
   } catch (err) {
     console.error("[chatStreamEvents] Unhandled error processing event:", err, e);
-    if (conversationId) {
-      useAppStore.getState().finishStreaming(conversationId, undefined, "failed", eventMessageId(e));
+    if (!isReplayedChatEvent(e)) {
+      if (conversationId) {
+        useAppStore.getState().finishStreaming(conversationId, undefined, "failed", eventMessageId(e));
+      }
+      pushToast("处理流式响应时出错，请重试。", "error", 4000);
     }
-    pushToast("Stream processing error — please retry", "error", 4000);
     return false;
   }
 };

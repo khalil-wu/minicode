@@ -56,18 +56,18 @@ export const PromptHistoryOverlay = ({ open, items, placement = "above", onSelec
             ref={inputRef}
             value={query}
             onChange={(event) => { setQuery(event.target.value); setActiveIndex(0); }}
-            placeholder="Search prompt history"
-            aria-label="Search prompt history"
+            placeholder="搜索输入历史"
+            aria-label="搜索输入历史"
           />
           {items.length > 0 && (
-            <button type="button" onClick={onClear} title="Clear prompt history" aria-label="Clear prompt history">
+            <button type="button" onClick={onClear} title="清空输入历史" aria-label="清空输入历史">
               <Trash2 size={14} />
             </button>
           )}
         </div>
-        <div role="listbox" aria-label="Prompt history" className="prompt-history-list">
+        <div role="listbox" aria-label="输入历史" className="prompt-history-list">
           {filtered.length === 0 ? (
-            <div className="prompt-history-empty">{items.length === 0 ? "No prompts sent in this workspace yet" : "No matching prompts"}</div>
+            <div className="prompt-history-empty">{items.length === 0 ? "此工作区还没有输入记录" : "没有匹配的输入记录"}</div>
           ) : filtered.map((item, index) => (
             <button
               type="button"
@@ -83,7 +83,7 @@ export const PromptHistoryOverlay = ({ open, items, placement = "above", onSelec
             </button>
           ))}
         </div>
-        <div className="prompt-history-hint">Ctrl+R · arrows to navigate · Enter to reuse</div>
+        <div className="prompt-history-hint">Ctrl+R · 方向键选择 · Enter 重新使用</div>
       </div>
     </div>
   );

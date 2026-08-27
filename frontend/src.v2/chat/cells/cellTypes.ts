@@ -1,20 +1,21 @@
 /**
- * Cell type system for Codex-like chat rendering.
+ * Cell type system for MiniCode chat rendering.
  * Maps to MiniCode_AgentLoop_UI_Detailed_V3.md Section 4.
  */
 
 import type { ToolCallRecord } from "../../lib/tool-call-reducer";
 import type { TurnActivityKind } from "../../lib/turn-projection";
-import type { Citation } from "../../stores/types";
+import type { ArtifactPreview, Citation, MessageUsage, ProgressContentBlock } from "../../stores/types";
 
 // ── Diff File Change ────────────────────────────────────────────────
 
 export interface DiffFileChange {
   path: string;
+  oldPath?: string;
   patch?: string;
   additions: number;
   deletions: number;
-  changeType?: "created" | "updated" | "deleted";
+  changeType?: "created" | "updated" | "deleted" | "renamed";
   isLarge?: boolean;
   isTruncated?: boolean;
 }
@@ -67,6 +68,8 @@ export interface ActivityCellState {
   skill?: SkillProcessMetadata;
   startedAt: number;
   completedAt?: number;
+  segment?: number;
+  segmentClosed?: boolean;
 }
 
 export interface SkillProcessMetadata {
@@ -95,6 +98,8 @@ export interface ExecCellState {
   needsApproval?: boolean;
   createdAt: number;
   completedAt?: number;
+  segment?: number;
+  segmentClosed?: boolean;
 }
 
 export interface DiffCellState {
@@ -107,6 +112,8 @@ export interface DiffCellState {
     deleted: number;
     modifiedFiles: number;
   };
+  /** Number of authoritative file-mutating tool calls folded into this cell. */
+  toolCallCount?: number;
   collapsed: boolean;
   createdAt: number;
 }
@@ -138,6 +145,17 @@ export interface AssistantMarkdownCellState {
   /** Attachments carried by a BriefTool (send_message) reply. Rendered as a
    * compact chip list below the answer; image attachments are previewable. */
   attachments?: AssistantReplyAttachment[];
+  /** Validated artifacts attached to this assistant message. */
+  artifacts?: ArtifactPreview[];
+  /** Dedicated image-generation lifecycle rendered in the answer position. */
+  imageProgress?: ProgressContentBlock[];
+  /** When image generation is interleaved with answer text, preserve the
+   * provider's before/after ordering around the generated artifact. */
+  markdownBeforeArtifacts?: string;
+  markdownAfterArtifacts?: string;
+  /** Terminal image-generation failure metadata owned by this assistant message. */
+  failureMessage?: string;
+  failureRecoverable?: boolean;
   createdAt: number;
 }
 
@@ -157,25 +175,37 @@ export interface StreamingAssistantTailCellState {
   updatedAt: number;
 }
 
-export interface StreamingAssistantNarrationCellState {
-  kind: "streaming_assistant_narration";
-  id: string;
-  partialMarkdown: string;
-  isStreaming: boolean;
-  updatedAt: number;
-  eventIndex?: number;
-}
-
 export interface ThinkingCellState {
   kind: "thinking";
   id: string;
   content: string;
   source: "commentary" | "model_preamble" | "post_tool" | "provider" | "reasoning" | "runtime";
-  isRawProviderReasoning?: boolean;
-  providerReasoningType?: string;
   phase?: string; // Optional phase indicator (e.g., "analyzing", "planning")
   isStreaming?: boolean;
   createdAt: number;
+  segment?: number;
+  segmentClosed?: boolean;
+}
+
+export interface CollaborationCellEntry {
+  agentId: string;
+  agentLabel: string;
+  content?: string;
+}
+
+/** MiniCode-style transcript projection for parent/child control actions. The
+ * runtime remains the source of truth; this is only a collapsible view over
+ * existing subagent start, mailbox message, and terminal state. */
+export interface CollaborationCellState {
+  kind: "collaboration";
+  id: string;
+  action: "sent_message" | "closed";
+  status: "running" | "success" | "failed";
+  entries: CollaborationCellEntry[];
+  collapsed: boolean;
+  createdAt: number;
+  segment?: number;
+  segmentClosed?: boolean;
 }
 
 // ── Cell Union ──────────────────────────────────────────────────────
@@ -189,13 +219,14 @@ export type HistoryCellState =
   | ErrorCellState
   | AssistantMarkdownCellState
   | StreamingAssistantTailCellState
-  | StreamingAssistantNarrationCellState
-  | ThinkingCellState;
+  | ThinkingCellState
+  | CollaborationCellState;
 
 // ── Turn State ──────────────────────────────────────────────────────
 
 export interface ChatTurnState {
   id: string;
+  turnId?: string;
   userCell: UserMessageCellState | null;
   committedCells: Exclude<
     HistoryCellState,
@@ -207,6 +238,7 @@ export interface ChatTurnState {
   startedAt: number;
   completedAt?: number;
   durationMs?: number;
+  usage?: MessageUsage;
 }
 
 // ── Surface State ───────────────────────────────────────────────────

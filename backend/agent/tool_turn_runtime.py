@@ -29,7 +29,6 @@ async def execute_tool_turn(
     pending_tool_calls: list[Any],
     provider_phase: str,
     provider_items: list[dict[str, Any]],
-    iteration_id: str,
     tool_batch_count: int,
     turn_start_tool_call_count: int,
     state: Any,
@@ -94,24 +93,16 @@ async def execute_tool_turn(
         cancel_remaining=tool_executor.cancel_remaining,
     ):
         yield event
-    if pending_tool_calls:
-        tool_names = [str(getattr(call, "name", "tool") or "tool") for call in pending_tool_calls]
-        tool_call_ids = [str(getattr(call, "id", "") or "") for call in pending_tool_calls]
-        yield AgentEvent.tool_use_summary(
-            summary=", ".join(tool_names),
-            iteration_id=iteration_id,
-            tool_call_ids=[call_id for call_id in tool_call_ids if call_id],
-            tool_count=len(pending_tool_calls),
-        )
-
     boundary = turn_budget_controller.evaluate(
         elapsed_seconds=deadline_controller.elapsed(),
         iterations=state.work_iterations,
         tool_calls=len(state.tool_calls) - turn_start_tool_call_count,
-        tokens=budget_runtime.rollout_tokens_used(),
+        tokens=budget_runtime.local_tokens_used(),
         cost_usd=budget_runtime.turn_cost_usd(),
         post_tools=True,
     )
+    if boundary is None:
+        boundary = budget_runtime.rollout_boundary(post_tools=True)
     if boundary is not None:
         _, events = await budget_runtime.apply_boundary(boundary)
         for event in events:
@@ -128,4 +119,8 @@ async def execute_tool_turn(
         tool_call_count=tool_call_count,
         total_tool_calls=len(state.tool_calls),
     )
-    yield ToolTurnResult("proceed", tool_batch_count, tool_call_count)
+    yield ToolTurnResult(
+        "proceed",
+        tool_batch_count,
+        tool_call_count,
+    )

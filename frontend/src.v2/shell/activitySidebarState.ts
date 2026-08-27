@@ -114,7 +114,7 @@ export interface RuntimeItem {
   label: string;
   kind: "terminal" | "background-command" | "preview" | "agent" | "automation";
   detail?: string;
-  status: "running" | "completed" | "failed" | "cancelled" | "idle";
+  status: "running" | "stalled" | "completed" | "failed" | "cancelled" | "idle";
   terminalId?: string;
   automationId?: string;
   previewId?: string;
@@ -228,7 +228,7 @@ function buildSummary(input: ActivitySidebarStateInput): ActivitySummaryItem[] {
     items.push({
       id: "goal",
       label: input.activeGoal.text,
-      detail: input.activeGoal.status === "paused" ? "Paused goal" : "Active goal",
+      detail: input.activeGoal.status === "paused" ? "已暂停的目标" : "进行中的目标",
       kind: "goal",
       status: input.activeGoal.status === "paused" ? "info" : "running",
     });
@@ -309,15 +309,13 @@ function buildProgress(input: ActivitySidebarStateInput): ActivityProgressItem[]
       });
     }
   } else if (shouldSurfacePlanProgress(input.plan)) {
-    const currentStep = input.plan.steps.find((step) => step.status === "running")
-      || input.plan.steps.find((step) => step.status === "failed")
-      || input.plan.steps.find((step) => step.status === "pending");
+    const currentStep = input.plan.plan.find((step) => step.status === "in_progress")
+      || input.plan.plan.find((step) => step.status === "pending");
     if (currentStep) {
       progress.push({
-        id: currentStep.id || "plan-step-current",
-        label: currentStep.title,
-        detail: currentStep.detail,
-        status: planStepProgressStatus(input.plan, currentStep, Boolean(input.isStreaming)),
+        id: `plan-step-${input.plan.plan.indexOf(currentStep)}`,
+        label: currentStep.step,
+        status: planStepProgressStatus(currentStep, Boolean(input.isStreaming)),
       });
     }
   }
@@ -570,10 +568,10 @@ function buildRuns(input: ActivitySidebarStateInput): ActivityRunItem[] {
       id: `background:${task.id}`,
       kind: "background-command",
       label: cleanDisplayText(task.command) || "Background command",
-      detail: task.exitCode == null ? undefined : `exit ${task.exitCode}`,
+      detail: backgroundTaskDetail(task),
       status: task.status,
       startedAt: task.timestamp,
-      attention: task.status === "failed",
+      attention: task.status === "failed" || task.status === "stalled",
     });
   }
 
@@ -617,8 +615,32 @@ function buildRuns(input: ActivitySidebarStateInput): ActivityRunItem[] {
   }
 
   return items
-    .sort((a, b) => Number(b.status === "running") - Number(a.status === "running") || Number(b.attention) - Number(a.attention) || runtimeKindOrder(a.kind) - runtimeKindOrder(b.kind) || (b.startedAt ?? 0) - (a.startedAt ?? 0))
+    .sort((a, b) => Number(isActiveRuntimeStatus(b.status)) - Number(isActiveRuntimeStatus(a.status)) || Number(b.attention) - Number(a.attention) || runtimeKindOrder(a.kind) - runtimeKindOrder(b.kind) || (b.startedAt ?? 0) - (a.startedAt ?? 0))
     .slice(0, 16);
+}
+
+const isActiveRuntimeStatus = (status: ActivityRunItem["status"]): boolean =>
+  status === "running" || status === "stalled";
+
+function backgroundTaskDetail(task: BackgroundTaskEntry): string | undefined {
+  if (task.status === "stalled") {
+    const prompt = compactRuntimeDetail(task.stalledTail || task.stalledAdvice || "可能正在等待交互输入");
+    return prompt ? `等待输入 · ${prompt}` : "等待输入";
+  }
+  if (task.status === "failed" && task.outputPreview) {
+    const output = compactRuntimeDetail(task.outputPreview);
+    if (output) return task.exitCode == null ? output : `exit ${task.exitCode} · ${output}`;
+  }
+  const details = [
+    task.exitCode == null ? "" : `exit ${task.exitCode}`,
+    task.duration == null ? "" : `${task.duration.toFixed(1).replace(/\.0$/, "")} 秒`,
+  ].filter(Boolean);
+  return details.join(" · ") || undefined;
+}
+
+function compactRuntimeDetail(value: string): string {
+  const singleLine = cleanDisplayText(value).replace(/\s+/g, " ");
+  return singleLine.length > 160 ? `${singleLine.slice(0, 157)}...` : singleLine;
 }
 
 const runtimeKindOrder = (kind: ActivityRunItem["kind"]): number =>

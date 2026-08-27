@@ -7,6 +7,10 @@ import type {
   GoalInfo,
   GoalUpdatedEvent,
   LlmModelUpdatedEvent,
+  ProviderOAuthAuthEvent,
+  ProviderOAuthDeviceCodeEvent,
+  ProviderOAuthInfoEvent,
+  ProviderOAuthProgressEvent,
   UserMessageQueueUpdatedEvent,
   RuntimeSessionSnapshot,
   ServerEvent,
@@ -21,15 +25,23 @@ import type {
   AgentProgressEntry,
   ChatMessage,
   ConversationAgentState,
+  EffortLevel,
   PlanState,
   SubagentMessageState,
   SubagentState,
   TodoItem,
+  ProviderOAuthFlowProjection,
 } from "../stores/types";
 import { toConversationGoal } from "../stores/types";
 import { fromBackendPermissionMode } from "../protocol/permissions";
 import { mergeCapabilities } from "../protocol/capabilities";
-import { conversationResetPayload, LS, writeLS } from "../stores/shared-helpers";
+import {
+  conversationResetPayload,
+  LS,
+  removeConversationOwnedPrompts,
+  visibleDiffReviewForConversation,
+  writeLS,
+} from "../stores/shared-helpers";
 import type { ConversationMeta } from "../stores/types";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { normalizeSkillList, normalizeSlashCommands } from "../lib/catalog-normalizers";
@@ -38,10 +50,48 @@ import { normalizeContextLedger } from "./contextLedger";
 import {
   isAgentProgressPhase,
 } from "../protocol/streaming-types";
+import { isDesktop, ptyKillConversation } from "../desktop/runtime";
+import { releasePreviewScope } from "./previewRequestScope";
+import { providerTracePayloadFromDone } from "./providerTrace";
 
 type ConversationSummary = ConversationSummaryPayload;
 type ConversationPayload = ConversationRecordPayload;
 const UI_AGENT_STATE_KEY = "ui_agent_state";
+const RUNTIME_PROTOCOL_VERSION = "1.0.0";
+const pendingAuthoritativeConversationResets = new Set<string>();
+
+type ProviderOAuthEvent =
+  | ProviderOAuthAuthEvent
+  | ProviderOAuthDeviceCodeEvent
+  | ProviderOAuthInfoEvent
+  | ProviderOAuthProgressEvent;
+
+const isReplayedEvent = (event: ServerEvent): boolean =>
+  (event as ServerEvent & { __replayed?: boolean }).__replayed === true;
+
+const providerOAuthEventTime = (event: ServerEvent): number => {
+  const parsed = typeof event.timestamp === "string" ? Date.parse(event.timestamp) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : Date.now();
+};
+
+const setProviderOAuthProjection = (
+  event: ProviderOAuthEvent & ServerEvent,
+  patch: Omit<Partial<ProviderOAuthFlowProjection>, "conversationId" | "provider" | "updatedAt"> & Pick<ProviderOAuthFlowProjection, "phase">,
+) => {
+  const state = useAppStore.getState();
+  const owner = event.conversation_id.trim();
+  const provider = event.provider.trim();
+  const existing = state.providerOAuthFlowsByConversation[owner]?.[provider];
+  const updatedAt = providerOAuthEventTime(event);
+  state.setProviderOAuthFlow({
+    ...existing,
+    conversationId: owner,
+    provider,
+    updatedAt,
+    ...(Number.isSafeInteger(event.seq) ? { eventSeq: event.seq } : {}),
+    ...patch,
+  });
+};
 
 const maybeString = (value: string | null | undefined): string | undefined =>
   typeof value === "string" && value ? value : undefined;
@@ -210,9 +260,20 @@ export const applyUserMessageQueueUpdate = (event: UserMessageQueueUpdatedEvent)
 
 const toConversationMeta = (conversation: ConversationSummary) => ({
   id: conversation.id,
-  title: maybeString(conversation.title) ?? "Untitled",
+  title: maybeString(conversation.title) ?? "未命名",
   updatedAt: maybeString(conversation.updated_at) ?? new Date().toISOString(),
+  revision: Number.isSafeInteger(conversation.revision) && Number(conversation.revision) >= 0
+    ? Number(conversation.revision)
+    : undefined,
+  summary: maybeString(conversation.summary),
+  compactionState: maybeString(conversation.compaction_state),
+  conversationType: conversation.conversation_type === "side_chat" ? "side_chat" as const : "main" as const,
   archived: conversation.archived,
+  memoryMode: maybeString(conversation.memory_mode),
+  memoryPolluted: conversation.memory_polluted === true,
+  memoryPollutionSources: Array.isArray(conversation.memory_pollution_sources)
+    ? conversation.memory_pollution_sources.filter((source): source is string => typeof source === "string" && Boolean(source.trim()))
+    : [],
   workspaceRoot: maybeString(conversation.workspace_root),
   gitBranch: maybeString(conversation.git_branch),
   worktreePath: maybeString(conversation.worktree_path),
@@ -229,37 +290,40 @@ const toConversationMeta = (conversation: ConversationSummary) => ({
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value && typeof value === "object" && !Array.isArray(value));
 
-const PLAN_STATUSES = new Set<PlanState["status"]>(["draft", "accepted", "executing", "completed", "cancelled"]);
-const PLAN_STEP_STATUSES = new Set<PlanState["steps"][number]["status"]>(["pending", "running", "done", "skipped", "failed"]);
+const PLAN_STEP_STATUSES = new Set<PlanState["plan"][number]["status"]>(["pending", "in_progress", "completed"]);
 const TODO_STATUSES = new Set<TodoItem["status"]>(["pending", "in_progress", "completed", "blocked"]);
 const SUBAGENT_STATUSES = new Set<SubagentState["status"]>(["pending", "running", "blocked", "done", "partial", "cancelled", "error"]);
-const PROGRESS_STAGES = new Set<AgentProgressEntry["stage"]>(["status", "planning", "tool", "approval", "final"]);
+const PROGRESS_STAGES = new Set<AgentProgressEntry["stage"]>([
+  "status",
+  "planning",
+  "tool",
+  "approval",
+  "verification",
+  "image_generation",
+  "cache",
+  "final",
+]);
 const PROGRESS_STATUSES = new Set<AgentProgressEntry["status"]>(["running", "completed", "partial", "failed", "info"]);
 
 const normalizePlanFromSnapshot = (value: unknown): PlanState | null => {
-  if (!isRecord(value) || !Array.isArray(value.steps)) return null;
-  const steps: PlanState["steps"] = value.steps
+  if (!isRecord(value) || !Array.isArray(value.plan)) return null;
+  const plan: PlanState["plan"] = value.plan
     .filter(isRecord)
-    .map((step, index) => {
-      const rawStatus = String(step.status ?? "pending") as PlanState["steps"][number]["status"];
+    .map((step) => {
+      const rawStatus = String(step.status ?? "pending") as PlanState["plan"][number]["status"];
       return {
-        id: String(step.id ?? `step-${index}`),
-        title: String(step.title ?? `Step ${index + 1}`),
-        detail: typeof step.detail === "string" ? step.detail : undefined,
+        step: String(step.step ?? ""),
         status: PLAN_STEP_STATUSES.has(rawStatus) ? rawStatus : "pending",
       };
     });
-  const rawStatus = String(value.status ?? "executing") as PlanState["status"];
-  const currentStep = typeof value.currentStep === "number"
-    ? value.currentStep
-    : typeof value.current_step === "number"
-      ? value.current_step
-      : 0;
+  const threadId = String(value.threadId ?? value.thread_id ?? "").trim();
+  const turnId = String(value.turnId ?? value.turn_id ?? "").trim();
+  if (!threadId || !turnId) return null;
   return {
-    planId: String(value.planId ?? value.plan_id ?? "plan"),
-    status: PLAN_STATUSES.has(rawStatus) ? rawStatus : "executing",
-    currentStep,
-    steps,
+    threadId,
+    turnId,
+    plan,
+    explanation: typeof value.explanation === "string" ? value.explanation : undefined,
   };
 };
 
@@ -450,7 +514,7 @@ const hasStreamingAssistantForConversation = (conversationId: string): boolean =
 };
 
 const isVisibleConversationMeta = (conversation: ConversationMeta | undefined | null): boolean =>
-  Boolean(conversation && !conversation.archived);
+  Boolean(conversation && conversation.conversationType !== "side_chat" && !conversation.archived);
 
 const visibleActiveConversationId = (
   activeConversationId: string | undefined,
@@ -472,11 +536,47 @@ const fallbackVisibleConversationId = (
   return conversations.find(isVisibleConversationMeta)?.id;
 };
 
-const upsertConversationMeta = (conversation: ConversationSummary) => {
+const normalizedConversationRevision = (value: unknown): number | undefined => (
+  Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : undefined
+);
+
+const incomingConversationMetaIsStale = (
+  incoming: Pick<ConversationMeta, "revision" | "updatedAt">,
+  existing: Pick<ConversationMeta, "revision" | "updatedAt">,
+): boolean => {
+  const incomingRevision = normalizedConversationRevision(incoming.revision);
+  const existingRevision = normalizedConversationRevision(existing.revision);
+  if (incomingRevision !== undefined && existingRevision !== undefined) {
+    return incomingRevision < existingRevision;
+  }
+  if (existingRevision !== undefined && incomingRevision === undefined) {
+    return true;
+  }
+  const incomingUpdatedAt = Date.parse(String(incoming.updatedAt || ""));
+  const existingUpdatedAt = Date.parse(String(existing.updatedAt || ""));
+  return Number.isFinite(incomingUpdatedAt)
+    && Number.isFinite(existingUpdatedAt)
+    && incomingUpdatedAt < existingUpdatedAt;
+};
+
+const conversationSnapshotIsStale = (conversation: ConversationSummary): boolean => {
+  const existing = useAppStore.getState().conversations.find((item) => item.id === conversation.id);
+  if (!existing) return false;
+  return incomingConversationMetaIsStale(toConversationMeta(conversation), existing);
+};
+
+const upsertConversationMeta = (
+  conversation: ConversationSummary,
+  options: { forceAuthoritative?: boolean } = {},
+) => {
   useAppStore.setState((state) => {
     const meta = toConversationMeta(conversation);
     const existingIndex = state.conversations.findIndex((item) => item.id === meta.id);
     if (existingIndex >= 0) {
+      const existing = state.conversations[existingIndex];
+      if (!options.forceAuthoritative && incomingConversationMetaIsStale(meta, existing)) {
+        return state;
+      }
       const conversations = [...state.conversations];
       conversations[existingIndex] = meta;
       return { conversations };
@@ -638,11 +738,25 @@ const applyPendingTurnInputSnapshot = (
 };
 
 const applyActiveStreamSnapshot = (session: RuntimeSessionSnapshot) => {
-  const activeStreamIds = Array.isArray(session.active_stream_conversation_ids)
-    ? session.active_stream_conversation_ids.map((id) => String(id || "").trim()).filter(Boolean)
-    : [];
-  if (activeStreamIds.length === 0) return;
+  // The backend always emits this field as the authoritative set of live
+  // conversation runs.  An empty array is therefore meaningful: it seals any
+  // stale renderer-side stream left behind when the socket disconnected near
+  // DONE.  Older snapshots that omit the field remain non-authoritative.
+  if (!Array.isArray(session.active_stream_conversation_ids)) return;
+  const activeStreamIds = session.active_stream_conversation_ids
+    .map((id) => String(id || "").trim())
+    .filter(Boolean);
   const activeStreamSet = new Set(activeStreamIds);
+  const legacyActiveConversationId = String(session.active_conversation_id || "").trim();
+  if (
+    activeStreamSet.size === 0
+    && String(session.active_task_id || "").trim()
+    && legacyActiveConversationId
+  ) {
+    // Compatibility with snapshots produced before per-conversation run ids
+    // were added.  A concrete active task still proves that owner is live.
+    activeStreamSet.add(legacyActiveConversationId);
+  }
   const steerTargets = new Map<string, Set<string>>();
   for (const entry of session.pending_turn_inputs ?? []) {
     const conversationId = String(entry?.conversation_id || "").trim();
@@ -653,7 +767,18 @@ const applyActiveStreamSnapshot = (session: RuntimeSessionSnapshot) => {
     steerTargets.set(conversationId, targets);
   }
 
-  const markStreamingAssistant = (messages: ChatMessage[], conversationId: string): ChatMessage[] => {
+  const projectStreamingAssistant = (
+    messages: ChatMessage[],
+    conversationId: string,
+    isStreaming: boolean,
+  ): ChatMessage[] => {
+    if (!isStreaming) {
+      return messages.map((message) => (
+        message.isStreaming || message.isThinkingStreaming
+          ? { ...message, isStreaming: false, isThinkingStreaming: false }
+          : message
+      ));
+    }
     const targets = steerTargets.get(conversationId);
     let fallbackIndex = -1;
     for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -662,32 +787,46 @@ const applyActiveStreamSnapshot = (session: RuntimeSessionSnapshot) => {
         break;
       }
     }
-    return messages.map((message, index) => (
-      message.role === "assistant"
-      && ((targets?.has(message.id) ?? false) || (!targets?.size && index === fallbackIndex))
-        ? { ...message, isStreaming: true }
-        : message
-    ));
+    return messages.map((message, index) => {
+      const ownsActiveStream = message.role === "assistant"
+        && ((targets?.has(message.id) ?? false) || (!targets?.size && index === fallbackIndex));
+      if (ownsActiveStream) return { ...message, isStreaming: true };
+      return message.isStreaming || message.isThinkingStreaming
+        ? { ...message, isStreaming: false, isThinkingStreaming: false }
+        : message;
+    });
   };
 
   useAppStore.setState((state) => {
     const conversationMessages = { ...state.conversationMessages };
     const conversationStreaming = { ...state.conversationStreaming };
     const sideChats = { ...state.sideChats };
+    const knownConversationIds = new Set<string>([
+      ...Object.keys(conversationMessages),
+      ...Object.keys(conversationStreaming),
+      ...Object.keys(sideChats),
+      ...activeStreamSet,
+      ...(state.conversationId ? [state.conversationId] : []),
+    ]);
     let activeMessages = state.messages;
-    for (const conversationId of activeStreamIds) {
-      conversationStreaming[conversationId] = true;
+    for (const conversationId of knownConversationIds) {
+      const isStreaming = activeStreamSet.has(conversationId);
+      conversationStreaming[conversationId] = isStreaming;
       if (sideChats[conversationId]) {
         sideChats[conversationId] = {
           ...sideChats[conversationId],
-          isStreaming: true,
-          messages: markStreamingAssistant(sideChats[conversationId].messages, conversationId),
+          isStreaming,
+          messages: projectStreamingAssistant(
+            sideChats[conversationId].messages,
+            conversationId,
+            isStreaming,
+          ),
         };
         continue;
       }
       const source = conversationMessages[conversationId]
         ?? (state.conversationId === conversationId ? state.messages : []);
-      const messages = markStreamingAssistant(source, conversationId);
+      const messages = projectStreamingAssistant(source, conversationId, isStreaming);
       conversationMessages[conversationId] = messages;
       if (state.conversationId === conversationId) activeMessages = messages;
     }
@@ -696,7 +835,7 @@ const applyActiveStreamSnapshot = (session: RuntimeSessionSnapshot) => {
       conversationStreaming,
       sideChats,
       messages: activeMessages,
-      ...(state.conversationId && activeStreamSet.has(state.conversationId) ? { isStreaming: true } : {}),
+      isStreaming: Boolean(state.conversationId && activeStreamSet.has(state.conversationId)),
     };
   });
 };
@@ -705,25 +844,43 @@ const hydrateActiveConversation = (
   conversation: ConversationPayload | null | undefined,
   activeConversationId?: string,
   fallbackMessages?: BackendTranscriptMessage[],
-  options: { upsertMeta?: boolean; preserveStreamingAssistant?: boolean } = {},
+  options: {
+    upsertMeta?: boolean;
+    preserveStreamingAssistant?: boolean;
+    forceAuthoritative?: boolean;
+  } = {},
 ) => {
   const conversationId = maybeString(activeConversationId) || conversation?.id || "";
   if (!conversationId) return;
+  const staleSnapshot = Boolean(
+    conversation
+    && !options.forceAuthoritative
+    && conversationSnapshotIsStale(conversation),
+  );
 
   if (conversation && options.upsertMeta !== false) {
-    upsertConversationMeta(conversation);
+    upsertConversationMeta(conversation, {
+      forceAuthoritative: options.forceAuthoritative,
+    });
   }
   useAppStore.getState().applyConversationSwitched({ conversationId });
-  if (conversation) {
-    useAppStore.getState().setActiveGoal(toConversationGoal(conversation.goal), conversationId);
+  if (conversation && !staleSnapshot) {
+    useAppStore.getState().setActiveGoal(
+      toConversationGoal(conversation.goal),
+      conversationId,
+      normalizedConversationRevision(conversation.revision),
+    );
   }
-  hydrateConversationAgentState(conversationId, conversation);
-
   const transcript = conversation?.messages ?? conversation?.transcript ?? fallbackMessages;
   if (transcript) {
     const cachedMessages = useAppStore.getState().conversationMessages[conversationId]
       ?? (useAppStore.getState().conversationId === conversationId ? useAppStore.getState().messages : []);
-    if (Array.isArray(transcript) && transcript.length === 0 && cachedMessages.length > 0) {
+    if (
+      Array.isArray(transcript)
+      && transcript.length === 0
+      && cachedMessages.length > 0
+      && !options.forceAuthoritative
+    ) {
       useAppStore.getState().hydrateConversationMessages(
         conversationId,
         cachedMessages,
@@ -731,7 +888,7 @@ const hydrateActiveConversation = (
       );
     } else {
       const hydrated = hydrateMessages(transcript);
-      const messages = options.preserveStreamingAssistant
+      const messages = options.preserveStreamingAssistant || staleSnapshot
         ? mergeHydratedWithStreamingAssistants(conversationId, hydrated)
         : hydrated;
       useAppStore.getState().hydrateConversationMessages(
@@ -741,10 +898,69 @@ const hydrateActiveConversation = (
       );
     }
   }
+  restoreProviderInspectorFromTranscript(
+    conversationId,
+    useAppStore.getState().messages,
+  );
+  // Agent state and transcript describe one durable snapshot.  Apply the
+  // transcript first so a stale local streaming placeholder cannot suppress a
+  // completed plan/progress snapshot; genuinely live streams are preserved by
+  // the merge above and still block stale agent-state replacement.
+  if (!staleSnapshot) hydrateConversationAgentState(conversationId, conversation);
 
   const workspaceRoot = maybeString(conversation?.worktree_path) || maybeString(conversation?.workspace_root);
-  if (conversation) {
+  if (conversation && !staleSnapshot) {
+    // "" is faithful, not a missing field: the backend's own
+    // `_switch_workspace_for_conversation` calls `_clear_workspace_runtime()`
+    // when a conversation has no workspace_root/worktree_path, so mirroring the
+    // empty value is what keeps the renderer's workspace equal to the session's.
     useAppStore.getState().setWorkingDirectory(workspaceRoot || "");
+  }
+};
+
+const restoreProviderInspectorFromTranscript = (
+  conversationId: string,
+  messages: ChatMessage[],
+) => {
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    for (const [blockIndex, block] of (message.blocks ?? []).entries()) {
+      if (block.type !== "text" || !block.providerRaw) continue;
+      const providerRaw = block.finishReason && !block.providerRaw.finish_reason
+        ? { ...block.providerRaw, finish_reason: block.finishReason }
+        : block.providerRaw;
+      const usage = message.usage
+        ? {
+            input: message.usage.input,
+            ordinaryInput: message.usage.ordinaryInput,
+            inputIncludesCacheRead: message.usage.inputIncludesCacheRead,
+            inputIncludesCacheWrite: message.usage.inputIncludesCacheWrite,
+            output: message.usage.output,
+            cacheRead: message.usage.cacheRead ?? 0,
+            cacheWrite: message.usage.cacheWrite ?? 0,
+            promptCacheTotal: message.usage.promptCacheTotal,
+            promptCacheHitRate: message.usage.promptCacheHitRate,
+            reasoning: message.usage.reasoning ?? 0,
+          }
+        : undefined;
+      const payload = providerTracePayloadFromDone(providerRaw, usage);
+      if (!payload) continue;
+      const targetId = String(
+        payload.trace_id
+        || `${message.id}:${block.itemId || blockIndex}:provider:transcript`,
+      );
+      useAppStore.getState().addInspectorEntry({
+        targetKind: "provider",
+        targetId,
+        payload: {
+          ...payload,
+          conversationId,
+          messageId: message.id,
+          restored_from: "transcript",
+        },
+        timestamp: message.completedAt ?? message.timestamp,
+      });
+    }
   }
 };
 
@@ -756,27 +972,36 @@ const mergeHydratedWithStreamingAssistants = (
   const cachedMessages = state.conversationMessages[conversationId]
     ?? (state.conversationId === conversationId ? state.messages : []);
 
-  // A delayed or stale conversation.switched snapshot must not clobber a
-  // fresher cached answer. Preserve cached assistant messages the snapshot is
-  // missing when they are in-flight OR newer than the snapshot's latest
-  // completed message (i.e. the cache is ahead of the snapshot).
-  const completedMs = (message: ChatMessage): number =>
-    Number((message as { completedAt?: number }).completedAt ?? 0);
+  // A delayed conversation snapshot must not clobber a fresher cached turn.
+  // Preserve the in-flight version of the same message as well as newer tail
+  // messages (including user steer/follow-up messages), not just assistant
+  // messages missing from the snapshot.
+  const messageMs = (message: ChatMessage): number => Math.max(
+    Number((message as { completedAt?: number }).completedAt ?? 0),
+    Number(message.timestamp ?? 0),
+  );
   const hydratedLatest = hydratedMessages.reduce(
-    (max, message) => Math.max(max, completedMs(message)),
+    (max, message) => Math.max(max, messageMs(message)),
     0,
   );
   const hydratedIds = new Set(hydratedMessages.map((message) => message.id));
+  const cachedById = new Map(cachedMessages.map((message) => [message.id, message]));
 
-  const preserved = cachedMessages.filter((message) => {
-    if (message.role !== "assistant") return false;
-    if (hydratedIds.has(message.id)) return false;
-    if (Boolean(message.isStreaming)) return true; // in-flight: always preserve
-    return completedMs(message) > hydratedLatest; // cache is ahead of snapshot
+  const merged = hydratedMessages.map((message) => {
+    const cached = cachedById.get(message.id);
+    if (!cached) return message;
+    if (cached.isStreaming || cached.isThinkingStreaming) return cached;
+    return messageMs(cached) > messageMs(message) ? cached : message;
   });
 
-  if (!preserved.length) return hydratedMessages;
-  return [...hydratedMessages, ...preserved];
+  const preserved = cachedMessages.filter((message) => {
+    if (hydratedIds.has(message.id)) return false;
+    if (Boolean(message.isStreaming || message.isThinkingStreaming)) return true;
+    return messageMs(message) > hydratedLatest;
+  });
+
+  if (!preserved.length) return merged;
+  return [...merged, ...preserved];
 };
 
 const activeConversationWorkspace = (): string => {
@@ -786,8 +1011,14 @@ const activeConversationWorkspace = (): string => {
 };
 
 const clearActiveConversationView = () => {
+  const state = useAppStore.getState();
+  const hasCodeContext = Boolean(
+    state.workingDirectory
+    || state.editorTabs.length > 0
+    || state.activeTabPath
+    || state.activeEditorPath
+  );
   writeLS(LS.conversation.activeId, "");
-  useAppStore.getState().setWorkingDirectory("");
   useAppStore.setState({
     ...conversationResetPayload(),
     conversationId: null,
@@ -795,6 +1026,18 @@ const clearActiveConversationView = () => {
     messages: [],
     isStreaming: false,
     toolCallCount: 0,
+    draft: "",
+    attachments: [],
+    quotedMessage: null,
+    selectedMentions: [],
+    selectedSkills: [],
+    allowedRemoteImageDomains: [],
+    actionChip: null,
+    mentionResults: [],
+    slashPanelOpen: false,
+    mentionPanelOpen: false,
+    prMonitor: null,
+    ...(hasCodeContext ? { appMode: "code" as const } : {}),
   });
 };
 
@@ -835,6 +1078,14 @@ export const handleSessionEvent = (
       const model = stringValue(ev.current_model) || stringValue(ev.model);
       if (model) s.setCurrentModel(model);
       if (ev.provider) s.setCurrentProvider(ev.provider);
+      const effectiveReasoningEffort = String(
+        ev.effective_reasoning_effort || "",
+      ).trim().toLowerCase();
+      // The backend emits an effective value only after matching it against
+      // this model's provider-declared catalog, including MiniCode custom levels.
+      if (effectiveReasoningEffort) {
+        useAppStore.setState({ effortLevel: effectiveReasoningEffort as EffortLevel });
+      }
       s.setCurrentProviderMeta({
         providerId: stringValue(ev.provider_id),
         baseUrl: stringValue(ev.base_url),
@@ -847,9 +1098,82 @@ export const handleSessionEvent = (
       }
       return true;
     }
+    case "llm.provider.oauth.auth": {
+      const ev = e as ProviderOAuthAuthEvent & ServerEvent;
+      setProviderOAuthProjection(ev, {
+        phase: "auth_url",
+        url: ev.url,
+        instructions: ev.instructions,
+      });
+      if (!isReplayedEvent(e) && ev.conversation_id === s.conversationId) {
+        pushToast(`${ev.provider} 的 OAuth 授权链接已就绪，请在提供商设置中确认并打开。`, "info", 12_000);
+      }
+      return true;
+    }
+    case "llm.provider.oauth.device_code": {
+      const ev = e as ProviderOAuthDeviceCodeEvent & ServerEvent;
+      const updatedAt = providerOAuthEventTime(e);
+      setProviderOAuthProjection(ev, {
+        phase: "device_code",
+        userCode: ev.userCode,
+        verificationUri: ev.verificationUri,
+        intervalSeconds: ev.intervalSeconds,
+        expiresInSeconds: ev.expiresInSeconds,
+        ...(ev.expiresInSeconds
+          ? { expiresAt: updatedAt + ev.expiresInSeconds * 1_000 }
+          : {}),
+      });
+      if (!isReplayedEvent(e) && ev.conversation_id === s.conversationId) {
+        pushToast(`${ev.provider} 设备授权码：${ev.userCode}。完整步骤已显示在提供商设置中。`, "info", 12_000);
+      }
+      return true;
+    }
+    case "llm.provider.oauth.info": {
+      const ev = e as ProviderOAuthInfoEvent & ServerEvent;
+      setProviderOAuthProjection(ev, {
+        phase: "info",
+        message: ev.message,
+        links: ev.links,
+      });
+      if (!isReplayedEvent(e) && ev.conversation_id === s.conversationId) {
+        pushToast(ev.message.slice(0, 240), "info", 8_000);
+      }
+      return true;
+    }
+    case "llm.provider.oauth.progress": {
+      const ev = e as ProviderOAuthProgressEvent & ServerEvent;
+      setProviderOAuthProjection(ev, {
+        phase: "progress",
+        message: ev.message,
+      });
+      return true;
+    }
     case "session.restored":
     case "session.synced": {
       const ev = e as SessionRestoredEvent | SessionSyncedEvent;
+      if (
+        ev.type === "session.synced"
+        && ev.protocol_version
+        && ev.protocol_version !== RUNTIME_PROTOCOL_VERSION
+      ) {
+        s.setConnected(false);
+        pushToast(
+        `协议版本不匹配：界面为 ${RUNTIME_PROTOCOL_VERSION}，后端为 ${ev.protocol_version}。更新 MiniCode 后请重新加载。`,
+          "error",
+        );
+        return true;
+      }
+      const authoritativeEpochReset = ev.cursor_reset === true;
+      if (authoritativeEpochReset) {
+        // A server restart or durable-store rollback can legitimately reuse
+        // the same inventory instance with a lower revision. Drop the old
+        // comparison barrier before applying the authoritative restore and
+        // the conversation.list snapshot requested immediately afterwards.
+        useAppStore.setState({
+          conversationInventoryInstanceId: null,
+          conversationInventoryRevision: 0,
+        });
+      }
       const model = stringValue(ev.current_model)
         || stringValue(ev.model)
         || stringValue(ev.session?.selected_model);
@@ -864,8 +1188,23 @@ export const handleSessionEvent = (
         || stringValue(ev.session?.active_conversation_id)
         || activeConversation?.id
         || "";
-      const activeConversationIsArchived = Boolean(activeConversation?.archived);
+      const activeConversationIsHidden = Boolean(
+        activeConversation?.archived || activeConversation?.conversation_type === "side_chat",
+      );
       const switchEventWillHydrate = ev.type === "session.restored" && ev.conversation_switched_follows === true;
+      if (ev.type === "session.restored") {
+        pendingAuthoritativeConversationResets.clear();
+        if (switchEventWillHydrate && activeConversationId) {
+          // session.restore is followed immediately by a canonical
+          // conversation.switched payload loaded from the durable repository.
+          // It is authoritative even when the event cursor itself did not
+          // reset: a renderer may still hold a newer optimistic/local revision
+          // from before refresh. Treating only cursor-reset restores as
+          // authoritative restores the transcript but drops the matching
+          // durable Agent state (for example Provider activity in Context).
+          pendingAuthoritativeConversationResets.add(activeConversationId);
+        }
+      }
       const activeTaskId = stringValue(ev.session?.active_task_id);
       const activeStreamIds = Array.isArray(ev.session?.active_stream_conversation_ids)
         ? ev.session.active_stream_conversation_ids
@@ -881,7 +1220,15 @@ export const handleSessionEvent = (
         buffers.textStreamBuffer.destroy();
         buffers.thinkingStreamBuffer.destroy();
       } else {
-        clearStreamingState(buffers, { conversationId: activeConversationId || s.conversationId });
+        // The session snapshot reports no live stream, so any locally streaming
+        // turn was cut off while this client was away. Its real outcome is
+        // unknown, so it is sealed as partial: never a fabricated success, and
+        // never a fabricated failure for a turn that may have finished fine on
+        // the server.
+        clearStreamingState(buffers, {
+          conversationId: activeConversationId || s.conversationId,
+          terminalStatus: "partial",
+        });
       }
 
       if (model) s.setCurrentModel(model);
@@ -894,23 +1241,28 @@ export const handleSessionEvent = (
       });
       if (workspaceRoot && !switchEventWillHydrate) s.setWorkingDirectory(workspaceRoot);
             setAvailableModelsForCurrentProvider(ev.available_models, model, provider, maybeString(ev.models_source));
-      if (activeConversationIsArchived) {
+      if (activeConversationIsHidden) {
         clearActiveConversationView();
       } else if (switchEventWillHydrate) {
         // The backend will immediately emit the canonical conversation.switched
         // event. Keep conversation activation on that single path so restore and
         // manual switching cannot diverge.
       } else if (activeConversationId) {
-        hydrateActiveConversation(activeConversation, activeConversationId, fallbackMessages);
+        hydrateActiveConversation(
+          activeConversation,
+          activeConversationId,
+          fallbackMessages,
+          { forceAuthoritative: authoritativeEpochReset },
+        );
       } else {
         clearActiveConversationView();
       }
       applyRuntimeSessionSnapshot(ev.session);
       if (ev.type === "session.restored" && ev.error) {
-        pushToast(`Session restore warning: ${ev.error}`, "warning", 5000);
+      pushToast(`恢复会话时出现警告：${ev.error}`, "warning", 5000);
       }
       if (ev.type === "session.restored" && ev.missed_events) {
-        pushToast("Connection was lost during an active run; some events may be missing.", "warning", 8000);
+      pushToast("任务运行期间连接曾中断，部分事件可能缺失。", "warning", 8000);
         // Replay has a bounded server window. Re-fetch the durable transcript
         // before accepting more deltas so timeline/tool cards cannot remain
         // silently absent after a long disconnect.
@@ -923,43 +1275,158 @@ export const handleSessionEvent = (
     case "conversation.list": {
       const ev = e as ConversationListEvent;
       if (ev.conversations) {
-        const conversationMetas = ev.conversations.map(toConversationMeta);
+        const incomingConversationMetas = ev.conversations
+          .map(toConversationMeta);
         const requestedActiveConversationId = maybeString(ev.active_conversation_id);
         const storeState = useAppStore.getState();
-        const requestedEffectiveActiveConversationId = visibleActiveConversationId(requestedActiveConversationId, conversationMetas);
-        const pendingLocalActive = storeState.conversationId
-          ? storeState.conversations.find((conversation) =>
-              conversation.id === storeState.conversationId &&
-              conversation.title === "New chat" &&
-              !conversationMetas.some((item) => item.id === conversation.id)
-            )
-          : undefined;
-        const effectiveActiveConversationId = pendingLocalActive
-          ? undefined
-          : (requestedEffectiveActiveConversationId ?? fallbackVisibleConversationId(storeState.conversationId, conversationMetas));
-        const nextConversationMetas = pendingLocalActive
-          ? [pendingLocalActive, ...conversationMetas]
-          : conversationMetas;
+        const incomingInventoryInstanceId = maybeString(ev.inventory_instance_id)?.trim();
+        const currentInventoryInstanceId = maybeString(
+          storeState.conversationInventoryInstanceId,
+        )?.trim();
+        const incomingInventoryRevision = normalizedConversationRevision(ev.inventory_revision);
+        const inventoryEpochChanged = Boolean(
+          incomingInventoryInstanceId
+          && incomingInventoryInstanceId !== currentInventoryInstanceId,
+        );
+        // Once a renderer has observed a durable inventory epoch, an
+        // unversioned list cannot replace it. This also rejects malformed
+        // half-versioned snapshots defensively if validation is bypassed.
+        if (
+          (currentInventoryInstanceId && !incomingInventoryInstanceId)
+          || (incomingInventoryInstanceId && incomingInventoryRevision === undefined)
+          || (!incomingInventoryInstanceId && incomingInventoryRevision !== undefined)
+        ) {
+          return true;
+        }
+        if (
+          !inventoryEpochChanged
+          && (
+            (incomingInventoryRevision !== undefined
+              && incomingInventoryRevision < storeState.conversationInventoryRevision)
+            || (incomingInventoryRevision === undefined
+              && storeState.conversationInventoryRevision > 0)
+          )
+        ) {
+          return true;
+        }
+        const existingById = new Map(storeState.conversations.map((conversation) => [conversation.id, conversation]));
+        const snapshotAt = Date.parse(String(ev.snapshot_at || e.timestamp || ""));
+        const mergedIncomingMetas = incomingConversationMetas.map((incoming) => {
+          const existing = existingById.get(incoming.id);
+          if (!existing || inventoryEpochChanged) return incoming;
+          return incomingConversationMetaIsStale(incoming, existing) ? existing : incoming;
+        });
+        const incomingIds = new Set(incomingConversationMetas.map((conversation) => conversation.id));
+        const newerThanSnapshot = !incomingInventoryInstanceId
+          && incomingInventoryRevision === undefined
+          && Number.isFinite(snapshotAt)
+          ? storeState.conversations.filter((conversation) => {
+              if (incomingIds.has(conversation.id)) return false;
+              const updatedAt = Date.parse(String(conversation.updatedAt || ""));
+              return Number.isFinite(updatedAt) && updatedAt > snapshotAt;
+            })
+          : [];
+        const conversationMetas = [...mergedIncomingMetas, ...newerThanSnapshot];
+        const currentEffectiveActiveConversationId = visibleActiveConversationId(
+          storeState.conversationId ?? undefined,
+          conversationMetas,
+        );
+        const requestedEffectiveActiveConversationId = visibleActiveConversationId(
+          requestedActiveConversationId,
+          conversationMetas,
+        );
+        // conversation.list is an inventory snapshot, not an activation
+        // command. Keep an existing visible active conversation authoritative;
+        // switching is committed by conversation.switched/session restore.
+        // The list may choose a backend/fallback owner only for cold start or
+        // after the current owner was actually removed/archived.
+        const fallbackActiveConversationId = fallbackVisibleConversationId(
+          storeState.conversationId ?? undefined,
+          conversationMetas,
+        );
+        const effectiveActiveConversationId = currentEffectiveActiveConversationId
+          ?? requestedEffectiveActiveConversationId
+          ?? fallbackActiveConversationId;
+        const activationNeedsBackendSync = Boolean(
+          effectiveActiveConversationId
+          && !currentEffectiveActiveConversationId
+          && !requestedEffectiveActiveConversationId,
+        );
+        const nextConversationMetas = conversationMetas;
         const knownConversationIds = new Set(nextConversationMetas.map((conversation) => conversation.id));
-        useAppStore.setState((state) => ({
-          conversations: nextConversationMetas,
-          conversationMessages: Object.fromEntries(
-            Object.entries(state.conversationMessages).filter(([id]) => knownConversationIds.has(id)),
-          ),
-          conversationStreaming: Object.fromEntries(
-            Object.entries(state.conversationStreaming).filter(([id]) => knownConversationIds.has(id)),
-          ),
-          conversationAgentStates: Object.fromEntries(
-            Object.entries(state.conversationAgentStates ?? {}).filter(([id]) => knownConversationIds.has(id)),
-          ),
-          conversationRecallTruncations: Object.fromEntries(
-            Object.entries(state.conversationRecallTruncations ?? {}).filter(([id]) => knownConversationIds.has(id)),
-          ),
-        }));
+        const removedConversationIds = storeState.conversations
+          .map((conversation) => conversation.id)
+          .filter((id) => !knownConversationIds.has(id));
+        for (const removedId of removedConversationIds) {
+          releasePreviewScope(removedId);
+          useAppStore.getState().clearConversationControlPlaneState(removedId);
+          if (isDesktop()) {
+            void ptyKillConversation(removedId);
+          }
+        }
+        useAppStore.setState((state) => {
+          let pendingApproval = state.pendingApproval;
+          let approvalQueue = state.approvalQueue;
+          let pendingDiffReview = state.pendingDiffReview;
+          let diffReviewQueue = state.diffReviewQueue;
+          let pendingAskUser = state.pendingAskUser;
+          let askUserQueue = state.askUserQueue;
+          const removedDiffRequestIds = new Set<string>();
+          for (const removedId of removedConversationIds) {
+            const approvals = removeConversationOwnedPrompts(pendingApproval, approvalQueue, removedId);
+            pendingApproval = approvals.pending;
+            approvalQueue = approvals.queue;
+            const removedDiffs = [pendingDiffReview, ...diffReviewQueue]
+              .filter((item) => item?.conversationId?.trim() === removedId);
+            for (const item of removedDiffs) removedDiffRequestIds.add(item!.requestId);
+            const diffs = removeConversationOwnedPrompts(pendingDiffReview, diffReviewQueue, removedId);
+            pendingDiffReview = diffs.pending;
+            diffReviewQueue = diffs.queue;
+            const questions = removeConversationOwnedPrompts(pendingAskUser, askUserQueue, removedId);
+            pendingAskUser = questions.pending;
+            askUserQueue = questions.queue;
+          }
+          return {
+            conversations: nextConversationMetas,
+            conversationInventoryInstanceId: incomingInventoryInstanceId
+              ?? state.conversationInventoryInstanceId,
+            conversationInventoryRevision: incomingInventoryRevision
+              ?? (inventoryEpochChanged ? 0 : state.conversationInventoryRevision),
+            conversationMessages: Object.fromEntries(
+              Object.entries(state.conversationMessages).filter(([id]) => knownConversationIds.has(id)),
+            ),
+            conversationStreaming: Object.fromEntries(
+              Object.entries(state.conversationStreaming).filter(([id]) => knownConversationIds.has(id)),
+            ),
+            conversationAgentStates: Object.fromEntries(
+              Object.entries(state.conversationAgentStates ?? {}).filter(([id]) => knownConversationIds.has(id)),
+            ),
+            conversationWorkbenchStates: Object.fromEntries(
+              Object.entries(state.conversationWorkbenchStates ?? {}).filter(([id]) => knownConversationIds.has(id)),
+            ),
+            conversationRecallTruncations: Object.fromEntries(
+              Object.entries(state.conversationRecallTruncations ?? {}).filter(([id]) => knownConversationIds.has(id)),
+            ),
+            pendingApproval,
+            approvalQueue,
+            pendingDiffReview,
+            diffReviewQueue,
+            pendingAskUser,
+            askUserQueue,
+            diffReview: visibleDiffReviewForConversation(
+              effectiveActiveConversationId,
+              pendingDiffReview,
+              diffReviewQueue,
+            ) ?? (state.diffReview && !removedDiffRequestIds.has(state.diffReview.requestId)
+              ? state.diffReview
+              : null),
+          };
+        });
         const eventActiveConversation = ev.active_conversation ?? null;
         const activeConversation = eventActiveConversation
           && eventActiveConversation.id === effectiveActiveConversationId
           && !eventActiveConversation.archived
+          && eventActiveConversation.conversation_type !== "side_chat"
             ? eventActiveConversation
             : null;
         if (effectiveActiveConversationId) {
@@ -967,7 +1434,11 @@ export const handleSessionEvent = (
           if (alreadyActive) {
             const activeMeta = conversationMetas.find((conversation) => conversation.id === effectiveActiveConversationId);
             if (activeMeta?.goal !== undefined) {
-              useAppStore.getState().setActiveGoal(activeMeta.goal ?? null, effectiveActiveConversationId);
+              useAppStore.getState().setActiveGoal(
+                activeMeta.goal ?? null,
+                effectiveActiveConversationId,
+                activeMeta.revision,
+              );
             }
             if (activeConversation) {
               hydrateConversationAgentState(effectiveActiveConversationId, activeConversation);
@@ -975,13 +1446,9 @@ export const handleSessionEvent = (
           } else {
             hydrateActiveConversation(activeConversation, effectiveActiveConversationId, undefined, { upsertMeta: false });
           }
-          if (requestedActiveConversationId !== effectiveActiveConversationId) {
+          if (activationNeedsBackendSync) {
             sendClientCommand({ type: "conversation.switch", conversation_id: effectiveActiveConversationId });
           }
-        } else if (pendingLocalActive) {
-          // A freshly-created optimistic conversation can coexist with a stale
-          // list response that was already in flight. Keep the blank local
-          // conversation visible until the create response reconciles it.
         } else {
           clearActiveConversationView();
         }
@@ -990,24 +1457,75 @@ export const handleSessionEvent = (
       return true;
     }
     case "goal.updated": {
-      const ev = e as GoalUpdatedEvent & { goal?: GoalInfo | null };
-      useAppStore.getState().setActiveGoal(toConversationGoal(ev.goal), maybeString(ev.conversation_id));
+      const ev = e as GoalUpdatedEvent & { goal?: GoalInfo | null; updated_at?: string };
+      const conversationId = maybeString(ev.conversation_id);
+      if (!conversationId) return true;
+      const incomingGoal = toConversationGoal(ev.goal);
+      const currentConversation = useAppStore.getState().conversations.find(
+        (conversation) => conversation.id === conversationId,
+      );
+      const currentGoal = currentConversation?.goal;
+      const incomingRevision = normalizedConversationRevision(ev.revision);
+      const currentRevision = normalizedConversationRevision(currentConversation?.revision);
+      const incomingUpdatedAt = Date.parse(String(incomingGoal?.updatedAt || ev.updated_at || ""));
+      const currentUpdatedAt = Date.parse(String(
+        currentGoal?.updatedAt || currentConversation?.updatedAt || "",
+      ));
+      // Goal updates are durable state, not append-only notifications.  A
+      // delayed replay from before a newer edit must not regress the visible
+      // goal or overwrite the conversation metadata with stale text.
+      if (
+        (incomingRevision !== undefined
+          && currentRevision !== undefined
+          && incomingRevision < currentRevision)
+        || (currentRevision !== undefined && incomingRevision === undefined)
+        || (
+          incomingRevision === undefined
+          && currentRevision === undefined
+          && Number.isFinite(incomingUpdatedAt)
+          && Number.isFinite(currentUpdatedAt)
+          && incomingUpdatedAt < currentUpdatedAt
+        )
+      ) {
+        return true;
+      }
+      useAppStore.getState().setActiveGoal(incomingGoal, conversationId, incomingRevision);
       return true;
     }
     case "conversation.switched": {
       const ev = e as ConversationSwitchedEvent;
-      if (ev.conversation?.archived) {
+      const switchedConversationId = maybeString(ev.conversation_id) ?? ev.conversation?.id;
+      const forceAuthoritative = Boolean(
+        switchedConversationId
+        && pendingAuthoritativeConversationResets.delete(switchedConversationId),
+      );
+      if (switchedConversationId) {
+        useAppStore.getState().setConversationHydration(
+          switchedConversationId,
+          ev.is_hydrating === true,
+          Date.now(),
+        );
+      }
+      if (ev.conversation?.archived || ev.conversation?.conversation_type === "side_chat") {
         clearActiveConversationView();
       } else if (ev.conversation) {
-        const nextConversationId = maybeString(ev.conversation_id) ?? ev.conversation.id;
+        const nextConversationId = switchedConversationId ?? ev.conversation.id;
         const activeStreamIds = Array.isArray(ev.session?.active_stream_conversation_ids)
           ? ev.session.active_stream_conversation_ids
           : [];
         const preserveStreamingAssistant = activeStreamIds.includes(nextConversationId)
           || (activeStreamIds.length === 0 && Boolean(ev.session?.active_task_id));
-        hydrateActiveConversation(ev.conversation, nextConversationId, undefined, { preserveStreamingAssistant });
+        hydrateActiveConversation(ev.conversation, nextConversationId, undefined, {
+          preserveStreamingAssistant,
+          forceAuthoritative,
+        });
       }
       applyRuntimeSessionSnapshot(ev.session);
+      if (!isReplayedEvent(e)) {
+        // Extension/project commands are conversation-scoped. A switch must
+        // replace the palette even when the transport itself did not reconnect.
+        sendClientCommand({ type: "commands.list" });
+      }
       return true;
     }
     default:

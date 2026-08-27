@@ -15,10 +15,11 @@ from backend.agent.loop_recovery import (
 )
 from backend.agent.message import AgentEvent
 from backend.agent.loop_preflight import run_stop_failure_hook
-from backend.agent.provider_protocol import usage_done_event
+from backend.agent.provider_protocol import usage_terminal_projection
 from backend.agent.recovery_controller import RecoveryDependencies, RecoveryProfile
 from backend.agent.state import AgentState
 from backend.agent.stream_sanitizer import scrub_thinking_tags
+from backend.agent.terminal_projection import TurnTerminalProjection
 from backend.llm.base import ToolCallEvent, UsageInfo
 
 
@@ -52,7 +53,7 @@ async def degrade_and_finish(
     full_text: str,
     pending_tool_calls: list[ToolCallEvent],
     profile: RecoveryProfile,
-) -> AsyncIterator[AgentEvent]:
+) -> AsyncIterator[AgentEvent | TurnTerminalProjection]:
     async for event in run_degrade_and_finish(
         state=state,
         context=ctx,
@@ -63,7 +64,7 @@ async def degrade_and_finish(
         profile=profile,
         dependencies=RecoveryDependencies(
             scrub_thinking_tags=scrub_thinking_tags,
-            usage_done_event=usage_done_event,
+            usage_terminal_projection=usage_terminal_projection,
             run_stop_failure_hook=run_stop_failure_hook,
         ),
     ):

@@ -3,8 +3,11 @@ import type {
   AgentProgressEvent,
   AgentRunCompletedEvent,
   AgentRunStartedEvent,
-  PlanStepUpdatedEvent,
-  PlanUpdatedEvent,
+  ContextForkedEvent,
+  ContextLedgerEvent,
+  ContextSideQueryResultEvent,
+  ParentNotificationsEvent,
+  TurnPlanUpdatedEvent,
   RateLimitEvent,
   RuntimeSpanEvent,
   ServerEvent,
@@ -12,10 +15,10 @@ import type {
   StreamEventEvent,
   SubagentEventEvent,
   SubagentMailboxEvent,
+  SubagentPlanApprovalRequestedEvent,
   SubagentProgressEvent,
   SubagentStartEvent,
   TaskUpdateEvent,
-  ToolUseSummaryEvent,
 } from "../protocol/events";
 import type { McpServerStatus, SubagentMessageState, SubagentState, TodoItem } from "../stores/types";
 import { sendClientCommand } from "../protocol/ws-outbox";
@@ -25,6 +28,8 @@ import { pushToast } from "../overlays/ToastContainer";
 import { addInspectorPayload } from "./inspectorEntries";
 import { normalizeSkillList, normalizeSlashCommands } from "../lib/catalog-normalizers";
 import { normalizeContextLedger } from "./contextLedger";
+import { hydrateMessages, type BackendTranscriptMessage } from "./transcriptHydration";
+import { LS, writeLS } from "../stores/shared-helpers";
 
 const userVisibleSubagentProgress = (value?: string, explicitVisible?: boolean): string => {
   const text = String(value ?? "").trim();
@@ -89,6 +94,20 @@ const explicitSubagentActivity = (
   return userVisibleSubagentProgress(activitySummary, explicitVisible)
     || userVisibleSubagentProgress(currentActivity, explicitVisible)
     || userVisibleSubagentProgress(detail, explicitVisible);
+};
+
+const transcriptSnapshotPatch = (
+  event: unknown,
+  existing?: SubagentState,
+): Pick<SubagentState, "transcriptMessages" | "transcriptSeq"> | Record<string, never> => {
+  const snapshot = maybeObject((event as { transcript_snapshot?: unknown }).transcript_snapshot);
+  const seq = maybeNumber(snapshot?.seq);
+  const rawMessages = snapshot?.messages;
+  if (seq == null || !Array.isArray(rawMessages) || seq <= (existing?.transcriptSeq ?? -1)) return {};
+  return {
+    transcriptSeq: seq,
+    transcriptMessages: hydrateMessages(rawMessages as BackendTranscriptMessage[]),
+  };
 };
 
 const subagentProgressSummary = (ev: {
@@ -254,13 +273,42 @@ const isActiveConversationEvent = (conversationId?: string): boolean => {
   return useAppStore.getState().conversationId === conversationId.trim();
 };
 
+const isReplayedRuntimeEvent = (event: ServerEvent): boolean =>
+  (event as ServerEvent & { __replayed?: boolean }).__replayed === true;
+
+const eventTimestampMs = (event: ServerEvent): number => {
+  const parsed = Date.parse(String(event.timestamp || ""));
+  return Number.isFinite(parsed) ? parsed : Date.now();
+};
+
+const rateLimitMessage = (event: RateLimitEvent): string => {
+  const reason = event.error_type === "quota_exceeded"
+    ? "模型额度已用尽"
+    : event.error_type === "concurrency_limit"
+      ? "模型并发额度已满"
+      : event.error_type === "busy"
+        ? "模型服务暂时繁忙"
+        : "模型请求受到速率限制";
+  const details: string[] = [];
+  const provider = String(event.provider || "").trim();
+  if (provider) details.push(`提供商：${provider}`);
+  if (typeof event.retry_after_seconds === "number" && event.retry_after_seconds > 0) {
+    details.push(`${Math.ceil(event.retry_after_seconds)} 秒后重试`);
+  } else if (typeof event.retry_at === "number" && event.retry_at > Date.now()) {
+    details.push(`${Math.max(1, Math.ceil((event.retry_at - Date.now()) / 1000))} 秒后重试`);
+  }
+  if (event.recoverable === false) details.push("无法自动恢复");
+  const message = String(event.message || "").trim();
+  if (message && message !== reason) details.push(message);
+  return [reason, ...details].join(" · ");
+};
+
 const TURN_SCOPED_RUNTIME_EVENTS = new Set<string>([
   "agent.progress",
   "runtime.span",
   "agent.run.started",
   "agent.run.completed",
-  "plan_updated",
-  "plan_step_updated",
+  "turn.plan.updated",
   "task.update",
   "subagent.start",
   "subagent.event",
@@ -502,6 +550,21 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
     && !hasStreamingAssistantForMessage(conversationId, messageId)
     && !canApplyLateTerminalEvent(conversationId, messageId, e.type)
   ) {
+    // `done` is the turn's delivery fence, so these rows cannot be rendered.
+    // They still describe work that happened — `runtime.span` and
+    // `agent.progress` arriving late can carry status:"failed" — and dropping
+    // them with a bare `return true` left no record anywhere that the turn had
+    // a failure the transcript never showed.
+    addInspectorPayload("message", `late:${conversationId || "session"}:${messageId}:${e.type}`, {
+      event: e.type,
+      dropped: true,
+      reason: "turn_already_terminal",
+      detail: "事件在本轮 done 之后到达，已越过投递栅栏",
+      conversation_id: conversationId,
+      message_id: messageId,
+      status: (e as unknown as { status?: unknown }).status,
+      payload: e,
+    });
     return true;
   }
   switch (e.type) {
@@ -511,7 +574,29 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       // Main chat is owned by typed message/tool/approval events. Keep legacy
       // progress available to the activity/inspector surfaces without creating
       // a second transcript item for the same lifecycle.
-      if (ev.tool_call_id) return true;
+      if (ev.tool_call_id) {
+        addInspectorPayload("tool_call", ev.tool_call_id, {
+          event: "agent.progress",
+          conversation_id: conversationId,
+          message_id: messageId,
+          id: ev.id,
+          stage: ev.stage,
+          phase: ev.phase,
+          status: ev.status,
+          message,
+          label: ev.label,
+          summary: ev.summary,
+          detail: ev.detail,
+          tool_name: ev.tool_name,
+          group_id: ev.group_id,
+          step_id: ev.step_id,
+          iteration_id: ev.iteration_id,
+          count: ev.count,
+          ephemeral: ev.ephemeral,
+          replayed: isReplayedRuntimeEvent(e),
+        });
+        return true;
+      }
       if (message) {
         const progress = {
           id: String(ev.id || `${ev.stage || "status"}:${message}`),
@@ -530,7 +615,18 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
           count: ev.count,
           ephemeral: ev.ephemeral,
         };
-        s.appendAgentProgress(progress, conversationId);
+        if (ev.stage === "image_generation") {
+          s.upsertMessageProgress(progress, conversationId, messageId);
+          addInspectorPayload("provider", progress.id, {
+            event: "agent.progress",
+            conversation_id: conversationId,
+            message_id: messageId,
+            ...progress,
+            replayed: isReplayedRuntimeEvent(e),
+          });
+        } else {
+          s.appendAgentProgress(progress, conversationId);
+        }
       }
       return true;
     }
@@ -557,6 +653,47 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         ...ev,
         event: ev.type,
       });
+      if (ev.type === "agent.run.completed") {
+        // The durable runtime completion is authoritative even when the
+        // transport-level `done` envelope was lost during disconnect/replay.
+        // Only the active assistant is eligible; a late completion for an
+        // already sealed turn remains inspector metadata and cannot close a
+        // newer turn.
+        const owner = String(ev.conversation_id || conversationId || "").trim();
+        const targetMessageId = runMessageId || undefined;
+        if (owner && targetMessageId && hasStreamingAssistantForMessage(owner, targetMessageId)) {
+          const rawStatus = String(ev.status || "completed").trim().toLowerCase();
+          const terminalStatus = rawStatus === "partial"
+            ? "partial" as const
+            : rawStatus === "failed"
+              ? "failed" as const
+              : rawStatus === "cancelled" || rawStatus === "interrupted"
+                ? "interrupted" as const
+                : "completed" as const;
+          const reason = String(
+            (ev as unknown as { terminal_reason?: unknown }).terminal_reason
+              || ev.summary
+              || ev.error
+              || "",
+          ).trim();
+          s.finishStreaming(
+            owner,
+            undefined,
+            terminalStatus,
+            targetMessageId,
+            terminalStatus === "failed" ? (ev.error || ev.summary || reason) : undefined,
+            false,
+            undefined,
+            reason,
+          );
+          s.finishAgentProgress(
+            owner,
+            terminalStatus === "failed" || terminalStatus === "interrupted"
+              ? "failed"
+              : terminalStatus === "partial" ? "partial" : "completed",
+          );
+        }
+      }
       return true;
     }
     case "context_usage": {
@@ -579,31 +716,57 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       return true;
     }
     case "context_compacted": {
-      if (!isActiveConversationEvent(conversationId)) return true;
       const compacted = e as unknown as {
         summary?: string;
+        before_tokens?: number;
+        after_tokens?: number;
+        retained_categories?: string[];
         ledger?: unknown;
       };
-      const summary = compacted.summary ?? "Context compacted.";
+      const summary = compacted.summary ?? "上下文已压缩。";
+      const ledger = normalizeContextLedger(compacted.ledger);
+      const beforeTokens = maybeNumber(compacted.before_tokens);
+      const afterTokens = maybeNumber(compacted.after_tokens);
+      const savedTokens = beforeTokens != null && afterTokens != null
+        ? Math.max(0, beforeTokens - afterTokens)
+        : undefined;
+      addInspectorPayload("budget", `compaction:${conversationId || "unowned"}`, {
+        event: "context_compacted",
+        conversation_id: conversationId,
+        summary,
+        before_tokens: beforeTokens,
+        after_tokens: afterTokens,
+        saved_tokens: savedTokens,
+        retained_categories: compacted.retained_categories,
+        ledger,
+        replayed: isReplayedRuntimeEvent(e),
+      });
+      if (!isActiveConversationEvent(conversationId)) return true;
       const currentUsage = useAppStore.getState().contextUsage;
       s.setContextUsage({
-        used: currentUsage?.used ?? 0,
+        used: afterTokens ?? currentUsage?.used ?? 0,
         limit: currentUsage?.limit ?? 0,
-        compactedAt: Date.now(),
+        compactedAt: eventTimestampMs(e),
         compactSummary: summary,
-        ledger: normalizeContextLedger(compacted.ledger) ?? currentUsage?.ledger,
+        ledger: ledger ?? currentUsage?.ledger,
       });
-      sendClientCommand({ type: "session.usage.inspect" });
+      if (!isReplayedRuntimeEvent(e)) {
+        sendClientCommand({ type: "session.usage.inspect" });
+      }
+      const tokenSummary = beforeTokens != null && afterTokens != null
+        ? `，从 ${beforeTokens.toLocaleString()} 降至 ${afterTokens.toLocaleString()} tokens${savedTokens ? `，节省 ${savedTokens.toLocaleString()}` : ""}`
+        : "";
       s.upsertSystemMessage(
         "system-compact-status",
-        "上下文已压缩，摘要已保存到会话记忆中。",
-        { conversationId, replacePrefix: "Compacting context" },
+        `上下文已压缩${tokenSummary}，摘要已保存到会话记忆中。`,
+        { conversationId, replacePrefix: "正在压缩上下文" },
       );
       return true;
     }
     case "context_ledger": {
       if (!isActiveConversationEvent(conversationId)) return true;
-      const ledger = normalizeContextLedger((e as unknown as { data?: unknown }).data ?? e);
+      const ev = e as ContextLedgerEvent;
+      const ledger = normalizeContextLedger(ev);
       if (ledger) {
         const currentUsage = useAppStore.getState().contextUsage;
         s.setContextUsage({
@@ -621,79 +784,65 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       return true;
     }
     case "context_forked": {
-      if (!isActiveConversationEvent(conversationId)) return true;
-      const data = (e as unknown as { data?: Record<string, unknown> }).data ?? {};
-      const forkId = String(data.fork_id || "").trim();
-      const historyLength = Number(data.history_length || 0);
+      if (!conversationId) return true;
+      const ev = e as ContextForkedEvent;
+      const branchId = String(ev.branch_conversation_id || "").trim();
+      const destination = ev.branch_created
+        ? ev.branch_activated
+          ? "已创建并切换到上下文分支"
+          : "已创建上下文分支"
+        : "已创建临时上下文分叉";
+      const identity = branchId || ev.fork_id;
       s.upsertSystemMessage(
-        `context-forked:${forkId || Date.now()}`,
-        `上下文已分叉${forkId ? `（${forkId}）` : ""}，保留 ${historyLength} 条历史消息。`,
+        `context-forked:${ev.fork_id}`,
+        `${destination}（${identity}），从第 ${ev.message_index + 1} 条可见消息分叉，保留 ${ev.history_length} 条模型历史，估算 ${ev.estimated_tokens.toLocaleString()} tokens。`,
         { conversationId },
       );
       return true;
     }
     case "context_side_query_result": {
-      if (!isActiveConversationEvent(conversationId)) return true;
-      const data = (e as unknown as { data?: Record<string, unknown> }).data ?? {};
-      const result = String(data.result || "").trim();
-      if (result) {
-        s.upsertSystemMessage(
-          `context-side-query:${Date.now()}`,
-          result,
-          { conversationId },
-        );
-      }
+      if (!conversationId) return true;
+      const ev = e as ContextSideQueryResultEvent;
+      const result = ev.result.trim() || "未返回文本结果。";
+      const focus = ev.focus.trim();
+      const eventIdentity = String(e.event_id || (Number.isSafeInteger(e.seq) ? `seq-${e.seq}` : `${ev.query}:${ev.focus}`));
+      s.upsertSystemMessage(
+        `context-side-query:${eventIdentity}`,
+        [
+          focus ? `上下文旁路查询（聚焦：${focus}）` : "上下文旁路查询",
+          `问题：${ev.query}`,
+          `结果：${result}`,
+        ].join("\n\n"),
+        { conversationId },
+      );
       return true;
     }
-    case "plan_updated": {
-      const ev = e as PlanUpdatedEvent;
-      if (!Array.isArray(ev.steps)) return true;
-      const validStatus = new Set(["pending", "running", "done", "skipped", "failed"]);
-      const planId = ev.plan_id || "plan";
-      const normalizedStatus = ev.status === "completed" || ev.status === "cancelled" || ev.status === "draft" || ev.status === "accepted"
-        ? ev.status
-        : "executing";
-      s.setPlan({
-        planId,
-        status: normalizedStatus,
-        currentStep: typeof ev.current_step === "number" ? ev.current_step : 0,
-        steps: ev.steps.map((step, idx) => ({
-          id: step.id || `step-${idx}`,
-          title: step.title || `Step ${idx + 1}`,
-          detail: step.detail,
-          status: (step.status && validStatus.has(step.status) ? step.status : "pending") as
-            "pending" | "running" | "done" | "skipped" | "failed",
-        })),
-      }, conversationId);
-      // Keep plan snapshots in the dedicated plan/task UI. Mirroring every
-      // snapshot into generic progress makes the process stream read like a
-      // repeated narration of the same checklist.
-      return true;
-    }
-    case "plan_step_updated": {
-      const ev = e as PlanStepUpdatedEvent;
+    case "turn.plan.updated": {
+      const ev = e as TurnPlanUpdatedEvent;
+      const owner = String(ev.conversation_id || conversationId || "").trim();
+      const threadId = String(ev.thread_id || "").trim();
+      const turnId = String(ev.turn_id || "").trim();
+      if (!owner || threadId !== owner || !turnId || !Array.isArray(ev.plan)) return true;
       const currentState = useAppStore.getState();
-      const current = conversationId && conversationId !== currentState.conversationId
-        ? currentState.conversationAgentStates?.[conversationId]?.plan
-        : currentState.plan;
-      if (!current || (ev.plan_id && current.planId !== ev.plan_id)) return true;
-      const index = typeof ev.step_index === "number"
-        ? ev.step_index
-        : current.steps.findIndex((step) => step.id === ev.step_id);
-      if (index < 0 || index >= current.steps.length || !ev.status) return true;
-      const steps = current.steps.slice();
-      steps[index] = {
-        ...steps[index],
-        status: ev.status,
-        ...(ev.title ? { title: ev.title } : {}),
-        ...(ev.detail ? { detail: ev.detail } : {}),
-      };
+      const messages = owner === currentState.conversationId
+        ? currentState.messages
+        : currentState.conversationMessages[owner] ?? [];
+      const ownerMessage = messages.find((message) =>
+        message.role === "assistant" && message.turnId === turnId,
+      );
+      if (!ownerMessage) return true;
+      if (ev.message_id && ownerMessage.id !== ev.message_id) return true;
+      const validStatus = new Set(["pending", "in_progress", "completed"]);
       s.setPlan({
-        ...current,
-        steps,
-        currentStep: ev.current_step ?? index,
-        status: current.status === "completed" || current.status === "cancelled" ? current.status : "executing",
-      }, conversationId);
+        threadId,
+        turnId,
+        explanation: typeof ev.explanation === "string" ? ev.explanation : undefined,
+        plan: ev.plan.map((step) => ({
+          step: String(step.step ?? ""),
+          status: (step.status && validStatus.has(step.status) ? step.status : "pending") as
+            "pending" | "in_progress" | "completed",
+        })),
+      }, owner);
       return true;
     }
     case "task.update": {
@@ -750,6 +899,22 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         ev as unknown as Record<string, unknown>,
         record,
       )) return true;
+      // A delayed start can arrive after the durable done event (the real
+      // provider path can flush the start envelope after the child settles).
+      // Starting it again would erase the terminal result and leave the UI
+      // claiming that a completed worker is still running.  Only a fenced,
+      // strictly newer incarnation may replace a terminal row.
+      if (existingById && isTerminalSubagentStatus(existingById.status)) {
+        const incoming = subagentIncarnation(ev as unknown as Record<string, unknown>, record);
+        const newerIncarnation = Boolean(
+          existingById.agentPath
+          && typeof existingById.mailboxEpoch === "number"
+          && incoming.agentPath
+          && typeof incoming.mailboxEpoch === "number"
+          && incoming.mailboxEpoch > existingById.mailboxEpoch,
+        );
+        if (!newerIncarnation) return true;
+      }
       const metadata = subagentMetadataPatch(ev as unknown as Record<string, unknown>, record);
       const stableMetadata = {
         ...metadata,
@@ -768,6 +933,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         activityLog: [],
         terminationReason: undefined,
         terminationInitiator: undefined,
+        ...transcriptSnapshotPatch(ev, existingById),
         ...stableMetadata,
       }, conversationId);
       addInspectorPayload("subagent", ev.subagent_id, {
@@ -793,7 +959,6 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         const recipient = maybeString(message.recipient_id) ?? ev.subagent_id;
         const content = maybeString(message.content) ?? "";
         const targetId = recipient === "parent" ? sender : recipient || ev.subagent_id;
-        const activity = content ? `协作消息：${content}` : "协作消息";
         const currentState = useAppStore.getState();
         const visibleSubagents = conversationId && conversationId !== currentState.conversationId
           ? currentState.conversationAgentStates?.[conversationId]?.subagents ?? []
@@ -802,8 +967,6 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         if (existing) {
           const normalizedMessage = swarmMessageState(message);
           s.updateSubagent(targetId, {
-            currentActivity: activity,
-            detail: existing.detail || content,
             lastEventAt: Date.now(),
             messages: mergeSubagentMessages(existing.messages, [normalizedMessage]),
           }, conversationId);
@@ -902,6 +1065,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         lastEventAt: now,
         lastProgressAt: lastProgressAt ?? now,
         messages: mergeSubagentMessages(existing?.messages, snapshotMessages(e)),
+        ...transcriptSnapshotPatch(ev, existing),
       };
       if (existing) {
         s.updateSubagent(subagentId, patch, conversationId);
@@ -926,8 +1090,8 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       const result = subagentResultPayload(e);
       const resultContent = maybeString(result?.content);
       const resultError = maybeString(result?.error);
-      const durationMs = maybeNumber(result?.duration_ms);
-      const toolCallCount = maybeNumber(result?.tool_call_count);
+      const durationMs = maybeNumber(result?.duration_ms) ?? maybeNumber(e.duration_ms);
+      const toolCallCount = maybeNumber(result?.tool_call_count) ?? maybeNumber(e.tool_call_count);
       const resultStatus = maybeString(result?.status);
       const eventStatus = maybeString((e as unknown as Record<string, unknown>).status) || resultStatus;
       const terminationReason = maybeString((e as unknown as Record<string, unknown>).termination_reason);
@@ -965,12 +1129,14 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       const existingTerminal = Boolean(
         existing && ["done", "partial", "cancelled", "error"].includes(existing.status),
       );
+      const transcriptPatch = transcriptSnapshotPatch(e, existing);
+      const hasTranscriptUpdate = "transcriptSeq" in transcriptPatch;
       const duplicateTerminal = existingTerminal && (
         (!resultContent && Boolean(existing?.resultContent || existing?.resultError))
         || (Boolean(resultContent) && resultContent === existing?.resultContent
           && resultError === (existing?.resultError || ""))
       );
-      if (duplicateTerminal) return true;
+      if (duplicateTerminal && !hasTranscriptUpdate) return true;
       const activityLog = existing?.activityLog ?? [];
       const messages = mergeSubagentMessages(existing?.messages, snapshotMessages(e));
       if (existing) {
@@ -987,6 +1153,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
           checkpointId,
           activityLog,
           messages,
+          ...transcriptPatch,
           ...metadata,
         }, conversationId);
       } else if (e.subagent_id !== "parallel-batch") {
@@ -1005,6 +1172,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
           checkpointId,
           activityLog,
           messages,
+          ...transcriptPatch,
           ...metadata,
         }, conversationId);
       }
@@ -1024,27 +1192,45 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       return true;
     }
     case "budget_update": {
-      if (!isActiveConversationEvent(conversationId)) return true;
       const used = e.used as number | undefined;
       const total = e.total as number | undefined;
       const breakdown = e.breakdown as Record<string, number> | undefined;
+      const percent = used != null && total != null && total > 0 ? used / total : 0;
+      addInspectorPayload("budget", `budget:${conversationId || "unowned"}`, {
+        event: "budget_update",
+        conversation_id: conversationId,
+        used,
+        total,
+        percent,
+        breakdown: breakdown ?? {},
+        replayed: isReplayedRuntimeEvent(e),
+      });
+      if (!isActiveConversationEvent(conversationId)) return true;
       if (used != null && total != null) {
         const currentUsage = useAppStore.getState().contextUsage;
         const buckets = breakdown
-          ? Object.entries(breakdown).map(([name, tokens]) => ({ name, used: tokens, limit: 0 }))
+          ? Object.entries(breakdown).map(([name, tokens]) => ({ name, used: tokens, limit: total }))
           : [];
-        const percent = total > 0 ? used / total : 0;
         s.setBudget(buckets, percent);
         s.setContextUsage({
           used,
           limit: total,
           compactedAt: currentUsage?.compactedAt,
           compactSummary: currentUsage?.compactSummary,
+          ledger: currentUsage?.ledger,
         });
       }
       return true;
     }
     case "budget.warning": {
+      addInspectorPayload("budget", `budget-warning:${conversationId || "unowned"}:${e.bucket}`, {
+        event: "budget.warning",
+        conversation_id: conversationId,
+        bucket: e.bucket,
+        percent: e.percent,
+        will_compact: e.will_compact,
+        replayed: isReplayedRuntimeEvent(e),
+      });
       if (!isActiveConversationEvent(conversationId)) return true;
       const current = useAppStore.getState();
       s.setBudget(current.budgetBuckets, e.percent);
@@ -1053,12 +1239,14 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       const percentLabel = Number.isFinite(e.percent)
         ? ` (${Math.round(e.percent * 100)}%)`
         : "";
-      pushToast(
-        e.will_compact
-          ? `Context compaction is scheduled${percentLabel}`
-          : `Token budget warning${percentLabel}`,
-        "warning",
-      );
+      if (!isReplayedRuntimeEvent(e)) {
+        pushToast(
+          e.will_compact
+          ? `已安排压缩上下文${percentLabel}`
+          : `令牌预算提醒${percentLabel}`,
+          "warning",
+        );
+      }
       return true;
     }
     case "subagent.mailbox": {
@@ -1085,10 +1273,55 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       });
       return true;
     }
+    case "subagent.plan_approval_requested": {
+      const ev = e as SubagentPlanApprovalRequestedEvent;
+      const subagentId = String(ev.subagent_id || "").trim();
+      const requestId = String(ev.request_id || "").trim();
+      if (!subagentId || !requestId || !conversationId) {
+        // A prompt without an owner or routing ids can never be answered, so
+        // record why it was dropped instead of stranding the teammate quietly.
+        addInspectorPayload("subagent", subagentId || "plan_approval", {
+          event: "subagent.plan_approval_requested",
+          dropped: "missing_owner_or_request_id",
+          request_id: requestId,
+          conversation_id: conversationId,
+        });
+        return true;
+      }
+      const teammateName = String(ev.teammate_name || "").trim();
+      const teamName = String(ev.team_name || "").trim();
+      const planFilePath = String(ev.plan_file_path || "").trim();
+      const planContent = String(ev.plan_content || "").trim();
+      // The teammate is blocked on this decision until its own deadline turns
+      // silence into a rejection, so it becomes a blocking prompt.
+      s.setAskUser({
+        requestId,
+        conversationId,
+        question: teammateName
+          ? `子智能体 ${teammateName} 提交了计划，需要你批准后才能开始实现。`
+          : "子智能体提交了计划，需要你批准后才能开始实现。",
+        planReview: {
+          subagentId,
+          teammateName,
+          teamName,
+          plan_file_path: planFilePath,
+          planContent,
+        },
+      });
+      addInspectorPayload("subagent", subagentId, {
+        event: "subagent.plan_approval_requested",
+        request_id: requestId,
+        teammate_name: teammateName,
+        team_name: teamName,
+        plan_file_path: planFilePath,
+      });
+      return true;
+    }
     case "permission.mode.updated": {
       const ev = e as unknown as { mode?: string };
       if (ev.mode) {
         const permissionMode = fromBackendPermissionMode(ev.mode);
+        writeLS(LS.permissionMode, permissionMode);
         const state = useAppStore.getState();
         if (permissionMode === "plan" && state.agentMode !== "plan") state.setAgentMode("plan");
         if (permissionMode !== "plan" && state.agentMode === "plan") state.setAgentMode("build");
@@ -1116,6 +1349,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         status?: string;
         phase?: McpServerStatus["phase"];
         message?: string;
+        auth_status?: McpServerStatus["authStatus"];
         recoverable?: boolean;
         requires_user_action?: boolean;
         setup_hint?: string;
@@ -1129,6 +1363,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       const patch = {
         ...(ev.status ? { status: ev.status as McpServerStatus["status"] } : {}),
         phase: ev.phase,
+        authStatus: ev.auth_status,
         recoverable: ev.recoverable,
         requiresUserAction: ev.requires_user_action,
         setupHint: ev.setup_hint,
@@ -1173,64 +1408,83 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       return true;
     }
     default:
-      // SDK-only events: stream_event is forwarded but not rendered
-      if (e.type === "stream_event") return true;
+      // Raw provider events are explicitly SDK-only. They remain available to
+      // programmatic consumers without copying a potentially large provider
+      // payload into the renderer store or fabricating user-facing activity.
+      if (e.type === "stream_event") {
+        const ev = e as StreamEventEvent;
+        if (!ev.sdk_only && isActiveConversationEvent(conversationId)) {
+          addInspectorPayload(
+            "provider",
+            `stream:${conversationId}:${String(e.event_id || e.seq || ev.event_type)}`,
+            {
+              event: ev.type,
+              conversation_id: conversationId,
+              provider: ev.provider,
+              event_type: ev.event_type,
+              sdk_only: false,
+              data_keys: Object.keys(ev.data).slice(0, 50),
+            },
+          );
+        }
+        return true;
+      }
       // Delivery acknowledgement is durable control-plane state. Subagent
       // start/progress/done events already own its user-facing projection.
-      if (e.type === "parent.notifications") return true;
-      if (e.type === "session.state_changed") {
-        const ev = e as unknown as SessionStateEvent;
-        const isWorking = ev.state === "working";
-        const setState = useAppStore.setState as (partial: Partial<typeof useAppStore.getState> | ((s: typeof useAppStore.getState) => Partial<typeof useAppStore.getState>)) => void;
-        setState((s) => ({ ...s, _sessionState: ev.state }) as Partial<typeof useAppStore.getState>);
-        if (!isWorking) {
-          // Idle releases session busy state only. Message terminal ownership
-          // belongs to the authoritative done event and may arrive later.
-          const targetConvId = maybeString(ev.conversation_id) || conversationId;
-          const state = useAppStore.getState();
-          const hasStreaming = targetConvId ? state.conversationStreaming[targetConvId] : false;
-          if (hasStreaming && targetConvId) {
-            useAppStore.setState((current) => ({
-              conversationStreaming: {
-                ...current.conversationStreaming,
-                [targetConvId]: false,
-              },
-              ...(targetConvId === current.conversationId ? { isStreaming: false } : {}),
-            }));
-          }
+      if (e.type === "parent.notifications") {
+        const ev = e as ParentNotificationsEvent;
+        if (isActiveConversationEvent(ev.conversation_id)) {
+          addInspectorPayload(
+            "session",
+            `parent-notifications:${ev.conversation_id}:${ev.parent_run_id}`,
+            {
+              event: ev.type,
+              conversation_id: ev.conversation_id,
+              parent_run_id: ev.parent_run_id,
+              delivered_count: ev.count,
+              replayed: isReplayedRuntimeEvent(e),
+              received_at: eventTimestampMs(e),
+            },
+          );
         }
+        return true;
+      }
+      if (e.type === "session.state_changed") {
+        const ev = e as SessionStateEvent;
+        const isWorking = ev.state === "working";
+        const targetConvId = maybeString(ev.conversation_id) || conversationId;
+        if (!targetConvId) return true;
+        // This signal owns conversation busy state, not the terminal status of
+        // an individual assistant message. `done` remains authoritative for
+        // completed/partial/failed message presentation.
+        useAppStore.setState((current) => ({
+          conversationStreaming: {
+            ...current.conversationStreaming,
+            [targetConvId]: isWorking,
+          },
+          ...(targetConvId === current.conversationId ? { isStreaming: isWorking } : {}),
+        }));
         return true;
       }
       if (e.type === "rate_limit") {
-        const ev = e as unknown as RateLimitEvent;
-        const msg = ev.message || "模型暂时繁忙或达到并发限制";
-        pushToast(msg, "warning", 5000);
-        return true;
-      }
-      if (e.type === "tool_use_summary") {
-        const ev = e as unknown as ToolUseSummaryEvent;
-        const summary = String(ev.summary || "").trim();
-        if (!conversationId) {
-          addInspectorPayload("message", `unowned:tool-use-summary:${ev.iteration_id || "event"}`, {
-            event: e.type,
-            unowned: true,
-            summary,
-          });
-          return true;
-        }
-        if (summary) {
-          s.appendProcessItem({
-            id: `tool-use-summary:${ev.iteration_id || Date.now()}`,
-            itemKind: "action_summary",
-            content: summary,
-            title: "工具摘要",
-            summary,
-            source: "runtime",
-            role: "runtime",
-            status: "completed",
-            visibility: "compact",
-            toolCallIds: ev.tool_call_ids,
-          }, conversationId, messageId);
+        const ev = e as RateLimitEvent;
+        if (!isActiveConversationEvent(conversationId)) return true;
+        addInspectorPayload(
+          "provider",
+          `rate-limit:${conversationId}:${String(e.event_id || e.seq || ev.retry_at || ev.error_type)}`,
+          {
+            event: ev.type,
+            conversation_id: conversationId,
+            provider: ev.provider,
+            error_type: ev.error_type,
+            retry_after_seconds: ev.retry_after_seconds,
+            retry_at: ev.retry_at,
+            recoverable: ev.recoverable,
+            message: ev.message,
+          },
+        );
+        if (!isReplayedRuntimeEvent(e)) {
+          pushToast(rateLimitMessage(ev), "warning", 5000);
         }
         return true;
       }

@@ -1,3 +1,4 @@
-from .sensitive_files import is_sensitive_file
+"""Security guards.
 
-__all__ = ["is_sensitive_file"]
+Consumers import from ``backend.security.sensitive_files`` directly.
+"""

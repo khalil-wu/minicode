@@ -99,7 +99,7 @@ export const ModelBrandIcon = ({
   websiteUrl?: string;
 }) => {
   const brand = resolveModelBrand(model ?? "") ?? resolveModelBrand(provider ?? "");
-  const iconSize = framed ? Math.max(12, Math.round(size * 0.68)) : size;
+  const iconSize = framed ? Math.max(13, Math.round(size * 0.72)) : size;
   const wrapperStyle: CSSProperties = {
     width: size,
     height: size,
@@ -115,9 +115,8 @@ export const ModelBrandIcon = ({
 
   return (
     <span
-      className={className}
+      className={`model-brand-icon${framed ? " model-brand-icon-framed" : ""}${className ? ` ${className}` : ""}`}
       style={wrapperStyle}
-      title={brand?.label ?? "Custom model"}
       aria-hidden="true"
       data-model-brand={brand?.id ?? "custom"}
     >

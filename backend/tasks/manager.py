@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Callable
 from uuid import uuid4
+
+from backend.async_cleanup import (
+    CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+    cancel_and_drain_receipt,
+)
 
 
 def _utc_now_iso() -> str:
@@ -21,6 +27,10 @@ class ManagedTask:
     result: Any = None
     error: str | None = None
     task: asyncio.Task[Any] | None = None
+    cleanup_pending: bool = False
+    cleanup_reason: str = ""
+    cleanup_requested_at: str | None = None
+    cleanup_completed_at: str | None = None
 
     @property
     def is_terminal(self) -> bool:
@@ -35,6 +45,10 @@ class ManagedTask:
             "updated_at": self.updated_at,
             "result": self.result,
             "error": self.error,
+            "cleanup_pending": self.cleanup_pending,
+            "cleanup_reason": self.cleanup_reason,
+            "cleanup_requested_at": self.cleanup_requested_at,
+            "cleanup_completed_at": self.cleanup_completed_at,
         }
 
 
@@ -59,6 +73,18 @@ class TaskManager:
 
     def create(self, kind: str, awaitable: Any, *, timeout: float | None = None) -> ManagedTask:
         self.prune(notify=False)
+        # Reserve one slot for the task about to be created.  Terminal task
+        # records are history, not live ownership: retaining them when the
+        # registry is full would reject new work even though no running task
+        # needs to be cancelled or drained.  In contrast, never evict a live
+        # task just to make admission succeed.
+        self._enforce_task_limit(reserve_slots=1)
+        if len(self._tasks) >= self._max_tasks:
+            if inspect.iscoroutine(awaitable):
+                awaitable.close()
+            raise RuntimeError(
+                f"Task capacity reached ({self._max_tasks}); wait for a running task to finish"
+            )
         _seq = getattr(self, "_seq", 0) + 1
         self._seq = _seq
         task_id = f"task_{_seq:05d}_{uuid4().hex[:12]}"
@@ -119,8 +145,12 @@ class TaskManager:
             return False
         if managed.task.done():
             return False
-        managed.status = "cancelled"
-        managed.updated_at = _utc_now_iso()
+        # Cancellation is a request, not a terminal state. The done callback
+        # publishes cancelled only after the coroutine's cleanup has finished.
+        managed.cleanup_pending = True
+        managed.cleanup_reason = "cancel_requested"
+        managed.cleanup_requested_at = _utc_now_iso()
+        managed.cleanup_completed_at = None
         managed.task.cancel()
         self._notify_changed()
         return True
@@ -145,12 +175,21 @@ class TaskManager:
             task = managed.task
             if task is None or task.done() or task is current:
                 continue
-            managed.status = "cancelled"
-            managed.updated_at = _utc_now_iso()
             task.cancel()
             pending.append(task)
         if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+            requested_at = _utc_now_iso()
+            for managed in self._tasks.values():
+                if managed.task in pending:
+                    managed.cleanup_pending = True
+                    managed.cleanup_reason = "manager_shutdown"
+                    managed.cleanup_requested_at = requested_at
+                    managed.cleanup_completed_at = None
+            await cancel_and_drain_receipt(
+                pending,
+                timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                label="managed tasks",
+            )
             self._notify_changed()
         return len(pending)
 
@@ -163,7 +202,9 @@ class TaskManager:
         managed.updated_at = _utc_now_iso()
         try:
             managed.result = task.result()
-            if managed.status != "cancelled":
+            if managed.cleanup_pending:
+                managed.status = "cancelled"
+            elif managed.status != "cancelled":
                 managed.status = "completed"
         except asyncio.CancelledError:
             managed.status = "cancelled"
@@ -171,6 +212,9 @@ class TaskManager:
             managed.status = "failed"
             managed.error = str(exc)
         finally:
+            if managed.cleanup_requested_at is not None:
+                managed.cleanup_pending = False
+                managed.cleanup_completed_at = _utc_now_iso()
             self.prune(notify=False)
             self._notify_changed()
 
@@ -209,8 +253,15 @@ class TaskManager:
                 removed += 1
         return removed
 
-    def _enforce_task_limit(self) -> int:
-        if len(self._tasks) <= self._max_tasks:
+    def _enforce_task_limit(self, *, reserve_slots: int = 0) -> int:
+        """Evict oldest terminal records until the requested capacity exists.
+
+        ``reserve_slots`` is used by :meth:`create` before a new task is
+        inserted.  It makes capacity admission and post-insert pruning obey
+        the same policy while ensuring running tasks always stay owned.
+        """
+        target_size = max(0, self._max_tasks - max(0, int(reserve_slots)))
+        if len(self._tasks) <= target_size:
             return 0
 
         removed = 0
@@ -222,7 +273,7 @@ class TaskManager:
         terminal_tasks.sort(key=lambda item: (item.updated_at, item.id))
 
         for managed in terminal_tasks:
-            if len(self._tasks) <= self._max_tasks:
+            if len(self._tasks) <= target_size:
                 break
             self._tasks.pop(managed.id, None)
             removed += 1

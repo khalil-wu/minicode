@@ -6,8 +6,10 @@ import json
 import time
 from collections import OrderedDict
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
+
+from backend.secret_redaction import redact_json_secrets
 
 
 _SUMMARY_KEYS = frozenset({
@@ -23,6 +25,7 @@ class DiagnosticPayload:
     target_kind: str
     target_id: str
     conversation_id: str
+    conversation_ids: tuple[str, ...]
     payload: dict[str, Any]
     created_at: int
     byte_size: int
@@ -48,8 +51,9 @@ def compact_diagnostic_payload(
         for key, value in payload.items()
         if key in {
             "kind", "provider", "model", "finish_reason", "event_type", "usage",
-            "raw_usage", "stateful_continuation", "loop_metrics", "safety",
+            "raw_usage", "loop_metrics", "safety",
             "prompt_cache_diagnostic", "iteration_id", "call_index", "trace_id",
+            "citations", "search_sources", "container", "refusal",
         }
     }
     request_summary = payload.get("request_summary")
@@ -83,8 +87,31 @@ class DiagnosticPayloadStore:
         conversation_id: str = "",
     ) -> dict[str, Any]:
         key = (str(target_kind), str(target_id))
-        stored_payload = deepcopy(dict(payload))
+        # Inspector data eventually crosses the same renderer boundary as a
+        # websocket event, only on demand. Apply the live secret/ownership
+        # sanitizer before retaining it so focusing an entry cannot reveal a
+        # field that the normal event stream would have removed.
+        sanitized = redact_json_secrets(deepcopy(dict(payload)))
+        stored_payload = sanitized if isinstance(sanitized, dict) else {}
         size = _json_size(stored_payload)
+        previous = self._entries.get(key)
+        if (
+            key[0] == "provider"
+            and previous is not None
+            and previous.payload.get("kind") == "provider_trace"
+            and stored_payload.get("kind") != "provider_trace"
+        ):
+            # item.completed and done carry a reduced public provider_raw under
+            # the same trace id after the authoritative inspector.update. Keep
+            # that later projection compact without downgrading the full trace
+            # users fetch when they focus the Inspector entry.
+            self._entries.move_to_end(key)
+            return compact_diagnostic_payload(
+                stored_payload,
+                target_kind=key[0],
+                target_id=key[1],
+                byte_size=size,
+            )
         previous = self._entries.pop(key, None)
         if previous is not None:
             self._bytes -= previous.byte_size
@@ -92,6 +119,7 @@ class DiagnosticPayloadStore:
             target_kind=key[0],
             target_id=key[1],
             conversation_id=str(conversation_id or ""),
+            conversation_ids=(str(conversation_id),) if conversation_id else (),
             payload=stored_payload,
             created_at=int(time.time() * 1000),
             byte_size=size,
@@ -115,3 +143,40 @@ class DiagnosticPayloadStore:
             return None
         self._entries.move_to_end(key)
         return entry
+
+    def delete_for_conversation(self, conversation_id: str) -> int:
+        owner = str(conversation_id or "").strip()
+        if not owner:
+            return 0
+        removed = 0
+        for key, entry in list(self._entries.items()):
+            owners = list(entry.conversation_ids or ((entry.conversation_id,) if entry.conversation_id else ()))
+            if owner not in owners:
+                continue
+            remaining = [value for value in owners if value != owner]
+            if remaining:
+                self._entries[key] = replace(
+                    entry,
+                    conversation_id=remaining[0],
+                    conversation_ids=tuple(remaining),
+                )
+                continue
+            self._entries.pop(key)
+            self._bytes -= entry.byte_size
+            removed += 1
+        return removed
+
+    def share_for_conversation(self, source_conversation_id: str, target_conversation_id: str) -> int:
+        source = str(source_conversation_id or "").strip()
+        target = str(target_conversation_id or "").strip()
+        if not source or not target or source == target:
+            return 0
+        shared = 0
+        for key, entry in list(self._entries.items()):
+            owners = list(entry.conversation_ids or ((entry.conversation_id,) if entry.conversation_id else ()))
+            if source not in owners or target in owners:
+                continue
+            owners.append(target)
+            self._entries[key] = replace(entry, conversation_ids=tuple(owners))
+            shared += 1
+        return shared

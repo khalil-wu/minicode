@@ -5,10 +5,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { isDesktop, fsListTree, fsSearchFiles } from "../desktop/runtime";
 import { useAppStore } from "../stores";
 import { listWorkspaceTree, searchWorkspaceFiles } from "../protocol/workspace";
-import { apiBase, authHeaders } from "../protocol/api";
+import { apiBase, authHeaders, fetchWithTimeout } from "../protocol/api";
 import { fuzzyFilter } from "../lib/fuzzy-match";
 import { buildRuntimeSlashArgMenuItems, buildRuntimeSlashMenuItems } from "../lib/runtime-commands";
 import { mentionSearchCache, mentionTreeCache, type MentionFileItem } from "./mentionCache";
+import { workspaceFilePathComparisonKey } from "../lib/workspace-path";
 
 interface Props {
   open: boolean;
@@ -73,31 +74,36 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
   const selectedSkills = useAppStore((s) => s.selectedSkills);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const slashFilter = filter ?? "";
-  const selectedSkillKeys = new Set(selectedSkills.map((skill) => skill.path || skill.name));
+  const skillKey = (path: string | undefined, name: string): string => path
+    ? `path:${workspaceFilePathComparisonKey(path, workingDirectory)}`
+    : `name:${name}`;
+  const selectedSkillKeys = new Set(selectedSkills.map((skill) => skillKey(skill.path, skill.name)));
 
   // Slash commands and explicit skill picker
   const slashBaseItems: MenuItem[] = buildRuntimeSlashMenuItems(storeCommands).map((item) => ({
     ...item,
     type: "command" as const,
-    section: item.section ?? "Commands",
+    section: item.section ?? "命令",
     path: item.name,
   }));
-  const slashSkillItems: MenuItem[] = availableSkills.map((skill) => ({
-    name: `/${skill.name}`,
-    description: skill.short_description || skill.description || "Skill",
-    type: "skill" as const,
-    path: skill.path ? `skill-path:${encodeURIComponent(skill.path)}` : `skill-name:${encodeURIComponent(skill.name)}`,
-    section: "Skills",
-    displayName: skill.display_name,
-    icon: skill.icon,
-    sourceLevel: skill.source_level,
-    active: Boolean(skill.active || selectedSkillKeys.has(skill.path || skill.name)),
-    allowImplicitInvocation: skill.allow_implicit_invocation,
-    mcpDependencies: skill.mcp_dependencies,
-    defaultPrompt: skill.default_prompt,
-    skillPath: skill.path,
-  }));
-  const skillsPickerActive = /^\/skills(?:\s|$)/i.test(slashFilter);
+  const slashSkillItems: MenuItem[] = availableSkills
+    .filter((skill) => skill.user_invocable !== false)
+    .map((skill) => ({
+      name: `/${skill.name}`,
+      description: skill.short_description || skill.description || "技能",
+      type: "skill" as const,
+      path: skill.path ? `skill-path:${encodeURIComponent(skill.path)}` : `skill-name:${encodeURIComponent(skill.name)}`,
+      section: "技能",
+      displayName: skill.display_name,
+      icon: skill.icon,
+      sourceLevel: skill.source_level,
+      active: Boolean(skill.active || selectedSkillKeys.has(skillKey(skill.path, skill.name))),
+      allowImplicitInvocation: skill.allow_implicit_invocation,
+      mcpDependencies: skill.mcp_dependencies,
+      defaultPrompt: skill.default_prompt,
+      skillPath: skill.path,
+    }));
+  const skillsPickerActive = /^\/skills?\s+/i.test(slashFilter);
   const explicitSkillPickerActive = kind === "skill";
 
   // Argument stage: "/effort" or "/effort lo" with a local command that
@@ -106,7 +112,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
     ? buildRuntimeSlashArgMenuItems(slashFilter, storeCommands)?.map((item) => ({
         ...item,
         type: "argument" as const,
-        section: "Options",
+        section: "选项",
         path: item.name,
       }))
     : null;
@@ -116,7 +122,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
     : skillsPickerActive
     ? fuzzyFilter(
         slashSkillItems,
-        slashFilter.replace(/^\/skills\s*/i, "").replace(/^\//, ""),
+        slashFilter.replace(/^\/skills?\s*/i, "").replace(/^\//, ""),
         (c) => [c.name, c.displayName, c.description, c.defaultPrompt, ...(c.mcpDependencies ?? [])].filter(Boolean).join(" "),
       )
     : slashFilter && slashFilter !== "/"
@@ -126,23 +132,24 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
           (c) => [c.name, c.description, c.section, ...(c.keywords ?? [])].filter(Boolean).join(" "),
         )
       : balancedRootSlashItems(slashBaseItems, slashSkillItems);
-  const slashItems = slashCommandItems.slice(0, SLASH_MENU_LIMIT);
+  const slashItems = prioritizeExactSlashCommand(slashCommandItems, slashFilter)
+    .slice(0, SLASH_MENU_LIMIT);
 
   // Mention mode: extract query from @<query>
   const mentionQuery = kind === "mention" ? (filter ?? "").replace(/^@/, "").trim() : "";
   const mentionSearchQuery = stripLineAnchor(mentionQuery);
   const explicitSkillItems: MenuItem[] = kind === "skill"
     ? fuzzyFilter(
-        availableSkills.map((skill) => ({
+        availableSkills.filter((skill) => skill.user_invocable !== false).map((skill) => ({
           name: `$${skill.name}`,
-          description: skill.short_description || skill.description || "Skill",
+          description: skill.short_description || skill.description || "技能",
           type: "skill" as const,
           path: skill.path ? `skill-path:${encodeURIComponent(skill.path)}` : `skill-name:${encodeURIComponent(skill.name)}`,
-          section: "Skills",
+          section: "技能",
           displayName: skill.display_name,
           icon: skill.icon,
           sourceLevel: skill.source_level,
-          active: Boolean(skill.active || selectedSkillKeys.has(skill.path || skill.name)),
+          active: Boolean(skill.active || selectedSkillKeys.has(skillKey(skill.path, skill.name))),
           allowImplicitInvocation: skill.allow_implicit_invocation,
           mcpDependencies: skill.mcp_dependencies,
           defaultPrompt: skill.default_prompt,
@@ -161,12 +168,12 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
             name: `@${plugin.displayName || plugin.name}`,
             displayName: plugin.displayName || plugin.name,
             description: plugin.shortDescription || plugin.description || [
-              plugin.skill_count ? `${plugin.skill_count} skill${plugin.skill_count === 1 ? "" : "s"}` : "",
-              plugin.mcp_server_count ? `${plugin.mcp_server_count} MCP server${plugin.mcp_server_count === 1 ? "" : "s"}` : "",
-            ].filter(Boolean).join(" · ") || "Plugin",
+              plugin.skill_count ? `${plugin.skill_count} 个技能` : "",
+              plugin.mcp_server_count ? `${plugin.mcp_server_count} 个 MCP 服务` : "",
+            ].filter(Boolean).join(" · ") || "插件",
             type: "plugin" as const,
             path: `plugin:${encodeURIComponent(plugin.name)}`,
-            section: "Plugins",
+            section: "插件",
           })),
         mentionSearchQuery,
         (plugin) => [plugin.name, plugin.displayName, plugin.description].filter(Boolean).join(" "),
@@ -180,13 +187,14 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
   useEffect(() => {
     if (!open || kind !== "mention") return;
     let active = true;
+    const controller = new AbortController();
     let headers: HeadersInit = {};
     try {
       headers = authHeaders();
     } catch {
       headers = {};
     }
-    fetch(`${apiBase()}/api/plugins`, { headers })
+    fetchWithTimeout(`${apiBase()}/api/plugins`, { headers, signal: controller.signal })
       .then(async (response) => response.ok ? response.json() : { plugins: [] })
       .then((payload) => {
         if (!active) return;
@@ -195,7 +203,10 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
       .catch(() => {
         if (active) setPluginResults([]);
       });
-    return () => { active = false; };
+    return () => {
+      active = false;
+      controller.abort();
+    };
   }, [open, kind]);
 
   // File search effect for @ mentions
@@ -230,7 +241,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
                 name: entry.name || entry.path,
                 description: entry.path.replace(/[\\/][^\\/]*$/, ""),
                 type,
-                section: "Files",
+                section: "文件",
                 path: `${type}:${entry.path}`,
               };
             });
@@ -255,7 +266,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
             name: node.name || node.path,
             description: node.path,
             type: node.is_dir ? "folder" as const : "file" as const,
-            section: "Files",
+            section: "文件",
             path: `${node.is_dir ? "folder" : "file"}:${node.path}`,
           }));
           rememberMentionResults(mentionTreeCache, cacheKey, results);
@@ -291,7 +302,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
             if (searchId !== searchSequenceRef.current) return; // Stale result
             const results = files.map((f) => {
               const type = f.kind === "folder" || f.path.endsWith("/") || f.path.endsWith("\\") ? "folder" as const : "file" as const;
-              return { name: f.name || f.path, description: f.path.replace(/[\\/][^\\/]*$/, ""), type, section: "Files", path: `${type}:${f.path}` };
+              return { name: f.name || f.path, description: f.path.replace(/[\\/][^\\/]*$/, ""), type, section: "文件", path: `${type}:${f.path}` };
             });
             rememberMentionResults(mentionSearchCache, cacheKey, results);
             setFileResults(results);
@@ -312,7 +323,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
               name: f.name || f.path,
               description: f.path.replace(/[\\/][^\\/]*$/, ""),
               type: f.kind === "folder" ? "folder" as const : "file" as const,
-              section: "Files",
+              section: "文件",
               path: `${f.kind === "folder" ? "folder" : "file"}:${f.path}`,
             }));
             rememberMentionResults(mentionSearchCache, cacheKey, results);
@@ -390,21 +401,21 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
         bottom: placement === "above" ? "calc(100% + 10px)" : undefined,
         top: placement === "below" ? "calc(100% + 10px)" : undefined,
         left: kind === "slash" ? 0 : 8,
-        zIndex: 50,
+        zIndex: "var(--z-dropdown)",
         maxWidth: "calc(100vw - 32px)",
       }}
     >
       <div
         ref={listRef}
         role="listbox"
-        className="composer-menu-list"
+        className="composer-menu-list mc-dropdown-menu"
         data-kind={kind}
         data-skills-picker={skillsPickerActive || explicitSkillPickerActive ? "true" : "false"}
         style={menuListStyle(kind, skillsPickerActive || explicitSkillPickerActive)}
       >
         {items.length === 0 ? (
           <div style={emptyMenuStyle}>
-            {searching ? "Searching..." : kind === "mention" ? "No files found" : (skillsPickerActive || explicitSkillPickerActive) ? "No skills found" : "No matches"}
+            {searching ? "正在搜索…" : kind === "mention" ? "未找到文件" : (skillsPickerActive || explicitSkillPickerActive) ? "未找到技能" : "无匹配项"}
           </div>
         ) : (
           items.map((it, i) => {
@@ -439,7 +450,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above" 
                   <span style={menuBodyStyle}>
                     <span style={menuTitleRowStyle}>
                       <span style={menuNameStyle}>{displayName}</span>
-                      {it.active && <span style={activeBadgeStyle}>active</span>}
+                      {it.active && <span style={activeBadgeStyle}>已启用</span>}
                     </span>
                     {it.description && <span style={menuDescriptionStyle}>{it.description}</span>}
                     {skillPolicyLabel && <span style={menuTriggerStyle}>{skillPolicyLabel}</span>}
@@ -460,8 +471,8 @@ const menuListStyle = (kind: Props["kind"], skillsPickerActive: boolean): React.
   width: kind === "mention" ? "min(360px, calc(100vw - 56px))" : skillsPickerActive ? "min(520px, calc(100vw - 56px))" : "min(460px, calc(100vw - 56px))",
   background: "var(--surface-raised)",
   border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-md, 8px)",
-  boxShadow: "0 12px 38px rgb(28 25 23 / 0.10)",
+  borderRadius: "var(--radius-md)",
+  boxShadow: "var(--shadow-medium)",
   padding: 5,
   maxHeight: skillsPickerActive ? "min(340px, calc(100vh - 230px))" : "min(292px, calc(100vh - 230px))",
   overflowY: "auto",
@@ -516,7 +527,7 @@ const menuNameStyle: React.CSSProperties = {
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
   fontFamily: "var(--font-ui)",
-  fontWeight: 620,
+  fontWeight: "var(--fw-semibold)",
 };
 
 const menuDescriptionStyle: React.CSSProperties = {
@@ -537,21 +548,21 @@ const menuTriggerStyle: React.CSSProperties = {
   color: "var(--text-muted)",
   fontSize: "var(--text-2xs)",
   lineHeight: 1.3,
-  fontFamily: "var(--font-mono)",
+  fontFamily: "var(--font-ui)",
 };
 
 const menuShortcutStyle: React.CSSProperties = {
   flexShrink: 0,
   color: "var(--text-muted)",
   fontSize: "var(--text-2xs)",
-  fontFamily: "var(--font-mono)",
+  fontFamily: "var(--font-ui)",
 };
 
 const sectionLabelStyle: React.CSSProperties = {
   padding: "6px 7px 4px",
   color: "var(--text-muted)",
   fontSize: "var(--text-2xs)",
-  fontWeight: 700,
+  fontWeight: "var(--fw-bold)",
   letterSpacing: 0,
   textTransform: "uppercase",
 };
@@ -570,14 +581,14 @@ const sourceBadgeStyle: React.CSSProperties = {
   background: "var(--surface-page)",
   fontSize: "var(--text-2xs)",
   lineHeight: 1.25,
-  fontFamily: "var(--font-mono)",
+  fontFamily: "var(--font-ui)",
 };
 
 const activeBadgeStyle: React.CSSProperties = {
   flexShrink: 0,
   color: "var(--accent-primary)",
   fontSize: "var(--text-2xs)",
-  fontFamily: "var(--font-mono)",
+  fontFamily: "var(--font-ui)",
 };
 
 function renderMenuIcon(item: MenuItem) {
@@ -596,7 +607,7 @@ function displayMenuName(item: MenuItem, skillsPickerActive: boolean): string {
 
 function formatSkillPolicy(item: MenuItem): string {
   const parts: string[] = [];
-  if (item.allowImplicitInvocation === false) parts.push("explicit only");
+  if (item.allowImplicitInvocation === false) parts.push("仅显式调用");
   const mcp = (item.mcpDependencies ?? []).filter(Boolean);
   if (mcp.length > 0) parts.push(`MCP: ${mcp.slice(0, 2).join(", ")}`);
   return parts.join(" · ");
@@ -605,8 +616,10 @@ function formatSkillPolicy(item: MenuItem): string {
 function formatSourceLevel(level?: string): string {
   const normalized = (level || "").replace(/-legacy$/i, "").toLowerCase();
   if (!normalized) return "";
-  if (normalized === "global") return "personal";
-  if (normalized === "builtin") return "bundled";
+  if (normalized === "global") return "个人";
+  if (normalized === "builtin") return "内置";
+  if (normalized === "project") return "项目";
+  if (normalized === "user" || normalized === "personal") return "个人";
   return normalized;
 }
 
@@ -622,4 +635,14 @@ function balancedRootSlashItems(commands: MenuItem[], skills: MenuItem[]): MenuI
     ...commands.slice(0, commandCount),
     ...skills.slice(0, skillCount),
   ];
+}
+
+function prioritizeExactSlashCommand(items: MenuItem[], filter: string): MenuItem[] {
+  const exactName = filter.trim().toLowerCase();
+  if (!/^\/[a-z0-9][a-z0-9._:-]*$/i.test(exactName)) return items;
+  const exactIndex = items.findIndex((item) => (
+    item.type === "command" && item.name.trim().toLowerCase() === exactName
+  ));
+  if (exactIndex <= 0) return items;
+  return [items[exactIndex], ...items.slice(0, exactIndex), ...items.slice(exactIndex + 1)];
 }

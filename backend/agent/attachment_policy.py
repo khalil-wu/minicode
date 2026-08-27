@@ -6,18 +6,18 @@ from typing import Any
 from backend.llm.capabilities import capabilities_for_adapter
 
 
-NATIVE_IMAGE_LIMIT_BYTES = 20 * 1024 * 1024
-NATIVE_PDF_LIMIT_BYTES = 50 * 1024 * 1024
+# MiniCode derives these from the provider request limits: Anthropic caps an
+# encoded image at 5 MiB, so raw bytes must stay at or below 3.75 MiB after the
+# 4/3 base64 expansion; a PDF must stay below 20 MiB to leave room inside the
+# 32 MiB request envelope.  These conservative limits also keep fallback
+# providers safe instead of accepting an attachment that only the primary can
+# serialize.
+NATIVE_IMAGE_LIMIT_BYTES = (5 * 1024 * 1024 * 3) // 4
+NATIVE_PDF_LIMIT_BYTES = 20 * 1024 * 1024
+NATIVE_PDF_PAGE_LIMIT = 100
+NATIVE_MEDIA_COUNT_LIMIT = 100
 
 PDF_MEDIA_TYPE = "application/pdf"
-
-# Small text attachments are inlined verbatim into the user message so the model
-# sees them without calling read_artifact (matches cc/Codex pasted-text behavior;
-# avoids the "model didn't look at the pasted file" failure where the model only
-# gets a hint and guesses instead). Larger docs keep the read_artifact hint.
-INLINE_TEXT_LIMIT_CHARS = 8_000
-PASTED_TEXT_INLINE_LIMIT_CHARS = 64_000
-
 
 @dataclass(frozen=True)
 class AttachmentInputPlan:
@@ -25,6 +25,23 @@ class AttachmentInputPlan:
     documents: list[dict[str, str]] = field(default_factory=list)
     text_hints: list[str] = field(default_factory=list)
     inlined_texts: list[dict[str, str]] = field(default_factory=list)
+    unavailable: list[dict[str, str]] = field(default_factory=list)
+
+
+class AttachmentUnavailableError(RuntimeError):
+    """Raised when a current-turn attachment cannot be resolved by its owner."""
+
+    def __init__(self, attachments: list[dict[str, str]]) -> None:
+        self.attachments = [dict(item) for item in attachments]
+        labels = [
+            str(item.get("file_name") or item.get("artifact_id") or "attachment")
+            for item in attachments
+        ]
+        rendered = ", ".join(dict.fromkeys(labels))
+        super().__init__(
+            f"The attachment is no longer available in this conversation: {rendered}. "
+            "Restore or upload it again before sending."
+        )
 
 
 def build_attachment_input_plan(
@@ -32,10 +49,12 @@ def build_attachment_input_plan(
     *,
     llm: Any | None = None,
     attachment_store: Any | None = None,
+    conversation_id: str = "",
+    workspace_root: str = "",
 ) -> AttachmentInputPlan:
     """Choose native multimodal payloads and cheap artifact fallbacks.
 
-    The policy mirrors Codex/Claude Code style attachment handling: send native
+    The policy mirrors MiniCode style attachment handling: send native
     images/PDFs when the active wire format is known to support them, but keep
     extracted document text addressable through scoped artifacts instead of
     replaying large files into every prompt turn.
@@ -47,26 +66,83 @@ def build_attachment_input_plan(
     documents: list[dict[str, str]] = []
     hints: list[str] = []
     inlined_texts: list[dict[str, str]] = []
+    unavailable: list[dict[str, str]] = []
 
     for attachment in attachments:
-        file_name = str(attachment.get("file_name") or "attachment").strip() or "attachment"
+        file_name = (
+            str(attachment.get("file_name") or "attachment").strip() or "attachment"
+        )
         media_type = str(attachment.get("media_type") or "").strip()
         kind = str(attachment.get("kind") or "").strip()
-        data = str(attachment.get("data") or "").strip()
         artifact_id = str(attachment.get("artifact_id") or "").strip()
-        size_bytes = int(attachment.get("size_bytes") or 0)
+        data = str(attachment.get("data") or "").strip()
+        stored_attachment: dict[str, Any] = {}
+        if artifact_id and attachment_store is not None:
+            try:
+                payload = attachment_store.get_payload(
+                    artifact_id,
+                    conversation_id=conversation_id,
+                    workspace_root=workspace_root,
+                )
+            except Exception:  # noqa: BLE001 - a missing native body falls back to extracted text
+                payload = None
+            if payload is None:
+                # Owner-scoped runtime inputs must resolve through the durable
+                # store. Unscoped SDK/local ingestion may still pass a direct
+                # in-process payload because there is no cross-session owner to
+                # confuse with another conversation.
+                if conversation_id or workspace_root:
+                    unavailable.append(
+                        {"artifact_id": artifact_id, "file_name": file_name}
+                    )
+                    continue
+                payload = None
+            if payload is not None:
+                metadata = payload.get("metadata")
+                if isinstance(metadata, dict):
+                    raw_stored_attachment = metadata.get("attachment")
+                    if isinstance(raw_stored_attachment, dict):
+                        stored_attachment = raw_stored_attachment
+                data = str(payload.get("native_data") or "").strip()
+                file_name = (
+                    str(stored_attachment.get("file_name") or file_name).strip()
+                    or "attachment"
+                )
+                media_type = str(
+                    stored_attachment.get("media_type") or media_type
+                ).strip()
+                kind = str(stored_attachment.get("kind") or kind).strip()
+        size_bytes = _native_data_size_bytes(data) if data else int(
+            stored_attachment.get("size_bytes")
+            or attachment.get("size_bytes")
+            or 0
+        )
         parse_error = str(attachment.get("parse_error") or "").strip()
+        try:
+            page_count = max(
+                0,
+                int(attachment.get("page_count") or attachment.get("pages") or 0),
+            )
+        except (TypeError, ValueError):
+            page_count = 0
         input_source = str(attachment.get("input_source") or "").strip()
 
         used_native = False
         if kind == "image" and data:
-            metadata_hint = _attachment_source_hint(artifact_id, fallback="the attachment metadata")
+            metadata_hint = _attachment_source_hint(
+                artifact_id, fallback="the attachment metadata"
+            )
             if not _supports_native_images(mode, capability_llm):
                 hints.append(
                     f"- {file_name}: the active model/API does not support native image input, "
                     "so the image pixels were not sent to the model. "
                     f"Only stored metadata is available via {metadata_hint}; "
                     "switch to a vision-capable model to inspect the image itself."
+                )
+            elif len(images) + len(documents) >= NATIVE_MEDIA_COUNT_LIMIT:
+                hints.append(
+                    f"- {file_name}: native media input skipped because the request already contains "
+                    f"the provider maximum of {NATIVE_MEDIA_COUNT_LIMIT} media items (images/PDFs)."
                 )
             elif _fits_limit(size_bytes, NATIVE_IMAGE_LIMIT_BYTES):
                 images.append({"media_type": media_type or "image/png", "data": data})
@@ -81,7 +157,12 @@ def build_attachment_input_plan(
                 artifact_id,
                 fallback="the extracted attachment text if available",
             )
-            if _supports_native_pdf(mode) and _fits_limit(size_bytes, NATIVE_PDF_LIMIT_BYTES):
+            if (
+                _supports_native_pdf(mode, capability_llm)
+                and _fits_limit(size_bytes, NATIVE_PDF_LIMIT_BYTES)
+                and (page_count <= 0 or page_count <= NATIVE_PDF_PAGE_LIMIT)
+                and len(images) + len(documents) < NATIVE_MEDIA_COUNT_LIMIT
+            ):
                 documents.append(
                     {
                         "media_type": PDF_MEDIA_TYPE,
@@ -90,10 +171,20 @@ def build_attachment_input_plan(
                     }
                 )
                 used_native = True
-            elif not _supports_native_pdf(mode):
+            elif len(images) + len(documents) >= NATIVE_MEDIA_COUNT_LIMIT:
+                hints.append(
+                    f"- {file_name}: native media input skipped because the request already contains "
+                    f"the provider maximum of {NATIVE_MEDIA_COUNT_LIMIT} media items (images/PDFs)."
+                )
+            elif not _supports_native_pdf(mode, capability_llm):
                 hints.append(
                     f"- {file_name}: the active API format does not accept native PDF input; "
                     f"use {text_hint} for extracted text."
+                )
+            elif page_count > NATIVE_PDF_PAGE_LIMIT:
+                hints.append(
+                    f"- {file_name}: native PDF input skipped because it has {page_count} pages, "
+                    f"above the provider maximum of {NATIVE_PDF_PAGE_LIMIT}; use {text_hint} for extracted text."
                 )
             else:
                 hints.append(
@@ -119,26 +210,21 @@ def build_attachment_input_plan(
                 )
             continue
 
-        # Inline small text attachments directly into the user message so the
-        # model sees them without calling read_artifact (cc/Codex pasted-text
-        # behavior). This also makes the content persist in history for
-        # follow-up turns. Large docs keep the read_artifact hint below.
+        # MiniCode preserves the complete pasted/file text in the
+        # user turn. Size changes must not turn the user's message into a
+        # compulsory follow-up tool call with different semantics.
         if (
             attachment_store is not None
             and artifact_id
             and kind != "image"
             and not used_native
         ):
-            inline_limit = (
-                PASTED_TEXT_INLINE_LIMIT_CHARS
-                if input_source == "pasted_text"
-                else INLINE_TEXT_LIMIT_CHARS
-            )
-            inlined = _inline_small_text(
+            inlined = _inline_text(
                 attachment_store,
                 artifact_id,
                 file_name,
-                limit_chars=inline_limit,
+                conversation_id=conversation_id,
+                workspace_root=workspace_root,
             )
             if inlined is not None:
                 inlined_texts.append(inlined)
@@ -170,43 +256,38 @@ def build_attachment_input_plan(
         documents=documents,
         text_hints=_dedupe(hints),
         inlined_texts=inlined_texts,
+        unavailable=unavailable,
     )
 
 
-def _inline_small_text(
+def _inline_text(
     attachment_store: Any,
     artifact_id: str,
     file_name: str,
     *,
-    limit_chars: int = INLINE_TEXT_LIMIT_CHARS,
+    conversation_id: str = "",
+    workspace_root: str = "",
 ) -> dict[str, str] | None:
-    """Return {file_name, artifact_id, content} for a small text attachment, or
-    None if the content is missing/empty/too large to inline safely."""
+    """Return the complete owner-scoped text attachment for user projection."""
     try:
-        content = attachment_store.get(artifact_id)
+        content = attachment_store.get(
+            artifact_id,
+            conversation_id=conversation_id,
+            workspace_root=workspace_root,
+        )
     except Exception:  # noqa: BLE001 — never break the turn on store read errors
         return None
     if not content or not content.strip():
-        return None
-    if len(content) > limit_chars:
         return None
     return {"file_name": file_name, "artifact_id": artifact_id, "content": content}
 
 
 def _primary_llm_adapter(llm: Any | None) -> Any | None:
-    """Return the first concrete adapter hidden behind fallback/cache wrappers."""
+    """Return the concrete adapter hidden behind a session-owned wrapper."""
     current = llm
     seen: set[int] = set()
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        adapters = getattr(current, "_adapters", None)
-        if isinstance(adapters, list) and adapters:
-            current = adapters[0]
-            continue
-        adapters = getattr(current, "adapters", None)
-        if isinstance(adapters, list) and adapters:
-            current = adapters[0]
-            continue
         wrapped = getattr(current, "_llm", None) or getattr(current, "llm", None)
         if wrapped is not None:
             current = wrapped
@@ -232,8 +313,7 @@ def _detect_llm_wire_mode(llm: Any | None) -> str:
 
     # The adapter is the source of truth for its wire contract. Do not infer
     # protocol or model capabilities from Python class names, hostnames, or
-    # model slugs; fallback adapters are already unwrapped by the capability
-    # helper.
+    # model slugs.
     capabilities = capabilities_for_adapter(llm)
     wire_api = str(capabilities.wire_api or "").strip().lower()
     if wire_api in {"responses", "chat"}:
@@ -244,12 +324,15 @@ def _detect_llm_wire_mode(llm: Any | None) -> str:
     return "auto"
 
 
-def _supports_native_pdf(mode: str) -> bool:
+def _supports_native_pdf(mode: str, llm: Any | None = None) -> bool:
+    capability = capabilities_for_adapter(llm).native_pdf
+    if capability is not None:
+        return capability
     return mode in {"auto", "openai_responses", "anthropic"}
 
 
 def _supports_native_images(mode: str, llm: Any | None) -> bool:
-    # Match Pi's model-input contract: unknown metadata stays permissive, and
+    # Match MiniCode's model-input contract: unknown metadata stays permissive, and
     # only an explicit provider declaration can suppress image bytes. Never
     # infer vision support from a hostname or a model-name substring.
     del mode
@@ -258,6 +341,15 @@ def _supports_native_images(mode: str, llm: Any | None) -> bool:
 
 def _fits_limit(size_bytes: int, limit: int) -> bool:
     return size_bytes <= 0 or size_bytes <= limit
+
+
+def _native_data_size_bytes(data: str) -> int:
+    """Return decoded base64 size without allocating a second large buffer."""
+    compact = "".join(str(data or "").split())
+    if not compact:
+        return 0
+    padding = 2 if compact.endswith("==") else 1 if compact.endswith("=") else 0
+    return max(0, (len(compact) * 3) // 4 - padding)
 
 
 def _dedupe(lines: list[str]) -> list[str]:

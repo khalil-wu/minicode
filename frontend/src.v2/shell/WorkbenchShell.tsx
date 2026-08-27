@@ -9,25 +9,17 @@ import { MainSlots } from "./MainSlots";
 import { SideChatPanel } from "../panels/SideChatPanel";
 import { ChatPane } from "../chat/ChatPane";
 import { useAppStore } from "../stores";
-import { LEFT_SIDEBAR_DEFAULT_WIDTH } from "../stores/shared-helpers";
+import { isCompactWorkbenchViewport, LEFT_SIDEBAR_DEFAULT_WIDTH } from "../stores/shared-helpers";
 import { SafeBoundary } from "./ChunkErrorBoundary";
 import { ChatErrorFallback } from "../components/ChatErrorFallback";
 import { isDesktop, runtime } from "../desktop/runtime";
 import { useEscapeKey, useFocusTrap } from "../hooks/useFocusTrap";
-
-// Keep enough horizontal room for the normal chat canvas and its expanded
-// context card. Below this width the project sidebar becomes an on-demand
-// drawer instead of squeezing the context card down to its icon-only state.
-const COMPACT_WORKBENCH_MAX_WIDTH = 1599;
-
-const isCompactWorkbench = () => (
-  typeof window !== "undefined" && window.innerWidth <= COMPACT_WORKBENCH_MAX_WIDTH
-);
+import { getConnectionPresentation } from "./connectionPresentation";
 
 const useCompactWorkbench = () => {
-  const [compact, setCompact] = useState(isCompactWorkbench);
+  const [compact, setCompact] = useState(isCompactWorkbenchViewport);
   useEffect(() => {
-    const onResize = () => setCompact(isCompactWorkbench());
+    const onResize = () => setCompact(isCompactWorkbenchViewport());
     onResize();
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
@@ -35,50 +27,39 @@ const useCompactWorkbench = () => {
   return compact;
 };
 
-const connectionBannerMessage = (): string => {
-  const runtimeInfo = runtime();
-  const hasToken = Boolean(runtimeInfo?.runtimeToken?.trim());
-  if (isDesktop()) return "Connecting to MiniCode backend...";
-  if (!hasToken) return "当前网页预览未连接桌面运行环境。请在 MiniCode 桌面应用中打开，以使用完整功能。";
-  return "后端不可用。请确认 MiniCode 后端正在运行。";
-};
+const currentConnectionPresentation = (isConnected: boolean) => getConnectionPresentation({
+  isConnected,
+  isDesktop: isDesktop(),
+  hasRuntimeToken: Boolean(runtime()?.runtimeToken?.trim()),
+});
 
 const ConnectionBanner = () => {
   const isConnected = useAppStore((s) => s.isConnected);
+  const presentation = currentConnectionPresentation(isConnected);
   const previousConnectedRef = useRef(isConnected);
   const [announcement, setAnnouncement] = useState(
-    isConnected ? "后端已连接" : connectionBannerMessage(),
+    presentation.accessibleLabel,
   );
   useEffect(() => {
     if (previousConnectedRef.current === isConnected) return;
     previousConnectedRef.current = isConnected;
-    setAnnouncement(isConnected ? "后端已连接" : connectionBannerMessage());
+    setAnnouncement(currentConnectionPresentation(isConnected).accessibleLabel);
   }, [isConnected]);
   return (
     <>
       <span role="status" aria-live="polite" aria-atomic="true" className="sr-only">
         {announcement}
       </span>
-      {!isConnected && <div
-      aria-hidden="true"
-      className="mc-connection-banner flex items-center gap-2 px-4 py-1.5"
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-        padding: "6px 16px",
-        background: "color-mix(in oklch, var(--state-warning) 15%, var(--surface-base))",
-        borderBottom: "1px solid var(--state-warning)",
-        fontSize: "var(--text-sm)",
-        color: "var(--state-warning)",
-      }}
-    >
-      <span
-        className="w-2 h-2 rounded-full thinking-pulse-dot"
-        style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--state-warning)" }}
-      />
-      {connectionBannerMessage()}
-      </div>}
+      {!isConnected && (
+        <div
+          aria-hidden="true"
+          className="mc-connection-banner"
+          data-kind={presentation.kind}
+        >
+          <span className="mc-connection-banner-dot" />
+          <span>{presentation.bannerMessage}</span>
+        </div>
+      )}
     </>
   );
 };
@@ -197,6 +178,7 @@ export const WorkbenchShell = () => {
   const panelSlots = useAppStore((s) => s.panelSlots);
   const rightPanelOpen = useAppStore((s) => s.rightPanelOpen);
   const rightStackTab = useAppStore((s) => s.rightStackTab);
+  const previewRequestAt = useAppStore((s) => s.previewArtifact?.loadedAt ?? 0);
   const setLeftSidebarWidth = useAppStore((s) => s.setLeftSidebarWidth);
   const toggleRightPanel = useAppStore((s) => s.toggleRightPanel);
   const compact = useCompactWorkbench();
@@ -236,6 +218,10 @@ export const WorkbenchShell = () => {
     previousRightStackTabRef.current = rightStackTab;
     if (compact && rightPanelAvailable && (panelWasOpened || requestedTabChanged)) setCompactPanel("right");
   }, [compact, rightPanelAvailable, rightPanelOpen, rightStackTab]);
+
+  useEffect(() => {
+    if (compact && rightPanelAvailable && previewRequestAt > 0) setCompactPanel("right");
+  }, [compact, previewRequestAt, rightPanelAvailable]);
 
   const toggleLeftPanel = () => {
     if (compact) {
@@ -326,7 +312,7 @@ export const WorkbenchShell = () => {
             ref={sideChatDialogRef}
             role="dialog"
             aria-modal="true"
-            aria-label="Side chat"
+            aria-label="侧边对话"
             tabIndex={-1}
             onMouseDown={(event) => event.stopPropagation()}
             style={{
@@ -350,13 +336,13 @@ export const WorkbenchShell = () => {
                 background: "var(--surface-soft)",
               }}
             >
-              <span style={{ flex: 1, fontSize: "var(--text-sm)", fontWeight: 600 }}>Side Chat</span>
+              <span style={{ flex: 1, fontSize: "var(--text-sm)", fontWeight: "var(--fw-semibold)" }}>侧边对话</span>
               <span style={{ fontSize: "var(--text-xs)", color: "var(--text-muted)", marginRight: 8 }}>Ctrl+;</span>
               <button
                 type="button"
                 onClick={toggleSideChat}
-                aria-label="Close side chat"
-                title="Close side chat"
+                aria-label="关闭侧边对话"
+                title="关闭侧边对话"
                 className="btn-ghost mc-icon-button mc-icon-button-compact"
               >
                 <X size={14} />

@@ -8,6 +8,7 @@ export const QueuedMessageList = ({ wide = false, minimal = false }: { wide?: bo
   const conversationId = useAppStore((state) => state.conversationId);
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const menuRootRef = useRef<HTMLDivElement>(null);
+  const menuTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
   const queued = useMemo(
     () => messages
       .filter((message) => message.role === "user" && message.queueState === "queued")
@@ -17,17 +18,38 @@ export const QueuedMessageList = ({ wide = false, minimal = false }: { wide?: bo
 
   useEffect(() => {
     if (!menuFor) return;
+    const menuRoot = menuRootRef.current;
+    queueMicrotask(() => menuRoot?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus());
     const close = (event: MouseEvent) => {
       if (!menuRootRef.current?.contains(event.target as Node)) setMenuFor(null);
     };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMenuFor(null);
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setMenuFor(null);
+        menuTriggerRefs.current.get(menuFor)?.focus();
+      }
+    };
+    const navigateMenu = (event: KeyboardEvent) => {
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Home" && event.key !== "End") return;
+      const items = Array.from(menuRoot?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []);
+      if (!items.length) return;
+      event.preventDefault();
+      const current = items.indexOf(document.activeElement as HTMLButtonElement);
+      if (event.key === "Home" || event.key === "End") {
+        items[event.key === "Home" ? 0 : items.length - 1].focus();
+        return;
+      }
+      const next = event.key === "ArrowDown" ? (current + 1 + items.length) % items.length : (current - 1 + items.length) % items.length;
+      items[next].focus();
     };
     document.addEventListener("mousedown", close);
     document.addEventListener("keydown", closeOnEscape);
+    menuRoot?.addEventListener("keydown", navigateMenu);
     return () => {
       document.removeEventListener("mousedown", close);
       document.removeEventListener("keydown", closeOnEscape);
+      menuRoot?.removeEventListener("keydown", navigateMenu);
     };
   }, [menuFor]);
 
@@ -79,6 +101,7 @@ export const QueuedMessageList = ({ wide = false, minimal = false }: { wide?: bo
               <button
                 type="button"
                 className="queued-message-icon"
+                ref={(node) => { if (node) menuTriggerRefs.current.set(message.id, node); else menuTriggerRefs.current.delete(message.id); }}
                 onClick={() => setMenuFor((current) => current === message.id ? null : message.id)}
                 title="更多排队消息操作"
                 aria-label={`排队消息 ${displayNumber} 的更多操作`}

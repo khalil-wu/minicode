@@ -7,7 +7,11 @@ from typing import Any
 
 import yaml
 
-from backend.agent.claude_md import _find_project_root, _get_managed_claude_dir
+from backend.agent.instruction_discovery import _get_managed_minicode_dir
+from backend.agent.markdown_scopes import (
+    file_identity,
+    get_markdown_directories,
+)
 from backend.workspace.state import get_explicit_active_workspace_root
 
 def _availability(
@@ -30,8 +34,9 @@ _REVIEW_PROMPT = (
     "and provide prioritized findings."
 )
 
-_INIT_PROMPT = """Generate a file named AGENTS.md that serves as a contributor guide for this repository.
-Before writing, check whether AGENTS.md already exists in the current working directory. If it does, do not overwrite or modify it.
+_INIT_PROMPT = """Generate a file named .minicode/INSTRUCTIONS.md that serves as a contributor guide for this repository.
+Before writing, check whether .minicode/INSTRUCTIONS.md already exists. If it does, do not overwrite or modify it.
+If the repository has an existing AGENTS.md, CLAUDE.md, or similar agent instruction file, read it first and carry the still-accurate parts across; leave the original file in place.
 Create a concise repository-specific guide with actionable sections for project structure, build/test/development commands, coding conventions, testing, and commit or pull-request guidance. Omit sections that do not apply and do not invent project facts."""
 
 
@@ -102,7 +107,16 @@ _BUILTIN_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
     {
         "name": "conversation.memory_mode.set",
         "label": "conversation.memory_mode.set",
-        "description": "Update the active conversation memory mode.",
+        "description": "Enable or disable long-term memory generation for a conversation.",
+        "type": "protocol",
+        "source": "builtin",
+        "enabled": True,
+        "availability": _availability(scope="websocket"),
+    },
+    {
+        "name": "memory.reset",
+        "label": "memory.reset",
+        "description": "Clear generated memories while preserving task transcripts and memory modes.",
         "type": "protocol",
         "source": "builtin",
         "enabled": True,
@@ -244,6 +258,20 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "availability": _availability(),
     },
     {
+        "id": "cmd-export",
+        "name": "export",
+        "command": "export",
+        "label": "/export",
+        "description": "导出当前 MiniCode 会话树。",
+        "template": "/export",
+        "search_text": "export minicode conversation session tree",
+        "type": "local",
+        "kind": "local",
+        "source": "builtin",
+        "enabled": True,
+        "availability": _availability(scope="session"),
+    },
+    {
         "id": "cmd-plan",
         "name": "plan",
         "command": "plan",
@@ -264,15 +292,15 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "label": "/permissions",
         "description": "查看或切换权限模式，并管理规则",
         "template": "/permissions",
-        "search_text": "local permissions mode rules list add remove deny override ask auto full access confirm bypass",
+        "search_text": "local permissions mode rules list add remove deny override confirm auto plan bypass",
         "type": "local",
         "kind": "local",
         "source": "builtin",
         "enabled": True,
         "availability": _availability(scope="session"),
         "args": [
-            {"value": "default", "description": "Ask — 写操作需确认"},
-            {"value": "confirm", "description": "Diff review — 改动需审查"},
+            {"value": "confirm", "description": "Ask — 写操作需确认"},
+            {"value": "diff", "description": "Diff review — 改动需审查"},
             {"value": "auto", "description": "Auto — 自动执行常规操作"},
             {"value": "rules list", "description": "查看权限规则"},
         ],
@@ -282,9 +310,9 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "name": "bypass",
         "command": "bypass",
         "label": "/bypass",
-        "description": "Switch to Full access permission mode for advanced trusted sessions.",
+        "description": "Switch to bypass permission mode for an explicitly trusted session.",
         "template": "/bypass",
-        "search_text": "local bypass full auto permissions dangerous advanced",
+        "search_text": "local bypass permissions dangerous advanced",
         "type": "local",
         "kind": "local",
         "source": "builtin",
@@ -296,9 +324,9 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "name": "effort",
         "command": "effort",
         "label": "/effort",
-        "description": "Set reasoning effort: none, minimal, low, medium, high, xhigh, or max.",
+        "description": "Set a reasoning effort advertised by the active model.",
         "template": "/effort high",
-        "search_text": "local effort reasoning none minimal low medium high xhigh max",
+        "search_text": "local effort reasoning none minimal low medium high xhigh max ultra",
         "type": "local",
         "kind": "local",
         "source": "builtin",
@@ -312,14 +340,29 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
             {"value": "high", "description": "更深入的推理"},
             {"value": "xhigh", "description": "OpenAI 官方最高推理档"},
             {"value": "max", "description": "最强推理，最慢"},
+            {"value": "ultra", "description": "模型声明支持时使用 Ultra"},
         ],
+    },
+    {
+        "id": "cmd-skill-local",
+        "name": "skill",
+        "command": "skill",
+        "label": "/skill",
+        "description": "选择一个技能用于下一条消息",
+        "template": "/skill",
+        "search_text": "local skill select invoke",
+        "type": "local",
+        "kind": "local",
+        "source": "builtin",
+        "enabled": True,
+        "availability": _availability(scope="session"),
     },
     {
         "id": "cmd-skills-local",
         "name": "skills",
         "command": "skills",
         "label": "/skills",
-        "description": "浏览并选择技能",
+        "description": "管理和安装技能",
         "template": "/skills",
         "search_text": "local skills browse select install",
         "type": "local",
@@ -361,7 +404,7 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "name": "plugins",
         "command": "plugins",
         "label": "/plugins",
-        "description": "管理本地 Codex 插件",
+        "description": "管理本地 MiniCode 插件",
         "template": "/plugins",
         "search_text": "local plugins bundles skills mcp apps hooks",
         "type": "local",
@@ -424,7 +467,7 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "label": "/goal",
         "description": "Set or manage a persistent conversation goal.",
         "template": "/goal",
-        "search_text": "local goal objective target pause resume clear codex",
+        "search_text": "local goal objective target pause resume clear",
         "type": "local",
         "kind": "local",
         "source": "builtin",
@@ -559,9 +602,9 @@ _COMPOSER_COMMAND_CATALOG: tuple[dict[str, Any], ...] = (
         "name": "init",
         "command": "init",
         "label": "/init",
-        "description": "分析代码库并生成 AGENTS.md 项目说明",
+        "description": "分析代码库并生成 .minicode/INSTRUCTIONS.md 项目说明",
         "template": _INIT_PROMPT,
-        "search_text": "template init agentsmd documentation bootstrap",
+        "search_text": "template init instructions agentsmd documentation bootstrap",
         "type": "template",
         "kind": "template",
         "source": "builtin",
@@ -613,28 +656,27 @@ _COMMAND_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 def _project_command_dirs(workspace_root: Path | None) -> list[Path]:
     if workspace_root is None:
         return []
-    current = workspace_root.resolve()
-    boundary = _find_project_root(current)
-    home = Path.home().resolve()
-    result: list[Path] = []
-    while current != home:
-        directory = current / ".claude" / "commands"
-        if directory.is_dir():
-            result.append(directory)
-        if boundary is not None and current == boundary:
-            break
-        parent = current.parent
-        if parent == current:
-            break
-        current = parent
-    return result
+    return [
+        scope.path
+        for scope in get_markdown_directories(
+            "commands",
+            workspace_root,
+            managed_root=_get_managed_minicode_dir(),
+            session_project_root=get_explicit_active_workspace_root(),
+        )
+        if scope.source == "project"
+    ]
 
 
 def _file_command_dirs(workspace_root: Path | None) -> list[tuple[Path, str]]:
     return [
-        (_get_managed_claude_dir() / ".claude" / "commands", "policySettings"),
-        *((path, "projectSettings") for path in _project_command_dirs(workspace_root)),
-        (Path.home() / ".claude" / "commands", "userSettings"),
+        (scope.path, scope.source)
+        for scope in get_markdown_directories(
+            "commands",
+            workspace_root,
+            managed_root=_get_managed_minicode_dir(),
+            session_project_root=get_explicit_active_workspace_root(),
+        )
     ]
 
 
@@ -707,13 +749,20 @@ def _parse_file_command(path: Path, source: str) -> dict[str, Any] | None:
 
 def get_file_command_catalog(
     workspace_root: str | Path | None = None,
+    *,
+    resolve_active_workspace: bool = True,
 ) -> list[dict[str, Any]]:
     root = (
-        Path(workspace_root).resolve()
+        Path(workspace_root).expanduser().absolute()
         if workspace_root is not None
-        else get_explicit_active_workspace_root()
+        else (
+            get_explicit_active_workspace_root()
+            if resolve_active_workspace
+            else None
+        )
     )
     commands: dict[str, dict[str, Any]] = {}
+    seen_files: set[tuple[int, int]] = set()
     for directory, source in _file_command_dirs(root):
         if not directory.is_dir():
             continue
@@ -734,6 +783,11 @@ def get_file_command_catalog(
             if path.parent not in skill_dirs or path.name.casefold() == "skill.md"
         ]
         for path in paths:
+            identity = file_identity(path)
+            if identity is not None and identity in seen_files:
+                continue
+            if identity is not None:
+                seen_files.add(identity)
             entry = _parse_file_command(path, source)
             if entry is not None:
                 relative = path.relative_to(directory).with_suffix("")
@@ -753,23 +807,46 @@ def get_file_command_catalog(
     return list(commands.values())
 
 
-def get_composer_command_catalog() -> list[dict[str, Any]]:
+def get_composer_command_catalog(
+    workspace_root: str | Path | None = None,
+    *,
+    resolve_active_workspace: bool = True,
+) -> list[dict[str, Any]]:
+    """Custom file commands first, builtins after (cc loadAllCommands order).
+
+    cc resolves slash commands by first match over this order, so a project
+    ``commands/review.md`` shadows the builtin ``/review`` instead of being
+    silently dropped.
+    """
     builtins = [deepcopy(entry) for entry in _COMPOSER_COMMAND_CATALOG]
-    builtin_names = {str(entry.get("command") or "").casefold() for entry in builtins}
-    return [
-        *builtins,
-        *(
-            entry
-            for entry in get_file_command_catalog()
-            if str(entry.get("command") or "").casefold() not in builtin_names
+    seen: set[str] = set()
+    merged: list[dict[str, Any]] = []
+    for entry in (
+        *get_file_command_catalog(
+            workspace_root,
+            resolve_active_workspace=resolve_active_workspace,
         ),
-    ]
+        *builtins,
+    ):
+        name = str(entry.get("command") or "").casefold()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        merged.append(entry)
+    return merged
 
 
-def get_enabled_composer_command_catalog() -> list[dict[str, Any]]:
+def get_enabled_composer_command_catalog(
+    workspace_root: str | Path | None = None,
+    *,
+    resolve_active_workspace: bool = True,
+) -> list[dict[str, Any]]:
     return [
         entry
-        for entry in get_composer_command_catalog()
+        for entry in get_composer_command_catalog(
+            workspace_root,
+            resolve_active_workspace=resolve_active_workspace,
+        )
         if bool(entry.get("enabled", True))
     ]
 

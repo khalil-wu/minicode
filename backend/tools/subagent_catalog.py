@@ -24,8 +24,8 @@ def agent_type_description(
     """Describe each selectable subagent type for the model-facing schema.
 
     A bare enum tells the model nothing about when to pick a custom agent, so a
-    user-authored ``agents/*.md`` would be undiscoverable in practice. Mirrors
-    cc's formatAgentLine (``- type: whenToUse``).
+    user-authored ``agents/*.md`` would be undiscoverable in practice. Each line
+    is rendered as ``- type: whenToUse``.
     """
     lines: list[str] = []
     for name in agent_types:
@@ -66,11 +66,22 @@ def normalize_agent_type(
     *,
     get_custom_agent: Callable[[str], Any | None] | None = None,
 ) -> str:
-    agent_type = str(raw or "general-purpose").strip().lower()
+    """Resolve an agent type name exactly (cc AgentTool semantics).
+
+    Lookups are case-sensitive against builtin and custom agent names; an
+    unknown type raises with the available list instead of silently degrading
+    to general-purpose.
+    """
+    agent_type = str(raw or "general-purpose").strip()
+    if not agent_type:
+        agent_type = "general-purpose"
     if agent_type == "general":
         agent_type = "general-purpose"
     if agent_type in BUILTIN_AGENT_TYPES:
         return agent_type
     if get_custom_agent is not None and get_custom_agent(agent_type):
         return agent_type
-    return "general-purpose"
+    raise ValueError(
+        f"Agent type '{agent_type}' not found. Available agents: "
+        f"{', '.join(BUILTIN_AGENT_TYPE_ORDER)} (plus discovered custom agents)"
+    )

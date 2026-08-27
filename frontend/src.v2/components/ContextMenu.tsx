@@ -19,8 +19,37 @@ interface ContextMenuProps {
 export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
   const ref = useRef<HTMLDivElement>(null);
   const [adjusted, setAdjusted] = useState(position);
+  const activeIndexRef = useRef(-1);
 
-  // Dismiss on outside mousedown or Escape
+  const actionableIndexes = items
+    .map((item, index) => (item.separator || item.disabled ? -1 : index))
+    .filter((index) => index >= 0);
+
+  const focusItemAt = useCallback((index: number) => {
+    const menu = ref.current;
+    if (!menu) return;
+    const buttons = Array.from(menu.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]:not([disabled])'));
+    const next = buttons[index];
+    if (next) {
+      activeIndexRef.current = index;
+      next.focus();
+    }
+  }, []);
+
+  const moveActive = useCallback(
+    (delta: 1 | -1) => {
+      if (actionableIndexes.length === 0) return;
+      const current = activeIndexRef.current;
+      const currentPos = actionableIndexes.indexOf(current);
+      const nextPos = currentPos < 0
+        ? (delta === 1 ? 0 : actionableIndexes.length - 1)
+        : (currentPos + delta + actionableIndexes.length) % actionableIndexes.length;
+      focusItemAt(actionableIndexes[nextPos]);
+    },
+    [actionableIndexes, focusItemAt],
+  );
+
+  // Dismiss on outside mousedown or Escape; arrow/Home/End roving focus
   useEffect(() => {
     const handleMouseDown = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) {
@@ -28,7 +57,14 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
       }
     };
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (e.key === "ArrowDown") { e.preventDefault(); moveActive(1); return; }
+      if (e.key === "ArrowUp") { e.preventDefault(); moveActive(-1); return; }
+      if (e.key === "Home") { e.preventDefault(); focusItemAt(actionableIndexes[0] ?? -1); return; }
+      if (e.key === "End") { e.preventDefault(); focusItemAt(actionableIndexes[actionableIndexes.length - 1] ?? -1); return; }
     };
     // Use setTimeout so the current click event doesn't immediately fire
     const timer = window.setTimeout(() => {
@@ -40,7 +76,7 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
       window.removeEventListener("mousedown", handleMouseDown);
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [onClose]);
+  }, [onClose, moveActive, focusItemAt, actionableIndexes]);
 
   // Adjust position to stay within viewport
   useLayoutEffect(() => {
@@ -73,10 +109,10 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
         zIndex: "var(--z-context-menu)",
         minWidth: 180,
         maxWidth: 260,
-        background: "var(--surface-raised, #2a2a2e)",
-        border: "1px solid var(--border-subtle, rgba(255,255,255,0.08))",
-        borderRadius: "var(--radius-md, 8px)",
-        boxShadow: "0 6px 20px rgba(0,0,0,0.22), 0 1px 4px rgba(0,0,0,0.12)",
+        background: "var(--surface-raised)",
+        border: "1px solid var(--border-subtle)",
+        borderRadius: "var(--radius-md)",
+        boxShadow: "var(--shadow-strong-overlay)",
         padding: "4px 0",
         outline: "none",
       }}
@@ -88,7 +124,7 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
             role="separator"
             style={{
               height: 1,
-              background: "var(--border-subtle, rgba(255,255,255,0.06))",
+              background: "var(--border-subtle)",
               margin: "4px 8px",
             }}
           />
@@ -96,10 +132,16 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
           <button
             key={i}
             role="menuitem"
+            aria-disabled={item.disabled || undefined}
+            className="mc-menu-item"
             disabled={item.disabled}
             onClick={() => {
               item.onClick?.();
               onClose();
+            }}
+            onFocus={() => {
+              const index = items.slice(0, i + 1).filter((it) => !it.separator && !it.disabled).length - 1;
+              activeIndexRef.current = index;
             }}
             style={{
               display: "flex",
@@ -110,22 +152,13 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
               background: "transparent",
               border: 0,
               color: item.disabled
-                ? "var(--text-muted, #666)"
-                : "var(--text-secondary, #ccc)",
+                ? "var(--text-muted)"
+                : "var(--text-secondary)",
               cursor: item.disabled ? "default" : "pointer",
               padding: "6px 12px",
               fontSize: "var(--text-sm, 13px)",
               lineHeight: 1.4,
               opacity: item.disabled ? 0.45 : 1,
-            }}
-            onMouseEnter={(e) => {
-              if (!item.disabled) {
-                (e.currentTarget as HTMLButtonElement).style.background =
-                  "var(--surface-hover, rgba(255,255,255,0.06))";
-              }
-            }}
-            onMouseLeave={(e) => {
-              (e.currentTarget as HTMLButtonElement).style.background = "transparent";
             }}
           >
             {item.icon && (
@@ -138,10 +171,9 @@ export const ContextMenu = ({ items, position, onClose }: ContextMenuProps) => {
             </span>
             {item.shortcut && (
               <span
-                className="shrink-0 font-mono"
+                className="shrink-0 mc-kbd"
                 style={{
-                  color: "var(--text-muted, #888)",
-                  fontSize: "var(--text-xs, 11px)",
+                  color: "var(--text-muted)",
                   marginLeft: 12,
                 }}
               >

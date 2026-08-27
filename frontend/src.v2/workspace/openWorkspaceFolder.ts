@@ -10,26 +10,11 @@ export const openWorkspaceFolder = async (): Promise<string | null> => {
   const trustedPath = await trustWorkspace(selectedPath);
   const workspacePath = trustedPath || selectedPath;
 
-  useAppStore.getState().setWorkingDirectory(workspacePath);
-  const { conversationId, conversations } = useAppStore.getState();
-  if (conversationId) {
-    useAppStore.setState({
-      conversations: conversations.map((conversation) =>
-        conversation.id === conversationId
-          ? {
-              ...conversation,
-              workspaceRoot: workspacePath,
-              worktreePath: undefined,
-              gitIsolated: false,
-            }
-          : conversation,
-      ),
-    });
-  }
   const sent = sendClientCommand({ type: "workspace.set", path: workspacePath });
   if (sent) {
     useAppStore.getState().setAppMode("code");
-    pushToast(`Opened workspace: ${workspacePath}`, "success", 2200);
+    pushToast(`Opening workspace: ${workspacePath}`, "info", 2200);
+    return workspacePath;
   }
-  return workspacePath;
+  return null;
 };

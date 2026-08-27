@@ -28,17 +28,17 @@
        adjacent ΔL ∈ [0.018, 0.035].
 
      Dark-theme base/frame lifted slightly above the original 0.075–0.135 band
-     so the app frame reads closer to Codex/Claude-Code dark UIs (~0.16–0.22)
+     so the app frame reads closer to modern dark UIs (~0.16–0.22)
      and panel boundaries stay distinguishable instead of near-black. ──── */
-  --surface-sunken:  oklch(0.100 0.002 250);
-  --surface-base:    oklch(0.120 0.002 250);
-  --surface-sidebar: oklch(0.140 0.003 250);
-  --surface-page:    oklch(0.160 0.003 250);
+  --surface-sunken:  oklch(0.095 0.002 250);
+  --surface-base:    oklch(0.115 0.002 250);
+  --surface-sidebar: oklch(0.130 0.003 250);
+  --surface-page:    oklch(0.165 0.003 250);
   --surface-soft:    oklch(0.180 0.004 250);
   --surface-panel:   oklch(0.200 0.004 250);
   --surface-raised:  oklch(0.220 0.005 250);
-  --surface-hover:   oklch(0.255 0.005 250);
-  --surface-active:  oklch(0.290 0.006 250);
+  --surface-hover:   oklch(0.275 0.005 250);
+  --surface-active:  oklch(0.315 0.006 250);
 
   /* ── Text (4) — Pillar 1.2
      WCAG invariant (P1.3): primary/secondary ≥ 4.5:1 vs any surface,
@@ -50,7 +50,7 @@
   --text-on-accent: oklch(0.985 0.005 250);
 
   /* ── Border (4) — Pillar 1.3 ──────────────────────────── */
-  --border-subtle: oklch(0.870 0.006 250 / 0.15);
+  --border-subtle: oklch(0.870 0.006 250 / 0.17);
   --border-soft:   oklch(0.870 0.006 250 / 0.22);
   --border-strong: oklch(0.870 0.006 250 / 0.40);
   --border-focus:  var(--accent-primary);
@@ -88,6 +88,9 @@
   --font-mono:  "JetBrains Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   --font-cjk:   "Noto Sans SC", "Microsoft YaHei UI", "PingFang SC", "Source Han Sans SC", sans-serif;
   --font-prose: var(--font-ui);
+  --app-text-scale: 1;
+  --code-text-scale: 1;
+  --code-font-size: calc(15px * var(--code-text-scale));
 
   /* ── Font sizes (11) — dense chrome, readable 15–16px prose.
      All sizes scale with the user's GeneralTab text-size preference. ── */
@@ -117,18 +120,32 @@
   --weight-semibold: 600;
   --weight-bold:     700;
 
+  /* ── Canonical weight scale (UI polish) ───────────────
+     数值不变，仅命名：把散落的 440–750 半档收敛到 4 档。
+     任何 440–470 → regular，500–560 → medium，
+     580–670 → semibold，680–800 → bold。 ─────────────── */
+  --fw-regular:  var(--weight-regular);
+  --fw-medium:   var(--weight-medium);
+  --fw-semibold: var(--weight-semibold);
+  --fw-bold:     var(--weight-bold);
+
+  /* ── Icon rhythm ─────────────────────────────────────
+     Single stroke language for every glyph (lucide and custom svg alike).
+     Declared here; components.css / ui-polish.css only consume it. ──── */
+  --mc-icon-stroke: 1.75;
+
   /* ── Radius (5) — soft desktop geometry shared by navigation and cards. ─── */
-  --radius-sm:   6px;
-  --radius-md:   8px;
-  --radius-lg:   12px;
-  --radius-xl:   16px;
+  --radius-sm:   8px;
+  --radius-md:   12px;
+  --radius-lg:   16px;
+  --radius-xl:   20px;
   --radius-full: 9999px;
 
-  /* ── Shadows (4) ──────────────────────────────────────── */
-  --shadow-sm:     0 1px 3px 0 rgba(0, 0, 0, 0.10), 0 1px 2px -1px rgba(0, 0, 0, 0.10);
-  --shadow-md:     0 4px 6px -1px rgba(0, 0, 0, 0.10), 0 2px 4px -2px rgba(0, 0, 0, 0.10);
-  --shadow-panel:  0 1px 3px 0 rgba(0, 0, 0, 0.10), 0 1px 2px -1px rgba(0, 0, 0, 0.10);
-  --shadow-strong: 0 10px 15px -3px rgba(0, 0, 0, 0.10), 0 4px 6px -4px rgba(0, 0, 0, 0.10);
+  /* ── Shadows (4) — legacy names, aliased to the refined oklch set ──── */
+  --shadow-sm:     var(--shadow-refined);
+  --shadow-md:     var(--shadow-refined-hover);
+  --shadow-panel:  var(--shadow-refined);
+  --shadow-strong: var(--shadow-strong-overlay);
 
   /* ── Refined shadows (精致版专用，2026-07-25) ────────── */
   --shadow-refined:       0 1px 2px oklch(0 0 0 / 0.06), 0 4px 14px oklch(0 0 0 / 0.06);
@@ -139,14 +156,17 @@
   --glass-backdrop: blur(12px) saturate(150%);
   --glass-bg: color-mix(in oklch, var(--surface-panel) 72%, transparent);
 
-  /* ── Backdrop overlays (3) ───────────────────────────── */
+  /* ── Backdrop overlays (3) ─────────────────────────────
+     Ordered by depth: subtle < overlay < strong. (Previously "strong" 0.48 was
+     shallower than "overlay" 0.50, so destructive-confirmation dialogs read as
+     the lightest scrim — inverted. Strong is now genuinely the deepest.) */
   --backdrop-overlay: oklch(0 0 0 / 0.50);
-  --backdrop-strong:  oklch(0 0 0 / 0.48);
+  --backdrop-strong:  oklch(0 0 0 / 0.60);
   --backdrop-subtle:  oklch(0 0 0 / 0.18);
 
-  /* ── Semantic shadows (3) ────────────────────────────── */
-  --shadow-soft:   0 4px 16px oklch(0 0 0 / 0.10);
-  --shadow-medium: 0 8px 32px oklch(0 0 0 / 0.14);
+  /* ── Semantic shadows (3) — one elevation ladder with refined. ───── */
+  --shadow-soft:   var(--shadow-refined);
+  --shadow-medium: var(--shadow-refined-hover);
   --shadow-strong-overlay: 0 10px 30px oklch(0 0 0 / 0.22);
 
   /* ── Easing ────────────────────────────────────────── */
@@ -154,6 +174,9 @@
   --easing-enter: cubic-bezier(0.16, 1, 0.3, 1);
   --easing-exit: cubic-bezier(0.4, 0, 1, 1);
   --easing-pulse: cubic-bezier(0.42, 0, 0.18, 1);
+  --easing-status-sweep: cubic-bezier(0.2, 0.7, 0.25, 1);
+  /* Gentle overshoot for panel/card entrances only — not for hover states. */
+  --easing-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 
   /* ── Duration primitives (4) — raw ms values for @keyframes
      Used by animations.css utility classes. The --transition-*
@@ -162,6 +185,7 @@
   --duration-fast:  150ms;
   --duration-base:  200ms;
   --duration-slow:  250ms;
+  --duration-status-sweep: calc(var(--duration-slow) * 7);
 
   /* ── Transitions (4) — Cross-cutting #7
      Single registry: 100 / 150 / 200 / 250 ms with the standard
@@ -199,29 +223,24 @@
   --z-loading: 1500;
   --z-debug: 9999;
 
-  /* ── Layout vars ──────────────────────────────────────── */
+  /* ── Layout vars ────────────────────────────────────────
+     Shell layout density (sidebar widths, chat axis, conversation rhythm
+     --space-turn-gap / --space-cell-internal) is owned by shell/ shell.css —
+     do not re-declare it here. ──────────────────────────────── */
   --header-height:       44px;
   --dock-height:         280px;
   --app-text-scale:      1;
-  --sidebar-width:       240px;
-  --sidebar-max-width:   332px;
-  --sidebar-min-width:   260px;
-  --context-panel-width: 280px;
-  --input-max-width:     860px;
 
   /* ── Conversation spacing (Phase 1 optimization) ─────── */
-  --space-turn-gap:      30px;  /* Between conversation turns */
-  --space-cell-gap:      10px;  /* Between cells within a turn */
-  --space-cell-internal: 12px;  /* Internal cell padding */
   --space-activity-indent: 16px; /* Activity detail indentation */
   --content-width-code:    min(1320px, 100%);
   --content-width-cowork:  min(880px, 100%);
 
-  /* ── CJK Typography tuning — Anthropic-inspired ────
+  /* ── CJK Typography tuning ───────────────────────────
      When CJK characters are present, we apply slightly
      larger line-height and reduced letter-spacing to give
-     Chinese text the generous vertical rhythm Anthropic
-     uses in Claude's UI. The `--cjk-leading` and
+Chinese text the generous vertical rhythm MiniCode
+uses in its UI. The `--cjk-leading` and
      `--cjk-spacing` tokens are consumed by utility.css. */
   --cjk-leading:  1.65;  /* CJK needs more vertical room */
   --cjk-spacing:  0.02em; /* Tighter horizontal spacing for Chinese */
@@ -301,21 +320,27 @@
 [data-theme="light"] {
   color-scheme: light;
 
-  /* User prompts stay crisp against the page instead of reading as grey blocks. */
+  /* Light mode uses white content planes with neutral, low-contrast interaction
+     fills. This keeps hierarchy without turning every page into a grey card. */
   --message-user-bg: #fff;
-  --attachment-chip-bg: oklch(0.985 0.003 250);
+  --attachment-chip-bg: oklch(0.975 0 0);
   --attachment-chip-fg: var(--text-secondary);
 
-  /* Surface (9) */
-  --surface-sunken:  oklch(0.975 0.004 250);
+  /* Surface (9) — light theme.
+     Previously base/page/raised were all pure white (1.0) and sunken/soft both
+     0.975, collapsing the 9-step ladder to ~3 planes so hierarchy had to be
+     carried by 1px hairlines. Re-laddered so *planes* (not lines) carry depth:
+     white content floats above neutral grey chrome (macOS sidebar-grey model).
+     Still monotone, still ≥ each adjacent step distinguishable. */
+  --surface-sunken:  oklch(0.955 0.002 250);
   --surface-base:    oklch(1 0 0);
-  --surface-sidebar: oklch(0.985 0.009 245);
-  --surface-page:    oklch(0.975 0.004 250);
-  --surface-soft:    oklch(0.955 0.005 250);
-  --surface-panel:   oklch(0.935 0.006 250);
-  --surface-raised:  oklch(0.915 0.007 250);
-  --surface-hover:   oklch(0.890 0.008 250);
-  --surface-active:  oklch(0.860 0.009 250);
+  --surface-sidebar: oklch(0.965 0.002 250);
+  --surface-page:    oklch(1 0 0);
+  --surface-soft:    oklch(0.950 0.003 250);
+  --surface-panel:   oklch(0.945 0.003 250);
+  --surface-raised:  oklch(1 0 0);
+  --surface-hover:   oklch(0.915 0.004 250);
+  --surface-active:  oklch(0.885 0.005 250);
 
   /* Text (4) — muted/secondary darkened for readability on white (was 0.52/0.38) */
   --text-primary:   oklch(0.110 0.004 250);
@@ -325,7 +350,7 @@
   --text-on-accent: oklch(0.985 0.005 250);
 
   /* Border (4) */
-  --border-subtle: oklch(0.220 0.006 250 / 0.10);
+  --border-subtle: oklch(0.220 0.006 250 / 0.12);
   --border-soft:   oklch(0.220 0.006 250 / 0.18);
   --border-strong: oklch(0.220 0.006 250 / 0.30);
   --border-focus:  var(--accent-primary);
@@ -355,26 +380,27 @@
   --command-accent-strong: oklch(0.47 0.085 245);
   --command-border:        oklch(0.62 0.075 245 / 0.42);
 
-  /* Shadows — deeper on light backgrounds for proper elevation. */
-  --shadow-sm:     0 1px 3px 0 rgba(15, 23, 42, 0.08), 0 1px 2px -1px rgba(15, 23, 42, 0.06);
-  --shadow-md:     0 4px 6px -1px rgba(15, 23, 42, 0.10), 0 2px 4px -2px rgba(15, 23, 42, 0.08);
-  --shadow-panel:  0 1px 3px 0 rgba(15, 23, 42, 0.10), 0 1px 2px -1px rgba(15, 23, 42, 0.08);
-  --shadow-strong: 0 10px 15px -3px rgba(15, 23, 42, 0.12), 0 4px 6px -4px rgba(15, 23, 42, 0.10);
+  /* Shadows — legacy names, aliased to the refined set (single ladder). */
+  --shadow-sm:     var(--shadow-refined);
+  --shadow-md:     var(--shadow-refined-hover);
+  --shadow-panel:  var(--shadow-refined);
+  --shadow-strong: var(--shadow-strong-overlay);
 
-  /* Backdrop overlays — slightly stronger on light surfaces. */
+  /* Backdrop overlays — slightly stronger on light surfaces.
+     Depth order preserved: subtle < overlay < strong. */
   --backdrop-overlay: oklch(0.15 0.005 250 / 0.50);
-  --backdrop-strong:  oklch(0.15 0.005 250 / 0.48);
+  --backdrop-strong:  oklch(0.15 0.005 250 / 0.60);
   --backdrop-subtle:  oklch(0.15 0.005 250 / 0.18);
 
-  /* Semantic shadows — deeper on light backgrounds. */
-  --shadow-soft:   0 4px 16px oklch(0.15 0.005 250 / 0.10);
-  --shadow-medium: 0 8px 32px oklch(0.15 0.005 250 / 0.14);
+  /* Semantic shadows — same single ladder (refined pair), tinted overlay kept. */
+  --shadow-soft:   var(--shadow-refined);
+  --shadow-medium: var(--shadow-refined-hover);
   --shadow-strong-overlay: 0 10px 30px oklch(0.15 0.005 250 / 0.22);
 
   /* Backward-compat aliases (mirror :root layout). */
   --surface-elevated:     var(--surface-raised);
-  --surface-input:        oklch(0.965 0.005 250);
-  --surface-overlay:      oklch(0.950 0.006 250);
+  --surface-input:        oklch(1 0 0);
+  --surface-overlay:      oklch(1 0 0);
   --text-strong:          var(--text-primary);
   --border-light:         var(--border-subtle);
   --border-medium:        var(--border-soft);

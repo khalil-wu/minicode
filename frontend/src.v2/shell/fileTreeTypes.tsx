@@ -40,7 +40,7 @@ export const HIDDEN_TREE_NAMES = new Set([
 ]);
 
 export const GIT_STATUS_COLOR: Record<GitStatus, string> = {
-  modified: "var(--state-warning, #e5a50a)",
+  modified: "var(--state-warning)",
   added: "var(--state-success)",
   untracked: "var(--text-muted)",
   deleted: "var(--state-danger)",
@@ -92,7 +92,7 @@ export const fileTreeRootLabelStyle: React.CSSProperties = {
   whiteSpace: "nowrap",
   color: "var(--text-primary)",
   fontSize: "var(--text-sm)",
-  fontWeight: 630,
+  fontWeight: "var(--fw-semibold)",
 };
 
 export const fileTreeToolbarStyle: React.CSSProperties = {
@@ -144,7 +144,7 @@ export const toolbarMenuStyle: React.CSSProperties = {
   position: "absolute",
   top: 34,
   right: 0,
-  zIndex: 50,
+  zIndex: "var(--z-dropdown)",
   minWidth: 150,
   padding: 4,
   border: "1px solid var(--border-subtle)",
@@ -192,7 +192,7 @@ export const gitBadgeStyle: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "center",
   fontSize: "var(--text-3xs)",
-  fontWeight: 750,
+  fontWeight: "var(--fw-bold)",
   borderRadius: 4,
   background: "var(--surface-page)",
   border: "1px solid var(--border-subtle)",
@@ -234,7 +234,7 @@ export const openWorkspaceButtonStyle: React.CSSProperties = {
   color: "var(--text-secondary)",
   cursor: "pointer",
   fontSize: "var(--text-xs)",
-  fontWeight: 650,
+  fontWeight: "var(--fw-semibold)",
 };
 
 export const searchResultRowStyle: React.CSSProperties = {

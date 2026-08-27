@@ -1,8 +1,21 @@
 import type { CSSProperties } from "react";
 import type { PanelKind } from "../stores/types";
 
+const PANEL_KIND_LABELS: Record<PanelKind, string> = {
+  chat: "对话",
+  diff: "Diff",
+  editor: "编辑器",
+  preview: "预览",
+  terminal: "终端",
+  plan: "计划",
+  tasks: "任务",
+  subagents: "子智能体",
+  artifacts: "产物",
+  inspector: "运行详情",
+};
+
 export const PanelSkeleton = ({ kind }: { kind: PanelKind }) => (
-  <div style={shellStyle} aria-label={`Loading ${kind} panel`}>
+  <div style={shellStyle} aria-label={`正在加载${PANEL_KIND_LABELS[kind]}面板`}>
     <div style={toolbarStyle}>
       <span className="panel-skeleton-shimmer" style={{ ...barStyle, width: 82 }} />
       <span className="panel-skeleton-shimmer" style={{ ...barStyle, width: 38 }} />

@@ -10,15 +10,14 @@
     "check:ui-debt": "node scripts/check-ui-debt.mjs",
     "preview": "vite preview",
     "test": "npm exec vitest run",
-    "test:e2e:electron": "playwright test tests/e2e/electron-multi-agent.spec.ts --config=playwright.config.ts --workers=1",
-    "test:e2e:real-provider": "playwright test tests/e2e/electron-real-provider.spec.ts --config=playwright.config.ts --workers=1"
+    "test:e2e:electron": "node scripts/run-electron-e2e.mjs",
+    "test:e2e:real-provider": "node scripts/run-electron-e2e.mjs tests/e2e/electron-real-provider.spec.ts"
   },
   "dependencies": {
-    "@iconify-icons/logos": "^1.2.36",
     "@iconify-icons/simple-icons": "^1.2.74",
     "@iconify-icons/vscode-icons": "^1.2.29",
     "@iconify/react": "^6.0.2",
-    "@lobehub/icons": "^1.80.0",
+    "@iconify/types": "^2.0.0",
     "@lobehub/icons-static-svg": "^1.94.0",
     "@monaco-editor/react": "^4.7.0",
     "@noble/hashes": "^2.2.0",
@@ -27,8 +26,9 @@
     "@xterm/xterm": "^6.0.0",
     "katex": "^0.17.0",
     "lucide-react": "^0.460.0",
-    "mermaid": "^11.16.0",
-    "monaco-editor": "^0.55.1",
+    "mermaid": "^11.16.1",
+    "monaco-editor": "^0.56.0",
+    "pdfjs-dist": "^4.10.38",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^9.0.1",
@@ -42,7 +42,6 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.60.0",
-    "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@types/culori": "^4.0.1",
     "@types/react": "^18.3.12",
@@ -53,13 +52,14 @@
     "culori": "^4.0.2",
     "fast-check": "^4.8.0",
     "jsdom": "^29.1.1",
-    "postcss": "^8.4.49",
+    "postcss": "^8.5.26",
     "tailwindcss": "^3.4.16",
     "typescript": "^5.7.2",
     "vite": "^8.0.16",
     "vitest": "^4.1.8"
   },
   "overrides": {
-    "dompurify": "^3.4.10"
+    "dompurify": "^3.4.13",
+    "undici": "^7.29.0"
   }
 }

@@ -1,4 +1,5 @@
 import { normalizeToolDiff, type ToolCallRecord } from "../lib/tool-call-reducer";
+import { workspacePathComparisonKey } from "../lib/workspace-path";
 import { isAgentProgressPhase } from "../protocol/streaming-types";
 import type {
   ArtifactPreview,
@@ -30,28 +31,96 @@ export type BackendTranscriptMessage = {
   timestamp?: unknown;
   completedAt?: unknown;
   completed_at?: unknown;
+  durationMs?: unknown;
+  duration_ms?: unknown;
+  isStreaming?: unknown;
+  is_streaming?: unknown;
+  isThinkingStreaming?: unknown;
+  is_thinking_streaming?: unknown;
   terminalStatus?: unknown;
   terminal_status?: unknown;
   terminationReason?: unknown;
   termination_reason?: unknown;
   failureMessage?: unknown;
   failure_message?: unknown;
+  failureRecoverable?: unknown;
+  failure_recoverable?: unknown;
   steered?: unknown;
   steer_target_message_id?: unknown;
 };
 
-const toTimestamp = (value: unknown): number => {
+export type HydrateMessagesOptions = {
+  live?: boolean;
+};
+
+const toTimestamp = (value: unknown, fallback = 0): number => {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string") {
     const parsed = Date.parse(value);
     if (Number.isFinite(parsed)) return parsed;
   }
-  return Date.now();
+  return fallback;
 };
 
 const toRole = (value: unknown): ChatMessage["role"] => {
+  if (value === "user") return "user";
   if (value === "assistant" || value === "system") return value;
-  return "user";
+  if (
+    value === "tool"
+    || value === "tool_result"
+    || value === "toolResult"
+    || value === "bashExecution"
+    || value === "custom"
+    || value === "branchSummary"
+    || value === "compactionSummary"
+  ) return "system";
+  return "system";
+};
+
+const transcriptContent = (message: BackendTranscriptMessage): string => {
+  if (typeof message.content === "string") return message.content;
+  if (Array.isArray(message.content)) {
+    return message.content
+      .flatMap((item) => {
+        if (!item || typeof item !== "object") return [];
+        const block = item as Record<string, unknown>;
+        const text = block.text ?? block.content ?? block.thinking;
+        return typeof text === "string" && text ? [text] : [];
+      })
+      .join("\n");
+  }
+  const source = message as BackendTranscriptMessage & Record<string, unknown>;
+  const role = String(message.role ?? "");
+  if (role === "bashExecution") {
+    const command = typeof source.command === "string" ? source.command : "";
+    const output = typeof source.output === "string" ? source.output : "";
+    const exitCode = typeof source.exitCode === "number" ? source.exitCode : undefined;
+    const status = source.cancelled === true
+      ? "Command cancelled"
+      : exitCode != null && exitCode !== 0
+        ? `Command exited with code ${exitCode}`
+        : "";
+    return [command ? `$ ${command}` : "", output, status].filter(Boolean).join("\n");
+  }
+  if (role === "branchSummary" || role === "compactionSummary") {
+    return typeof source.summary === "string" ? source.summary : "";
+  }
+  return "";
+};
+
+const transcriptNoticeTitle = (message: BackendTranscriptMessage): string | undefined => {
+  const role = String(message.role ?? "");
+  if (role === "bashExecution") return "命令执行记录";
+  if (role === "branchSummary") return "分支摘要";
+  if (role === "compactionSummary") return "上下文压缩摘要";
+  if (role === "custom") return "运行时记录";
+  if (role === "tool" || role === "tool_result" || role === "toolResult") {
+    const source = message as BackendTranscriptMessage & Record<string, unknown>;
+    const toolName = String(source.name ?? source.toolName ?? "工具").trim() || "工具";
+    return `${toolName} 结果`;
+  }
+  if (role === "developer") return "开发者上下文";
+  return undefined;
 };
 
 const normalizeTerminalStatus = (value: unknown): ChatMessage["terminalStatus"] => {
@@ -66,6 +135,9 @@ const toUsage = (value: unknown): MessageUsage | undefined => {
   if (!value || typeof value !== "object") return undefined;
   const usage = value as {
     input?: unknown;
+    ordinaryInput?: unknown;
+    inputIncludesCacheRead?: unknown;
+    inputIncludesCacheWrite?: unknown;
     output?: unknown;
     cacheRead?: unknown;
     cacheWrite?: unknown;
@@ -73,6 +145,9 @@ const toUsage = (value: unknown): MessageUsage | undefined => {
     promptCacheHitRate?: unknown;
     reasoning?: unknown;
     input_tokens?: unknown;
+    ordinary_input_tokens?: unknown;
+    input_includes_cache_read?: unknown;
+    input_includes_cache_write?: unknown;
     output_tokens?: unknown;
     cache_read_input_tokens?: unknown;
     cache_creation_input_tokens?: unknown;
@@ -81,14 +156,37 @@ const toUsage = (value: unknown): MessageUsage | undefined => {
     reasoning_output_tokens?: unknown;
   };
   const input = Number(usage.input ?? usage.input_tokens ?? 0);
+  const ordinaryInput = Number(
+    usage.ordinaryInput ?? usage.ordinary_input_tokens,
+  );
   const output = Number(usage.output ?? usage.output_tokens ?? 0);
   const cacheRead = Number(usage.cacheRead ?? usage.cache_read_input_tokens ?? 0);
   const cacheWrite = Number(usage.cacheWrite ?? usage.cache_creation_input_tokens ?? 0);
   const promptCacheTotal = Number(usage.promptCacheTotal ?? usage.prompt_cache_total_tokens);
   const promptCacheHitRate = Number(usage.promptCacheHitRate ?? usage.prompt_cache_hit_rate);
   const reasoning = Number(usage.reasoning ?? usage.reasoning_output_tokens ?? 0);
-  if (!input && !output && !cacheRead && !cacheWrite && !reasoning) return undefined;
-  const normalized: MessageUsage = { input, output, cacheRead, cacheWrite, reasoning };
+  if (
+    !input
+    && !output
+    && !Number.isFinite(ordinaryInput)
+    && !cacheRead
+    && !cacheWrite
+    && !reasoning
+    && !Number.isFinite(promptCacheTotal)
+    && !Number.isFinite(promptCacheHitRate)
+  ) return undefined;
+  const normalized: MessageUsage = {
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    reasoning,
+  };
+  if (Number.isFinite(ordinaryInput)) normalized.ordinaryInput = ordinaryInput;
+  const inputIncludesCacheRead = usage.inputIncludesCacheRead ?? usage.input_includes_cache_read;
+  const inputIncludesCacheWrite = usage.inputIncludesCacheWrite ?? usage.input_includes_cache_write;
+  if (typeof inputIncludesCacheRead === "boolean") normalized.inputIncludesCacheRead = inputIncludesCacheRead;
+  if (typeof inputIncludesCacheWrite === "boolean") normalized.inputIncludesCacheWrite = inputIncludesCacheWrite;
   if (Number.isFinite(promptCacheTotal)) normalized.promptCacheTotal = promptCacheTotal;
   if (Number.isFinite(promptCacheHitRate)) normalized.promptCacheHitRate = promptCacheHitRate;
   return normalized;
@@ -96,8 +194,8 @@ const toUsage = (value: unknown): MessageUsage | undefined => {
 
 const toArray = <T,>(value: unknown): T[] => Array.isArray(value) ? value as T[] : [];
 
-const isProgressStage = (value: unknown): value is "status" | "planning" | "tool" | "approval" | "final" =>
-  value === "status" || value === "planning" || value === "tool" || value === "approval" || value === "final";
+const isProgressStage = (value: unknown): value is "status" | "planning" | "tool" | "approval" | "verification" | "final" =>
+  value === "status" || value === "planning" || value === "tool" || value === "approval" || value === "verification" || value === "final";
 
 const isProgressStatus = (value: unknown): value is "running" | "completed" | "partial" | "failed" | "info" =>
   value === "running" || value === "completed" || value === "partial" || value === "failed" || value === "info";
@@ -202,6 +300,7 @@ const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
       : typeof tool.activity_kind === "string"
         ? tool.activity_kind
         : "genericTool",
+    visibility: typeof tool.visibility === "string" ? tool.visibility : undefined,
     limitation: typeof tool.limitation === "string" ? tool.limitation : undefined,
     provider: typeof tool.provider === "string" ? tool.provider : undefined,
     providerErrorType: typeof tool.providerErrorType === "string"
@@ -246,6 +345,16 @@ const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
       : typeof tool.input_summary === "string"
         ? tool.input_summary
         : undefined,
+    groupId: typeof tool.groupId === "string"
+      ? tool.groupId
+      : typeof tool.group_id === "string"
+        ? tool.group_id
+        : undefined,
+    stepId: typeof tool.stepId === "string"
+      ? tool.stepId
+      : typeof tool.step_id === "string"
+        ? tool.step_id
+        : undefined,
     turnId: typeof tool.turnId === "string"
       ? tool.turnId
       : typeof tool.turn_id === "string"
@@ -283,6 +392,17 @@ const toToolCallRecord = (value: unknown): ToolCallRecord | null => {
         ? tool.stderr_preview
         : undefined,
     outputFiles: toOutputFiles(tool.outputFiles ?? tool.output_files),
+    cleanupReceipt: tool.cleanupReceipt && typeof tool.cleanupReceipt === "object"
+      ? tool.cleanupReceipt as Record<string, unknown>
+      : tool.cleanup_receipt && typeof tool.cleanup_receipt === "object"
+        ? tool.cleanup_receipt as Record<string, unknown>
+        : undefined,
+    supersededToolCallIds: toArray<unknown>(
+      tool.supersededToolCallIds ?? tool.superseded_tool_call_ids,
+    ).map((value) => String(value || "").trim()).filter(Boolean),
+    removedFilePaths: toArray<unknown>(
+      tool.removedFilePaths ?? tool.removed_file_paths,
+    ).map((value) => String(value || "").trim()).filter(Boolean),
     temporaryRemoved: booleanValue(tool.temporaryRemoved ?? tool.temporary_removed),
     diff: normalizeToolDiff(tool.diff),
   };
@@ -296,13 +416,12 @@ export const normalizeContentBlocks = (value: unknown): ContentBlock[] | undefin
   for (const item of items) {
     const type = String(item.type ?? "").trim();
     if (type === "thinking") {
+      if (isLegacyRawProviderReasoning(item)) continue;
       blocks.push({
         type: "thinking",
         content: typeof item.content === "string" ? item.content : "",
         source: stringValue(item.source),
         visibility: stringValue(item.visibility),
-        is_raw_provider_reasoning: booleanValue(item.is_raw_provider_reasoning),
-        provider_reasoning_type: stringValue(item.provider_reasoning_type),
         phase: stringValue(item.phase),
       });
       continue;
@@ -354,7 +473,11 @@ export const normalizeContentBlocks = (value: unknown): ContentBlock[] | undefin
     if (type === "process") {
       const id = String(item.id ?? item.item_id ?? "").trim();
       const itemKind = String(item.itemKind ?? item.item_kind ?? item.kind ?? "").trim();
-      if (!id || !itemKind) continue;
+      if (
+        !id
+        || !itemKind
+        || String(item.status ?? "").trim().toLowerCase() === "retracted"
+      ) continue;
       blocks.push({
         type: "process",
         id,
@@ -483,6 +606,25 @@ const legacyBlocksFor = (
   return blocks.length ? blocks : undefined;
 };
 
+const isLegacyRawProviderReasoning = (item: Record<string, unknown>): boolean => {
+  if (booleanValue(item.is_raw_provider_reasoning ?? item.isRawProviderReasoning) === true) {
+    return true;
+  }
+  const visibility = String(item.visibility ?? "").trim().toLowerCase();
+  if (["hidden", "internal", "redacted"].includes(visibility)) return true;
+  const reasoningType = String(
+    item.provider_reasoning_type ?? item.providerReasoningType ?? "",
+  ).trim().toLowerCase();
+  return [
+    "reasoning_text",
+    "reasoning_content",
+    "raw_reasoning",
+    "raw_provider_reasoning",
+    "thinking",
+    "thinking_delta",
+  ].includes(reasoningType);
+};
+
 const normalizeText = (value: string): string => value.trim().replace(/\s+/g, " ");
 
 const toAttachmentRefs = (value: unknown): MessageAttachmentRef[] => {
@@ -533,7 +675,7 @@ const toReplyAttachments = (value: unknown): ChatMessage["replyAttachments"] => 
   const seenPaths = new Set<string>();
   const attachments = items.flatMap((item) => {
     const path = String(item.path ?? "").trim();
-    const pathKey = path.toLocaleLowerCase();
+    const pathKey = workspacePathComparisonKey(path);
     if (!path || seenPaths.has(pathKey)) return [];
     seenPaths.add(pathKey);
     const size = Number(item.size ?? 0);
@@ -560,9 +702,38 @@ const dedupeHydratedMessages = (messages: ChatMessage[]): ChatMessage[] => {
   return result;
 };
 
-export const hydrateMessages = (messages: BackendTranscriptMessage[] | undefined): ChatMessage[] =>
-  dedupeHydratedMessages((messages ?? []).map((message, index) => {
+export const normalizeLiveTranscriptMessages = (
+  messages: ChatMessage[],
+  live: boolean,
+): ChatMessage[] => {
+  if (!live) return messages;
+  let lastAssistantIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "assistant") {
+      lastAssistantIndex = index;
+      break;
+    }
+  }
+  if (lastAssistantIndex < 0) return messages;
+  const assistant = messages[lastAssistantIndex];
+  if (
+    assistant.isStreaming === true
+    || assistant.terminalStatus != null
+    || assistant.completedAt != null
+    || assistant.durationMs != null
+  ) return messages;
+  return messages.map((message, index) => index === lastAssistantIndex
+    ? { ...message, isStreaming: true }
+    : message);
+};
+
+export const hydrateMessages = (
+  messages: BackendTranscriptMessage[] | undefined,
+  options: HydrateMessagesOptions = {},
+): ChatMessage[] => {
+  const hydrated = (messages ?? []).map((message, index) => {
     const role = toRole(message.role);
+    const content = transcriptContent(message);
     const parsedBlocks = normalizeContentBlocks(message.blocks);
     const fallbackToolCalls = toArray<unknown>(message.tool_calls ?? message.toolCalls).flatMap((item) => {
       const record = toToolCallRecord(item);
@@ -572,10 +743,11 @@ export const hydrateMessages = (messages: BackendTranscriptMessage[] | undefined
     // final answer from message.content or block position.
     // Only the pre-block legacy schema is upgraded at this compatibility edge.
     const blocks = parsedBlocks ?? legacyBlocksFor(message, role, fallbackToolCalls);
+    const timestamp = toTimestamp(message.timestamp, index);
     return {
-      id: typeof message.id === "string" && message.id ? message.id : `m-${index}-${Date.now().toString(36)}`,
+      id: typeof message.id === "string" && message.id ? message.id : `m-${index}-${timestamp}`,
       role,
-      content: typeof message.content === "string" ? message.content : "",
+      content,
       blocks,
       artifacts: toArray<ArtifactPreview>(message.artifacts),
       attachmentRefs: toAttachmentRefs(message.attachmentRefs ?? message.attachments),
@@ -583,16 +755,104 @@ export const hydrateMessages = (messages: BackendTranscriptMessage[] | undefined
       replyAttachments: toReplyAttachments(message.replyAttachments ?? message.reply_attachments),
       citations: toArray<Citation>(message.citations),
       usage: toUsage(message.usage),
-      timestamp: toTimestamp(message.timestamp),
+      timestamp,
       completedAt: message.completedAt != null || message.completed_at != null
-        ? toTimestamp(message.completedAt ?? message.completed_at)
+        ? toTimestamp(message.completedAt ?? message.completed_at, timestamp)
+        : undefined,
+      durationMs: message.durationMs != null || message.duration_ms != null
+        ? toTimestamp(message.durationMs ?? message.duration_ms)
+        : undefined,
+      isStreaming: typeof (message.isStreaming ?? message.is_streaming) === "boolean"
+        ? Boolean(message.isStreaming ?? message.is_streaming)
+        : undefined,
+      isThinkingStreaming: typeof (message.isThinkingStreaming ?? message.is_thinking_streaming) === "boolean"
+        ? Boolean(message.isThinkingStreaming ?? message.is_thinking_streaming)
         : undefined,
       terminalStatus: normalizeTerminalStatus(message.terminalStatus ?? message.terminal_status),
+      terminationReason: typeof (message.terminationReason ?? message.termination_reason) === "string"
+        ? String(message.terminationReason ?? message.termination_reason)
+        : undefined,
       failureMessage: typeof (message.failureMessage ?? message.failure_message) === "string"
         ? String(message.failureMessage ?? message.failure_message)
+        : undefined,
+      failureRecoverable: typeof (message.failureRecoverable ?? message.failure_recoverable) === "boolean"
+        ? Boolean(message.failureRecoverable ?? message.failure_recoverable)
         : undefined,
       steeredIntoMessageId: message.steered === true && typeof message.steer_target_message_id === "string"
         ? message.steer_target_message_id
         : undefined,
+      ...(role === "system" && transcriptNoticeTitle(message)
+        ? { systemNoticeTitle: transcriptNoticeTitle(message) }
+        : {}),
     };
-  }));
+  });
+
+  const projected: ChatMessage[] = [];
+  const pendingToolResults = new Map<string, {
+    content: string;
+    failed: boolean;
+    timestamp: number;
+    projectedIndex: number;
+  }>();
+  const mergedToolResultIndexes = new Set<number>();
+  for (let index = 0; index < hydrated.length; index += 1) {
+    const source = (messages ?? [])[index] as (BackendTranscriptMessage & Record<string, unknown>) | undefined;
+    const message = hydrated[index];
+    if (!source || !message) continue;
+    const sourceRole = String(source.role ?? "");
+    if (sourceRole === "tool" || sourceRole === "tool_result" || sourceRole === "toolResult") {
+      const callId = String(source.tool_call_id ?? source.toolCallId ?? "").trim();
+      let merged = false;
+      for (let messageIndex = projected.length - 1; messageIndex >= 0 && !merged; messageIndex -= 1) {
+        const candidate = projected[messageIndex];
+        for (const block of candidate?.blocks ?? []) {
+          if (block.type !== "tool_call" || block.record.id !== callId) continue;
+          block.record.status = source.is_error === true || source.isError === true ? "failed" : "success";
+          block.record.outputPreview = message.content;
+          block.record.finishedAt = message.timestamp;
+          merged = true;
+          break;
+        }
+      }
+      if (merged) continue;
+      if (callId) {
+        const projectedIndex = projected.length;
+        const toolName = String(source.name ?? source.toolName ?? "tool").trim() || "tool";
+        message.content = message.content ? `${toolName}: ${message.content}` : `${toolName} completed`;
+        message.role = "system";
+        projected.push(message);
+        pendingToolResults.set(callId, {
+          content: message.content,
+          failed: source.is_error === true || source.isError === true,
+          timestamp: message.timestamp,
+          projectedIndex,
+        });
+        continue;
+      }
+      const toolName = String(source.name ?? source.toolName ?? "tool").trim() || "tool";
+      message.content = message.content ? `${toolName}: ${message.content}` : `${toolName} completed`;
+      message.role = "system";
+    }
+    if (sourceRole === "custom" && source.display === false) continue;
+    for (const block of message.blocks ?? []) {
+      if (block.type !== "tool_call") continue;
+      const pending = pendingToolResults.get(block.record.id);
+      if (!pending) continue;
+      block.record.status = pending.failed ? "failed" : "success";
+      block.record.outputPreview = pending.content;
+      block.record.finishedAt = pending.timestamp;
+      mergedToolResultIndexes.add(pending.projectedIndex);
+      pendingToolResults.delete(block.record.id);
+    }
+    if (
+      !message.content
+      && !(message.blocks?.length)
+      && !(message.terminalStatus === "failed" && message.failureMessage)
+    ) continue;
+    projected.push(message);
+  }
+  const projectedMessages = dedupeHydratedMessages(
+    projected.filter((_message, index) => !mergedToolResultIndexes.has(index)),
+  );
+  return normalizeLiveTranscriptMessages(projectedMessages, Boolean(options.live));
+};

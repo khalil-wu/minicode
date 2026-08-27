@@ -1,6 +1,4 @@
-"""
-模糊文件搜索工具（参考 Claude Code 的 fuzzy search 功能）。
-"""
+"""MiniCode fuzzy file search tool."""
 
 from __future__ import annotations
 

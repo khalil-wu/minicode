@@ -1,5 +1,14 @@
+/*
+ * AgentAvatar — 子任务字形头像。
+ *
+ * data-tone 不是身份色而是**状态色**：agent-view-model.ts 的 glyphToneFor()
+ * 按 AgentDisplayStatus 派发（attention→rose、completed→green、running→blue、
+ * waiting→amber）。因此色值一律引用 --state-* 语义 token，随主题翻转；
+ * 此前的 7 个 hex 字面量脱离设计系统且在浅色主题下不跟随，已移除。
+ * teal / violet 目前无调用点，保留为 AgentGlyphTone 联合类型的完整映射。
+ */
 .mc-agent-avatar {
-  --agent-avatar-color: #66b9e8;
+  --agent-avatar-color: var(--state-info);
   --agent-avatar-size: 30px;
   position: relative;
   display: inline-grid;
@@ -13,12 +22,13 @@
 
 .mc-agent-avatar[data-size="small"] { --agent-avatar-size: 24px; }
 .mc-agent-avatar[data-size="large"] { --agent-avatar-size: 38px; }
-.mc-agent-avatar[data-tone="amber"] { --agent-avatar-color: #ffd338; }
-.mc-agent-avatar[data-tone="blue"] { --agent-avatar-color: #60bdd4; }
-.mc-agent-avatar[data-tone="green"] { --agent-avatar-color: #88d77b; }
-.mc-agent-avatar[data-tone="rose"] { --agent-avatar-color: #f47eb2; }
-.mc-agent-avatar[data-tone="teal"] { --agent-avatar-color: #61d0b1; }
-.mc-agent-avatar[data-tone="violet"] { --agent-avatar-color: #a986ee; }
+/* waiting → 等待人工/排队；running → 进行中；completed → 成功；attention → 需处理。 */
+.mc-agent-avatar[data-tone="amber"]  { --agent-avatar-color: var(--state-warning); }
+.mc-agent-avatar[data-tone="blue"]   { --agent-avatar-color: var(--state-info); }
+.mc-agent-avatar[data-tone="green"]  { --agent-avatar-color: var(--state-success); }
+.mc-agent-avatar[data-tone="rose"]   { --agent-avatar-color: var(--state-danger); }
+.mc-agent-avatar[data-tone="teal"]   { --agent-avatar-color: var(--accent-secondary); }
+.mc-agent-avatar[data-tone="violet"] { --agent-avatar-color: var(--accent-primary); }
 
 .mc-agent-avatar-art {
   display: block;

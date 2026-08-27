@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 
@@ -33,7 +34,13 @@ async def install_skill(skill_manager: Any | None, name: str) -> SkillInstallRes
         )
     install = getattr(skill_manager, "install", None)
     if not callable(install):
-        raise RuntimeError("Skill manager does not support installation")
+        # cc's CLI install path exists for every skill source; a runtime
+        # without install support must fail loudly instead of reporting a
+        # fake success notice.
+        raise RuntimeError(
+            "Skill installation is unavailable in this runtime; "
+            "use the HTTP skill install endpoint instead."
+        )
     result = install(skill_name)
     if hasattr(result, "__await__"):
         await result
@@ -44,26 +51,19 @@ async def install_skill(skill_manager: Any | None, name: str) -> SkillInstallRes
     )
 
 
-def list_skill_marketplace(skill_manager: Any | None) -> list[dict[str, Any]]:
-    from backend.skills.marketplace import CURATED_SKILLS
-
-    installed_names = _installed_skill_names(skill_manager)
-    marketplace_skills: list[dict[str, Any]] = []
-    for name, info in CURATED_SKILLS.items():
-        marketplace_skills.append({
-            "name": name,
-            "title": info.get("title", name),
-            "description": info.get("description", ""),
-            "triggers": info.get("triggers", []),
-            "installed": name in installed_names,
-        })
-    return marketplace_skills
-
-
-def list_commands() -> list[dict[str, Any]]:
+def list_commands(
+    workspace_root: str | Path | None = None,
+    *,
+    resolve_active_workspace: bool = True,
+) -> list[dict[str, Any]]:
     from backend.commands.catalog import get_enabled_composer_command_catalog
 
-    return list(get_enabled_composer_command_catalog())
+    return list(
+        get_enabled_composer_command_catalog(
+            workspace_root,
+            resolve_active_workspace=resolve_active_workspace,
+        )
+    )
 
 
 def _installed_skill_names(skill_manager: Any | None) -> set[str]:

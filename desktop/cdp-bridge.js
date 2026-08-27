@@ -8,7 +8,8 @@ const { sleep, isHttpUrl } = require("./utils");
 
 let appendDesktopLog = () => {};
 const CDP_SCREENSHOT_MAX_DIMENSION = 4096;
-const CDP_SCREENSHOT_MAX_BASE64_CHARS = 32 * 1024 * 1024;
+// MiniCode's API image contract is a 5 MiB base64 payload, not raw bytes.
+const CDP_SCREENSHOT_MAX_BASE64_CHARS = 5 * 1024 * 1024;
 const CDP_TYPE_MAX_CHARS = 200_000;
 
 function init({ logger }) {
@@ -42,6 +43,36 @@ function normalizeLoopbackCdpEndpoint(targetEndpoint) {
   }
   const port = parsed.port || "9222";
   return `http://${host === "[::1]" ? "::1" : host}:${port}`;
+}
+
+function normalizeHost(value) {
+  return String(value || "").replace(/^\[|\]$/g, "").toLowerCase();
+}
+
+function isLoopbackHost(value) {
+  const host = normalizeHost(value);
+  return host === "localhost" || host === "127.0.0.1" || host === "::1";
+}
+
+function validateWebSocketDebuggerUrl(value, discoveryEndpoint) {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw) return "";
+  let parsed;
+  let endpoint;
+  try {
+    parsed = new URL(raw);
+    endpoint = new URL(discoveryEndpoint);
+  } catch {
+    return "";
+  }
+  if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") return "";
+  if (parsed.username || parsed.password || !parsed.hostname) return "";
+  if (!isLoopbackHost(parsed.hostname)) return "";
+  if (normalizeHost(parsed.hostname) !== normalizeHost(endpoint.hostname)) return "";
+  const endpointPort = Number(endpoint.port || 9222);
+  const socketPort = Number(parsed.port || (parsed.protocol === "wss:" ? 443 : 80));
+  if (!Number.isInteger(socketPort) || socketPort !== endpointPort) return "";
+  return parsed.toString();
 }
 
 async function fetchJsonWithTimeout(url, timeoutMs = 1800) {
@@ -82,8 +113,10 @@ async function discoverChromeCdp(targetEndpoint) {
           faviconUrl: typeof target?.faviconUrl === "string" ? target.faviconUrl : "",
           devtoolsFrontendUrl:
             typeof target?.devtoolsFrontendUrl === "string" ? target.devtoolsFrontendUrl : "",
-          webSocketDebuggerUrl:
-            typeof target?.webSocketDebuggerUrl === "string" ? target.webSocketDebuggerUrl : "",
+          webSocketDebuggerUrl: validateWebSocketDebuggerUrl(
+            target?.webSocketDebuggerUrl,
+            endpoint,
+          ),
         }))
       : [];
     return {
@@ -92,8 +125,10 @@ async function discoverChromeCdp(targetEndpoint) {
       browser: typeof version?.Browser === "string" ? version.Browser : "",
       protocolVersion: typeof version?.["Protocol-Version"] === "string" ? version["Protocol-Version"] : "",
       userAgent: typeof version?.["User-Agent"] === "string" ? version["User-Agent"] : "",
-      webSocketDebuggerUrl:
-        typeof version?.webSocketDebuggerUrl === "string" ? version.webSocketDebuggerUrl : "",
+      webSocketDebuggerUrl: validateWebSocketDebuggerUrl(
+        version?.webSocketDebuggerUrl,
+        endpoint,
+      ),
       targets,
     };
   } catch (error) {
@@ -125,6 +160,15 @@ async function readWebSocketEventText(data) {
 }
 
 async function openWebSocketWithTimeout(url, timeoutMs = 5000) {
+  let parsed;
+  try {
+    parsed = new URL(String(url || ""));
+  } catch {
+    throw new Error("Invalid Chrome DevTools WebSocket URL.");
+  }
+  if ((parsed.protocol !== "ws:" && parsed.protocol !== "wss:") || !isLoopbackHost(parsed.hostname)) {
+    throw new Error("Chrome DevTools WebSocket URL must be loopback ws(s).");
+  }
   return await new Promise((resolve, reject) => {
     const socket = new WebSocket(url);
     const timer = setTimeout(() => {
@@ -428,11 +472,21 @@ function isPrivateOrLocalBrowserHost(host) {
   const normalized = String(host || "").replace(/^\[|\]$/g, "").toLowerCase();
   if (!normalized) return false;
   if (normalized === "localhost" || normalized === "localhost.localdomain" || normalized.endsWith(".localhost")) return true;
-  if (normalized === "::1" || normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe80")) return true;
+  if (normalized.startsWith("::ffff:")) return true;
+  if (normalized === "::1" || normalized === "::" || normalized.startsWith("fc") || normalized.startsWith("fd") || /^fe[89ab]/.test(normalized) || normalized.startsWith("ff") || normalized.startsWith("2001:db8:")) return true;
   const ipv4 = parseIpv4Host(normalized);
   if (!ipv4) return false;
   const [a, b] = ipv4;
-  return a === 127 || ipv4.every((part) => part === 0) || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+  return a === 0
+    || a === 10
+    || a === 127
+    || (a === 100 && b >= 64 && b <= 127)
+    || (a === 169 && b === 254)
+    || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && (b === 0 || b === 168))
+    || (a === 198 && (b === 18 || b === 19 || b === 51))
+    || (a === 203 && b === 0)
+    || a >= 224;
 }
 
 function assertBrowserNavigationPolicy(targetUrl, options = {}) {
@@ -450,6 +504,9 @@ function assessBrowserNavigationPolicy(targetUrl) {
     parsed = new URL(normalizedUrl);
   } catch {
     throw new Error("Navigation URL is invalid.");
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error("Navigation URLs must not contain credentials.");
   }
   const requiresPrivateNetworkApproval = isPrivateOrLocalBrowserHost(parsed.hostname);
   return {
@@ -611,4 +668,5 @@ module.exports = {
   clickChromeTarget,
   typeIntoChromeTarget,
   captureScreenshotViaCdp,
+  validateWebSocketDebuggerUrl,
 };

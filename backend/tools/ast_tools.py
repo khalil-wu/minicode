@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.permissions.context import ToolExecutionContext
+from backend.security.sensitive_files import is_sensitive_file
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.tree_sitter_parser import (
     find_definitions as _ts_find_definitions,
@@ -78,11 +79,23 @@ for _ext in ("tsx", "jsx", "mjs", "cjs"):
 
 def _iter_source_files(root: Path) -> list[Path]:
     """递归收集可搜索文件，排除黑名单目录。"""
+    resolved_root = root.resolve()
     result: list[Path] = []
     for item in root.rglob("*"):
+        # Do not inspect symlinked files (or directories reached through a
+        # symlink).  Resolving an attacker-controlled link before the
+        # containment check would disclose source outside the workspace.
+        if item.is_symlink():
+            continue
         if not item.is_file():
             continue
+        try:
+            relative_item = item.resolve().relative_to(resolved_root)
+        except (OSError, ValueError):
+            continue
         if any(part in _IGNORED_DIRS for part in item.parts):
+            continue
+        if is_sensitive_file(relative_item):
             continue
         if item.suffix.lower() in _SEARCHABLE_EXTENSIONS:
             result.append(item)
@@ -90,6 +103,8 @@ def _iter_source_files(root: Path) -> list[Path]:
 
 
 def _read_safe(path: Path) -> str | None:
+    if path.is_symlink() or is_sensitive_file(path):
+        return None
     try:
         return path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
@@ -186,6 +201,11 @@ def _find_references_in_file(path: Path, name: str, include_defs: bool) -> list[
 
     ext = path.suffix.lower().lstrip(".")
     results: list[dict[str, Any]] = []
+    definition_lines = (
+        {int(item["line"]) for item in _find_definitions_in_file(path, name)}
+        if not include_defs
+        else set()
+    )
 
     # For non-Python files, try tree-sitter AST-based reference finding
     if ext != "py":
@@ -194,6 +214,8 @@ def _find_references_in_file(path: Path, name: str, include_defs: bool) -> list[
             ts_refs = _ts_find_references(content, name, ts_lang)
             if ts_refs:
                 for lineno, line_text in ts_refs:
+                    if lineno in definition_lines:
+                        continue
                     results.append({
                         "file": str(path),
                         "line": lineno,
@@ -206,7 +228,7 @@ def _find_references_in_file(path: Path, name: str, include_defs: bool) -> list[
     source_lines = content.splitlines()
 
     for lineno, line in enumerate(source_lines, 1):
-        if pattern.search(line):
+        if lineno not in definition_lines and pattern.search(line):
             results.append({
                 "file": str(path),
                 "line": lineno,
@@ -248,7 +270,7 @@ class GoToDefinitionTool(BaseTool):
         "- You want to understand what a function does by reading its implementation.\n"
         "- You need to navigate to a symbol before modifying it.\n\n"
         "WHEN NOT TO USE:\n"
-        "- The symbol is from an external library not in the workspace (use read_docs instead).\n"
+        "- The symbol is from an external library not in the workspace (use web_fetch or web_search for its docs).\n"
         "- You need all usages, not the definition (use find_references instead).\n"
         "- You are searching for free-text, not a symbol name (use grep_files instead).\n\n"
         "Analysis method:\n"
@@ -260,15 +282,6 @@ class GoToDefinitionTool(BaseTool):
     permission = PermissionLevel.AUTO
     workspace_path_fields = ("directory",)
     allow_workspace_root_path = True
-
-    def get_spec(self) -> Any | None:
-        """Return runtime metadata describing analysis capabilities."""
-        return {
-            "tool_name": self.name,
-            "analysis_backend": "tree-sitter" if _ts_is_available() else "regex",
-            "supported_languages": ["py", "js", "jsx", "ts", "tsx", "go", "rs", "java", "kt", "c", "cpp", "rb"],
-            "tree_sitter_available": _ts_is_available(),
-        }
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -317,11 +330,14 @@ class GoToDefinitionTool(BaseTool):
             all_files = [f for f in all_files if f.suffix.lower() in normalized_exts]
 
         definitions: list[dict[str, Any]] = []
+        files_searched = 0
         for path in all_files:
             defs = _find_definitions_in_file(path, symbol_name)
             definitions.extend(defs)
+            files_searched += 1
             if len(definitions) >= 20:
                 break
+        stopped_early = files_searched < len(all_files)
 
         if not definitions:
             return self._success_result(
@@ -329,7 +345,10 @@ class GoToDefinitionTool(BaseTool):
                 "提示：检查名称拼写，或使用 grep_files 进行宽松搜索。"
             )
 
-        lines = [f"符号 '{symbol_name}' 的定义（共 {len(definitions)} 处）：\n"]
+        header = f"符号 '{symbol_name}' 的定义（共 {len(definitions)} 处"
+        if stopped_early:
+            header += f"，搜索了 {files_searched}/{len(all_files)} 个文件后达到上限，可能还有更多"
+        lines = [header + "）：\n"]
         for i, d in enumerate(definitions, 1):
             rel = Path(d["file"]).relative_to(root) if Path(d["file"]).is_relative_to(root) else Path(d["file"])
             lines.append(f"[{i}] {rel}:{d['line']}")
@@ -378,16 +397,6 @@ class FindReferencesTool(BaseTool):
     allow_workspace_root_path = True
 
     MAX_REFS = 60
-
-    def get_spec(self) -> Any | None:
-        """Return runtime metadata describing analysis capabilities."""
-        return {
-            "tool_name": self.name,
-            "analysis_backend": "tree-sitter" if _ts_is_available() else "regex",
-            "supported_languages": ["py", "js", "jsx", "ts", "tsx", "go", "rs", "java", "kt", "c", "cpp", "rb"],
-            "tree_sitter_available": _ts_is_available(),
-            "max_references": self.MAX_REFS,
-        }
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(

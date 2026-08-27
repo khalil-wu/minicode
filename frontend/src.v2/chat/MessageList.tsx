@@ -3,9 +3,16 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDown } from "lucide-react";
 import { useAppStore } from "../stores";
 import { BrandMark } from "../components/icons";
-import { projectMessagesToTurns, projectRecentMessagesToTurns } from "./chatSurfaceState";
+import { Button } from "../components/Button";
+import {
+  createRecentTurnProjectionCache,
+  projectMessagesToTurns,
+  projectRecentMessagesToTurns,
+} from "./chatSurfaceState";
 import { ChatTurn } from "./components/ChatTurn";
 import { hasVisibleActiveConversation } from "./activeConversation";
+import { summarizeTurnDiff } from "../lib/turn-diff";
+import type { ChatTurnState, DiffCellState } from "./cells/cellTypes";
 
 const RECENT_TURN_WINDOW = 40;
 const MAX_TURNS_WITHOUT_VIRTUALIZATION = 8;
@@ -18,8 +25,9 @@ export const MessageList = () => {
   const messages = useAppStore((s) => s.messages);
   const isStreaming = useAppStore((s) => s.isStreaming);
   const conversationId = useAppStore((s) => s.conversationId);
+  const workingDirectory = useAppStore((s) => s.workingDirectory);
   const conversations = useAppStore((s) => s.conversations);
-  const liveGitChanges = useAppStore((s) => s.gitChanges.live);
+  const turnDiff = useAppStore((s) => conversationId ? s.turnDiffs[conversationId] : undefined);
 
   // Deferred messages: during streaming, use the live messages so the
   // streaming tail updates in real-time. When NOT streaming, defer the
@@ -28,10 +36,11 @@ export const MessageList = () => {
   // at that point. Mirrors cc's usesSyncMessages approach (REPL.tsx:4560).
   const deferredMessages = useDeferredValue(messages);
   const displayMessages = isStreaming ? messages : deferredMessages;
-  const timelineMessages = useMemo(
-    () => displayMessages.filter((message) => message.queueState !== "queued"),
-    [displayMessages],
-  );
+  // Queue filtering is performed by the turn projector while it scans only
+  // the visible recent window.  Filtering the full transcript here made every
+  // streaming token copy an otherwise unchanged multi-thousand-message array.
+  const timelineMessages = displayMessages;
+  const recentProjectionCacheRef = useRef(createRecentTurnProjectionCache());
   const ref = useRef<HTMLDivElement>(null);
   const getScrollElement = useCallback(() => ref.current, []);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -42,7 +51,6 @@ export const MessageList = () => {
   const lastRenderedMessageIdRef = useRef<string | null>(messages.at(-1)?.id ?? null);
   const lastRenderedMessageCountRef = useRef(messages.length);
   const userScrollIntentRef = useRef(0);
-  const [faded, setFaded] = useState(false);
   const [showAllHistory, setShowAllHistory] = useState(false);
   const [isScrollbarActive, setIsScrollbarActive] = useState(false);
   const scrollbarFadeTimerRef = useRef<number | null>(null);
@@ -55,14 +63,24 @@ export const MessageList = () => {
       ? { turns: [], hiddenTurnCount: 0, totalTurnCount: 0 }
       : showAllHistory
         ? {
-            turns: projectMessagesToTurns(timelineMessages, isStreaming),
+            turns: projectMessagesToTurns(timelineMessages, isStreaming, workingDirectory),
             hiddenTurnCount: 0,
             totalTurnCount: 0,
           }
-        : projectRecentMessagesToTurns(timelineMessages, isStreaming, RECENT_TURN_WINDOW),
-    [isStreaming, showAllHistory, shouldShowMessages, timelineMessages],
+        : projectRecentMessagesToTurns(
+            timelineMessages,
+            isStreaming,
+            RECENT_TURN_WINDOW,
+            recentProjectionCacheRef.current,
+            conversationId ?? "",
+            workingDirectory,
+          ),
+    [conversationId, isStreaming, showAllHistory, shouldShowMessages, timelineMessages, workingDirectory],
   );
-  const turns = projectedTurns.turns;
+  const turns = useMemo(
+    () => applyAuthoritativeTurnDiff(projectedTurns.turns, turnDiff),
+    [projectedTurns.turns, turnDiff],
+  );
   const hiddenTurnCount = projectedTurns.hiddenTurnCount;
   // Keep the newest turn outside historical virtualization. The current reply
   // then streams without invalidating row measurements, and a newly restored
@@ -204,26 +222,19 @@ export const MessageList = () => {
   useLayoutEffect(() => {
     if (prevConvId.current !== conversationId) {
       prevConvId.current = conversationId;
-      setFaded(true);
       setShowAllHistory(false);
       isNearBottom.current = true;
       setIsFollowing(true);
       setShowScrollBtn(false);
       lastRenderedMessageIdRef.current = messages.at(-1)?.id ?? null;
       lastRenderedMessageCountRef.current = messages.length;
-    }
-  }, [conversationId, messages]);
-
-  useEffect(() => {
-    if (faded) {
-      const t = setTimeout(() => {
-        setFaded(false);
+      const frame = requestAnimationFrame(() => {
         const el = ref.current;
         if (el) setScrollTop(el, el.scrollHeight);
-      }, 60);
-      return () => clearTimeout(t);
+      });
+      return () => cancelAnimationFrame(frame);
     }
-  }, [faded, setScrollTop]);
+  }, [conversationId, messages, setScrollTop]);
 
   const scrollToBottom = useCallback(() => {
     const el = ref.current;
@@ -334,7 +345,7 @@ export const MessageList = () => {
       <div
         ref={ref}
         data-testid="message-list-scroll"
-        className={`message-list-scroll chat-scrollbar-auto-hide${isScrollbarActive ? " is-scrolling" : ""} flex-1 min-h-0 overflow-y-auto flex flex-col transition-opacity duration-[120ms] ease-out`}
+        className={`message-list-scroll chat-scrollbar-auto-hide${isScrollbarActive ? " is-scrolling" : ""} flex-1 min-h-0 overflow-y-auto flex flex-col`}
         role="log"
         aria-label="会话历史"
         tabIndex={0}
@@ -346,8 +357,8 @@ export const MessageList = () => {
           flexDirection: "column",
           gap: "var(--space-turn-gap)",
           overscrollBehavior: "contain",
-          scrollbarGutter: "stable",
-          opacity: faded ? 0 : 1,
+          scrollbarGutter: "auto",
+          opacity: 1,
         }}
       >
         <div
@@ -364,21 +375,14 @@ export const MessageList = () => {
           ) : (
             <>
             {hiddenTurnCount > 0 && (
-              <button
-                type="button"
+              <Button
+                variant="secondary"
+                size="sm"
+                className="self-center"
                 onClick={() => setShowAllHistory(true)}
-                className="self-center border rounded-md px-3 py-[7px] cursor-pointer font-[650]"
-                style={{
-                  borderColor: "var(--border-subtle)",
-                  borderRadius: "var(--radius-sm, 6px)",
-                  background: "var(--surface-page)",
-                  color: "var(--text-secondary)",
-                  fontFamily: "var(--font-ui)",
-                  fontSize: "var(--text-xs)",
-                }}
               >
-                Show earlier messages ({hiddenTurnCount})
-              </button>
+                显示更早的消息（{hiddenTurnCount}）
+              </Button>
             )}
             {shouldVirtualize ? (
               <div
@@ -422,13 +426,6 @@ export const MessageList = () => {
               return (
                 <div
                   key={turn.id}
-                  className={
-                    i === turns.length - 1
-                      ? "anim-message-appear"
-                      : i >= turns.length - 3
-                        ? "message-enter"
-                        : undefined
-                  }
                   style={{
                     contentVisibility: isRecent ? "visible" : "auto",
                     containIntrinsicSize: isVeryOld ? "auto 200px" : "auto 120px",
@@ -440,14 +437,10 @@ export const MessageList = () => {
             })}
             {tailTurn && (
               <div
-                className={liveTurn ? "anim-message-appear" : undefined}
                 data-testid={liveTurn ? "streaming-turn-tail" : "latest-turn-tail"}
                 style={{ flex: "0 0 auto" }}
               >
-                <ChatTurn
-                  turn={tailTurn}
-                  liveGitChanges={liveTurn ? liveGitChanges : undefined}
-                />
+                <ChatTurn turn={tailTurn} />
               </div>
             )}
             </>
@@ -485,17 +478,58 @@ export const MessageList = () => {
   );
 };
 
-const EmptyState = () => {
-  return (
-    <div className="workbench-empty-state">
-      <section className="workbench-empty-hero">
-        <div className="workbench-empty-brand">
-          <div className="workbench-empty-mark" aria-hidden="true">
-            <BrandMark size={22} />
-          </div>
-          <h1 className="workbench-empty-title">我们应该在 MiniCode 中构建什么？</h1>
+const EmptyState = () => (
+  <div className="workbench-empty-state">
+    <section className="workbench-empty-hero">
+      <div className="workbench-empty-brand">
+        <div className="workbench-empty-mark" aria-hidden="true">
+          <BrandMark size={22} />
         </div>
-      </section>
-    </div>
-  );
+        <h1 className="workbench-empty-title">今天想构建什么？</h1>
+      </div>
+    </section>
+  </div>
+);
+
+const applyAuthoritativeTurnDiff = (
+  turns: ChatTurnState[],
+  turnDiff: ReturnType<typeof useAppStore.getState>["turnDiffs"][string] | undefined,
+): ChatTurnState[] => {
+  const summary = summarizeTurnDiff(turnDiff);
+  if (!summary || !turnDiff?.turnId) return turns;
+  const index = turns.findIndex((turn) => turn.turnId === turnDiff.turnId);
+  if (index < 0) return turns;
+  const turn = turns[index];
+  const fallback = turn.committedCells.find((cell): cell is DiffCellState => cell.kind === "diff");
+  const authoritative: DiffCellState = {
+    kind: "diff",
+    id: `turn-diff-${turnDiff.turnId}`,
+    status: "updated",
+    files: summary.files.map((file) => ({
+      path: file.path,
+      oldPath: file.oldPath,
+      patch: file.patch,
+      additions: file.additions,
+      deletions: file.deletions,
+      changeType: file.oldPath && file.oldPath !== file.path ? "renamed" : "updated",
+      isLarge: file.additions + file.deletions > 200,
+    })),
+    summary: {
+      added: summary.additions,
+      deleted: summary.deletions,
+      modifiedFiles: summary.files.length,
+    },
+    toolCallCount: fallback?.toolCallCount,
+    collapsed: false,
+    createdAt: fallback?.createdAt ?? turn.startedAt,
+  };
+  const next = turns.slice();
+  next[index] = {
+    ...turn,
+    committedCells: [
+      ...turn.committedCells.filter((cell) => cell.kind !== "diff"),
+      authoritative,
+    ],
+  };
+  return next;
 };

@@ -6,17 +6,26 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
+from backend.agent.parent_notification_outbox import (
+    ParentNotification,
+    claim_parent_notification_wake,
+    load_parent_outbox,
+    release_parent_notification_wake,
+    subscribe_parent_notification_enqueued,
+)
+from backend.agent.message import UserCommand
 from backend.agent.turn_input import TurnInput, TurnInputQueue
 from backend.async_cleanup import (
     CANCELLATION_DRAIN_TIMEOUT_SECONDS,
     await_with_deadline,
     cancel_and_drain,
+    cancel_and_drain_receipt,
+    cancel_and_drain_to_completion,
 )
 from backend.conversations.repository import CONVERSATION_DATA_DIR
 from backend.ws.durable_user_queue import DurableUserMessageQueue
 
 logger = logging.getLogger(__name__)
-MAX_QUEUED_USER_MESSAGES_PER_CONVERSATION = 20
 
 
 class SessionRunManager:
@@ -29,12 +38,29 @@ class SessionRunManager:
 
     def __init__(self, session: Any) -> None:
         self._session = session
-        session_id = str(getattr(session, "session_id", "") or "").strip()
-        queue_store = (
-            DurableUserMessageQueue(
-                session_id=session_id,
-                root_dir=Path(CONVERSATION_DATA_DIR).parent / "user-message-queue",
+        # Normalize legacy session doubles once at the composition boundary.
+        # Runtime access below uses the explicit session properties only.
+        if not hasattr(session, "conversation_run_tasks"):
+            session.conversation_run_tasks = getattr(
+                session, "_conversation_run_tasks", {}
             )
+        if not hasattr(session, "conversation_run_task_ids"):
+            session.conversation_run_task_ids = getattr(
+                session, "_conversation_run_task_ids", {}
+            )
+        if not hasattr(session, "conversation_run_cancel_events"):
+            session.conversation_run_cancel_events = getattr(
+                session, "_conversation_run_cancel_events", {}
+            )
+        session_id = str(getattr(session, "session_id", "") or "").strip()
+        # The session repository owns the active conversation storage root.
+        # Derive the durable queue beside that repository so a session cannot
+        # load commands from a different runtime or test data root.
+        conversation_repo = getattr(session, "conversation_repo", None)
+        conversation_dir = getattr(conversation_repo, "_base_dir", None)
+        queue_root = Path(conversation_dir or CONVERSATION_DATA_DIR).parent / "user-message-queue"
+        queue_store = (
+            DurableUserMessageQueue(session_id=session_id, root_dir=queue_root)
             if session_id
             else None
         )
@@ -51,11 +77,36 @@ class SessionRunManager:
         self._queue_steering: set[str] = set()
         self._turn_input_queues: dict[str, TurnInputQueue] = {}
         self._terminal_statuses: dict[str, str] = {}
-        self._delivery_complete: set[str] = set()
+        self._delivery_complete: set[tuple[str, str]] = set()
+        self._watched_notification_conversations: set[str] = set()
+        self._notification_request_generation: dict[str, int] = {}
+        self._notification_attempt_generation: dict[str, int] = {}
+        self._notification_wake_tasks: dict[str, asyncio.Task[None]] = {}
+        self._retired_notification_wake_tasks: set[asyncio.Task[Any]] = set()
+        self._notification_run_task_ids: dict[str, str] = {}
+        self._notification_wakes_closed = False
+        self._notification_wake_owner_token = f"{session_id}:{id(self)}"
+        try:
+            self._notification_loop: asyncio.AbstractEventLoop | None = (
+                asyncio.get_running_loop()
+            )
+        except RuntimeError:
+            self._notification_loop = None
+        self._unsubscribe_parent_notifications = (
+            subscribe_parent_notification_enqueued(
+                self._on_parent_notification_enqueued
+            )
+        )
 
     @property
     def durable_queue(self) -> DurableUserMessageQueue | None:
         return self._durable_queue
+
+    def close_durable_queue(self) -> None:
+        queue = self._durable_queue
+        if queue is None:
+            return
+        queue.close()
 
     def _persist_user_queues(self) -> None:
         if self._durable_queue is None:
@@ -72,23 +123,71 @@ class SessionRunManager:
         if conversation_id and status:
             self._terminal_statuses[conversation_id] = status
 
-    def mark_delivery_complete(self, conversation_id: str) -> None:
+    @staticmethod
+    def _delivery_key(conversation_id: str, run_id: str = "") -> tuple[str, str]:
+        return (
+            str(conversation_id or "").strip(),
+            str(run_id or "").strip(),
+        )
+
+    def mark_delivery_complete(self, conversation_id: str, run_id: str = "") -> None:
         conversation_id = str(conversation_id or "").strip()
         if conversation_id:
-            self._delivery_complete.add(conversation_id)
+            self._delivery_complete.add(self._delivery_key(conversation_id, run_id))
 
-    def is_delivery_complete(self, conversation_id: str) -> bool:
-        return str(conversation_id or "").strip() in self._delivery_complete
+    def is_delivery_complete(self, conversation_id: str, run_id: str = "") -> bool:
+        conversation_id, run_id = self._delivery_key(conversation_id, run_id)
+        if not conversation_id:
+            return False
+        if run_id:
+            # New runners fence terminal delivery to the concrete managed-task
+            # id.  Legacy/integration runners can only publish the
+            # conversation-scoped marker; registration clears every older
+            # marker for the conversation, so that marker can only belong to
+            # the currently registered run and is safe to accept here.
+            return (
+                (conversation_id, run_id) in self._delivery_complete
+                or (conversation_id, "") in self._delivery_complete
+            )
+        # Conversation-level callers are asking whether the current/most
+        # recent run crossed its terminal delivery fence.  A run-scoped marker
+        # must therefore be visible to them as well; otherwise cleanup and
+        # reconnect code incorrectly keep the conversation busy after DONE.
+        return any(
+            owner == conversation_id
+            for owner, _owned_run_id in self._delivery_complete
+        )
 
     def enqueue_user_message(self, conversation_id: str, command: Any) -> int:
         queue = self._user_message_queues.setdefault(conversation_id, deque())
-        if len(queue) >= MAX_QUEUED_USER_MESSAGES_PER_CONVERSATION:
-            return 0
         queue.append(command)
         self._persist_user_queues()
         return len(queue)
 
     def dequeue_user_message(self, conversation_id: str) -> Any | None:
+        if self._durable_queue is not None:
+            local_commands = list(self._user_message_queues.get(conversation_id) or ())
+            claimed = self._durable_queue.claim_user_message(conversation_id)
+            remaining = self._durable_queue.pending_user_messages(conversation_id)
+            command = next(
+                (candidate for candidate in local_commands if candidate == claimed),
+                claimed,
+            )
+            remaining = [
+                next(
+                    (candidate for candidate in local_commands if candidate == persisted),
+                    persisted,
+                )
+                for persisted in remaining
+            ]
+            if remaining:
+                self._user_message_queues[conversation_id] = deque(remaining)
+            else:
+                self._user_message_queues.pop(conversation_id, None)
+            if command is None:
+                return None
+            self._inflight_user_messages[conversation_id] = command
+            return command
         queue = self._user_message_queues.get(conversation_id)
         if not queue:
             return None
@@ -102,6 +201,30 @@ class SessionRunManager:
     def finish_user_message_dispatch(self, conversation_id: str, command: Any, *, succeeded: bool) -> None:
         inflight = self._inflight_user_messages.get(conversation_id)
         if inflight is not command:
+            return
+        if self._durable_queue is not None:
+            if not isinstance(command, UserCommand):
+                return
+            local_commands = list(self._user_message_queues.get(conversation_id) or ())
+            if not self._durable_queue.settle_user_message(
+                conversation_id,
+                command,
+                succeeded=succeeded,
+            ):
+                return
+            self._inflight_user_messages.pop(conversation_id, None)
+            remaining = self._durable_queue.pending_user_messages(conversation_id)
+            remaining = [
+                next(
+                    (candidate for candidate in local_commands if candidate == persisted),
+                    persisted,
+                )
+                for persisted in remaining
+            ]
+            if remaining:
+                self._user_message_queues[conversation_id] = deque(remaining)
+            else:
+                self._user_message_queues.pop(conversation_id, None)
             return
         self._inflight_user_messages.pop(conversation_id, None)
         if not succeeded:
@@ -229,6 +352,7 @@ class SessionRunManager:
         return queue
 
     def turn_input_queue(self, conversation_id: str) -> TurnInputQueue:
+        self.watch_conversation_notifications(conversation_id)
         queue = self._turn_input_queues.get(conversation_id)
         if queue is None or queue.sealed:
             queue = TurnInputQueue()
@@ -250,6 +374,35 @@ class SessionRunManager:
             mode="steer",
             target_message_id=target_message_id,
         )
+
+    def enqueue_user_message_as_steer(
+        self,
+        conversation_id: str,
+        command: Any,
+        *,
+        target_message_id: str = "",
+    ) -> TurnInput | None:
+        """Atomically accept a newly arrived prompt into the active turn.
+
+        This is the direct-prompt counterpart to promoting an item that is
+        already in the follow-up queue. The original command is made durable
+        only after the turn-local queue accepts it, so callers can safely fall
+        back to normal FIFO enqueue when the current turn has crossed its final
+        boundary.
+        """
+        queue = self._turn_input_queues.get(conversation_id)
+        if queue is None or queue.sealed:
+            return None
+        item = queue.enqueue_command(
+            command,
+            mode="steer",
+            target_message_id=target_message_id,
+        )
+        if item is None:
+            return None
+        self._durable_turn_inputs.setdefault(conversation_id, []).append(command)
+        self._persist_user_queues()
+        return item
 
     def pending_turn_input_snapshot(self) -> list[dict[str, Any]]:
         """Return non-destructive turn-local input state for session restore."""
@@ -331,6 +484,31 @@ class SessionRunManager:
             queue.seal_and_drain_commands()
         self._persist_user_queues()
 
+    def forget_conversation(self, conversation_id: str) -> None:
+        """Drop all stopped runtime bookkeeping for a deleted conversation."""
+        owner = str(conversation_id or "").strip()
+        if not owner:
+            return
+        self.clear_user_message_queue(owner)
+        self._delivery_complete = {
+            key for key in self._delivery_complete if key[0] != owner
+        }
+        self._terminal_statuses.pop(owner, None)
+        self.run_tasks.pop(owner, None)
+        self.run_task_ids.pop(owner, None)
+        self.cancel_events.pop(owner, None)
+        self._watched_notification_conversations.discard(owner)
+        self._notification_request_generation.pop(owner, None)
+        self._notification_attempt_generation.pop(owner, None)
+        self._notification_run_task_ids.pop(owner, None)
+        release_parent_notification_wake(
+            owner,
+            self._notification_wake_owner_token,
+        )
+        wake_task = self._notification_wake_tasks.pop(owner, None)
+        if wake_task is not None and not wake_task.done():
+            wake_task.cancel()
+
     def clear_all_user_message_queues(self) -> None:
         self._user_message_queues.clear()
         self._queue_dispatching.clear()
@@ -369,19 +547,15 @@ class SessionRunManager:
 
     @property
     def run_tasks(self) -> dict[str, asyncio.Task[Any]]:
-        return getattr(self._session, "_conversation_run_tasks")
+        return self._session.conversation_run_tasks
 
     @property
     def run_task_ids(self) -> dict[str, str]:
-        return getattr(self._session, "_conversation_run_task_ids")
+        return self._session.conversation_run_task_ids
 
     @property
     def cancel_events(self) -> dict[str, asyncio.Event]:
-        return getattr(self._session, "_conversation_run_cancel_events")
-
-    @property
-    def locks(self) -> dict[str, asyncio.Lock]:
-        return getattr(self._session, "_conversation_run_locks")
+        return self._session.conversation_run_cancel_events
 
     def has_active_run(self) -> bool:
         active = getattr(self._session, "_active_run_task", None)
@@ -390,7 +564,9 @@ class SessionRunManager:
         return bool(self.run_tasks)
 
     def running_task_for(self, conversation_id: str) -> asyncio.Task[Any] | None:
-        if conversation_id in self._delivery_complete and not self._user_message_queues.get(conversation_id):
+        if self.is_delivery_complete(conversation_id) and not self._user_message_queues.get(
+            conversation_id
+        ):
             return None
         task = self.run_tasks.get(conversation_id)
         # Registration, not Task.done(), owns the conversation until cleanup.
@@ -408,7 +584,27 @@ class SessionRunManager:
         active_conversation_id: str | None,
     ) -> None:
         if conversation_id:
-            self._delivery_complete.discard(conversation_id)
+            # One conversation owns at most one live run. Overwriting the three
+            # handles while the previous task is unfinished orphaned it: cancel()
+            # and _cancel_run_tree resolve a conversation through these dicts
+            # only, so Stop and interrupt could no longer reach the first run
+            # while both loops streamed into the same conversation. The busy /
+            # queue check upstream does not cover every entrypoint (slash
+            # dispatch runs before it), so the ownership boundary refuses here.
+            previous = self.run_tasks.get(conversation_id)
+            if previous is not None and previous is not task and not previous.done():
+                raise RuntimeError(
+                    "This conversation already has a live agent run "
+                    f"({self.run_task_ids.get(conversation_id) or 'unknown'}); "
+                    "queue the message or cancel the active run first."
+                )
+            self.watch_conversation_notifications(conversation_id)
+            # A new concrete run starts a fresh delivery fence. Retain the
+            # previous marker after cleanup for reconnect diagnostics, but do
+            # not let it satisfy this conversation's new run.
+            self._delivery_complete = {
+                key for key in self._delivery_complete if key[0] != conversation_id
+            }
             self.run_tasks[conversation_id] = task
             self.run_task_ids[conversation_id] = task_id
             self.cancel_events[conversation_id] = cancel_event
@@ -418,6 +614,308 @@ class SessionRunManager:
             self._session._active_run_cancel_event = cancel_event
         self._session._schedule_task_runtime_update()
 
+    def watch_conversation_notifications(self, conversation_id: str) -> None:
+        """Bind one conversation to this session's CC-style queue subscriber."""
+
+        owner = str(conversation_id or "").strip()
+        if not owner or self._notification_wakes_closed:
+            return
+        if self._notification_loop is None:
+            try:
+                self._notification_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+        is_new = owner not in self._watched_notification_conversations
+        self._watched_notification_conversations.add(owner)
+        if is_new:
+            # A durable item may predate this process/session, so first bind is
+            # also a replay recheck rather than waiting for a fresh enqueue.
+            self.request_parent_notification_wake(owner)
+
+    def recheck_watched_parent_notifications(self) -> None:
+        """Recheck durable state after reconnect without trusting old signals."""
+
+        for conversation_id in tuple(self._watched_notification_conversations):
+            self.request_parent_notification_wake(conversation_id)
+
+    def request_parent_notification_wake(self, conversation_id: str) -> None:
+        owner = str(conversation_id or "").strip()
+        loop = self._notification_loop
+        if (
+            not owner
+            or owner not in self._watched_notification_conversations
+            or self._notification_wakes_closed
+            or loop is None
+            or loop.is_closed()
+        ):
+            return
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is loop:
+            self._request_parent_notification_wake_on_loop(owner)
+        else:
+            loop.call_soon_threadsafe(
+                self._request_parent_notification_wake_on_loop,
+                owner,
+            )
+
+    def recheck_parent_notification_wake(self, conversation_id: str) -> None:
+        """Retry a previously signalled wake after a busy/user-queue fence."""
+
+        owner = str(conversation_id or "").strip()
+        loop = self._notification_loop
+        if (
+            not owner
+            or owner not in self._watched_notification_conversations
+            or self._notification_wakes_closed
+            or loop is None
+            or loop.is_closed()
+        ):
+            return
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is loop:
+            self._schedule_parent_notification_wake(owner)
+        else:
+            loop.call_soon_threadsafe(
+                self._schedule_parent_notification_wake,
+                owner,
+            )
+
+    def _on_parent_notification_enqueued(
+        self,
+        notification: ParentNotification,
+    ) -> None:
+        # Enqueue can complete in a background hook/subagent thread.  Never
+        # mutate asyncio/session state from that producer; hand the durable
+        # signal back to the WebSocket session's event loop.
+        conversation_id = str(notification.conversation_id or "").strip()
+        if self._notification_owned_by_other_live_session(
+            str(notification.session_id or "").strip()
+        ):
+            return
+        self.request_parent_notification_wake(conversation_id)
+
+    def _notification_owned_by_other_live_session(
+        self,
+        notification_session_id: str,
+    ) -> bool:
+        owner_session_id = str(notification_session_id or "").strip()
+        current_session_id = str(getattr(self._session, "session_id", "") or "").strip()
+        if not owner_session_id or owner_session_id == current_session_id:
+            return False
+        ws_manager = getattr(self._session, "_ws_manager", None)
+        get_session = getattr(ws_manager, "get_session", None)
+        owner_session = get_session(owner_session_id) if callable(get_session) else None
+        return bool(
+            owner_session is not None
+            and owner_session is not self._session
+            and not getattr(
+                getattr(owner_session, "_run_manager", None),
+                "_notification_wakes_closed",
+                True,
+            )
+        )
+
+    def _request_parent_notification_wake_on_loop(
+        self,
+        conversation_id: str,
+    ) -> None:
+        if (
+            self._notification_wakes_closed
+            or conversation_id not in self._watched_notification_conversations
+        ):
+            return
+        self._notification_request_generation[conversation_id] = (
+            self._notification_request_generation.get(conversation_id, 0) + 1
+        )
+        self._schedule_parent_notification_wake(conversation_id)
+
+    def _schedule_parent_notification_wake(self, conversation_id: str) -> None:
+        if self._notification_wakes_closed:
+            return
+        requested = self._notification_request_generation.get(conversation_id, 0)
+        attempted = self._notification_attempt_generation.get(conversation_id, 0)
+        if requested <= attempted:
+            return
+        existing = self._notification_wake_tasks.get(conversation_id)
+        if existing is not None and not existing.done():
+            return
+        task = asyncio.create_task(
+            self._dispatch_parent_notification_wake(conversation_id),
+            name=f"parent-notification-wake:{conversation_id}",
+        )
+        self._notification_wake_tasks[conversation_id] = task
+
+        def _discard(completed: asyncio.Task[None]) -> None:
+            if self._notification_wake_tasks.get(conversation_id) is completed:
+                self._notification_wake_tasks.pop(conversation_id, None)
+            if completed.cancelled():
+                return
+            try:
+                completed.result()
+            except Exception:
+                logger.exception(
+                    "Parent notification wake failed for conversation %s",
+                    conversation_id,
+                )
+
+        task.add_done_callback(_discard)
+
+    def _has_replayable_parent_notification(self, conversation_id: str) -> bool:
+        try:
+            notifications = load_parent_outbox(
+                conversation_id=conversation_id,
+            ).replayable()
+        except Exception:
+            logger.exception(
+                "Failed to inspect parent notifications for conversation %s",
+                conversation_id,
+            )
+            return False
+        return any(
+            str(item.status or "pending") in {"pending", "delivered", "failed"}
+            and not self._notification_owned_by_other_live_session(
+                str(item.session_id or "")
+            )
+            for item in notifications
+        )
+
+    async def _dispatch_parent_notification_wake(
+        self,
+        conversation_id: str,
+    ) -> None:
+        # Match CC's queue processor: yield once so already-enqueued human input
+        # can take its higher-priority path before a later task notification.
+        await asyncio.sleep(0)
+        lifecycle_lock = getattr(self._session, "_conversation_lifecycle_lock", None)
+        if not isinstance(lifecycle_lock, asyncio.Lock):
+            return
+        async with lifecycle_lock:
+            requested = self._notification_request_generation.get(
+                conversation_id,
+                0,
+            )
+            attempted = self._notification_attempt_generation.get(
+                conversation_id,
+                0,
+            )
+            if (
+                self._notification_wakes_closed
+                or requested <= attempted
+                or conversation_id not in self._watched_notification_conversations
+            ):
+                return
+            # Registration is the ownership fence until cleanup.  Do not use
+            # Task.done(): the completed task may still be committing DONE,
+            # transcript and turn-input state.
+            if (
+                conversation_id in self.run_tasks
+                or conversation_id in self._queue_dispatching
+                or conversation_id in self._queue_steering
+                or bool(self._user_message_queues.get(conversation_id))
+                or conversation_id in self._inflight_user_messages
+            ):
+                return
+
+            if not self._has_replayable_parent_notification(conversation_id):
+                self._notification_attempt_generation[conversation_id] = requested
+                return
+            if not claim_parent_notification_wake(
+                conversation_id,
+                self._notification_wake_owner_token,
+            ):
+                # Another live session has the QueryGuard-style reservation.
+                # Its run or cleanup owns the next recheck.
+                self._notification_attempt_generation[conversation_id] = requested
+                return
+            conversation_repo = getattr(self._session, "conversation_repo", None)
+            get_conversation = getattr(conversation_repo, "get_conversation", None)
+            conversation = (
+                get_conversation(conversation_id)
+                if callable(get_conversation)
+                else None
+            )
+            if (
+                conversation is None
+                or bool(getattr(conversation, "archived", False))
+                or str(getattr(conversation, "conversation_type", "main"))
+                != "main"
+            ):
+                self._notification_attempt_generation[conversation_id] = requested
+                release_parent_notification_wake(
+                    conversation_id,
+                    self._notification_wake_owner_token,
+                )
+                return
+            starter = getattr(self._session, "_start_agent_run", None)
+            if not callable(starter):
+                self._notification_attempt_generation[conversation_id] = requested
+                release_parent_notification_wake(
+                    conversation_id,
+                    self._notification_wake_owner_token,
+                )
+                return
+            try:
+                task_id = await starter(
+                    "",
+                    attachments=[],
+                    conversation_id=conversation_id,
+                    metadata={
+                        "_parent_notification_only": True,
+                        "query_source": "task-notification",
+                        "notification_wake_generation": requested,
+                    },
+                )
+            except BaseException:
+                self._notification_attempt_generation[conversation_id] = requested
+                release_parent_notification_wake(
+                    conversation_id,
+                    self._notification_wake_owner_token,
+                )
+                raise
+            self._notification_attempt_generation[conversation_id] = requested
+            self._notification_run_task_ids[conversation_id] = str(task_id)
+
+    def stop_notification_wake_intake(self) -> None:
+        """Synchronously stop new CC-style queue signals during teardown."""
+
+        if self._notification_wakes_closed:
+            return
+        self._notification_wakes_closed = True
+        unsubscribe = self._unsubscribe_parent_notifications
+        self._unsubscribe_parent_notifications = None
+        if callable(unsubscribe):
+            unsubscribe()
+
+    async def shutdown_notification_wakes(self) -> None:
+        """Detach the process signal and drain session-owned wake tasks."""
+
+        self.stop_notification_wake_intake()
+        tasks = [
+            task
+            for task in self._notification_wake_tasks.values()
+            if not task.done() and task is not asyncio.current_task()
+        ]
+        self._notification_wake_tasks.clear()
+        for conversation_id in tuple(self._notification_run_task_ids):
+            release_parent_notification_wake(
+                conversation_id,
+                self._notification_wake_owner_token,
+            )
+        self._notification_run_task_ids.clear()
+        if tasks:
+            await cancel_and_drain_receipt(
+                tasks,
+                timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                label="parent notification wake shutdown",
+                owner=self._retired_notification_wake_tasks,
+            )
+
     def cleanup(
         self,
         *,
@@ -426,6 +924,12 @@ class SessionRunManager:
         task_id: str,
         cancel_event: asyncio.Event,
     ) -> None:
+        if self._notification_run_task_ids.get(conversation_id) == task_id:
+            self._notification_run_task_ids.pop(conversation_id, None)
+            release_parent_notification_wake(
+                conversation_id,
+                self._notification_wake_owner_token,
+            )
         registered_task = self.run_tasks.get(conversation_id) if conversation_id else None
         newer_run_registered = registered_task is not None and registered_task is not task
         if conversation_id and registered_task is task:
@@ -434,8 +938,6 @@ class SessionRunManager:
             self.run_task_ids.pop(conversation_id, None)
         if conversation_id and self.cancel_events.get(conversation_id) is cancel_event:
             self.cancel_events.pop(conversation_id, None)
-        if conversation_id and not newer_run_registered:
-            self.locks.pop(conversation_id, None)
         if getattr(self._session, "_active_run_task", None) is task:
             self._session._active_run_task = None
         if getattr(self._session, "_active_task_id", None) == task_id:
@@ -445,9 +947,6 @@ class SessionRunManager:
         if not newer_run_registered:
             self._seal_turn_input_queue(conversation_id)
             self._terminal_statuses.pop(conversation_id, "")
-            # Keep the terminal-delivery fence until the next run registers.
-            # Interrupt handling may finish after task cleanup and still needs
-            # to know that DONE was already emitted.
         # The canonical agent.run.completed event is emitted by the agent loop.
         # Cleanup only releases manager bookkeeping; recording another terminal
         # event here produced a second, run-id-less completion after DONE.
@@ -471,14 +970,11 @@ class SessionRunManager:
             task_id = self.run_task_ids.get(cid)
             if task_id:
                 seen_task_ids.add(str(task_id))
-                self._cancel_run_tree(str(task_id), reason=reason)
+                await self._cancel_run_tree(str(task_id), reason=reason)
 
             cancel_event = self.cancel_events.get(cid)
             if isinstance(cancel_event, asyncio.Event):
                 cancel_event.set()
-            if cid:
-                self.mark_terminal_status(cid, "cancelled")
-
             task = self.run_tasks.get(cid)
             if task is not None:
                 seen_tasks.add(task)
@@ -499,14 +995,7 @@ class SessionRunManager:
                 tasks_to_wait.add(active_task)
                 cancelled_any = True
             if active_task_id and active_task_id not in seen_task_ids:
-                self._cancel_run_tree(str(active_task_id), reason=reason)
-            self._session._active_run_task = None
-            self._session._active_task_id = None
-            self._session._active_run_cancel_event = None
-        elif active_task in seen_tasks:
-            self._session._active_run_task = None
-            self._session._active_task_id = None
-            self._session._active_run_cancel_event = None
+                await self._cancel_run_tree(str(active_task_id), reason=reason)
 
         await await_with_deadline(
             self._session._cancel_pending_approvals(
@@ -515,11 +1004,12 @@ class SessionRunManager:
             ),
             timeout=0.25,
             label="pending approval cancellation",
+            owner=getattr(self._session, "_cleanup_tasks", None),
         )
         current = asyncio.current_task()
         waitable = [task for task in tasks_to_wait if task is not current and not task.done()]
         if waitable:
-            await cancel_and_drain(
+            await cancel_and_drain_to_completion(
                 waitable,
                 timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
                 label="agent run cancellation",
@@ -527,14 +1017,22 @@ class SessionRunManager:
         self._session._schedule_task_runtime_update()
         return cancelled_any
 
-    def _cancel_run_tree(self, task_id: str, *, reason: str) -> None:
+    async def _cancel_run_tree(self, task_id: str, *, reason: str) -> None:
+        from backend.agent.runtime import default_runtime
+
         try:
-            self._session._cancel_child_subagents_for_task_id(task_id, reason=reason)
-            self._session.task_manager.cancel(task_id)
+            # The runtime owns the child stop: it cancels, drains within the
+            # cancellation deadline and retains cleanup ownership of whatever
+            # survived. A failure here means children may still be running, so
+            # it must be visible rather than reduced to a debug line.
+            await default_runtime().stop_subagent_tasks_for_task(task_id, reason=reason)
         except Exception:
-            logger.debug(
-                "Failed to cancel run tree task_id=%s session=%s",
+            logger.exception(
+                "Failed to stop child subagents for task_id=%s session=%s",
                 task_id,
                 getattr(self._session, "session_id", ""),
-                exc_info=True,
             )
+        finally:
+            # The user-visible task record is cancelled either way; leaving it
+            # running would claim an active turn that nothing is driving.
+            self._session.task_manager.cancel(task_id)

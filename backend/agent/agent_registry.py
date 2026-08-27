@@ -78,6 +78,10 @@ class AgentRegistry:
         self._registrations[key] = sealed
         return sealed
 
+    def discard(self, agent_id: str, *, kind: str) -> bool:
+        """Forget a registration after its owning conversation is deleted."""
+        return self._registrations.pop(self._key(kind, agent_id), None) is not None
+
     def accepts_mailbox(
         self,
         *,

@@ -21,17 +21,9 @@ async def activate_turn_skills(
     """Select textual skill workflows without granting executable hook authority."""
     try:
         selected_skills = state.prompt_context.get("selected_skills", []) if isinstance(state.prompt_context, dict) else []
-        detections = (
-            skill_manager.detect(user_message, selected_skills=selected_skills)
-            if hasattr(skill_manager, "detect")
-            else [
-                type("_SkillDetection", (), {
-                    "name": name,
-                    "trigger_mode": "implicit",
-                    "reason": "Matches the current request",
-                })()
-                for name in skill_manager.auto_detect(user_message)
-            ]
+        detections = skill_manager.detect(
+            user_message,
+            selected_skills=selected_skills,
         )
         for detection in detections:
             name = detection.name

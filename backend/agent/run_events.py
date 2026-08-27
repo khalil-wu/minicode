@@ -40,8 +40,3 @@ def should_emit_event(event: AgentEvent) -> bool:
     if event.type in _ADAPTER_ONLY_EVENT_TYPES:
         return False
     return True
-
-
-def is_sdk_only_event(event_type: str) -> bool:
-    """Return True if events of this type are SDK-only (UI should suppress)."""
-    return event_type in _SDK_ONLY_EVENT_TYPES

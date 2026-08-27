@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RotateCw } from "lucide-react";
 import { pushToast } from "./ToastContainer";
-import { apiBase, authHeaders } from "../protocol/api";
+import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "../protocol/api";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import {
   secondaryActionStyle,
@@ -11,6 +11,7 @@ import {
   emptyInlineStyle,
 } from "./settingsShared";
 import { fetchJsonWithStartupRetry, formatSettingsLoadError } from "./settingsLoad";
+import { SelectMenu } from "../components/SelectMenu";
 
 type FeatureFlagEntry = {
   name: string;
@@ -34,7 +35,6 @@ const flagLabels: Record<string, { title: string; description: string; group: "R
   plugin_skills: { title: "插件技能", description: "发现本地插件中包含的 SKILL.md。", group: "Plugins" },
   sdk_query: { title: "SDK 查询", description: "启用 Python SDK 查询入口。", group: "SDK" },
   mcp_roots: { title: "MCP 根目录", description: "响应 MCP 服务的 roots/list 请求。", group: "MCP" },
-  mcp_sampling: { title: "MCP 采样", description: "允许 MCP 服务请求宿主模型采样。", group: "MCP" },
   mcp_elicitation: { title: "MCP 结构化提问", description: "允许 MCP 服务向用户请求结构化输入。", group: "MCP" },
   mcp_websocket_transport: { title: "MCP WebSocket 传输", description: "启用 MCP WebSocket 连接。", group: "MCP" },
   mcp_streamable_http_transport: { title: "MCP 流式 HTTP 传输", description: "启用 MCP Streamable HTTP 连接。", group: "MCP" },
@@ -83,8 +83,11 @@ export const FeatureFlagsTab = () => {
   const [loadError, setLoadError] = useState("");
   const [group, setGroup] = useState<typeof GROUPS[number]>("Runtime");
   const loadSeqRef = useRef(0);
+  const operationRef = useRef<"" | "refresh" | "save">("");
 
   const refresh = useCallback(async (options: { showToast?: boolean } = {}) => {
+    if (operationRef.current) return;
+    operationRef.current = "refresh";
     const seq = loadSeqRef.current + 1;
     loadSeqRef.current = seq;
     setLoading(true);
@@ -105,6 +108,7 @@ export const FeatureFlagsTab = () => {
       if (options.showToast) pushToast(`功能开关加载失败：${message}`, "error");
     } finally {
       if (loadSeqRef.current === seq) setLoading(false);
+      if (operationRef.current === "refresh") operationRef.current = "";
     }
   }, []);
 
@@ -122,15 +126,20 @@ export const FeatureFlagsTab = () => {
 
   const saveFlag = async (flag: FeatureFlagEntry, nextDraft: DraftOverride) => {
     if (flag.source === "env") return;
+    if (operationRef.current) return;
+    operationRef.current = "save";
     setDrafts((current) => ({ ...current, [flag.name]: nextDraft }));
     setSavingName(flag.name);
     try {
-      const res = await fetch(`${apiBase()}/api/settings/feature-flags`, {
+      const res = await fetchWithTimeout(`${apiBase()}/api/settings/feature-flags`, {
         method: "PUT",
         headers: jsonHeaders(),
         body: JSON.stringify({ flags: { [flag.name]: draftToOverride(nextDraft) } }),
-      });
-      if (!res.ok) throw new Error(await res.text());
+      }, { timeoutMessage: "保存功能开关超时，请重试。" });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(errorMessageFromResponseText(text, res.statusText));
+      }
       const payload = await res.json() as FeatureFlagPayload;
       const nextFlags = Array.isArray(payload.flags) ? payload.flags : [];
       setFlags(nextFlags);
@@ -139,11 +148,15 @@ export const FeatureFlagsTab = () => {
       pushToast(`功能开关已保存：${flagTitle(flag)}`, "success");
     } catch (error) {
       setDrafts((current) => ({ ...current, [flag.name]: overrideToDraft(flag.override) }));
-      pushToast(`功能开关保存失败：${String(error)}`, "error");
+      const message = error instanceof Error ? error.message : String(error || "未知错误");
+      pushToast(`功能开关保存失败：${message}`, "error");
     } finally {
       setSavingName("");
+      if (operationRef.current === "save") operationRef.current = "";
     }
   };
+
+  const busy = loading || Boolean(savingName);
 
   return (
     <>
@@ -160,7 +173,7 @@ export const FeatureFlagsTab = () => {
         <div style={loadErrorStyle}>
           <span>功能开关加载失败。</span>
           <code style={loadErrorCodeStyle}>{loadError}</code>
-          <button type="button" onClick={() => void refresh({ showToast: true })} disabled={loading} style={retryButtonStyle}>重试</button>
+          <button type="button" onClick={() => void refresh({ showToast: true })} disabled={busy} style={retryButtonStyle}>重试</button>
         </div>
       )}
 
@@ -175,18 +188,18 @@ export const FeatureFlagsTab = () => {
               </div>
 
               <div className="feature-flag-control" style={controlWrapStyle}>
-                <select
-                  aria-label={`覆盖 ${flagTitle(flag)}`}
+                <SelectMenu
+                  ariaLabel={`覆盖 ${flagTitle(flag)}`}
                   title={lockedByEnv && flag.env_var ? `由 ${flag.env_var} 管理` : `${flag.name} · 默认${flag.default ? "开启" : "关闭"}`}
                   value={lockedByEnv ? "default" : draft}
-                  disabled={lockedByEnv || savingName === flag.name}
-                  onChange={(event) => void saveFlag(flag, event.target.value as DraftOverride)}
-                  style={selectStyle}
+                  disabled={lockedByEnv || busy}
+                  onValueChange={(value) => void saveFlag(flag, value as DraftOverride)}
+                  style={{ width: 120 }}
                 >
                   <option value="default">{lockedByEnv ? `环境变量 · ${flag.enabled ? "开启" : "关闭"}` : `默认 · ${flag.default ? "开启" : "关闭"}`}</option>
                   <option value="on">开启</option>
                   <option value="off">关闭</option>
-                </select>
+                </SelectMenu>
                 {savingName === flag.name && <RotateCw size={14} className="animate-spin" aria-label="正在保存" style={savingStyle} />}
               </div>
             </div>
@@ -201,7 +214,7 @@ export const FeatureFlagsTab = () => {
       </div>
 
       <div style={{ display: "flex", justifyContent: "flex-end" }}>
-        <button className="feature-flag-refresh" aria-label="刷新功能开关" onClick={() => void refresh({ showToast: true })} disabled={loading} style={{ ...secondaryActionStyle, display: "inline-flex", alignItems: "center", gap: 7 }}>
+        <button className="feature-flag-refresh" aria-label="刷新功能开关" onClick={() => void refresh({ showToast: true })} disabled={busy} style={{ ...secondaryActionStyle, display: "inline-flex", alignItems: "center", gap: 7 }}>
           <RotateCw size={14} className={loading ? "animate-spin" : undefined} />
           刷新
         </button>
@@ -233,8 +246,8 @@ const flagNameStyle: React.CSSProperties = {
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
-  fontSize: "var(--text-sm)",
-  fontWeight: 700,
+  fontSize: "var(--mc-font-body)",
+  fontWeight: "var(--fw-bold)",
   color: "var(--text-primary)",
 };
 
@@ -248,7 +261,7 @@ const loadErrorStyle: React.CSSProperties = {
   borderRadius: "var(--radius-sm, 7px)",
   background: "var(--state-danger-soft)",
   color: "var(--state-danger)",
-  fontSize: "var(--text-xs)",
+  fontSize: "var(--mc-font-secondary)",
 };
 
 const loadErrorCodeStyle: React.CSSProperties = {
@@ -257,7 +270,7 @@ const loadErrorCodeStyle: React.CSSProperties = {
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
   color: "var(--text-secondary)",
-  fontFamily: "var(--font-mono)",
+  fontFamily: "var(--font-ui)",
 };
 
 const retryButtonStyle: React.CSSProperties = {
@@ -271,18 +284,6 @@ const controlWrapStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   gap: 8,
-};
-
-const selectStyle: React.CSSProperties = {
-  height: 32,
-  minWidth: 104,
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-sm, 6px)",
-  background: "var(--surface-base)",
-  color: "var(--text-primary)",
-  fontSize: "var(--text-sm)",
-  padding: "0 8px",
-  colorScheme: "light dark",
 };
 
 const savingStyle: React.CSSProperties = {

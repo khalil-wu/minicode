@@ -1,7 +1,8 @@
-import { memo, type MouseEvent as ReactMouseEvent } from "react";
+import { memo, useMemo, type MouseEvent as ReactMouseEvent } from "react";
 import { ChevronDown, ChevronRight, LoaderCircle } from "lucide-react";
 import type { WorkspaceTreeNode } from "../protocol/workspace";
 import { useAppStore } from "../stores";
+import { workspaceFilePathComparisonKey } from "../lib/workspace-path";
 import {
   type GitStatus,
   type ExplorerDensity,
@@ -56,9 +57,12 @@ export const TreeNode = memo(({
   const hasQuery = query.trim().length > 0;
   const expanded = expandedPaths.has(node.path) || (hasQuery && nodeMatchesQuery(node, query));
   const loading = loadingPaths.has(node.path);
-  const selected = !node.is_dir && isSameTreePath(activeEditorPath, node.path);
-  const childCount = node.is_dir ? filteredChildren(node, query).length : 0;
-  const gitStatus = gitMap.get(node.path);
+  const selected = !node.is_dir && isSameTreePath(activeEditorPath, node.path, workingDirectory);
+  // filteredChildren walks + sorts the child list; compute it once per render
+  // instead of twice (childCount badge + the recursive map below).
+  const visibleChildren = useMemo(() => filteredChildren(node, query), [node, query]);
+  const childCount = node.is_dir ? visibleChildren.length : 0;
+  const gitStatus = gitMap.get(workspaceFilePathComparisonKey(node.path, workingDirectory));
   const toggle = () => {
     if (node.is_dir) onToggleExpanded(node.path, !expanded && (node.children?.length ?? 0) === 0);
   };
@@ -118,7 +122,7 @@ export const TreeNode = memo(({
           borderColor: "transparent",
           borderRadius: 8,
           boxShadow: "none",
-          transition: "background 80ms ease, border-color 80ms ease, box-shadow 80ms ease",
+          transition: "background-color var(--transition-micro), border-color var(--transition-micro), box-shadow var(--transition-micro)",
         }}
       >
         <span className="file-tree-chevron" style={treeChevronStyle} aria-hidden="true">
@@ -179,7 +183,7 @@ export const TreeNode = memo(({
               pointerEvents: "none",
             }} />
           )}
-          {filteredChildren(node, query).map((child) => (
+          {visibleChildren.map((child) => (
             <TreeNode
               key={child.path}
               node={child}

@@ -26,6 +26,7 @@ export const ToolGlyph = ({
   if (normalized === "commandexecution" || normalized === "command") return <TerminalSquare {...props} />;
   if (normalized === "filechange" || normalized === "edit") return <PencilLine {...props} />;
   if (normalized === "fileread" || normalized === "file") return <FileText {...props} />;
+  if (normalized === "workspacelist") return <ListChecks {...props} />;
   if (normalized === "workspacesearch") return <FileSearch {...props} />;
   if (normalized === "skill" || normalized === "plan") return <ListChecks {...props} />;
   if (normalized === "code") return <Code2 {...props} />;

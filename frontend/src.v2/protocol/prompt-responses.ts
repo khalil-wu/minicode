@@ -1,56 +1,65 @@
 import type { ClientCommand } from "./events";
 
-export type PromptProtocol = "legacy" | "control";
 export type ApprovalAction = "approve" | "reject" | "partial";
+export interface PromptOwner {
+  conversationId?: string;
+  turnId?: string;
+  messageId?: string;
+}
+
+export interface ApprovalResponseOptions {
+  decisions?: Record<string, "approved" | "rejected">;
+  feedback?: string;
+  plan?: string;
+  commandPrompts?: Array<{ tool: "run_command"; prompt: string }>;
+  owner?: PromptOwner;
+}
+
+const ownerFields = (owner?: PromptOwner) => ({
+  ...(owner?.conversationId ? { conversation_id: owner.conversationId } : {}),
+  ...(owner?.turnId ? { turn_id: owner.turnId } : {}),
+  ...(owner?.messageId ? { message_id: owner.messageId } : {}),
+});
 
 export const buildApprovalResponseCommand = (
   requestId: string,
   action: ApprovalAction,
-  protocol?: PromptProtocol,
-  decisions?: Record<string, "approved" | "rejected">,
-  feedback?: string,
+  options?: ApprovalResponseOptions,
 ): ClientCommand => {
-  const trimmedFeedback = feedback?.trim() || undefined;
-  if (protocol === "control") {
-    const response: Record<string, unknown> = { action };
-    if (decisions) response.decisions = decisions;
-    if (trimmedFeedback) response.feedback = trimmedFeedback;
-    return {
-      type: "control_response",
-      request_id: requestId,
-      response: {
-        subtype: "success",
-        response,
-      },
-    };
-  }
+  const trimmedFeedback = options?.feedback?.trim() || undefined;
+  const plan = typeof options?.plan === "string" ? options.plan : undefined;
+  const commandPrompts = options?.commandPrompts?.flatMap((item) => {
+    const prompt = String(item?.prompt || "").trim();
+    return item?.tool === "run_command" && prompt ? [{ tool: "run_command" as const, prompt }] : [];
+  });
+  const response: Record<string, unknown> = { action };
+  if (options?.decisions) response.decisions = options.decisions;
+  if (trimmedFeedback) response.feedback = trimmedFeedback;
+  if (plan !== undefined) response.plan = plan;
+  if (commandPrompts?.length) response.command_prompts = commandPrompts;
   return {
-    type: "approval",
-    tool_call_id: requestId,
-    action,
-    ...(decisions ? { decisions } : {}),
-    ...(trimmedFeedback ? { feedback: trimmedFeedback } : {}),
+    type: "control_response",
+    request_id: requestId,
+    ...ownerFields(options?.owner),
+    response: {
+      subtype: "success",
+      response,
+    },
   };
 };
 
 export const buildAskUserResponseCommand = (
   requestId: string,
   answer: string,
-  protocol?: PromptProtocol,
+  owner?: PromptOwner,
 ): ClientCommand => {
-  if (protocol === "control") {
-    return {
-      type: "control_response",
-      request_id: requestId,
-      response: {
-        subtype: "success",
-        response: { answer },
-      },
-    };
-  }
   return {
-    type: "answer",
-    tool_call_id: requestId,
-    answer,
+    type: "control_response",
+    request_id: requestId,
+    ...ownerFields(owner),
+    response: {
+      subtype: "success",
+      response: { answer },
+    },
   };
 };

@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "react";
+import { ChevronDown, ChevronUp, X } from "lucide-react";
 
 interface SearchMatch {
   range: Range;
@@ -126,13 +127,16 @@ export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
 
   return (
     <div
+      role="search"
+      aria-label="在对话中搜索"
+      className="chat-pane-search"
       style={{
         display: "flex",
         alignItems: "center",
         gap: "8px",
         padding: "6px 12px",
-        background: "var(--surface-2, #2a2a2a)",
-        borderBottom: "1px solid var(--border-subtle, #333)",
+        background: "var(--surface-page)",
+        borderBottom: "1px solid var(--border-subtle)",
         flexShrink: 0,
       }}
     >
@@ -143,15 +147,16 @@ export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
           setQuery(e.target.value);
         }}
         onKeyDown={handleKeyDown}
-        placeholder="Search in conversation..."
+        placeholder="在对话中搜索…"
+        aria-label="搜索对话内容"
+        className="chat-search-input"
         style={{
           flex: 1,
           padding: "4px 8px",
-          background: "var(--surface-base, #1e1e1e)",
-          color: "var(--text-primary, #e0e0e0)",
-          border: "1px solid var(--border-soft, #444)",
-          borderRadius: "4px",
-          outline: "none",
+          background: "var(--surface-base)",
+          color: "var(--text-primary)",
+          border: "1px solid var(--border-subtle)",
+          borderRadius: "var(--radius-sm, 6px)",
           fontSize: "var(--text-chrome)",
           fontFamily: "inherit",
         }}
@@ -162,7 +167,7 @@ export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
             fontSize: "var(--text-xxs)",
             color:
               matchCount > 0
-                ? "var(--text-muted, #888)"
+                ? "var(--text-muted)"
                 : "var(--state-danger)",
             whiteSpace: "nowrap",
             minWidth: "60px",
@@ -171,47 +176,53 @@ export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
         >
           {matchCount > 0
             ? `${currentIndex}/${matchCount}`
-            : "No matches"}
+            : "无匹配项"}
         </span>
       )}
       <button
+        type="button"
         onClick={() => findNext(true)}
-        title="Previous (Shift+Enter)"
+        title="上一个匹配项（Shift + Enter）"
+        aria-label="上一个匹配项"
         style={btnStyle}
         onMouseEnter={(e) =>
-          (e.currentTarget.style.background = "var(--surface-3, #3a3a3a)")
+          (e.currentTarget.style.background = "var(--surface-hover)")
         }
         onMouseLeave={(e) =>
           (e.currentTarget.style.background = "transparent")
         }
       >
-        &#x2191;
+        <ChevronUp size={16} aria-hidden="true" />
       </button>
       <button
+        type="button"
         onClick={() => findNext(false)}
-        title="Next (Enter)"
+        title="下一个匹配项（Enter）"
+        aria-label="下一个匹配项"
         style={btnStyle}
         onMouseEnter={(e) =>
-          (e.currentTarget.style.background = "var(--surface-3, #3a3a3a)")
+          (e.currentTarget.style.background = "var(--surface-hover)")
         }
         onMouseLeave={(e) =>
           (e.currentTarget.style.background = "transparent")
         }
       >
-        &#x2193;
+        <ChevronDown size={16} aria-hidden="true" />
       </button>
       <button
+        type="button"
         onClick={onClose}
-        title="Close (Escape)"
+        title="关闭搜索（Escape）"
+        aria-label="关闭搜索"
         style={btnStyle}
         onMouseEnter={(e) =>
-          (e.currentTarget.style.background = "var(--surface-3, #3a3a3a)")
+          (e.currentTarget.style.background = "var(--surface-hover)")
         }
         onMouseLeave={(e) =>
           (e.currentTarget.style.background = "transparent")
         }
       >
-        &#x2715;
+        <X size={16} aria-hidden="true" />
       </button>
     </div>
   );
@@ -220,10 +231,14 @@ export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
 const btnStyle: React.CSSProperties = {
   background: "transparent",
   border: "none",
-  color: "var(--text-secondary, #aaa)",
+  color: "var(--text-secondary)",
   cursor: "pointer",
-  fontSize: "14px",
-  padding: "2px 6px",
-  borderRadius: "3px",
+  width: 30,
+  height: 30,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  padding: 0,
+  borderRadius: "var(--radius-sm, 6px)",
   lineHeight: 1,
 };

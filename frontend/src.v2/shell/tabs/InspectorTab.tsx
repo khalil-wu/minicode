@@ -2,7 +2,7 @@
  * Inspector tab — combines ContextTab (session/workspace/runtime info)
  * and DetailsTab (inspector entries / recent tool calls).
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, Copy, Database, Download, FolderOpen, GitBranch, TerminalSquare, Upload } from 'lucide-react'
 import { isDesktop, revealPath } from '../../desktop/runtime'
 import { fetchWorkspaceGitStatus, type WorkspaceGitStatusResponse } from '../../protocol/workspace'
@@ -10,14 +10,16 @@ import { useAppStore } from '../../stores'
 import { focusInspectorEntry } from '../../chat/inspectorEntries'
 import type { AgentProgressEntry, ChatMessage, InspectorEntry, ProviderRawMetadata } from '../../stores/types'
 import { branchDisplayName, workspaceDisplayName } from '../../lib/workspace-display'
-import { providerCacheDiagnosis, providerCacheHitRate, providerContinuationDetail, providerContinuationLabel, providerCurlSkeleton, providerDuplicateInputSummary, providerInstructionsTransportSummary, providerLargestInputItemsSummary, providerLargestToolsSummary, providerLoopMetricsSummary, providerOutputPhaseCounts, providerOutputSequence, providerPromptCacheDiagnosticSummary, providerPromptLargestSections, providerPromptSectionDeltaSummary, providerPromptSectionSummary, providerRequestDiff, providerRequestDiffSummary, providerRequestModeSummary, providerResponseLifecycle, providerSafeRequestJson, providerTimelineEventCounts, providerTimelineRows, providerTimelineSequence, providerTraceDiagnostics, providerTraceExportJson, providerTraceExportJsonl, providerTracePayloadFromExport, providerUsageSummary } from '../../chat/providerTrace'
-import { promptCacheEffectivePromptTokens } from '../../chat/cacheUsage'
+import { hasProviderContainerMetadata, hasProviderRefusalMetadata, providerCacheDiagnosis, providerCacheHitRate, providerContainerSummary, providerCurlSkeleton, providerDuplicateInputSummary, providerInstructionsTransportSummary, providerLargestInputItemsSummary, providerLargestToolsSummary, providerLoopMetricsSummary, providerNativeUsageDetails, providerOutputPhaseCounts, providerOutputSequence, providerPromptCacheDiagnosticSummary, providerPromptLargestSections, providerPromptSectionDeltaSummary, providerPromptSectionSummary, providerRefusalSummary, providerRequestDiff, providerRequestDiffSummary, providerRequestModeSummary, providerResponseLifecycle, providerSafeRequestJson, providerSearchSourcesSummary, providerTimelineEventCounts, providerTimelineRows, providerTimelineSequence, providerTraceDiagnostics, providerTraceExportJson, providerTraceExportJsonl, providerTracePayloadFromExport, providerUsageSummary, sanitizeProviderTraceExportValue } from '../../chat/providerTrace'
+import { promptCacheEffectivePromptTokens, promptCacheOrdinaryInputTokens } from '../../chat/cacheUsage'
 import { capabilityFeatureEnabled } from '../../protocol/capabilities'
 import { fetchReplayExport } from '../../protocol/replay'
 import { getWebSocket } from '../../hooks/useWebSocket'
 import { InfoCard, InfoRow, SectionLabel, SmallButton } from '../SidebarShared'
 import { ToolCallTimeline, buildRunReplayEvents, buildRunReplaySummary, runTimelineExportJsonl, runTimelineReplayJsonl, type RunReplayEvent, type RunReplaySummary } from '../../chat/tool-calls/ToolCallTimeline'
 import { getToolCallsFromMessage } from '../../lib/content-blocks'
+import { safeJsonParse } from '../../lib/safe-parse'
+import { commandResultSucceeded, sendClientCommand, sendClientCommandAwaitResult } from '../../protocol/ws-outbox'
 
 export const InspectorTab = () => (
   <InspectorTabContent />
@@ -30,6 +32,7 @@ const InspectorTabContent = () => {
   return (
     <div style={{ display: 'grid', gap: 14 }}>
       <ContextTab />
+      <ControlPlaneSection />
       <RunOverviewSection />
       <button
         type="button"
@@ -41,7 +44,7 @@ const InspectorTabContent = () => {
           <strong style={{ color: 'var(--text-primary)', fontSize: 'var(--text-sm)' }}>高级诊断</strong>
           <small style={{ color: 'var(--text-muted)', fontSize: 'var(--text-xs)' }}>面向开发者的事件、性能和原始请求信息</small>
         </span>
-        <ChevronDown size={16} style={{ transform: advancedOpen ? 'rotate(180deg)' : 'none', transition: 'transform 140ms ease' }} />
+        <ChevronDown size={16} style={{ transform: advancedOpen ? 'rotate(180deg)' : 'none', transition: 'transform var(--transition-fast)' }} />
       </button>
       {advancedOpen && (
         <section aria-label="高级诊断" style={{ display: 'grid', gap: 16 }}>
@@ -50,6 +53,175 @@ const InspectorTabContent = () => {
           <DetailsTab traceExportEnabled={traceExportEnabled} />
         </section>
       )}
+    </div>
+  )
+}
+
+const ControlPlaneSection = () => {
+  const conversationId = useAppStore((state) => state.conversationId)
+  const conversations = useAppStore((state) => state.conversations)
+  const workingDirectory = useAppStore((state) => state.workingDirectory)
+  const isConnected = useAppStore((state) => state.isConnected)
+  const hydration = useAppStore((state) => conversationId ? state.conversationHydration[conversationId] : undefined)
+  const permissions = useAppStore((state) => conversationId ? state.permissionRulesByConversation[conversationId] : undefined)
+  const checkpointCollection = useAppStore((state) => conversationId ? state.checkpointsByConversation[conversationId] : undefined)
+  const runCheckpointCollection = useAppStore((state) => conversationId ? state.runCheckpointsByConversation[conversationId] : undefined)
+  const resume = useAppStore((state) => conversationId ? state.checkpointResumeByConversation[conversationId] : undefined)
+  const guidelineReload = useAppStore((state) => conversationId ? state.guidelineReloadsByConversation[conversationId] : undefined)
+  const recentWorkspaces = useAppStore((state) => state.recentWorkspaces)
+  const conversation = conversations.find((item) => item.id === conversationId)
+  const workspaceRoot = conversation?.worktreePath || conversation?.workspaceRoot || workingDirectory
+  const [controlPlaneRefreshError, setControlPlaneRefreshError] = useState<string | null>(null)
+  const [isRefreshingControlPlane, setIsRefreshingControlPlane] = useState(false)
+  const refreshRequestRef = useRef(0)
+
+  const refreshControlPlane = useCallback(async (silent: boolean) => {
+    if (!isConnected || !conversationId || !workspaceRoot) return
+    const requestId = ++refreshRequestRef.current
+    setControlPlaneRefreshError(null)
+    setIsRefreshingControlPlane(true)
+
+    const checkpointListSent = sendClientCommand({
+      type: 'checkpoint.list',
+      conversation_id: conversationId,
+      workspace_root: workspaceRoot,
+      limit: 50,
+    }, { silent })
+    const runCheckpointListSent = sendClientCommand({
+      type: 'checkpoint.run.list',
+      conversation_id: conversationId,
+      workspace_root: workspaceRoot,
+    }, { silent })
+
+    try {
+      if (!checkpointListSent || !runCheckpointListSent) {
+        throw new Error('连接已中断，未能发送全部刷新请求')
+      }
+      const permissionResult = await sendClientCommandAwaitResult({
+        type: 'conversation.permission.rules.list',
+        conversation_id: conversationId,
+        source: 'frontend.inspector',
+      }, 'permissions.rules.list', { silent })
+      const resultConversationId = String(permissionResult.data?.conversation_id || '').trim()
+      const hasRulesPayload = Boolean(
+        permissionResult.data?.rules
+        && typeof permissionResult.data.rules === 'object'
+        && !Array.isArray(permissionResult.data.rules),
+      )
+      if (!commandResultSucceeded(permissionResult) || resultConversationId !== conversationId || !hasRulesPayload) {
+        throw new Error(permissionResult.message || '权限规则读取失败')
+      }
+    } catch (error) {
+      if (refreshRequestRef.current === requestId) {
+        setControlPlaneRefreshError(error instanceof Error ? error.message : String(error))
+      }
+    } finally {
+      if (refreshRequestRef.current === requestId) setIsRefreshingControlPlane(false)
+    }
+  }, [conversationId, isConnected, workspaceRoot])
+
+  useEffect(() => {
+    if (!isConnected || !conversationId || !workspaceRoot) {
+      refreshRequestRef.current += 1
+      setIsRefreshingControlPlane(false)
+      setControlPlaneRefreshError(null)
+      return
+    }
+    void refreshControlPlane(true)
+  }, [conversationId, isConnected, refreshControlPlane, workspaceRoot])
+
+  if (!conversationId && recentWorkspaces.length === 0) return null
+  const latestCheckpoints = checkpointCollection?.checkpoints.slice(0, 3) ?? []
+  const permissionPatterns = [
+    ...(permissions?.sessionDeny ?? []).map((rule) => rule.pattern).filter(Boolean),
+    ...(permissions?.sessionOverrides ?? []).map((rule) => `${rule.pattern}: ${rule.level}`).filter(Boolean),
+  ]
+
+  return (
+    <div style={{ display: 'grid', gap: 8 }}>
+      <div style={sectionHeaderWithActionsStyle}>
+        <SectionLabel label="安全与恢复" />
+        {conversationId && workspaceRoot && (
+          <SmallButton
+            icon={<Database size={14} />}
+            label={isRefreshingControlPlane ? '正在刷新…' : '刷新检查点'}
+            onClick={() => void refreshControlPlane(false)}
+            disabled={!isConnected || isRefreshingControlPlane}
+          />
+        )}
+      </div>
+      <InfoCard>
+        {!isConnected && conversationId && workspaceRoot && (
+          <InfoRow label="控制面" value="后端未连接 · 重连后自动刷新" tone="warning" />
+        )}
+        {isConnected && isRefreshingControlPlane && (
+          <InfoRow label="控制面" value="正在读取权限规则和检查点…" tone="accent" />
+        )}
+        {controlPlaneRefreshError && (
+          <InfoRow
+            label="控制面"
+            value={`刷新失败 · ${controlPlaneRefreshError}`}
+            title={controlPlaneRefreshError}
+            tone="warning"
+          />
+        )}
+        {hydration && (
+          <InfoRow
+            label="会话恢复"
+            value={hydration.isHydrating ? '正在恢复上下文和运行状态' : `已完成 · ${new Date(hydration.updatedAt).toLocaleTimeString()}`}
+            tone={hydration.isHydrating ? 'accent' : 'muted'}
+          />
+        )}
+        {permissions && (
+          <>
+            <InfoRow label="权限模式" value={`${permissions.mode} · ${permissions.contextSource}`} mono />
+            <InfoRow
+              label="权限规则"
+              value={`会话拒绝 ${permissions.sessionDeny.length} · 覆盖 ${permissions.sessionOverrides.length} · 系统拒绝 ${permissions.systemDeny.length} · 临时允许 ${permissions.sessionPromptRules.length}`}
+              tone={permissions.sessionDeny.length + permissions.systemDeny.length > 0 ? 'warning' : 'muted'}
+              title={permissionPatterns.join('\n') || undefined}
+            />
+          </>
+        )}
+        {guidelineReload && (
+          <InfoRow
+            label="项目指令"
+            value={`${guidelineReload.path || '指令源'} 已重载 · 下一回合生效 · ${new Date(guidelineReload.updatedAt).toLocaleTimeString()}`}
+            tone="accent"
+            mono
+          />
+        )}
+        <InfoRow
+          label="文件检查点"
+          value={checkpointCollection ? `${checkpointCollection.checkpoints.length} 个 · ${new Date(checkpointCollection.updatedAt).toLocaleTimeString()} 更新` : '尚未读取'}
+          tone={checkpointCollection?.checkpoints.length ? 'accent' : 'muted'}
+        />
+        {latestCheckpoints.map((checkpoint) => (
+          <InfoRow
+            key={checkpoint.id}
+            label={checkpoint.toolName || '写入保护'}
+            value={`${checkpoint.paths.length} 个路径 · ${checkpoint.paths.slice(0, 2).join(', ') || '无路径'} · ${new Date(checkpoint.createdAt).toLocaleTimeString()}`}
+            title={`${checkpoint.id}\n${checkpoint.paths.join('\n')}`}
+            mono
+          />
+        ))}
+        {runCheckpointCollection && (
+          <InfoRow
+            label="运行检查点"
+            value={`${runCheckpointCollection.checkpoints.length} 个快照 · ${runCheckpointCollection.runs.length} 个运行 · ${runCheckpointCollection.subagents.length} 个子 Agent`}
+          />
+        )}
+        {resume && (
+          <InfoRow
+            label="最近恢复"
+            value={resume.resumed
+              ? `${resume.runId || '未知运行'} · 第 ${resume.iteration ?? 0} 轮${resume.stoppedReason ? ` · 原因 ${resume.stoppedReason}` : ''}`
+              : resume.message || '没有可恢复运行'}
+            tone={resume.resumed ? 'accent' : 'muted'}
+          />
+        )}
+        {recentWorkspaces.length > 0 && <InfoRow label="最近工作区" value={`${recentWorkspaces.length} 个已记录`} />}
+      </InfoCard>
     </div>
   )
 }
@@ -368,16 +540,17 @@ const DetailsTab = ({ traceExportEnabled }: { traceExportEnabled: boolean }) => 
   const cacheEntries = useMemo(() => inspectorEntries.filter(isCacheMetricEntry), [inspectorEntries])
   const providerRaws = useMemo(() => providerEntries.map((entry) => providerRawFromPayload(entry.payload)), [providerEntries])
   const visibleEntries = useMemo(() => inspectorEntries.filter((entry) => {
-    if (filter === 'provider') return entry.targetKind === 'provider'
+    if (filter === 'provider') return isProviderTraceEntry(entry)
     if (filter === 'tool') return entry.targetKind === 'tool_call'
     if (filter === 'cache') return entry.targetKind === 'cache'
-    if (filter === 'usage') return entry.targetKind === 'provider' || entry.targetKind === 'budget' || entry.targetKind === 'cache'
+    if (filter === 'usage') return isProviderTraceEntry(entry) || entry.targetKind === 'budget' || entry.targetKind === 'cache'
     return true
   }), [filter, inspectorEntries])
   const usageTotals = useMemo(() => providerEntries.reduce(
     (acc, entry) => {
       const usage = providerUsageSummary(providerRawFromPayload(entry.payload))
       acc.input += usage.input
+      acc.ordinaryInput += promptCacheOrdinaryInputTokens(usage)
       acc.output += usage.output
       acc.cacheRead += usage.cacheRead
       acc.cacheWrite += usage.cacheWrite
@@ -386,7 +559,7 @@ const DetailsTab = ({ traceExportEnabled }: { traceExportEnabled: boolean }) => 
       acc.reasoning += usage.reasoning
       return acc
     },
-    { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheDeleted: 0, promptCacheTotal: 0, reasoning: 0 },
+    { input: 0, ordinaryInput: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheDeleted: 0, promptCacheTotal: 0, reasoning: 0 },
   ), [providerEntries])
   const sessionCacheHit = useMemo(() => providerCacheHitRate(usageTotals), [usageTotals])
 
@@ -398,7 +571,7 @@ const DetailsTab = ({ traceExportEnabled }: { traceExportEnabled: boolean }) => 
       const trimmed = line.trim()
       if (!trimmed) continue
       try {
-        const payload = providerTracePayloadFromExport(JSON.parse(trimmed))
+        const payload = providerTracePayloadFromExport(safeJsonParse<unknown>(trimmed, null))
         if (!payload) continue
         addInspectorEntry({
           targetKind: 'provider',
@@ -439,7 +612,8 @@ const DetailsTab = ({ traceExportEnabled }: { traceExportEnabled: boolean }) => 
             <InfoCard>
               <InfoRow label="模型调用" value={`${providerEntries.length} 次`} />
               <InfoRow label="令牌" value={`${formatNumber(usageTotals.input)} 输入 / ${formatNumber(usageTotals.output)} 输出`} mono />
-              <InfoRow label="缓存" value={`${sessionCacheHit == null ? '—' : `${sessionCacheHit}%`} 命中 · 读取 ${formatNumber(usageTotals.cacheRead)}`} tone={sessionCacheHit ? 'accent' : 'muted'} />
+              <InfoRow label="提示词" value={`${formatNumber(usageTotals.ordinaryInput)} 普通 · ${formatNumber(usageTotals.cacheRead)} 缓存读取 · ${formatNumber(usageTotals.cacheWrite)} 缓存写入 · ${formatNumber(usageTotals.promptCacheTotal)} 总量`} mono />
+              <InfoRow label="缓存" value={`${sessionCacheHit == null ? 'n/a' : `${sessionCacheHit}%`} 命中 · 读取 ${formatNumber(usageTotals.cacheRead)} · 写入 ${formatNumber(usageTotals.cacheWrite)}`} tone={sessionCacheHit ? 'accent' : 'muted'} />
               {usageTotals.cacheDeleted > 0 && <InfoRow label="已删除缓存" value={formatNumber(usageTotals.cacheDeleted)} mono />}
               <InfoRow label="推理令牌" value={formatNumber(usageTotals.reasoning)} mono />
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 7 }}>
@@ -473,7 +647,7 @@ const DetailsTab = ({ traceExportEnabled }: { traceExportEnabled: boolean }) => 
             ))}
           </div>
           {focusedEntry && (
-            focusedEntry.targetKind === 'provider'
+            isProviderTraceEntry(focusedEntry)
               ? <ProviderTraceDetails entry={focusedEntry} previous={previousProviderEntry(providerEntries, focusedEntry)} traceExportEnabled={traceExportEnabled} />
               : focusedEntry.targetKind === 'cache'
                 ? <CacheMetricDetails entry={focusedEntry} />
@@ -495,7 +669,7 @@ const DetailsTab = ({ traceExportEnabled }: { traceExportEnabled: boolean }) => 
               <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent-primary)' }}>{entry.targetId.slice(0, 12)}</span>
               {entry.targetKind === 'provider' && (
                 <span style={{ color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {providerRowLabel(entry)}
+                  {providerEntryRowLabel(entry)}
                 </span>
               )}
               {entry.targetKind === 'cache' && (
@@ -721,10 +895,14 @@ const providerRawFromPayload = (payload: Record<string, unknown>): ProviderRawMe
   finish_reason: typeof payload.finish_reason === 'string' ? payload.finish_reason : undefined,
   event_type: typeof payload.event_type === 'string' ? payload.event_type : undefined,
   usage: typeof payload.usage === 'object' && payload.usage !== null ? payload.usage as Record<string, unknown> : undefined,
+  raw_usage: typeof payload.raw_usage === 'object' && payload.raw_usage !== null ? payload.raw_usage as Record<string, unknown> : undefined,
+  citations: Array.isArray(payload.citations) ? payload.citations as ProviderRawMetadata['citations'] : undefined,
+  search_sources: Array.isArray(payload.search_sources) ? payload.search_sources as ProviderRawMetadata['search_sources'] : undefined,
+  container: typeof payload.container === 'object' && payload.container !== null ? payload.container as ProviderRawMetadata['container'] : undefined,
+  refusal: typeof payload.refusal === 'object' && payload.refusal !== null ? payload.refusal as ProviderRawMetadata['refusal'] : undefined,
   output_items: Array.isArray(payload.output_items) ? payload.output_items as ProviderRawMetadata['output_items'] : undefined,
   provider_timeline: Array.isArray(payload.provider_timeline) ? payload.provider_timeline as ProviderRawMetadata['provider_timeline'] : undefined,
   request_summary: typeof payload.request_summary === 'object' && payload.request_summary !== null ? payload.request_summary as ProviderRawMetadata['request_summary'] : undefined,
-  stateful_continuation: typeof payload.stateful_continuation === 'object' && payload.stateful_continuation !== null ? payload.stateful_continuation as ProviderRawMetadata['stateful_continuation'] : undefined,
   loop_metrics: typeof payload.loop_metrics === 'object' && payload.loop_metrics !== null ? payload.loop_metrics as ProviderRawMetadata['loop_metrics'] : undefined,
   safety: typeof payload.safety === 'object' && payload.safety !== null ? payload.safety as ProviderRawMetadata['safety'] : undefined,
   prompt_cache_diagnostic: typeof payload.prompt_cache_diagnostic === 'object' && payload.prompt_cache_diagnostic !== null ? payload.prompt_cache_diagnostic as ProviderRawMetadata['prompt_cache_diagnostic'] : undefined,
@@ -741,9 +919,26 @@ const providerRowLabel = (entry: InspectorEntry): string => {
   return `${raw.provider || 'provider'} · ${raw.model || raw.request_summary?.model || 'model'} · ${formatNumber(usage.input)} in`
 }
 
+const providerEntryRowLabel = (entry: InspectorEntry): string => {
+  if (isProviderTraceEntry(entry)) return providerRowLabel(entry)
+  const data = entry.payload.data && typeof entry.payload.data === 'object'
+    ? entry.payload.data as Record<string, unknown>
+    : {}
+  const event = String(entry.payload.span_event || entry.payload.event || entry.payload.type || 'provider event').trim()
+  const status = String(entry.payload.status || '').trim()
+  const finishReason = String(data.finish_reason || entry.payload.finish_reason || '').trim()
+  const input = Number(data.input_tokens)
+  const output = Number(data.output_tokens)
+  const usage = Number.isFinite(input) || Number.isFinite(output)
+    ? `${formatNumber(Number.isFinite(input) ? input : 0)} in / ${formatNumber(Number.isFinite(output) ? output : 0)} out`
+    : ''
+  return [event, status, finishReason, usage].filter(Boolean).join(' · ')
+}
+
 const ProviderTraceDetails = ({ entry, previous, traceExportEnabled }: { entry: InspectorEntry; previous?: InspectorEntry; traceExportEnabled: boolean }) => {
   const raw = providerRawFromPayload(entry.payload)
   const usage = providerUsageSummary(raw)
+  const nativeUsage = providerNativeUsageDetails(raw)
   const hit = providerCacheHitRate(usage)
   const summary = raw.request_summary ?? {}
   const previousSummary = providerRawFromPayload(previous?.payload ?? {}).request_summary
@@ -758,6 +953,12 @@ const ProviderTraceDetails = ({ entry, previous, traceExportEnabled }: { entry: 
   const duplicateInput = providerDuplicateInputSummary(summary)
   const promptSectionDelta = providerPromptSectionDeltaSummary(raw.prompt_cache_diagnostic?.prompt_section_delta)
   const promptCacheDiagnostic = providerPromptCacheDiagnosticSummary(raw.prompt_cache_diagnostic)
+  const ordinaryInput = promptCacheOrdinaryInputTokens(usage)
+  const promptCacheTotal = promptCacheEffectivePromptTokens(usage)
+  const citationCount = raw.citations?.length ?? 0
+  const documentCitationCount = raw.citations?.filter((citation) => !citation.url).length ?? 0
+  const hasNativeCacheBreakdown = nativeUsage.cache5m > 0 || nativeUsage.cache1h > 0
+  const hasHostedToolCounts = nativeUsage.webSearchRequests > 0 || nativeUsage.webFetchRequests > 0
   const exportJson = () => providerTraceExportJson(raw, previousSummary)
   const safeRequestJson = () => providerSafeRequestJson(raw)
   const curlSkeleton = () => providerCurlSkeleton(raw)
@@ -768,10 +969,15 @@ const ProviderTraceDetails = ({ entry, previous, traceExportEnabled }: { entry: 
         <InfoRow label="Model" value={String(raw.model || summary.model || 'unknown')} mono />
         <InfoRow label="Finish" value={String(raw.finish_reason || 'unknown')} tone={raw.finish_reason ? 'muted' : 'warning'} />
         <InfoRow label="API" value={providerRequestModeSummary(raw)} mono />
-        <InfoRow label="Mode" value={providerContinuationLabel(raw)} mono />
-        {summary.previous_response_id_present && <InfoRow label="Continuation" value={providerContinuationDetail(raw)} mono />}
         <InfoRow label="Usage" value={`${formatNumber(usage.input)} in / ${formatNumber(usage.output)} out / ${formatNumber(usage.reasoning)} reasoning`} mono />
-        <InfoRow label="Cache" value={`${hit == null ? 'n/a' : `${hit}%`} hit · ${formatNumber(usage.cacheRead)} read · ${formatNumber(usage.cacheWrite)} write`} tone={hit ? 'accent' : 'muted'} />
+        <InfoRow label="Cache" value={`${hit == null ? 'n/a' : `${hit}%`} hit · ${formatNumber(ordinaryInput)} ordinary · ${formatNumber(usage.cacheRead)} read · ${formatNumber(usage.cacheWrite)} write · ${formatNumber(promptCacheTotal)} total${usage.cacheDeleted ? ` · ${formatNumber(usage.cacheDeleted)} deleted` : ''}`} tone={hit ? 'accent' : 'muted'} />
+        {hasNativeCacheBreakdown && <InfoRow label="缓存 TTL" value={`5m ${formatNumber(nativeUsage.cache5m)} · 1h ${formatNumber(nativeUsage.cache1h)}`} mono />}
+        {hasHostedToolCounts && <InfoRow label="托管工具" value={`search ${formatNumber(nativeUsage.webSearchRequests)} · fetch ${formatNumber(nativeUsage.webFetchRequests)}`} mono />}
+        {(nativeUsage.serviceTier || nativeUsage.inferenceGeo) && <InfoRow label="服务层" value={[nativeUsage.serviceTier, nativeUsage.inferenceGeo].filter(Boolean).join(' · ')} mono />}
+        {(raw.search_sources?.length ?? 0) > 0 && <InfoRow label="Provider 来源" value={providerSearchSourcesSummary(raw)} />}
+        {citationCount > 0 && <InfoRow label="Provider 引用" value={`${citationCount}${documentCitationCount > 0 ? ` · ${documentCitationCount} document location${documentCitationCount === 1 ? '' : 's'}` : ''}`} />}
+        {hasProviderContainerMetadata(raw.container) && <InfoRow label="Container" value={providerContainerSummary(raw)} mono />}
+        {hasProviderRefusalMetadata(raw.refusal) && <InfoRow label="拒绝" value={providerRefusalSummary(raw)} tone="warning" />}
         <InfoRow label="Loop" value={providerLoopMetricsSummary(raw)} tone={(raw.loop_metrics?.provider_call_count ?? 0) >= 6 || (raw.loop_metrics?.tool_batch_count ?? 0) >= 5 ? 'warning' : 'muted'} mono />
         <InfoRow label="Cache Key" value={providerCacheDiagnosis(raw)} mono />
         <InfoRow label="Prompt" value={`${summary.instructions_hash || 'no hash'} · ${formatNumber(summary.instructions_len || 0)} chars`} mono />
@@ -828,7 +1034,7 @@ const ProviderTraceDetails = ({ entry, previous, traceExportEnabled }: { entry: 
           />
         ))}
       </InfoCard>
-      <pre style={jsonBlockStyle}>{JSON.stringify(entry.payload, null, 2)}</pre>
+      <pre style={jsonBlockStyle}>{JSON.stringify(sanitizeProviderTraceExportValue(entry.payload), null, 2)}</pre>
     </div>
   )
 }
@@ -844,8 +1050,6 @@ const shortDiffLabel = (label: string): string =>
     tool_schema_hashes: 'Schema',
     prompt_cache_key_present: 'CacheKey',
     prompt_cache_key_hash: 'CacheHash',
-    previous_response_id_present: 'PrevID',
-    previous_response_id_hash: 'PrevHash',
     turn_aborted_marker_present: 'Abort',
     input_items_len: 'Input',
     input_chars: 'InputChars',

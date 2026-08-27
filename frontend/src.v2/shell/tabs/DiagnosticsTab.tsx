@@ -3,9 +3,14 @@
  */
 import { RefreshCw, Wrench } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { apiBase, authHeaders } from '../../protocol/api'
+import {
+  apiBase,
+  authHeaders,
+  errorMessageFromResponseText,
+  fetchWithTimeout,
+} from '../../protocol/api'
 import { isDesktop } from '../../desktop/runtime'
-import { getWebSocket } from '../../hooks/useWebSocket'
+import { sendClientCommand } from '../../protocol/ws-outbox'
 import { useAppStore } from '../../stores'
 import { branchDisplayName, workspaceDisplayName } from '../../lib/workspace-display'
 import {
@@ -49,18 +54,32 @@ export const DiagnosticsTab = () => {
     ? 'runtime'
     : doctor?.capabilitySource
 
-  const refresh = useCallback(() => {
+  const refresh = useCallback(async () => {
     setLoading(true)
-    getWebSocket()?.send({ type: 'runtime.capabilities.inspect', source: 'diagnostics' })
-    fetch(`${apiBase()}/api/doctor`, { cache: 'no-store', headers: authHeaders() })
-      .then((res) => res.ok ? res.json() : Promise.reject(new Error(res.statusText)))
-      .then((payload) => withCapabilityFallback(payload as DoctorPayload))
-      .then((payload) => setDoctor(payload))
-      .catch((error) => setDoctor({ error: String(error) }))
-      .finally(() => setLoading(false))
+    sendClientCommand(
+      { type: 'runtime.capabilities.inspect', source: 'diagnostics' },
+      { silent: true },
+    )
+    try {
+      const res = await fetchWithTimeout(
+        `${apiBase()}/api/doctor`,
+        { cache: 'no-store', headers: authHeaders() },
+        { timeoutMessage: '运行诊断超时，请重试。' },
+      )
+      if (!res.ok) {
+        const text = await res.text().catch(() => '')
+        throw new Error(errorMessageFromResponseText(text, res.statusText || `HTTP ${res.status}`))
+      }
+      const payload = await withCapabilityFallback(await res.json() as DoctorPayload)
+      setDoctor(payload)
+    } catch (error) {
+      setDoctor({ error: error instanceof Error ? error.message : String(error || '未知错误') })
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
-  useEffect(() => { refresh() }, [refresh])
+  useEffect(() => { void refresh() }, [refresh])
 
   useEffect(() => {
     if (lastMcpSnapshot.current === null) {
@@ -69,12 +88,12 @@ export const DiagnosticsTab = () => {
     }
     if (lastMcpSnapshot.current === mcpSnapshot) return
     lastMcpSnapshot.current = mcpSnapshot
-    refresh()
+    void refresh()
   }, [mcpSnapshot, refresh])
 
   return (
     <div style={{ display: 'grid', gap: 10 }}>
-      <PanelHeader title="运行诊断" meta={loading ? '检查中' : '正常'} action={<SmallButton icon={<RefreshCw size={14} />} label="刷新" onClick={refresh} />} />
+      <PanelHeader title="运行诊断" meta={loading ? '检查中' : doctor?.error ? '失败' : doctor ? '正常' : '等待'} action={<SmallButton icon={<RefreshCw size={14} />} label="刷新" onClick={() => void refresh()} />} />
 
       {doctor?.error && <div style={errorStyle}>{doctor.error}</div>}
 
@@ -97,6 +116,9 @@ export const DiagnosticsTab = () => {
         <InfoRow label="MCP 错误" value={String(local.mcpErrors)} tone={local.mcpErrors ? 'warning' : 'muted'} />
         <InfoRow label="运行环境" value={isDesktop() ? '桌面端' : '网页兼容模式'} />
       </InfoCard>
+
+      <SectionLabel label="沙箱能力" />
+      <SandboxCapabilityCard status={effectiveCapabilities?.permission?.sandbox_status} />
 
       <SectionLabel label="智能体能力" />
       <InfoCard>
@@ -122,6 +144,39 @@ export const DiagnosticsTab = () => {
   )
 }
 
+const SandboxCapabilityCard = ({ status }: { status?: NonNullable<NonNullable<DoctorPayload['capabilities']>['permission']>['sandbox_status'] }) => {
+  const probe = String(status?.probe_status ?? 'unknown')
+  const backend = String(status?.backend ?? 'unknown')
+  const available = status?.backend_available
+  const isolated = (value: boolean | null | undefined) => value === true ? '已隔离' : value === false ? '未隔离' : '未知'
+  const tone: InfoTone = status?.fail_closed === true || available === false ? 'warning' : available === true ? 'accent' : 'muted'
+  return (
+    <InfoCard>
+      <InfoRow label="探测" value={probe === 'ready' ? '已完成' : probe === 'pending' ? '等待探测' : probe} tone={tone} />
+      <InfoRow label="执行后端" value={backend} mono />
+      <InfoRow label="文件系统" value={isolated(status?.filesystem_isolated)} tone={status?.filesystem_isolated === true ? 'accent' : 'warning'} />
+      <InfoRow label="子进程网络" value={isolated(status?.network_isolated)} tone={status?.network_isolated === true ? 'accent' : 'warning'} />
+      <InfoRow label="拒绝读取" value={isolated(status?.deny_read_isolated)} tone={status?.deny_read_isolated === true ? 'accent' : 'warning'} />
+      <InfoRow label="后端缺失时" value={sandboxUnavailableActionLabel(status?.unavailable_action)} tone={status?.unavailable_action === 'run_unsandboxed' ? 'warning' : 'muted'} />
+      <InfoRow label="失败策略" value={status?.fail_closed ? '失败关闭' : '不适用'} tone={status?.fail_closed ? 'warning' : 'muted'} />
+      {status?.reason && <InfoRow label="原因" value={status.reason} />}
+    </InfoCard>
+  )
+}
+
+const sandboxUnavailableActionLabel = (value: string | undefined): string => {
+  switch (value) {
+    case 'run_unsandboxed': return '按权限策略直接运行（无 OS 隔离）'
+    case 'reject_command': return '拒绝命令'
+    case 'reject_turn': return '在回合开始前失败'
+    case 'enforce_policy': return '强制执行沙箱策略'
+    case 'external_backend': return '由外部沙箱负责'
+    case 'await_probe': return '等待探测'
+    case 'none': return '不适用'
+    default: return value ? value : '未知'
+  }
+}
+
 // ── Helpers ────────────────────────────────────────────────────
 
 const withCapabilityFallback = async (payload: DoctorPayload): Promise<DoctorPayload> => {
@@ -130,7 +185,11 @@ const withCapabilityFallback = async (payload: DoctorPayload): Promise<DoctorPay
     return { ...payload, capabilities: withDerivedCapabilitySummary(payload.capabilities), capabilitySource: 'doctor' }
   }
   try {
-    const res = await fetch(`${apiBase()}/api/status`, { cache: 'no-store', headers: authHeaders() })
+    const res = await fetchWithTimeout(
+      `${apiBase()}/api/status`,
+      { cache: 'no-store', headers: authHeaders() },
+      { timeoutMessage: '能力清单加载超时。' },
+    )
     if (!res.ok) return { ...payload, capabilitySource: fallbackSource }
     const statusPayload = await res.json() as DoctorPayload
     const statusHasDetails = capabilityHasDetails(statusPayload.capabilities)

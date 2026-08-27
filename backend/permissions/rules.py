@@ -5,47 +5,9 @@ import logging
 from pathlib import Path
 from typing import Literal
 
+from backend.security.sensitive_files import DANGEROUS_DIRECTORIES, DANGEROUS_FILES
+
 logger = logging.getLogger(__name__)
-
-DANGEROUS_FILES = {
-    ".gitconfig",
-    ".gitmodules",
-    ".bashrc",
-    ".bash_profile",
-    ".zshrc",
-    ".zprofile",
-    ".profile",
-    ".mcp.json",
-    ".claude.json",
-    "settings.json",
-    "settings.local.json",
-}
-
-DANGEROUS_DIRECTORIES = {
-    ".git",
-    ".vscode",
-    ".idea",
-    ".claude",
-    ".ssh",
-}
-
-DEFAULT_IGNORE_DIRS = {
-    ".git",
-    ".svn",
-    ".hg",
-    "node_modules",
-    "__pycache__",
-    ".pytest_cache",
-    "venv",
-    ".venv",
-    "env",
-    "dist",
-    "build",
-    "target",
-    ".idea",
-    ".vscode",
-    ".claude",
-}
 
 
 class PermissionRuleMatcher:
@@ -72,7 +34,10 @@ class PermissionRuleMatcher:
 
         path = Path(file_path).resolve()
         if not self._is_within_workspace(path):
-            return False, f"Path is outside workspace: {self.workspace_root}"
+            return (
+                False,
+                f"Path is outside workspace: {path} (workspace: {self.workspace_root})",
+            )
 
         if operation == "write" and self._is_dangerous_file(path):
             return False, f"Sensitive file cannot be edited automatically: {path.name}"
@@ -150,9 +115,6 @@ class PermissionRuleMatcher:
             return False  # unclassifiable -> not allowed
         return any(fnmatch.fnmatch(rel_path, pattern.replace("\\", "/")) for pattern in self.allowed_paths)
 
-    def should_ignore_in_search(self, path: Path) -> bool:
-        return any(part in DEFAULT_IGNORE_DIRS for part in path.parts)
-
 
 class SandboxValidator:
     """Workspace boundary validator for filesystem operations."""
@@ -171,26 +133,7 @@ class SandboxValidator:
         if not allowed:
             return False, reason
 
-        if operation == "write" and content:
-            resolved_path = Path(file_path).resolve()
-            shell_config_names = {".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile"}
-            if resolved_path.name.lower() in shell_config_names and self._contains_shell_config_code(content):
-                return False, "Shell config contains potentially executable code"
-
         return True, ""
-
-    def _contains_shell_config_code(self, content: str) -> bool:
-        shell_config_markers = [
-            "eval(",
-            "exec(",
-            "__import__",
-            "os.system(",
-            "subprocess.call(",
-            "subprocess.run(",
-            "shell=True",
-        ]
-        content_lower = content.lower()
-        return any(marker.lower() in content_lower for marker in shell_config_markers)
 
 
 def create_default_sandbox(workspace_root: Path | None = None) -> SandboxValidator:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -13,6 +14,7 @@ from backend.services.skills_api_service import (
     extensions_marketplace_payload,
     install_skill_from_marketplace,
     remove_skill,
+    import_skill,
     skills_marketplace_payload,
 )
 from backend.services.plugin_settings_service import (
@@ -25,11 +27,23 @@ from backend.services.plugin_settings_service import (
     update_plugin_enabled,
     validate_plugin_directory,
 )
+from backend.plugins.manager import MarketplaceRegistry, PluginManager
+from backend.config import load_config_layer_stack
 from backend.config import SETTINGS_FILE
 from backend.hooks.runtime import run_config_change_hook
 
 from . import _state
-from .models import PluginImportRequest, PluginPackageRequest, PluginStateUpdateRequest, PluginValidateRequest, SkillInstallRequest
+from .models import (
+    PluginImportRequest,
+    PluginInstallRequest,
+    PluginMarketplaceRequest,
+    PluginMarketplaceRefreshRequest,
+    PluginPackageRequest,
+    PluginStateUpdateRequest,
+    PluginValidateRequest,
+    SkillInstallRequest,
+    SkillImportRequest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +125,7 @@ async def get_skills_marketplace_api(response: Response, refresh: bool = False) 
 
 @router.get("/api/extensions/marketplace")
 async def get_extensions_marketplace_api(response: Response, refresh: bool = False) -> dict[str, Any]:
-    """List real Skills and MCP marketplace entries from upstream catalogs with safe fallbacks."""
+    """List upstream Skills and MCP catalog entries with explicit source availability."""
     response.headers["Cache-Control"] = "no-store"
     from backend.api.routes_health import get_mcp_manager
 
@@ -127,6 +141,136 @@ async def get_extensions_marketplace_api(response: Response, refresh: bool = Fal
 def list_plugins_api(response: Response) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     return get_plugin_settings()
+
+
+@router.get("/api/plugins/marketplaces")
+def list_plugin_marketplaces_api(response: Response) -> dict[str, Any]:
+    """List registered marketplace sources and their materialized metadata."""
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        from backend.services.plugin_settings_service import _plugin_policy_from_stack
+
+        stack = load_config_layer_stack()
+        policy = _plugin_policy_from_stack(stack)
+        registry = MarketplaceRegistry()
+        return {"marketplaces": registry.list(policy=policy)}
+    except PluginSettingsError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Plugin policy unavailable: {exc}") from exc
+
+
+@router.get("/api/plugins/reconcile")
+def reconcile_plugins_api(response: Response) -> dict[str, Any]:
+    """Return one integrity report for marketplace/store/runtime state."""
+    response.headers["Cache-Control"] = "no-store"
+    stack = load_config_layer_stack()
+    from backend.services.plugin_settings_service import _plugin_policy_from_stack
+
+    policy = _plugin_policy_from_stack(stack)
+    manager = PluginManager(config_stack=stack)
+    return {
+        "marketplaces": MarketplaceRegistry().reconcile(policy=policy),
+        "plugins": manager.reconcile(),
+    }
+
+
+@router.post("/api/plugins/marketplaces")
+def add_plugin_marketplace_api(
+    request: PluginMarketplaceRequest,
+    response: Response,
+) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        from backend.services.plugin_settings_service import _plugin_policy_from_stack
+
+        policy = _plugin_policy_from_stack(load_config_layer_stack())
+        record = MarketplaceRegistry().add(request.name, request.source, policy=policy)
+    except PluginSettingsError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Plugin policy unavailable: {exc}") from exc
+    return {"marketplace": record}
+
+
+@router.delete("/api/plugins/marketplaces/{marketplace_name}")
+def remove_plugin_marketplace_api(marketplace_name: str, response: Response) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        from backend.services.plugin_settings_service import _plugin_policy_from_stack
+
+        stack = load_config_layer_stack()
+        policy = _plugin_policy_from_stack(stack)
+        registry = MarketplaceRegistry()
+        removed = registry.remove(marketplace_name, policy=policy)
+    except PluginSettingsError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Plugin policy unavailable: {exc}") from exc
+    if removed is None:
+        raise HTTPException(status_code=404, detail="Marketplace not found")
+    return {"removed": removed, "marketplaces": registry.list(policy=policy)}
+
+
+@router.post("/api/plugins/marketplaces/{marketplace_name}/refresh")
+def refresh_plugin_marketplace_api(
+    marketplace_name: str,
+    response: Response,
+    request: PluginMarketplaceRefreshRequest | None = None,
+) -> dict[str, Any]:
+    # ``request`` is accepted for clients that send a JSON body; the path is
+    # authoritative and avoids two competing marketplace identities.
+    del request
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        from backend.services.plugin_settings_service import _plugin_policy_from_stack
+
+        policy = _plugin_policy_from_stack(load_config_layer_stack())
+        refreshed = MarketplaceRegistry().refresh(marketplace_name, policy=policy)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Marketplace not found") from exc
+    except PluginSettingsError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"marketplace": refreshed}
+
+
+@router.post("/api/plugins/install")
+async def install_plugin_api(request: PluginInstallRequest, response: Response) -> dict[str, Any]:
+    """Materialize a local source or one entry from a registered marketplace."""
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        if request.plugin_name:
+            manager = PluginManager(config_stack=load_config_layer_stack())
+            result = await manager.install_marketplace_plugin(
+                request.marketplace,
+                request.plugin_name,
+                overwrite=request.overwrite,
+                settings_file=SETTINGS_FILE,
+                config_change_hook=run_config_change_hook,
+                refresh=request.refresh_marketplace,
+            )
+        else:
+            result = await import_plugin_from_path(
+                request.source_path,
+                overwrite=request.overwrite,
+                marketplace=request.marketplace,
+                settings_file=SETTINGS_FILE,
+                config_change_hook=run_config_change_hook,
+            )
+    except PluginSettingsError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if _state.bootstrap is not None:
+        result["runtime_refresh"] = await _refresh_plugin_runtime_state()
+    _state.invalidate_status_cache()
+    return result
 
 
 @router.put("/api/plugins/{plugin_name}/state")
@@ -161,6 +305,7 @@ async def import_plugin_api(request: PluginImportRequest, response: Response) ->
         result = await import_plugin_from_path(
             request.source_path,
             overwrite=request.overwrite,
+            marketplace=request.marketplace,
             settings_file=SETTINGS_FILE,
             config_change_hook=run_config_change_hook,
         )
@@ -199,7 +344,7 @@ async def remove_plugin_api(plugin_name: str, response: Response) -> dict[str, A
 async def validate_plugin_api(request: PluginValidateRequest, response: Response) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     try:
-        return validate_plugin_directory(request.source_path)
+        return await asyncio.to_thread(validate_plugin_directory, request.source_path)
     except PluginSettingsError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
@@ -208,7 +353,11 @@ async def validate_plugin_api(request: PluginValidateRequest, response: Response
 async def package_plugin_api(request: PluginPackageRequest, response: Response) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     try:
-        return package_plugin_directory(request.source_path, request.output_dir)
+        return await asyncio.to_thread(
+            package_plugin_directory,
+            request.source_path,
+            request.output_dir,
+        )
     except PluginSettingsError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
@@ -240,7 +389,8 @@ async def remove_skill_api(skill_name: str, response: Response) -> dict[str, Any
     """Remove a user-installed Skill directory, then refresh Skill discovery."""
     response.headers["Cache-Control"] = "no-store"
     try:
-        result = remove_skill(
+        result = await asyncio.to_thread(
+            remove_skill,
             skill_name,
             skill_manager=_state.bootstrap.skill_manager if _state.bootstrap is not None else None,
         )
@@ -255,37 +405,126 @@ async def remove_skill_api(skill_name: str, response: Response) -> dict[str, Any
     return result
 
 
+@router.post("/api/skills/import")
+async def import_skill_api(request: SkillImportRequest, response: Response) -> dict[str, Any]:
+    """Import a local SKILL.md into MiniCode's private extension directory."""
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        result = await asyncio.to_thread(
+            import_skill,
+            request.source_path,
+            skill_manager=_state.bootstrap.skill_manager if _state.bootstrap is not None else None,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _state.invalidate_status_cache()
+    return result
+
+
 async def _refresh_plugin_runtime_state() -> dict[str, Any]:
-    report: dict[str, Any] = {"ok": True, "warnings": [], "refreshed": []}
+    report: dict[str, Any] = {
+        "ok": True,
+        "warnings": [],
+        "errors": [],
+        "refreshed": [],
+        "sessions": [],
+    }
     bootstrap = _state.bootstrap
     if bootstrap is None:
-        return {"ok": False, "warnings": ["Plugin settings changed before runtime initialization"], "refreshed": []}
+        return {
+            "ok": False,
+            "warnings": [],
+            "errors": ["Plugin settings changed before runtime initialization"],
+            "refreshed": [],
+            "sessions": [],
+        }
     if bootstrap.skill_manager is not None:
         try:
             bootstrap.skill_manager.discover()
             report["refreshed"].append("bootstrap.skills")
         except Exception as exc:
             report["ok"] = False
-            report["warnings"].append(f"Bootstrap skill refresh failed: {exc}")
-            logger.warning("Failed to refresh bootstrap skills after plugin state update", exc_info=True)
+            report["errors"].append(f"Bootstrap skill refresh failed: {exc}")
+            logger.warning(
+                "Failed to refresh bootstrap skills after plugin state update",
+                exc_info=True,
+            )
     if bootstrap.mcp_manager is not None:
         try:
-            await bootstrap.mcp_manager.reload_config()
+            reload_managers = getattr(bootstrap, "reload_mcp_managers", None)
+            if callable(reload_managers):
+                await reload_managers()
+            else:
+                await bootstrap.mcp_manager.reload_config()
             report["refreshed"].append("bootstrap.mcp")
         except Exception as exc:
             report["ok"] = False
-            report["warnings"].append(f"MCP refresh failed: {exc}")
+            report["errors"].append(f"MCP refresh failed: {exc}")
             logger.warning("Failed to refresh plugin MCP servers", exc_info=True)
-    for session in list(getattr(_state.ws_manager, "_sessions", {}).values()):
+
+    iter_sessions = getattr(_state.ws_manager, "iter_sessions", None)
+    sessions = (
+        list(iter_sessions())
+        if callable(iter_sessions)
+        else list(getattr(_state.ws_manager, "_sessions", {}).values())
+    )
+    for session in sessions:
+        session_id = str(getattr(session, "session_id", "") or "")
+        session_report: dict[str, Any] = {
+            "session_id": session_id,
+            "skills_refreshed": False,
+            "runtime": None,
+        }
         skill_manager = getattr(session, "skill_manager", None)
         if skill_manager is not None:
             try:
                 skill_manager.discover()
-                report["refreshed"].append(f"session:{getattr(session, 'session_id', '')}:skills")
+                session_report["skills_refreshed"] = True
+                report["refreshed"].append(f"session:{session_id}:skills")
             except Exception as exc:
                 report["ok"] = False
-                report["warnings"].append(
-                    f"Session {getattr(session, 'session_id', '')} skill refresh failed: {exc}"
+                report["errors"].append(
+                    f"Session {session_id} skill refresh failed: {exc}"
                 )
-                logger.warning("Failed to refresh session skills for session %s", getattr(session, "session_id", ""), exc_info=True)
+                logger.warning(
+                    "Failed to refresh session skills for session %s",
+                    session_id,
+                    exc_info=True,
+                )
+
+        refresh_runtime = getattr(session, "refresh_plugin_runtime_state", None)
+        if callable(refresh_runtime):
+            try:
+                runtime_report = await refresh_runtime(reason="plugin.settings")
+                session_report["runtime"] = runtime_report
+                report["refreshed"].append(f"session:{session_id}:plugin_runtime")
+                if not bool(runtime_report.get("ok", False)):
+                    report["ok"] = False
+                report["warnings"].extend(
+                    f"Session {session_id}: {warning}"
+                    for warning in runtime_report.get("warnings", [])
+                )
+                report["errors"].extend(
+                    f"Session {session_id}: {error}"
+                    for error in runtime_report.get("errors", [])
+                )
+            except Exception as exc:
+                report["ok"] = False
+                report["errors"].append(
+                    f"Session {session_id} plugin runtime refresh failed: {exc}"
+                )
+                logger.warning(
+                    "Failed to refresh plugin runtime for session %s",
+                    session_id,
+                    exc_info=True,
+                )
+        else:
+            report["warnings"].append(
+                f"Session {session_id} has no plugin runtime refresh capability"
+            )
+        report["sessions"].append(session_report)
     return report

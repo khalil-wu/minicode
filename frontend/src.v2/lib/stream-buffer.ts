@@ -3,8 +3,6 @@ export type StreamMetadata = {
   role?: string;
   phase?: string;
   source?: string;
-  is_raw_provider_reasoning?: boolean;
-  provider_reasoning_type?: string;
   [key: string]: unknown;
 } | undefined;
 
@@ -29,12 +27,21 @@ export function createStreamBuffer(onFlush: FlushFn): StreamBuffer {
   let messageIdBuf: string | undefined;
   let metadataBuf: StreamMetadata;
   let metadataKeyBuf = "";
+  let activeStreamKey = "";
+  let projectedFirstChunk = false;
   let rafId: number | null = null;
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
   let generation = 0;
 
   const metadataKey = (metadata: StreamMetadata): string =>
     metadata ? JSON.stringify(metadata) : "";
+
+  const streamKey = (
+    conversationId: string | undefined,
+    source: string | undefined,
+    metadataKeyValue: string,
+    messageId: string | undefined,
+  ): string => JSON.stringify([conversationId, source, metadataKeyValue, messageId]);
 
   const clearBuffer = () => {
     textBuf = "";
@@ -97,9 +104,11 @@ export function createStreamBuffer(onFlush: FlushFn): StreamBuffer {
 
   return {
     push(chunk, conversationId, source, metadata, messageId) {
+      if (!chunk) return;
       // A source change within a pending batch is treated like a conversation
       // change: flush first so the previous origin keeps its attribution.
       const nextMetadataKey = metadataKey(metadata);
+      const nextStreamKey = streamKey(conversationId, source, nextMetadataKey, messageId);
       if (
         (cidBuf !== conversationId ||
           sourceBuf !== source ||
@@ -109,11 +118,23 @@ export function createStreamBuffer(onFlush: FlushFn): StreamBuffer {
       ) {
         flush();
       }
+      if (activeStreamKey !== nextStreamKey) {
+        activeStreamKey = nextStreamKey;
+        projectedFirstChunk = false;
+      }
       cidBuf = conversationId;
       sourceBuf = source;
       messageIdBuf = messageId;
       metadataBuf = metadata;
       metadataKeyBuf = nextMetadataKey;
+      // The first visible provider chunk should reach React in the same task
+      // that received the WebSocket event. Subsequent chunks still coalesce to
+      // one store update per animation frame.
+      if (!projectedFirstChunk) {
+        projectedFirstChunk = true;
+        onFlush(chunk, conversationId, source, metadata, messageId);
+        return;
+      }
       textBuf += chunk;
       scheduleFlush();
     },
@@ -125,6 +146,8 @@ export function createStreamBuffer(onFlush: FlushFn): StreamBuffer {
       rafId = null;
       timeoutId = null;
       clearBuffer();
+      activeStreamKey = "";
+      projectedFirstChunk = false;
     },
   };
 }

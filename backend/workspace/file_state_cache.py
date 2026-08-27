@@ -1,5 +1,5 @@
 """
-文件状态 LRU 缓存（参考 Claude Code 的 fileStateCache.ts）。
+文件状态 LRU 缓存（MiniCode 实现）。
 
 特性：
 - LRU 驱逐策略（最近最少使用）
@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Optional
+
+from backend.atomic_io import canonical_file_path_key
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +36,7 @@ class FileStateCache:
     """
     文件状态 LRU 缓存。
 
-    参考 Claude Code 的实现：
+    自有设计：
     - 最大 100 个条目
     - 最大 25MB 总大小
     - 基于修改时间的自动失效
@@ -79,7 +81,7 @@ class FileStateCache:
             文件状态条目，如果不存在或已过期则返回 None
         """
         path = path.resolve()
-        key = str(path)
+        key = canonical_file_path_key(path)
 
         with self._lock:
             entry = self._cache.get(key)
@@ -115,7 +117,7 @@ class FileStateCache:
             language_hint: 语言提示
         """
         path = path.resolve()
-        key = str(path)
+        key = canonical_file_path_key(path)
 
         try:
             stat = path.stat()
@@ -168,7 +170,7 @@ class FileStateCache:
             path: 文件路径
         """
         path = path.resolve()
-        key = str(path)
+        key = canonical_file_path_key(path)
 
         with self._lock:
             if key in self._cache:

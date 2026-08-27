@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlparse
 
 from backend.agent.message import AgentEvent
+from backend.permissions.network import assess_network_url
 
 
 def preview_servers_updated_event(servers: list[Any]) -> AgentEvent:
@@ -60,12 +62,46 @@ def no_preview_launch_notice() -> AgentEvent:
     return AgentEvent(type="system_notice", data={"content": "No preview launch process is running"})
 
 
-def validate_preview_url(data: dict[str, Any], *, command: str) -> tuple[str, AgentEvent | None]:
+def validate_preview_url(
+    data: dict[str, Any],
+    *,
+    command: str,
+    session_id: str = "",
+    conversation_id: str = "",
+    workspace_root: str = "",
+) -> tuple[str, AgentEvent | None]:
     url = str(data.get("url", "")).strip()
     if not url:
         return "", AgentEvent.error(f"{command} requires a url", recoverable=True)
-    if command == "preview.navigate" and not (url.startswith("http://") or url.startswith("https://")):
-        return "", AgentEvent.error("preview.navigate only supports http(s) URLs", recoverable=True)
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        parsed = None
+    if parsed is None or parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return "", AgentEvent.error(f"{command} only supports http(s) URLs", recoverable=True)
+    if parsed.username or parsed.password:
+        return "", AgentEvent.error(
+            f"{command} does not allow embedded URL credentials",
+            recoverable=True,
+            error_type="network_policy",
+        )
+    assessment = assess_network_url(url)
+    if not assessment.allowed:
+        from backend.preview.launcher import preview_url_is_owned
+
+        if not preview_url_is_owned(
+            url,
+            session_id=session_id,
+            conversation_id=conversation_id,
+            workspace_root=workspace_root,
+        ):
+            return "", AgentEvent.error(
+                "Preview access to a local, private, or unresolved network target "
+                "is allowed only for a preview owned by the active conversation. "
+                f"{assessment.reason}",
+                recoverable=True,
+                error_type="network_policy",
+            )
     return url, None
 
 

@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
   ChevronDown,
@@ -7,21 +7,20 @@ import {
   Folder,
   FolderOpen,
   Loader,
+  LoaderCircle,
   Pause,
+  SearchX,
   SquarePen,
   SlidersHorizontal,
-  Trash2,
   X,
 } from "lucide-react";
 import { useAppStore } from "../stores";
+import { EmptyState } from "../components/EmptyState";
 import { isDesktop, revealPath } from "../desktop/runtime";
 import type { ConversationMeta, SessionFilter } from "../stores/types";
 import * as wsOutbox from "../protocol/ws-outbox";
 import { canonicalWorkspacePath, workspaceDisplayName } from "../lib/workspace-display";
-import {
-  hasRuntimePendingUserActionForConversation,
-  runtimePendingUserActionLabelForConversation,
-} from "../lib/runtime-session";
+import { runtimePendingUserActionLabelForConversation } from "../lib/runtime-session";
 import { SessionRow } from "./SessionRow";
 import {
   sectionHeaderRowStyle,
@@ -35,18 +34,30 @@ import {
   filterButtonStyle,
   filterCountStyle,
   sessionListWrapStyle,
-  emptyStateStyle,
   projectCountStyle,
   projectItemsStyle,
 } from "./sidebarStyles";
 import { isConversationRunning } from "./sessionStatus";
+import { readableToolLabel } from "../chat/toolDisplayName";
+import { pushToast } from "../overlays/ToastContainer";
+import { safeJsonParse } from "../lib/safe-parse";
 
 type SidebarTab = "conversations" | "files";
 
 const CONVERSATION_UI_STATE_KEY = "minicode.sidebar.conversations.state";
+const CONVERSATION_UI_PERSIST_DELAY_MS = 140;
+
+type ConversationUiState = {
+  collapsedGroups: Set<string>;
+  scrollTop: number;
+};
+
 const readConversationUiState = () => {
   try {
-    const value = JSON.parse(localStorage.getItem(CONVERSATION_UI_STATE_KEY) || "{}");
+    const parsed = safeJsonParse<unknown>(localStorage.getItem(CONVERSATION_UI_STATE_KEY) || "{}", {});
+    const value = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as { collapsedGroups?: unknown; scrollTop?: unknown }
+      : {};
     return {
       collapsedGroups: new Set<string>(Array.isArray(value.collapsedGroups) ? value.collapsedGroups : []),
       scrollTop: typeof value.scrollTop === "number" ? value.scrollTop : 0,
@@ -58,13 +69,17 @@ const readConversationUiState = () => {
 
 const SESSION_FILTERS: { id: SessionFilter; label: string; icon: React.ReactNode }[] = [
   { id: "all", label: "全部", icon: null },
-  { id: "running", label: "运行中", icon: <Loader size={14} className="spin" /> },
+  { id: "running", label: "运行中", icon: <Loader size={14} className="animate-spin" /> },
   { id: "waiting", label: "等待中", icon: <Pause size={14} /> },
   { id: "idle", label: "空闲", icon: <Circle size={14} /> },
   { id: "archived", label: "已归档", icon: <Archive size={14} /> },
 ];
 
-export type EnrichedConversation = ConversationMeta & { sessionStatus: "running" | "waiting" | "idle" };
+export type EnrichedConversation = ConversationMeta & {
+  sessionStatus: "running" | "waiting" | "idle";
+  isHydrating: boolean;
+  waitingLabel: string | null;
+};
 
 export interface WorkspaceConversationGroup {
   baseLabel: string;
@@ -124,6 +139,28 @@ const workspacePathParts = (path: string | null | undefined): string[] => {
   return canonical.split("/").filter(Boolean);
 };
 
+const RECENT_WORKSPACE_TYPE_LABELS: Record<string, string> = {
+  python: "Python",
+  node: "Node.js",
+  rust: "Rust",
+  go: "Go",
+  java: "Java",
+};
+
+export const recentWorkspaceMetadata = (projectType: string, lastOpened: number): string => {
+  const normalizedType = String(projectType || "").trim().toLowerCase();
+  const typeLabel = normalizedType && normalizedType !== "unknown"
+    ? RECENT_WORKSPACE_TYPE_LABELS[normalizedType] || projectType.trim()
+    : "类型未知";
+  const openedAt = Number.isFinite(lastOpened) && lastOpened > 0
+    ? new Date(lastOpened * 1000)
+    : null;
+  const openedLabel = openedAt && Number.isFinite(openedAt.getTime())
+    ? `上次打开 ${openedAt.toLocaleString()}`
+    : "打开时间未知";
+  return `${typeLabel} · ${openedLabel}`;
+};
+
 export function groupByWorkspace(conversations: (ConversationMeta & { sessionStatus: string })[]): Map<string, WorkspaceConversationGroup> {
   const groups = new Map<string, WorkspaceConversationGroup>();
   for (const c of conversations) {
@@ -165,19 +202,6 @@ export function groupByWorkspace(conversations: (ConversationMeta & { sessionSta
   return groups;
 }
 
-/** 会话等待状态标签——抽离为独立React.memo组件避免每次渲染重建 */
-const ConversationWaitingLabel = memo(({
-  pendingAskUser, pendingDiffReview, pendingApproval,
-}: {
-  pendingAskUser: boolean; pendingDiffReview: boolean; pendingApproval: { toolName: string } | null;
-}) => {
-  if (pendingAskUser) return <>等待回复</>;
-  if (pendingDiffReview) return <>等待审阅</>;
-  if (pendingApproval) return <>等待批准 {pendingApproval.toolName}</>;
-  return null;
-});
-ConversationWaitingLabel.displayName = "ConversationWaitingLabel";
-
 export const ConversationsTab = ({
   conversationId,
   onNavigate,
@@ -190,15 +214,21 @@ export const ConversationsTab = ({
   const conversations = useAppStore((s) => s.conversations);
   const isStreaming = useAppStore((s) => s.isStreaming);
   const conversationStreaming = useAppStore((s) => s.conversationStreaming);
+  const conversationHydration = useAppStore((s) => s.conversationHydration);
+  const recentWorkspaces = useAppStore((s) => s.recentWorkspaces);
   const requestConversationSwitch = useAppStore((s) => s.requestConversationSwitch);
   const pendingApproval = useAppStore((s) => s.pendingApproval);
+  const approvalQueue = useAppStore((s) => s.approvalQueue);
   const pendingDiffReview = useAppStore((s) => s.pendingDiffReview);
+  const diffReviewQueue = useAppStore((s) => s.diffReviewQueue);
   const pendingAskUser = useAppStore((s) => s.pendingAskUser);
+  const askUserQueue = useAppStore((s) => s.askUserQueue);
   const runtimeSession = useAppStore((s) => s.runtimeSession);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const workspaceGit = useAppStore((s) => s.workspaceGit);
   const appMode = useAppStore((s) => s.appMode);
   const createConversation = useAppStore((s) => s.createConversation);
+  const isConnected = useAppStore((s) => s.isConnected);
 
   const [currentWorkspaceOnly, setCurrentWorkspaceOnly] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -211,33 +241,95 @@ export const ConversationsTab = ({
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(new Set());
+  const [removingRecentPaths, setRemovingRecentPaths] = useState<Set<string>>(new Set());
+  const [clearingRecentWorkspaces, setClearingRecentWorkspaces] = useState(false);
 
-  const waitingLabelForConversation = useCallback((id: string) => {
-    if (id === conversationId) {
-      if (pendingAskUser) return "等待回复";
-      if (pendingDiffReview) return "等待审阅";
-      if (pendingApproval) return `等待批准 ${pendingApproval.toolName}`;
+  const collapsedGroupsRef = useRef(collapsedGroups);
+  const pendingUiStateRef = useRef<ConversationUiState>({
+    collapsedGroups: initialUiState.collapsedGroups,
+    scrollTop: initialUiState.scrollTop,
+  });
+  const persistUiStateTimerRef = useRef<number | null>(null);
+  const pendingUiStateDirtyRef = useRef(false);
+  collapsedGroupsRef.current = collapsedGroups;
+
+  const persistPendingConversationUiState = useCallback(() => {
+    if (!pendingUiStateDirtyRef.current) return;
+    pendingUiStateDirtyRef.current = false;
+    const snapshot = pendingUiStateRef.current;
+    try {
+      localStorage.setItem(CONVERSATION_UI_STATE_KEY, JSON.stringify({
+        collapsedGroups: Array.from(snapshot.collapsedGroups),
+        scrollTop: snapshot.scrollTop,
+      }));
+    } catch { /* Storage can be unavailable in hardened renderer contexts. */ }
+  }, []);
+
+  const scheduleConversationUiStatePersist = useCallback((
+    nextCollapsedGroups: Set<string>,
+    scrollTop: number,
+  ) => {
+    pendingUiStateRef.current = {
+      collapsedGroups: nextCollapsedGroups,
+      scrollTop,
+    };
+    pendingUiStateDirtyRef.current = true;
+    if (persistUiStateTimerRef.current !== null) {
+      window.clearTimeout(persistUiStateTimerRef.current);
     }
-    return runtimePendingUserActionLabelForConversation(runtimeSession, id);
-  }, [conversationId, pendingAskUser, pendingDiffReview, pendingApproval, runtimeSession]);
+    persistUiStateTimerRef.current = window.setTimeout(() => {
+      persistUiStateTimerRef.current = null;
+      persistPendingConversationUiState();
+    }, CONVERSATION_UI_PERSIST_DELAY_MS);
+  }, [persistPendingConversationUiState]);
+
+  const handleConversationListScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
+    scheduleConversationUiStatePersist(collapsedGroupsRef.current, event.currentTarget.scrollTop);
+  }, [scheduleConversationUiStatePersist]);
+
+  const waitingLabelsByConversation = useMemo(() => {
+    const labels = new Map<string, string>();
+    for (const prompt of [pendingAskUser, ...askUserQueue]) {
+      const id = prompt?.conversationId?.trim();
+      if (id && !labels.has(id)) labels.set(id, "等待回复");
+    }
+    for (const prompt of [pendingDiffReview, ...diffReviewQueue]) {
+      const id = prompt?.conversationId?.trim();
+      if (id && !labels.has(id)) labels.set(id, "等待审阅");
+    }
+    for (const prompt of [pendingApproval, ...approvalQueue]) {
+      const id = prompt?.conversationId?.trim();
+      if (id && !labels.has(id)) {
+        labels.set(id, `等待批准 ${readableToolLabel(prompt?.toolName || "")}`);
+      }
+    }
+    return labels;
+  }, [pendingAskUser, askUserQueue, pendingDiffReview, diffReviewQueue, pendingApproval, approvalQueue]);
 
   const enrichedConversations = useMemo(() => {
-    return conversations.map((c) => ({
-      ...c,
-      sessionStatus: (() => {
-        const hasStreamingFlag = isConversationRunning({
-          conversationId: c.id,
-          activeConversationId: conversationId,
-          activeIsStreaming: isStreaming,
-          conversationStreaming,
-        });
-        if (hasStreamingFlag) return "running";
-        if (c.id === conversationId && (pendingAskUser || pendingDiffReview || pendingApproval)) return "waiting";
-        if (hasRuntimePendingUserActionForConversation(runtimeSession, c.id)) return "waiting";
-        return c.sessionStatus || "idle";
-      })() as "running" | "waiting" | "idle",
-    }));
-  }, [conversations, conversationId, isStreaming, conversationStreaming, pendingApproval, pendingDiffReview, pendingAskUser, runtimeSession]);
+    return conversations.map((conversation) => {
+      const isHydrating = conversationHydration[conversation.id]?.isHydrating === true;
+      const waitingLabel = waitingLabelsByConversation.get(conversation.id)
+        ?? runtimePendingUserActionLabelForConversation(runtimeSession, conversation.id);
+      let sessionStatus: EnrichedConversation["sessionStatus"] = conversation.sessionStatus || "idle";
+      if (isHydrating || isConversationRunning({
+        conversationId: conversation.id,
+        activeConversationId: conversationId,
+        activeIsStreaming: isStreaming,
+        conversationStreaming,
+      })) {
+        sessionStatus = "running";
+      } else if (waitingLabel) {
+        sessionStatus = "waiting";
+      }
+      return {
+        ...conversation,
+        isHydrating,
+        waitingLabel,
+        sessionStatus,
+      };
+    });
+  }, [conversations, conversationId, isStreaming, conversationStreaming, conversationHydration, waitingLabelsByConversation, runtimeSession]);
 
   const filterCounts = useMemo(() => {
     const counts: Record<string, number> = { all: 0, archived: 0, running: 0, waiting: 0, idle: 0 };
@@ -283,9 +375,57 @@ export const ConversationsTab = ({
   const workspaceConversations = useMemo(() => filtered.filter(isWorkspaceConversation), [filtered]);
   const ordinaryConversations = useMemo(() => filtered.filter((conversation) => !isWorkspaceConversation(conversation)), [filtered]);
   const projectGroups = useMemo(() => groupByWorkspace(workspaceConversations), [workspaceConversations]);
+  const orderedProjectGroups = useMemo(() => (
+    Array.from(projectGroups.entries(), ([projectKey, group]) => ({
+      projectKey,
+      group,
+      conversations: orderConversationTree(group.items),
+    }))
+  ), [projectGroups]);
+  const orderedOrdinaryConversations = useMemo(
+    () => orderConversationTree(ordinaryConversations),
+    [ordinaryConversations],
+  );
+  const visibleRecentWorkspaces = useMemo(() => {
+    const represented = new Set(
+      enrichedConversations
+        .map((conversation) => workspaceGroupIdentity(conversationWorkspacePath(conversation)))
+        .filter(Boolean),
+    );
+    return recentWorkspaces
+      .filter((workspace) => !represented.has(workspaceGroupIdentity(workspace.path)))
+      .slice(0, 5);
+  }, [enrichedConversations, recentWorkspaces]);
   const selectedSessions = useMemo(() => enrichedConversations.filter((c) => selectedSessionIds.has(c.id)), [enrichedConversations, selectedSessionIds]);
-  const selectableFiltered = useMemo(() => filtered.filter((c) => c.sessionStatus !== "running" && c.sessionStatus !== "waiting"), [filtered]);
+  const conversationsById = useMemo(
+    () => new Map(conversations.map((conversation) => [conversation.id, conversation])),
+    [conversations],
+  );
+  const selectableFiltered = useMemo(
+    () => filtered.filter((c) => c.sessionStatus !== "running" && c.sessionStatus !== "waiting"),
+    [filtered],
+  );
   const allFilteredSelected = selectableFiltered.length > 0 && selectableFiltered.every((c) => selectedSessionIds.has(c.id));
+
+  const conversationsRef = useRef(conversations);
+  const enrichedConversationsRef = useRef(enrichedConversations);
+  // Read through a ref like every other row callback in this file: listing
+  // Read the active id through a ref so switching chats does not recreate the
+  // row renderer and force every session row to rerender.
+  const conversationIdRef = useRef(conversationId);
+  const renameStateRef = useRef({ renaming, renameValue });
+  const onSetConfirmDialogRef = useRef(onSetConfirmDialog);
+  const onNavigateRef = useRef(onNavigate);
+  conversationsRef.current = conversations;
+  enrichedConversationsRef.current = enrichedConversations;
+  conversationIdRef.current = conversationId;
+  renameStateRef.current = { renaming, renameValue };
+  onSetConfirmDialogRef.current = onSetConfirmDialog;
+  onNavigateRef.current = onNavigate;
+
+  useEffect(() => {
+    if (isConnected) wsOutbox.sendClientCommand({ type: "workspace.recent" });
+  }, [isConnected]);
 
   useEffect(() => {
     if (!menuFor) return;
@@ -300,72 +440,30 @@ export const ConversationsTab = ({
     if (listRef.current) listRef.current.scrollTop = initialUiState.scrollTop;
   }, [initialUiState.scrollTop]);
 
-  const sendConversationDelete = wsOutbox.sendConversationDeleteCommand;
+  useEffect(() => () => {
+    if (persistUiStateTimerRef.current !== null) {
+      window.clearTimeout(persistUiStateTimerRef.current);
+      persistUiStateTimerRef.current = null;
+    }
+    persistPendingConversationUiState();
+  }, [persistPendingConversationUiState]);
 
-  const deleteConversation = (id: string) => {
-    const conversation = conversations.find((c) => c.id === id);
-    if (!conversation) return;
-    onSetConfirmDialog({
-      title: "删除会话",
-      message: conversation.gitIsolated
-        ? "删除此受保护会话并移除它的独立工作区？"
-        : "删除此会话？它将从会话列表中移除。",
-      confirmLabel: "删除",
-      danger: true,
-      onConfirm: () => {
-        void sendConversationDelete({
-          type: "conversation.delete",
-          conversation_id: id,
-          cleanup_worktree: Boolean(conversation.gitIsolated),
-        });
-      },
-    });
-  };
-
-  const deleteSessionBatch = (items: typeof enrichedConversations, label: string) => {
-    const deletable = items.filter((c) => c.sessionStatus !== "running" && c.sessionStatus !== "waiting");
-    if (deletable.length === 0) return;
-    const isolatedCount = deletable.filter((c) => c.gitIsolated).length;
-    const skipped = items.length - deletable.length;
-    onSetConfirmDialog({
-      title: label,
-      message: [
-        `删除 ${deletable.length} 个会话？它们将从会话列表中移除。`,
-        isolatedCount > 0 ? `同时清理 ${isolatedCount} 个受保护工作区。` : "",
-        skipped > 0 ? `跳过 ${skipped} 个运行中或等待中的会话。` : "",
-      ].filter(Boolean).join("\n\n"),
-      confirmLabel: "删除",
-      danger: true,
-      onConfirm: () => {
-        for (const c of deletable) {
-          void sendConversationDelete({
-            type: "conversation.delete",
-            conversation_id: c.id,
-            cleanup_worktree: Boolean(c.gitIsolated),
-          });
-        }
-        setSelectedSessionIds(new Set());
-        setSelectionMode(false);
-      },
-    });
-  };
-
-  const toggleSessionSelected = (id: string) => {
+  const toggleSessionSelected = useCallback((id: string) => {
     setSelectedSessionIds((prev) => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
-  };
+  }, []);
 
-  const setAllFilteredSelected = (selected: boolean) => {
+  const setAllFilteredSelected = useCallback((selected: boolean) => {
     setSelectedSessionIds((prev) => {
       const next = new Set(prev);
       for (const c of selectableFiltered) { selected ? next.add(c.id) : next.delete(c.id); }
       return next;
     });
-  };
+  }, [selectableFiltered]);
 
-  const cleanupWorktree = (id: string, force = false) => {
-    const conversation = conversations.find((c) => c.id === id);
+  const cleanupWorktree = useCallback((id: string, force = false) => {
+    const conversation = conversationsRef.current.find((candidate) => candidate.id === id);
     if (!conversation?.gitIsolated) return;
-    onSetConfirmDialog({
+    onSetConfirmDialogRef.current({
       title: force ? "强制清理工作区" : "清理工作区",
       message: force
         ? "强制移除这个隔离会话工作区并丢弃本地更改吗？"
@@ -374,60 +472,109 @@ export const ConversationsTab = ({
       danger: force,
       onConfirm: () => { wsOutbox.sendClientCommand({ type: "conversation.worktree.cleanup", conversation_id: id, force }); },
     });
-  };
+  }, []);
 
-  const archiveConversation = (id: string, archived: boolean) => {
-    wsOutbox.sendClientCommand({ type: archived ? "conversation.archive" : "conversation.unarchive", conversation_id: id, archived });
-    useAppStore.setState((s) => ({ conversations: s.conversations.map((c) => (c.id === id ? { ...c, archived } : c)) }));
-  };
+  const archiveConversation = useCallback(async (id: string, archived: boolean) => {
+    try {
+      const command = archived ? "conversation.archive" : "conversation.unarchive";
+      const result = await wsOutbox.sendClientCommandAwaitResult({
+        type: command,
+        conversation_id: id,
+        archived,
+      }, command);
+      if (!wsOutbox.commandResultSucceeded(result)) {
+        pushToast(result.message || "Unable to update the conversation archive state.", "error", 6000);
+      }
+    } catch (error) {
+      pushToast(
+        error instanceof Error ? error.message : "Unable to update the conversation archive state.",
+        "error",
+        6000,
+      );
+    }
+  }, []);
 
-  const handleSwitch = (id: string) => {
+  const handleSwitch = useCallback((id: string) => {
     setMenuFor(null);
     requestConversationSwitch(id);
-    onNavigate?.();
-  };
+    onNavigateRef.current?.();
+  }, [requestConversationSwitch]);
 
-  const handoffWorktree = (id: string, target: "local" | "worktree") => {
+  const handoffWorktree = useCallback((id: string, target: "local" | "worktree") => {
     wsOutbox.sendClientCommand({
       type: "conversation.worktree.handoff.preflight",
       conversation_id: id,
       target,
     });
-  };
-  const revealConversationPath = (path?: string) => { if (!path) return; setMenuFor(null); if (isDesktop()) void revealPath(path); };
-  const copyConversationPath = (path?: string) => { if (!path) return; setMenuFor(null); void navigator.clipboard?.writeText(path); };
-  const startRename = (id: string, currentTitle: string) => { setRenaming(id); setRenameValue(currentTitle); };
-  const commitRename = () => {
-    if (!renaming || !renameValue.trim()) { setRenaming(null); return; }
-    wsOutbox.sendClientCommand({ type: "conversation.rename", conversation_id: renaming, title: renameValue.trim() });
-    useAppStore.setState((s) => ({ conversations: s.conversations.map((c) => (c.id === renaming ? { ...c, title: renameValue.trim() } : c)) }));
+  }, []);
+  const revealConversationPath = useCallback((path?: string) => {
+    if (!path) return;
+    setMenuFor(null);
+    if (isDesktop()) void revealPath(path);
+  }, []);
+  const copyConversationPath = useCallback((path?: string) => {
+    if (!path) return;
+    setMenuFor(null);
+    void navigator.clipboard?.writeText(path);
+  }, []);
+  const startRename = useCallback((id: string, currentTitle: string) => {
+    renameStateRef.current = { renaming: id, renameValue: currentTitle };
+    setRenaming(id);
+    setRenameValue(currentTitle);
+  }, []);
+  const handleRenameValueChange = useCallback((value: string) => {
+    renameStateRef.current = { ...renameStateRef.current, renameValue: value };
+    setRenameValue(value);
+  }, []);
+  const cancelRename = useCallback(() => {
+    renameStateRef.current = { ...renameStateRef.current, renaming: null };
     setRenaming(null);
-  };
-  const cancelRename = () => { setRenaming(null); };
-
-  const toggleGroup = (key: string) => {
-    setCollapsedGroups((prev) => {
-      const next = new Set(prev);
-      next.has(key) ? next.delete(key) : next.add(key);
-      try {
-        localStorage.setItem(CONVERSATION_UI_STATE_KEY, JSON.stringify({
-          collapsedGroups: Array.from(next),
-          scrollTop: listRef.current?.scrollTop ?? 0,
-        }));
-      } catch { /* noop */ }
-      return next;
+  }, []);
+  const commitRename = useCallback(() => {
+    const current = renameStateRef.current;
+    const title = current.renameValue.trim();
+    if (!current.renaming || !title) {
+      cancelRename();
+      return;
+    }
+    const renamedConversationId = current.renaming;
+    renameStateRef.current = { ...current, renaming: null };
+    setRenaming(null);
+    void wsOutbox.sendClientCommandAwaitResult({
+      type: "conversation.rename",
+      conversation_id: renamedConversationId,
+      title,
+    }, "conversation.rename").then((result) => {
+      if (!wsOutbox.commandResultSucceeded(result)) {
+        pushToast(result.message || "Unable to rename the conversation.", "error", 6000);
+      }
+    }).catch((error) => {
+      pushToast(
+        error instanceof Error ? error.message : "Unable to rename the conversation.",
+        "error",
+        6000,
+      );
     });
-  };
-  const cloneConversation = (id: string) => {
+  }, [cancelRename]);
+
+  const toggleGroup = useCallback((key: string) => {
+    const next = new Set(collapsedGroupsRef.current);
+    next.has(key) ? next.delete(key) : next.add(key);
+    collapsedGroupsRef.current = next;
+    setCollapsedGroups(next);
+    scheduleConversationUiStatePersist(next, listRef.current?.scrollTop ?? 0);
+  }, [scheduleConversationUiStatePersist]);
+  const cloneConversation = useCallback((id: string) => {
     wsOutbox.sendClientCommand({ type: "conversation.clone", conversation_id: id, activate: false });
-  };
-  const mergeConversation = (id: string) => {
-    const conversation = conversations.find((item) => item.id === id);
+  }, []);
+  const mergeConversation = useCallback((id: string) => {
+    const currentConversations = conversationsRef.current;
+    const conversation = currentConversations.find((item) => item.id === id);
     const parent = conversation?.parentConversationId
-      ? conversations.find((item) => item.id === conversation.parentConversationId)
+      ? currentConversations.find((item) => item.id === conversation.parentConversationId)
       : undefined;
     if (!conversation || !parent) return;
-    onSetConfirmDialog({
+    onSetConfirmDialogRef.current({
       title: "合并会话分支",
       message: `将“${conversation.title}”的新增消息快速合并到“${parent.title}”。如果父会话已分叉修改，后端会拒绝合并并保留两边内容。`,
       confirmLabel: "合并",
@@ -437,56 +584,154 @@ export const ConversationsTab = ({
         target_conversation_id: parent.id,
       }),
     });
-  };
-  const exportConversation = (id: string) => {
+  }, []);
+  const exportConversation = useCallback((id: string) => {
     wsOutbox.sendClientCommand({ type: "conversation.export", conversation_id: id, include_descendants: true });
-  };
+  }, []);
 
   const startWorkspaceConversation = (projectKey: string, group: WorkspaceConversationGroup) => {
     const workspaceRoot = conversationWorkspacePath(group.items[0]);
     if (!workspaceRoot) return;
-    setCollapsedGroups((prev) => {
-      if (!prev.has(projectKey)) return prev;
-      const next = new Set(prev);
+    if (collapsedGroupsRef.current.has(projectKey)) {
+      const next = new Set(collapsedGroupsRef.current);
       next.delete(projectKey);
-      return next;
-    });
+      collapsedGroupsRef.current = next;
+      setCollapsedGroups(next);
+      scheduleConversationUiStatePersist(next, listRef.current?.scrollTop ?? 0);
+    }
     createConversation({ bindWorkspace: true, workspaceRoot, appMode });
     onNavigate?.();
   };
 
-  const renderSessionRow = (conversation: TreeConversation) => (
+  const renderSessionRow = useCallback((conversation: TreeConversation) => (
     <SessionRow
       key={conversation.id}
-      conversation={conversation}
-      conversationId={conversationId}
+      conversation={conversationsById.get(conversation.id) ?? conversation}
+      sessionStatus={conversation.sessionStatus}
+      isHydrating={conversation.isHydrating}
+      active={conversation.id === conversationIdRef.current}
       selectionMode={selectionMode}
-      selectedSessionIds={selectedSessionIds}
-      menuFor={menuFor}
-      renaming={renaming}
-      renameValue={renameValue}
-      waitingLabelForConversation={waitingLabelForConversation}
+      selected={selectedSessionIds.has(conversation.id)}
+      menuOpen={menuFor === conversation.id}
+      renaming={renaming === conversation.id}
+      renameValue={renaming === conversation.id ? renameValue : ""}
+      waitingLabel={conversation.waitingLabel}
       onSwitch={handleSwitch}
       onToggleSelected={toggleSessionSelected}
       onSetMenuFor={setMenuFor}
       onStartRename={startRename}
       onCommitRename={commitRename}
       onCancelRename={cancelRename}
-      onSetRenameValue={setRenameValue}
+      onSetRenameValue={handleRenameValueChange}
       onArchive={archiveConversation}
       onClone={cloneConversation}
       onMerge={mergeConversation}
       onExport={exportConversation}
-      onDelete={deleteConversation}
       onCleanup={cleanupWorktree}
       onHandoff={handoffWorktree}
       onReveal={revealConversationPath}
       onCopy={copyConversationPath}
       treeDepth={conversation.treeDepth}
     />
-  );
+  ), [
+    archiveConversation,
+    cancelRename,
+    cleanupWorktree,
+    cloneConversation,
+    commitRename,
+    conversationsById,
+    copyConversationPath,
+    exportConversation,
+    handleRenameValueChange,
+    handleSwitch,
+    handoffWorktree,
+    menuFor,
+    mergeConversation,
+    renameValue,
+    renaming,
+    revealConversationPath,
+    selectedSessionIds,
+    selectionMode,
+    startRename,
+    toggleSessionSelected,
+  ]);
 
-  if (enrichedConversations.length === 0) return null;
+  const openRecentWorkspace = (path: string) => {
+    if (!path || !wsOutbox.sendClientCommand({ type: "workspace.set", path })) return;
+    useAppStore.getState().setAppMode("code");
+    pushToast(`正在打开工作区：${path}`, "info", 2600);
+  };
+
+  const removeRecentWorkspace = async (path: string) => {
+    const identity = workspaceGroupIdentity(path);
+    if (!path || removingRecentPaths.has(identity) || clearingRecentWorkspaces) return;
+    setRemovingRecentPaths((current) => new Set(current).add(identity));
+    try {
+      const result = await wsOutbox.sendClientCommandAwaitResult({
+        type: "workspace.recent.remove",
+        path,
+      }, "workspace.recent.remove");
+      if (!wsOutbox.commandResultSucceeded(result)) {
+        pushToast(result.message || "无法删除最近工作区记录。", "error", 5000);
+      }
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : "无法删除最近工作区记录。", "error", 5000);
+    } finally {
+      setRemovingRecentPaths((current) => {
+        const next = new Set(current);
+        next.delete(identity);
+        return next;
+      });
+    }
+  };
+
+  const clearRecentWorkspaces = () => {
+    if (clearingRecentWorkspaces || recentWorkspaces.length === 0) return;
+    onSetConfirmDialog({
+      title: "清空最近工作区",
+      message: "只清除最近工作区列表，不会删除任何文件或项目目录。",
+      confirmLabel: "清空列表",
+      danger: true,
+      onConfirm: () => {
+        void (async () => {
+          setClearingRecentWorkspaces(true);
+          try {
+            const result = await wsOutbox.sendClientCommandAwaitResult(
+              { type: "workspace.recent.clear" },
+              "workspace.recent.clear",
+            );
+            if (!wsOutbox.commandResultSucceeded(result)) {
+              pushToast(result.message || "无法清空最近工作区列表。", "error", 5000);
+            }
+          } catch (error) {
+            pushToast(error instanceof Error ? error.message : "无法清空最近工作区列表。", "error", 5000);
+          } finally {
+            setClearingRecentWorkspaces(false);
+          }
+        })();
+      },
+    });
+  };
+
+  if (enrichedConversations.length === 0 && recentWorkspaces.length === 0) {
+    return (
+      <EmptyState
+        icon={<SquarePen size={22} />}
+        title="开始你的第一个任务"
+        action={
+          <button
+            type="button"
+            onClick={() => {
+              createConversation({ appMode });
+              onNavigate?.();
+            }}
+          >
+            新建任务
+          </button>
+        }
+      />
+    );
+  }
 
   return (
     <>
@@ -496,17 +741,6 @@ export const ConversationsTab = ({
           <div style={bulkActionsStyle}>
             <button type="button" onClick={() => setAllFilteredSelected(!allFilteredSelected)} style={bulkActionStyle} disabled={selectableFiltered.length === 0}>
               {allFilteredSelected ? "清除当前选择" : "选择当前结果"}
-            </button>
-            <button
-              type="button"
-              onClick={() => deleteSessionBatch(selectedSessions, "删除所选会话")}
-              className="mc-icon-button mc-icon-button-danger"
-              style={{ color: "var(--state-danger)" }}
-              disabled={selectedSessions.length === 0}
-              title="删除所选会话"
-              aria-label="删除所选会话"
-            >
-              <Trash2 size={14} />
             </button>
           </div>
         </div>
@@ -538,8 +772,8 @@ export const ConversationsTab = ({
               onClick={() => setCurrentWorkspaceOnly((value) => !value)}
               style={{
                 ...filterButtonStyle,
-                background: currentWorkspaceOnly ? "var(--accent-soft)" : "transparent",
-                color: currentWorkspaceOnly ? "var(--accent-primary)" : "var(--text-muted)",
+                 background: currentWorkspaceOnly ? "var(--surface-active)" : "transparent",
+                 color: currentWorkspaceOnly ? "var(--text-primary)" : "var(--text-muted)",
                 fontWeight: currentWorkspaceOnly ? 600 : 500,
               }}
               title={currentWorkspaceDisplayPath}
@@ -551,7 +785,7 @@ export const ConversationsTab = ({
             const count = filterCounts[f.id] || 0;
             return (
               <button key={f.id} onClick={() => setSessionFilter(f.id)}
-                style={{ ...filterButtonStyle, background: sessionFilter === f.id ? "var(--accent-soft)" : "transparent", color: sessionFilter === f.id ? "var(--accent-primary)" : "var(--text-muted)", fontWeight: sessionFilter === f.id ? 600 : 500 }}>
+                 style={{ ...filterButtonStyle, background: sessionFilter === f.id ? "var(--surface-active)" : "transparent", color: sessionFilter === f.id ? "var(--text-primary)" : "var(--text-muted)", fontWeight: sessionFilter === f.id ? 600 : 500 }}>
                 {f.icon}{f.label}{count > 0 && <span style={filterCountStyle}>{count}</span>}
               </button>
             );
@@ -559,25 +793,95 @@ export const ConversationsTab = ({
         </div>
       )}
 
+      {recentWorkspaces.length > 0 && !selectionMode && (
+        <section aria-label="最近工作区" style={{ padding: "0 8px 8px" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, color: "var(--text-muted)", fontSize: "var(--text-3xs)", padding: "2px 4px 5px" }}>
+            <span>最近工作区</span>
+            <button
+              type="button"
+              onClick={clearRecentWorkspaces}
+              disabled={clearingRecentWorkspaces}
+              aria-label="清空最近工作区"
+              title="只清除最近工作区列表，不会删除项目文件"
+              style={{ ...recentsActionStyle(false), width: "auto", padding: "0 5px", gap: 4, fontSize: "var(--text-3xs)" }}
+            >
+              {clearingRecentWorkspaces && <LoaderCircle size={12} className="animate-spin" aria-hidden="true" />}
+              清空
+            </button>
+          </div>
+          <div style={{ display: "grid", gap: 2 }}>
+            {visibleRecentWorkspaces.length === 0 && (
+              <span style={{ padding: "5px 7px", color: "var(--text-muted)", fontSize: "var(--text-3xs)" }}>
+                当前记录均已显示在项目列表中
+              </span>
+            )}
+            {visibleRecentWorkspaces.map((workspace) => {
+              const identity = workspaceGroupIdentity(workspace.path);
+              const removing = removingRecentPaths.has(identity);
+              return (
+                <div key={identity} style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 28px", alignItems: "stretch", gap: 2 }}>
+                  <button
+                    type="button"
+                    onClick={() => openRecentWorkspace(workspace.path)}
+                    disabled={removing || clearingRecentWorkspaces}
+                    title={`${workspace.path}\n${recentWorkspaceMetadata(workspace.projectType, workspace.lastOpened)}`}
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "18px minmax(0, 1fr)",
+                      alignItems: "center",
+                      gap: 7,
+                      width: "100%",
+                      padding: "6px 7px",
+                      border: 0,
+                      borderRadius: "var(--radius-sm, 5px)",
+                      background: "transparent",
+                      color: "var(--text-secondary)",
+                      textAlign: "left",
+                      cursor: removing ? "wait" : "pointer",
+                    }}
+                  >
+                    <Folder size={15} aria-hidden="true" />
+                    <span style={{ minWidth: 0 }}>
+                      <strong style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: "var(--text-xs)" }}>
+                        {workspace.name || workspaceDisplayName(workspace.path, "工作区")}
+                      </strong>
+                      <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-muted)", fontSize: "var(--text-3xs)" }}>
+                        {workspace.path}
+                      </span>
+                      <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-muted)", fontSize: "var(--text-3xs)" }}>
+                        {recentWorkspaceMetadata(workspace.projectType, workspace.lastOpened)}
+                      </span>
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void removeRecentWorkspace(workspace.path)}
+                    disabled={removing || clearingRecentWorkspaces}
+                    aria-label={`删除最近工作区记录 ${workspace.name || workspace.path}`}
+                    title="仅删除最近记录，不删除项目文件"
+                    className="mc-icon-button mc-icon-button-danger"
+                    style={{ alignSelf: "center", width: 26, height: 26 }}
+                  >
+                    {removing ? <LoaderCircle size={13} className="animate-spin" aria-hidden="true" /> : <X size={13} aria-hidden="true" />}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
       <div
         ref={listRef}
+        data-testid="conversation-list"
         style={sessionListWrapStyle}
-        onScroll={(event) => {
-          try {
-            localStorage.setItem(CONVERSATION_UI_STATE_KEY, JSON.stringify({
-              collapsedGroups: Array.from(collapsedGroups),
-              scrollTop: event.currentTarget.scrollTop,
-            }));
-          } catch { /* noop */ }
-        }}
+        onScroll={handleConversationListScroll}
       >
         {filtered.length === 0 ? (
-          <div style={emptyStateStyle}>
-            当前筛选下暂无会话
-          </div>
+          <EmptyState compact icon={<SearchX size={20} />} title="当前筛选下暂无会话" hint="换个关键词，或新建一个任务。" />
         ) : (
           <>
-            {Array.from(projectGroups.entries()).map(([projectKey, group]) => (
+            {orderedProjectGroups.map(({ projectKey, group, conversations: orderedConversations }) => (
               <section key={projectKey} aria-label={`工作区 ${group.label}`} style={taskSectionStyle}>
                 <div className="mc-workspace-group-header">
                   <button
@@ -590,8 +894,8 @@ export const ConversationsTab = ({
                   >
                     <span className="mc-workspace-folder-icon" aria-hidden="true">
                       {collapsedGroups.has(projectKey)
-                        ? <Folder className="mc-workspace-folder-glyph" size={17} data-testid={`workspace-folder-closed-${projectKey}`} />
-                        : <FolderOpen className="mc-workspace-folder-glyph" size={17} data-testid={`workspace-folder-open-${projectKey}`} />}
+                        ? <Folder className="mc-workspace-folder-glyph" size={16} data-testid={`workspace-folder-closed-${projectKey}`} />
+                        : <FolderOpen className="mc-workspace-folder-glyph" size={16} data-testid={`workspace-folder-open-${projectKey}`} />}
                     </span>
                     <span className="mc-workspace-label">{group.label}</span>
                     <span className="mc-workspace-session-count" aria-hidden="true">{group.items.length}</span>
@@ -612,7 +916,7 @@ export const ConversationsTab = ({
                 {!collapsedGroups.has(projectKey) && (
                   <div className="mc-workspace-group-body">
                     <div className="mc-workspace-group-body-inner" style={taskSectionBodyStyle}>
-                      {orderConversationTree(group.items).map(renderSessionRow)}
+                      {orderedConversations.map(renderSessionRow)}
                     </div>
                   </div>
                 )}
@@ -634,7 +938,7 @@ export const ConversationsTab = ({
                 {!collapsedGroups.has("__ordinary_tasks__") && (
                   <div className="mc-workspace-group-body">
                     <div className="mc-workspace-group-body-inner" style={projectItemsStyle}>
-                      {orderConversationTree(ordinaryConversations).map(renderSessionRow)}
+                      {orderedOrdinaryConversations.map(renderSessionRow)}
                     </div>
                   </div>
                 )}
@@ -681,7 +985,7 @@ const taskSectionHeaderStyle: React.CSSProperties = {
   color: "var(--text-primary)",
   cursor: "pointer",
   fontSize: "var(--text-chrome)",
-  fontWeight: 500,
+  fontWeight: "var(--fw-medium)",
   textAlign: "left",
 };
 

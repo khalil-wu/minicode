@@ -10,13 +10,21 @@ export const UsageRing = ({
   contextUsage: ContextUsage | null;
   totalBudgetPercent: number;
 }) => {
-  const contextPercent = contextUsage && contextUsage.limit > 0
+  const hasContextUsage = Boolean(contextUsage && contextUsage.limit > 0);
+  const hasBudgetUsage = !hasContextUsage && (
+    buckets.some((bucket) => bucket.limit > 0)
+    || Number(totalBudgetPercent) > 0
+  );
+  const usageKnown = hasContextUsage || hasBudgetUsage;
+  const contextPercent = hasContextUsage && contextUsage
     ? contextUsage.used / contextUsage.limit
     : 0;
-  const percent = clampPercent((totalBudgetPercent ?? 0) > 0 ? totalBudgetPercent : (contextPercent ?? 0));
-  const label = percent > 0 ? `${Math.round(percent * 100)}%` : "--";
+  // cc's ring shows context_window.used_percentage; the token-budget share
+  // is a different quantity and only stands in when context is unknown.
+  const percent = clampPercent(hasContextUsage ? contextPercent : (totalBudgetPercent ?? 0));
+  const label = usageKnown ? `${Math.round(percent * 100)}%` : "--";
   const color = "var(--accent-primary)";
-  const title = buildTitle({ buckets, contextUsage, percent });
+  const title = buildTitle({ buckets, contextUsage, percent, usageKnown });
 
   return (
     <div title={title} style={shellStyle}>
@@ -25,7 +33,7 @@ export const UsageRing = ({
         role="meter"
         aria-valuemin={0}
         aria-valuemax={100}
-        aria-valuenow={Math.round(percent * 100)}
+        aria-valuenow={usageKnown ? Math.round(percent * 100) : undefined}
         style={{
           ...ringStyle,
           background: `conic-gradient(${color} ${Math.round(percent * 360)}deg, var(--surface-soft) 0deg)`,
@@ -53,12 +61,14 @@ const buildTitle = ({
   buckets,
   contextUsage,
   percent,
+  usageKnown,
 }: {
   buckets: BudgetBucket[];
   contextUsage: ContextUsage | null;
   percent: number;
+  usageKnown: boolean;
 }) => {
-  const lines = [`Context budget: ${Math.round(percent * 100)}%`];
+  const lines = [`Context budget: ${usageKnown ? `${Math.round(percent * 100)}%` : "unknown"}`];
   if (contextUsage && contextUsage.limit > 0) {
     lines.push(`${formatCount(contextUsage.used)} / ${formatCount(contextUsage.limit)} tokens`);
   }
@@ -100,5 +110,5 @@ const ringInnerStyle: CSSProperties = {
 const labelStyle: CSSProperties = {
   fontFamily: "var(--font-mono)",
   fontSize: "var(--text-xs)",
-  fontWeight: 600,
+  fontWeight: "var(--fw-semibold)",
 };

@@ -18,18 +18,19 @@ from backend.agent.checkpoint import (
     MAX_CHECKPOINT_HISTORY_MESSAGES,
     MAX_CHECKPOINT_TEXT_CHARS,
     clear_checkpoints,
+    context_snapshot_revision,
     save_run_checkpoint,
 )
 from backend.agent.runtime import (
     AgentRunRecord,
     AgentRunStatus,
     AgentRuntime,
-    default_runtime,
+    TerminalCommitError,
 )
 from backend.agent.runtime_spans import epoch_ms, runtime_span
 from backend.agent.state import AgentState, TerminalReason, TerminalStatus
 from backend.agent.turn_input import TurnInput, TurnInputQueue
-from backend.agent.provider_attempt import ProviderAttempt
+from backend.agent.provider_attempt import ProviderAttempt, provider_progress_id
 from backend.config import TokenBudget
 from backend.permissions.context import PermissionContext, ToolExecutionContext
 
@@ -125,14 +126,13 @@ class TurnKernel:
         self._run_started_emitted = False
         self._run_completed_emitted = False
         self._completion_event: AgentEvent | None = None
+        self._terminal_commit_failure_event: AgentEvent | None = None
         self._tool_context: ToolExecutionContext | None = None
         self._turn_input_queue = metadata.get("turn_input_queue")
         if self._turn_input_queue is None:
             self._turn_input_queue = TurnInputQueue()
             metadata["turn_input_queue"] = self._turn_input_queue
-        begin_turn = getattr(self._turn_input_queue, "begin_turn", None)
-        if callable(begin_turn):
-            begin_turn(run_record.run_id)
+        self._turn_input_queue.begin_turn(run_record.run_id)
         self._next_user_message = initial_user_message
         self._next_user_attachments: tuple[dict[str, Any], ...] | None = None
         self._scheduled_steer: TurnInput | None = None
@@ -151,7 +151,11 @@ class TurnKernel:
         initial_user_message: str,
     ) -> "TurnKernel":
         runtime_value = metadata.get("agent_runtime")
-        runtime = runtime_value if isinstance(runtime_value, AgentRuntime) else default_runtime()
+        if not isinstance(runtime_value, AgentRuntime):
+            raise RuntimeError(
+                "Turn metadata does not own an AgentRuntime"
+            )
+        runtime = runtime_value
         run_record = runtime.start_run(
             conversation_id=str(
                 getattr(state, "conversation_id", "")
@@ -164,22 +168,51 @@ class TurnKernel:
             session_id=session_id,
             budget=budget,
             run_id=str(metadata.get("run_id", "") or "") or None,
+            mailbox_epoch=int(metadata.get("mailbox_epoch") or 0),
         )
-        metadata.setdefault("run_id", run_record.run_id)
+        # ``run_id`` owns the durable runtime record. ``turn_id`` remains the
+        # host/app-server turn identity when one was supplied; the two are
+        # intentionally distinct so runtime ownership cannot overwrite the
+        # transport identity used to route a turn's UI events.
+        metadata["run_id"] = run_record.run_id
+        metadata.setdefault(
+            "turn_id",
+            str(metadata.get("assistant_message_id") or run_record.run_id),
+        )
         metadata.setdefault("agent_runtime", runtime)
         if session_id:
             metadata.setdefault("session_id", session_id)
             metadata.setdefault("minicode_session_id", session_id)
         if run_record.conversation_id:
             metadata.setdefault("conversation_id", run_record.conversation_id)
-        return cls(
-            runtime=runtime,
-            run_record=run_record,
-            metadata=metadata,
-            emit_event=emit_event,
-            initial_user_message=initial_user_message,
-            state=state,
-        )
+        try:
+            return cls(
+                runtime=runtime,
+                run_record=run_record,
+                metadata=metadata,
+                emit_event=emit_event,
+                initial_user_message=initial_user_message,
+                state=state,
+            )
+        except Exception as exc:
+            # ``start_run`` has already crossed the durable running boundary.
+            # If turn construction fails, close that run before propagating the
+            # setup error; otherwise recovery sees an unexplained permanent
+            # ``running`` record.
+            try:
+                runtime.commit_terminal(
+                    run_record.run_id,
+                    "failed",
+                    summary="startup_failed",
+                    terminal_reason="startup_failed",
+                    error="startup_failed",
+                )
+            except Exception:
+                logger.warning(
+                    "Unable to abort run after TurnKernel construction failed",
+                    exc_info=True,
+                )
+            raise
 
     @property
     def completion_emitted(self) -> bool:
@@ -188,6 +221,33 @@ class TurnKernel:
     @property
     def completion_event(self) -> AgentEvent | None:
         return self._completion_event
+
+    @property
+    def terminal_commit_failure_event(self) -> AgentEvent | None:
+        """Return the explicit evidence for a failed durable terminal commit."""
+
+        return self._terminal_commit_failure_event
+
+    def _record_terminal_commit_failure(self, error: TerminalCommitError) -> AgentEvent:
+        if self._terminal_commit_failure_event is not None:
+            return self._terminal_commit_failure_event
+        self.state.stopped_reason = "terminal_commit_failed"
+        self.state.terminal_status = "failed"
+        event = AgentEvent.error(
+            "MiniCode could not durably commit the run terminal state.",
+            recoverable=False,
+            error_type="terminal_commit_failed",
+            error_code=f"runtime.{error.failure_kind}",
+        )
+        event.data.update(
+            {
+                "run_id": self.run_record.run_id,
+                "terminal_commit_failed": True,
+                "failure_kind": error.failure_kind,
+            }
+        )
+        self._terminal_commit_failure_event = event
+        return event
 
     def start_events(self) -> tuple[AgentEvent, ...]:
         if self._run_started_emitted:
@@ -200,8 +260,11 @@ class TurnKernel:
         status: AgentRunStatus,
         *,
         summary: str = "",
+        terminal_reason: str = "",
         error: str = "",
     ) -> AgentEvent | None:
+        if self._terminal_commit_failure_event is not None:
+            return None
         normalized_status: TerminalStatus = (
             "cancelled"
             if status in {"cancelled", "interrupted"}
@@ -215,30 +278,42 @@ class TurnKernel:
         self.defer_mailbox_to_next_turn()
         if self._run_completed_emitted:
             return None
-        record = self.runtime.complete_run(
-            self.run_record.run_id,
-            status,
-            summary=summary,
-            error=error,
-        )
-        if record is not None:
-            self.run_record = record
+        try:
+            record = self.runtime.commit_terminal(
+                self.run_record.run_id,
+                status,
+                summary=summary,
+                terminal_reason=terminal_reason,
+                error=error,
+            )
+        except TerminalCommitError as exc:
+            return self._record_terminal_commit_failure(exc)
+        self.run_record = record
         self._run_completed_emitted = True
         self._completion_event = AgentEvent.agent_run_completed(record or self.run_record)
         return self._completion_event
 
     def defer_mailbox_to_next_turn(self) -> bool:
-        defer = getattr(self._turn_input_queue, "defer_mailbox_to_next_turn", None)
-        if not callable(defer):
-            return False
-        return bool(defer(self.run_record.run_id))
+        return bool(self._turn_input_queue.defer_mailbox_to_next_turn(self.run_record.run_id))
 
     def complete_for_terminal_reason(self, reason: str | None) -> AgentEvent | None:
         terminal_status = self.state.terminal_status
         return self.complete_run_record(
             _terminal_run_status(reason, terminal_status),
             summary=_terminal_run_summary(reason, terminal_status),
+            terminal_reason=str(reason or ""),
             error=_terminal_run_error(reason, terminal_status),
+        )
+
+    def abort_startup(self, *, reason: str = "startup_failed") -> AgentEvent | None:
+        """Close a run that failed before the provider loop became usable."""
+
+        _set_terminal_reason(self.state, reason, status="failed")
+        return self.complete_run_record(
+            "failed",
+            summary=reason,
+            terminal_reason=reason,
+            error=reason,
         )
 
     def interrupt(
@@ -261,25 +336,68 @@ class TurnKernel:
             context_builder.append_assistant(cancelled_final_text)
         events: list[AgentEvent] = []
         if stream_text.agent_message_started:
-            partial_item = stream_text.complete_active_agent_message(
-                cancelled_final_text or stream_text.active_agent_message_text,
-                source="partial",
-                status="partial",
+            # Only text the provider actually phased as the final answer is a
+            # truncated answer. Unphased narration interrupted mid-flight is
+            # process text, and marking it ``partial`` promoted it into the
+            # persisted/copyable reply. cc, codex and pi all leave such text
+            # classified as it was and record the interruption separately.
+            interrupted_item = (
+                stream_text.complete_active_agent_message(
+                    cancelled_final_text,
+                    source="partial",
+                    status="partial",
+                )
+                if cancelled_final_text
+                else stream_text.cancel_active_agent_message()
             )
-            if partial_item is not None:
-                events.append(partial_item)
+            if interrupted_item is not None:
+                events.append(interrupted_item)
         reconcile = getattr(context_builder, "reconcile_dangling_tool_calls", None)
         if callable(reconcile):
             try:
                 reconcile()
             except Exception as exc:
-                logger.debug("Cancel-path tool trajectory reconcile failed: %s", exc)
+                # The cancelled trajectory is the resumption contract for the
+                # next turn; a failed repair must be visible evidence, not a
+                # debug-only footnote.
+                logger.warning("Cancel-path tool trajectory reconcile failed: %s", exc)
+                events.append(
+                    AgentEvent(
+                        type="system_notice",
+                        data={
+                            "title": "Interrupt recovery incomplete",
+                            "message": (
+                                "Dangling tool calls could not be reconciled while "
+                                "cancelling; the next request may be rejected by the "
+                                "provider until the history is repaired."
+                            ),
+                            "severity": "error",
+                            "cancel_recovery_failure": "tool_call_reconcile_failed",
+                            "detail": str(exc),
+                        },
+                    )
+                )
         append_user = getattr(context_builder, "append_user", None)
         if callable(append_user):
             try:
                 append_user("[Request interrupted by user]")
             except Exception as exc:
-                logger.debug("Cancel-path interruption marker append failed: %s", exc)
+                logger.warning("Cancel-path interruption marker append failed: %s", exc)
+                events.append(
+                    AgentEvent(
+                        type="system_notice",
+                        data={
+                            "title": "Interrupt marker not recorded",
+                            "message": (
+                                "The interruption marker could not be appended to "
+                                "the conversation history."
+                            ),
+                            "severity": "error",
+                            "cancel_recovery_failure": "interrupt_marker_append_failed",
+                            "detail": str(exc),
+                        },
+                    )
+                )
         return tuple(events)
 
     @property
@@ -308,13 +426,32 @@ class TurnKernel:
         except Exception as exc:
             logger.debug("Live permission context refresh failed: %s", exc)
             return False
+        normalizer = tool_context.metadata.get("_permission_context_normalizer")
+        if isinstance(current, PermissionContext) and callable(normalizer):
+            try:
+                current = normalizer(current)
+            except Exception as exc:
+                logger.warning("Managed permission context refresh failed closed: %s", exc)
+                return False
         if not isinstance(current, PermissionContext) or current == tool_context.permission:
             return False
-        tool_context.permission = current
         # Derived capabilities must change atomically with the permission mode.
         # Otherwise bypass -> default/plan leaves the old network grant cached
         # on the live tool context.
-        tool_context.allow_network = current.mode == "bypass"
+        sandbox_factory = tool_context.metadata.get("_sandbox_policy_factory")
+        if callable(sandbox_factory):
+            try:
+                refreshed_sandbox_policy = sandbox_factory(current)
+            except Exception as exc:
+                logger.warning("Sandbox policy refresh failed closed: %s", exc)
+                return False
+            tool_context.sandbox_policy = refreshed_sandbox_policy
+        tool_context.permission = current
+        tool_context.allow_network = bool(
+            tool_context.sandbox_policy.allow_network
+            if tool_context.sandbox_policy is not None
+            else current.mode == "bypass"
+        )
         return True
 
     async def emit_runtime_span(
@@ -343,7 +480,7 @@ class TurnKernel:
             turn_id=str(
                 self.metadata.get("turn_id")
                 or self.metadata.get("assistant_message_id")
-                or ""
+                or self.run_record.run_id
             ),
             iteration_id=iteration_id,
             phase=phase,
@@ -360,18 +497,60 @@ class TurnKernel:
         )
         await self.emit_event(event_value.type, dict(event_value.data))
 
+    async def emit_provider_progress(
+        self,
+        message: str,
+        *,
+        iteration_id: str,
+        status: str = "running",
+        phase: str = "model",
+        detail: str = "",
+        count: int | None = None,
+        summary: str = "",
+    ) -> None:
+        """Project provider liveness through the single typed UI event path."""
+        if self.emit_event is None:
+            return
+        event = AgentEvent.progress(
+            message,
+            stage="status",
+            status=status,
+            id=provider_progress_id(iteration_id),
+            phase=phase,
+            label="provider",
+            summary=summary or message,
+            detail=detail,
+            visibility="timeline",
+            count=count,
+        )
+        await self.emit_event(event.type, dict(event.data))
+
     async def start_provider_attempt(
         self,
         *,
         iteration_id: str,
         retry_index: int,
         started_at: int | None = None,
+        total_attempts: int = 0,
     ) -> ProviderAttempt:
         attempt = ProviderAttempt(
             iteration_id=iteration_id,
             retry_index=retry_index,
             span_id=f"provider:{iteration_id}:{retry_index + 1}",
             started_at=started_at if started_at is not None else epoch_ms(),
+        )
+        self.metadata["provider_total_attempts"] = max(0, int(total_attempts))
+        attempt_label = (
+            f"第 {attempt.attempt_number}/{total_attempts} 次"
+            if total_attempts > 0
+            else f"第 {attempt.attempt_number} 次"
+        )
+        await self.emit_provider_progress(
+            f"正在连接提供商（{attempt_label}）",
+            iteration_id=iteration_id,
+            phase="model",
+            count=attempt.attempt_number,
+            detail="等待提供商首个响应事件",
         )
         await self.emit_runtime_span(
             "provider.request.started",
@@ -400,6 +579,15 @@ class TurnKernel:
             return None
         attempt.first_event_reported = True
         wait_ms = max(0, attempt.first_byte_at - progress_origin_ms)
+        await self.emit_provider_progress(
+            "已连接，模型正在响应",
+            iteration_id=attempt.iteration_id,
+            status="running",
+            phase="model",
+            count=attempt.attempt_number,
+            detail=f"首个响应事件等待 {wait_ms}ms",
+            summary="Provider connection established",
+        )
         await self.emit_runtime_span(
             "provider.first_event",
             span_id=attempt.span_id,
@@ -425,6 +613,7 @@ class TurnKernel:
         event: str | None = None,
         ended_at: int | None = None,
         data: dict[str, Any] | None = None,
+        project_progress: bool = True,
     ) -> bool:
         if attempt is None or attempt.closed:
             return False
@@ -452,17 +641,49 @@ class TurnKernel:
             ui_visible=False,
             data=payload,
         )
+        if project_progress:
+            total_attempts = max(
+                0,
+                int(self.metadata.get("provider_total_attempts") or 0),
+            )
+            attempt_label = (
+                f"第 {attempt.attempt_number}/{total_attempts} 次"
+                if total_attempts > 0
+                else f"第 {attempt.attempt_number} 次"
+            )
+            detail_parts: list[str] = []
+            for key, label in (
+                ("status_code", "HTTP"),
+                ("provider_error_code", "code"),
+                ("provider_error_schema_type", "type"),
+                ("provider_error_type", "provider"),
+                ("error_type", "error"),
+            ):
+                value = payload.get(key)
+                if value not in (None, ""):
+                    detail_parts.append(f"{label}={value}")
+            if status == "completed":
+                progress_status = "completed"
+                progress_message = f"提供商响应完成（{attempt_label}）"
+            elif status in {"cancelled", "superseded"}:
+                progress_status = "partial"
+                progress_message = f"提供商请求已取消（{attempt_label}）"
+            else:
+                progress_status = "failed"
+                progress_message = f"提供商请求失败（{attempt_label}）"
+            await self.emit_provider_progress(
+                progress_message,
+                iteration_id=attempt.iteration_id,
+                status=progress_status,
+                phase="model",
+                count=attempt.attempt_number,
+                detail=" · ".join(detail_parts),
+                summary=summary,
+            )
         return True
 
     def pop_turn_steer(self) -> TurnInput | None:
-        pop_steer = getattr(self._turn_input_queue, "pop_steer", None)
-        if not callable(pop_steer):
-            return None
-        try:
-            item = pop_steer()
-        except Exception as exc:
-            logger.debug("Turn-local steer queue read failed: %s", exc)
-            return None
+        item = self._turn_input_queue.pop_steer()
         return item if isinstance(item, TurnInput) else None
 
     def schedule_user_input(
@@ -483,16 +704,15 @@ class TurnKernel:
         self._scheduled_steer = None
 
     async def accept_turn_steer(self, item: TurnInput) -> None:
+        # Skill selections belong to one user message. A steered message owns
+        # its exact selection and cannot inherit the prior message's skills.
         if item.selected_skills:
-            existing_skills = self.state.prompt_context.get("selected_skills")
-            merged_skills = {
-                (str(skill.get("name") or ""), str(skill.get("path") or "")): dict(skill)
-                for skill in existing_skills or []
-                if isinstance(skill, dict)
-            }
-            for skill in item.selected_skills:
-                merged_skills[(skill["name"], skill["path"])] = dict(skill)
-            self.state.prompt_context["selected_skills"] = list(merged_skills.values())
+            self.state.prompt_context["selected_skills"] = [
+                dict(skill) for skill in item.selected_skills
+            ]
+        else:
+            self.state.prompt_context.pop("selected_skills", None)
+        self.state.prompt_context.pop("skill_injections", None)
         if item.selected_plugins:
             from backend.services.plugin_settings_service import resolve_enabled_plugin_mentions
 
@@ -517,7 +737,13 @@ class TurnKernel:
                 if inspect.isawaitable(result):
                     await result
             except Exception as exc:
-                logger.warning("Failed to persist consumed turn steer: %s", exc)
+                # The original command remains in the durable turn-input set.
+                # Fail before scheduling it into model context so run cleanup
+                # can restore it as a follow-up without duplicating a message
+                # that the model already observed but history lost.
+                raise RuntimeError(
+                    "Failed to persist the steered user message before delivery"
+                ) from exc
         self.schedule_user_input(item.content, item.attachments, steer=item)
 
     async def take_boundary_input(self, *, initial_turn_pending: bool) -> TurnBoundaryInput:
@@ -566,69 +792,176 @@ class TurnKernel:
         user_message: str,
         state: AgentState,
         context_builder: Any,
+        defer_completed_clear: bool = False,
     ) -> str:
         if not session_id:
+            self.metadata["checkpoint_status"] = "none"
             return "none"
         reason = state.stopped_reason
         terminal_status = state.terminal_status
-        if _terminal_run_status(reason, terminal_status) != "completed":
-            try:
-                snapshot_exporter = getattr(context_builder, "export_snapshot", None)
-                snapshot: dict[str, Any] = {}
-                if callable(snapshot_exporter):
-                    parameters = inspect.signature(snapshot_exporter).parameters
-                    accepts_bounds = (
-                        "max_messages" in parameters
-                        or any(
-                            parameter.kind is inspect.Parameter.VAR_KEYWORD
-                            for parameter in parameters.values()
-                        )
+        resolved_status = _terminal_run_status(reason, terminal_status)
+        retain_completed = bool(self.metadata.get("retain_completed_checkpoint"))
+        if resolved_status == "completed" and retain_completed:
+            current_status = str(self.metadata.get("checkpoint_status") or "")
+            if current_status in {"saved", "save_failed"}:
+                return current_status
+            return self._save_checkpoint(
+                session_id=session_id,
+                user_message=user_message,
+                state=state,
+                context_builder=context_builder,
+                reason="idle",
+            )
+        if resolved_status != "completed":
+            return self._save_checkpoint(
+                session_id=session_id,
+                user_message=user_message,
+                state=state,
+                context_builder=context_builder,
+                reason=reason,
+            )
+        if defer_completed_clear:
+            # A completed turn's checkpoint is cleared only after its terminal
+            # commit lands: ``_finalize_query`` calls this again without the
+            # deferral once the commit succeeds. A failed commit therefore leaves
+            # the turn's mid-run checkpoints in place as the resume handle.
+            self.metadata["checkpoint_status"] = "pending_clear"
+            self.metadata.pop("checkpoint_error", None)
+            return "pending_clear"
+        self.metadata.pop("checkpoint_error", None)
+        try:
+            clear_checkpoints(
+                session_id,
+                conversation_id=str(
+                    getattr(state, "conversation_id", "")
+                    or self.run_record.conversation_id
+                    or ""
+                ),
+            )
+            self.metadata["checkpoint_status"] = "cleared"
+            self.metadata.pop("checkpoint_context_revision", None)
+            self.metadata.pop("checkpoint_sequence", None)
+            self.metadata.pop("checkpoint_schema_version", None)
+            return "cleared"
+        except Exception as exc:
+            self.metadata["checkpoint_status"] = "clear_failed"
+            self.metadata["checkpoint_error"] = type(exc).__name__
+            logger.warning("Checkpoint clear failed: %s", exc)
+            return "clear_failed"
+
+    def _save_checkpoint(
+        self,
+        *,
+        session_id: str,
+        user_message: str,
+        state: AgentState,
+        context_builder: Any,
+        reason: str,
+    ) -> str:
+        """Persist one resumable checkpoint and report the durable outcome."""
+        self.metadata.pop("checkpoint_error", None)
+        self.metadata.pop("checkpoint_context_revision", None)
+        self.metadata.pop("checkpoint_sequence", None)
+        self.metadata.pop("checkpoint_schema_version", None)
+        try:
+            snapshot_exporter = getattr(context_builder, "export_snapshot", None)
+            snapshot: dict[str, Any] = {}
+            if callable(snapshot_exporter):
+                parameters = inspect.signature(snapshot_exporter).parameters
+                accepts_bounds = (
+                    "max_messages" in parameters
+                    or any(
+                        parameter.kind is inspect.Parameter.VAR_KEYWORD
+                        for parameter in parameters.values()
                     )
-                    snapshot = (
-                        snapshot_exporter(
-                            max_messages=MAX_CHECKPOINT_HISTORY_MESSAGES,
-                            max_chars=MAX_CHECKPOINT_TEXT_CHARS * 4,
-                        )
-                        if accepts_bounds
-                        else snapshot_exporter()
+                )
+                snapshot = (
+                    snapshot_exporter(
+                        max_messages=MAX_CHECKPOINT_HISTORY_MESSAGES,
+                        max_chars=MAX_CHECKPOINT_TEXT_CHARS * 4,
                     )
-                save_run_checkpoint(
-                    session_id=session_id,
-                    user_message=user_message,
-                    iterations=state.iterations,
-                    reply=state.reply,
-                    messages=snapshot.get("history", []),
-                    tool_calls=state.tool_calls,
-                    active_skills=state.active_skills,
-                    disabled_tools=state.disabled_tools,
-                    stopped_reason=reason,
-                    last_mutation_index=state._last_mutation_index,
-                    run_id=self.run_record.run_id,
-                    conversation_id=str(getattr(state, "conversation_id", "") or ""),
-                    resume_payload={
-                        "run_id": self.run_record.run_id,
-                        "conversation_id": str(
-                            getattr(state, "conversation_id", "") or ""
-                        ),
-                        "role": self.run_record.role,
-                    },
+                    if accepts_bounds
+                    else snapshot_exporter()
                 )
-                return "saved"
-            except Exception as exc:
-                logger.debug("Checkpoint save failed: %s", exc)
-                return "save_failed"
-        if _terminal_run_status(reason, terminal_status) == "completed":
-            try:
-                clear_checkpoints(
-                    session_id,
-                    conversation_id=str(
-                        getattr(state, "conversation_id", "")
-                        or self.run_record.conversation_id
-                        or ""
-                    ),
-                )
-                return "cleared"
-            except Exception as exc:
-                logger.debug("Checkpoint clear failed: %s", exc)
-                return "clear_failed"
-        return "none"
+            receipt: dict[str, Any] = {}
+            context_revision = context_snapshot_revision(snapshot)
+            checkpoint_origin = self.metadata.get("checkpoint_origin")
+            resume_payload: dict[str, Any] = {
+                "run_id": self.run_record.run_id,
+                "conversation_id": str(getattr(state, "conversation_id", "") or ""),
+                "role": self.run_record.role,
+            }
+            if isinstance(checkpoint_origin, dict) and checkpoint_origin:
+                resume_payload["parent_checkpoint"] = dict(checkpoint_origin)
+            save_run_checkpoint(
+                receipt=receipt,
+                session_id=session_id,
+                user_message=user_message,
+                iterations=state.iterations,
+                reply=state.reply,
+                messages=snapshot.get("history", []),
+                context_snapshot=snapshot,
+                tool_calls=state.tool_calls,
+                active_skills=state.active_skills,
+                disabled_tools=state.disabled_tools,
+                loaded_deferred_tools=state.loaded_deferred_tools,
+                stopped_reason=reason,
+                last_mutation_index=state._last_mutation_index,
+                run_id=self.run_record.run_id,
+                conversation_id=str(getattr(state, "conversation_id", "") or ""),
+                resume_payload=resume_payload,
+            )
+            self.metadata["checkpoint_status"] = "saved"
+            self.metadata["checkpoint_context_revision"] = str(
+                receipt.get("context_revision") or context_revision
+            )
+            self.metadata["checkpoint_sequence"] = int(receipt.get("sequence") or 0)
+            self.metadata["checkpoint_schema_version"] = int(
+                receipt.get("schema_version") or 0
+            )
+            return "saved"
+        except Exception as exc:
+            self.metadata["checkpoint_status"] = "save_failed"
+            self.metadata["checkpoint_error"] = type(exc).__name__
+            logger.warning("Checkpoint save failed: %s", exc)
+            return "save_failed"
+
+    def checkpoint_failure_event(self) -> AgentEvent | None:
+        """Project a failed checkpoint cleanup without changing run authority."""
+        status = str(self.metadata.get("checkpoint_status") or "none")
+        if status not in {"save_failed", "clear_failed"}:
+            return None
+        operation = "save" if status == "save_failed" else "clear"
+        return AgentEvent.error(
+            (
+                "MiniCode could not save a resumable checkpoint for this stopped turn."
+                if operation == "save"
+                else "MiniCode completed the turn, but could not clear its stale run checkpoint."
+            ),
+            recoverable=False,
+            error_type="checkpoint",
+            error_code=f"checkpoint.{status}",
+        )
+
+    def checkpoint_evidence(self) -> dict[str, Any]:
+        """Return the public-safe receipt for this turn's resume boundary."""
+
+        status = str(self.metadata.get("checkpoint_status") or "none")
+        evidence: dict[str, Any] = {"status": status}
+        revision = str(
+            self.metadata.get("checkpoint_context_revision") or ""
+        ).strip()
+        if revision:
+            evidence["context_revision"] = revision
+        sequence = int(self.metadata.get("checkpoint_sequence") or 0)
+        if sequence:
+            evidence["sequence"] = sequence
+        schema_version = int(
+            self.metadata.get("checkpoint_schema_version") or 0
+        )
+        if schema_version:
+            evidence["schema_version"] = schema_version
+        error_type = str(self.metadata.get("checkpoint_error") or "").strip()
+        if error_type:
+            evidence["error_type"] = error_type
+        return evidence

@@ -1,7 +1,7 @@
 """
 Agent Loop - Single-loop + Recovery-ladder architecture.
 
-Inspired by Claude Code's single-query-loop pattern:
+The loop has one authoritative lifecycle:
   1. Context Pipeline  (before the call)
   2. Streaming Execution (during the call)
   3. Recovery Paths    (after the call)
@@ -21,13 +21,13 @@ from typing import Any, Callable
 from backend.agent.context import ContextBuilder
 from backend.agent.error_withholding import ErrorWithholdingController
 from backend.agent.message import AgentEvent
-from backend.agent.skill_activation import activate_turn_skills
 from backend.agent.loop_bootstrap import (
     AgentLoopBootstrap,
     AgentLoopBootstrapRequest,
     bootstrap_agent_loop,
 )
 from backend.agent.loop_components import build_agent_loop_components
+from backend.agent.loop_hook_projection import apply_hook_results
 from backend.agent.state import AgentState
 from backend.agent.loop_session import AgentLoopSessionContext
 from backend.agent.stream_sanitizer import scrub_thinking_tags as _scrub_thinking_tags
@@ -35,6 +35,7 @@ from backend.agent.turn_kernel import (
     TurnKernel,
     _set_terminal_reason,
 )
+from backend.agent.runtime import AgentRuntime, default_runtime
 from backend.agent.turn_budget import TurnBudgetController
 from backend.agent.turn_iteration_admission import (
     IterationAdmissionResult,
@@ -46,6 +47,12 @@ from backend.agent.turn_iteration_execution import (
     TurnIterationExecutor,
 )
 from backend.agent.stream_attempt import StreamTextState
+from backend.agent.terminal_projection import (
+    TurnTerminalProjection,
+    terminal_boundary_events,
+    terminal_status_and_reason,
+)
+from backend.agent.terminal_validation import validate_terminal_outcome
 from backend.artifact.store import ArtifactStore
 from backend.config import AgentSettings, TokenBudget
 from backend.llm.base import LLMAdapter, UsageInfo
@@ -56,14 +63,6 @@ from backend.tools.registry import ToolRegistry
 logger = logging.getLogger(__name__)
 
 __all__ = ["AgentLoopSessionContext", "run_agent_loop"]
-
-
-# Constants
-
-# Stop hook feedback may inject more than once (cc stopHookActive allows
-# multiple rounds); a small count cap guards against a prompt-too-long death
-# loop when a hook keeps blocking.
-_STOP_HOOK_FEEDBACK_LIMIT = 3
 
 
 # Main loop
@@ -100,6 +99,15 @@ async def run_agent_loop(
 
     The model decides: has tool_calls -> execute -> loop; no tool_calls -> done.
     """
+    # Preserve host metadata and establish the single durable runtime owner.
+    if metadata is None and session_context is not None and not state_prepared:
+        metadata = session_context.metadata
+    metadata = metadata if metadata is not None else {}
+    runtime_value = metadata.get("agent_runtime")
+    if runtime_value is None:
+        metadata["agent_runtime"] = default_runtime()
+    elif not isinstance(runtime_value, AgentRuntime):
+        raise TypeError("Turn metadata agent_runtime must be an AgentRuntime")
     bootstrap = None
     async for bootstrap_update in bootstrap_agent_loop(
         AgentLoopBootstrapRequest(
@@ -155,6 +163,7 @@ async def run_agent_loop(
     stream_retry_policy = bootstrap.stream_retry_policy
     effective_permission_context = bootstrap.effective_permission_context
     tool_ctx = bootstrap.tool_context
+    permission_checker = bootstrap.permission_checker
     session_id = bootstrap.session_id
     task_id = bootstrap.task_id
     stream_text = StreamTextState()
@@ -162,24 +171,28 @@ async def run_agent_loop(
         metadata.get("_query_engine_recovery_restored")
     )
     turn_usage = UsageInfo()
+    terminal_projection: TurnTerminalProjection | None = None
+    saw_non_text_result = False
+    side_call_records = metadata.get("_side_calls")
+    if not isinstance(side_call_records, list):
+        side_call_records = []
+        metadata["_side_calls"] = side_call_records
     from backend.llm.cost_tracker import CostTracker
     _cost_session_token = CostTracker.bind_session(bootstrap.cost_session_id)
     # Bind side-call usage (for example compaction) to the current turn.
     _turn_usage_token = LLMAdapter.bind_turn_usage(turn_usage)
+    _side_call_records_token = LLMAdapter.bind_side_call_records(side_call_records)
 
     try:
-        for hook_result in (
-            bootstrap.session_hook_result,
-            bootstrap.prompt_hook_result,
+        for event in apply_hook_results(
+            context=ctx,
+            user_message=user_message,
+            hook_results=(
+                bootstrap.session_hook_result,
+                bootstrap.prompt_hook_result,
+            ),
         ):
-            system_message = str(
-                getattr(hook_result, "system_message", "") or ""
-            ).strip()
-            if system_message:
-                yield AgentEvent(
-                    type="system_notice",
-                    data={"content": system_message},
-                )
+            yield event
         if bootstrap.preflight_blocked:
             message = bootstrap.preflight_block_message or "User prompt blocked by hook"
             _set_terminal_reason(state, "blocked", status="failed")
@@ -189,16 +202,18 @@ async def run_agent_loop(
                 error_type="hook",
                 error_code="user_prompt_blocked",
             )
-            completed_event = turn_kernel.complete_for_terminal_reason("blocked")
-            if completed_event is not None:
-                yield completed_event
-            yield AgentEvent.done(status="failed", reason="blocked")
-            turn_kernel.finalize_checkpoint(
+            for event in terminal_boundary_events(
+                turn_kernel=turn_kernel,
                 session_id=session_id,
                 user_message=user_message,
                 state=state,
                 context_builder=ctx,
-            )
+                usage=turn_usage,
+                terminal_projection=terminal_projection,
+                status="failed",
+                reason="blocked",
+            ):
+                yield event
             return
 
         turn_start_tool_call_count = 0
@@ -210,19 +225,12 @@ async def run_agent_loop(
         # Do not start more preflight work after references or hooks consumed
         # the absolute turn allowance. The loop boundary below owns the normal
         # terminal fallback decision for that exhausted turn.
-        if skill_manager and not preflight_deadline_reached:
-            try:
-                async for skill_event in activate_turn_skills(skill_manager, user_message, state):
-                    yield skill_event
-            except asyncio.CancelledError:
-                _set_terminal_reason(state, "interrupted", status="cancelled")
-                raise
-
         components = build_agent_loop_components(
             bootstrap=bootstrap,
             tool_registry=tool_registry,
             permission_checker=permission_checker,
             usage=lambda: turn_usage,
+            skill_manager=(skill_manager if not preflight_deadline_reached else None),
         )
         pending_turn_context = components.pending_turn_context
         turn_tool_schema_state = components.turn_tool_schema_state
@@ -232,7 +240,6 @@ async def run_agent_loop(
         budget_runtime = components.budget_runtime
         answer_committer = components.answer_committer
         llm_request_metadata = components.llm_request_metadata
-        prefer_stateful_history = components.prefer_stateful_history
         provider_completion = components.provider_completion
         iteration_admission = TurnIterationAdmission(
             context=ctx,
@@ -286,12 +293,10 @@ async def run_agent_loop(
             answer_committer=answer_committer,
             emit_event=emit_event,
             turn_budget_controller=turn_budget_controller,
-            stop_hook_feedback_limit=_STOP_HOOK_FEEDBACK_LIMIT,
         )
         iteration_execution_state = IterationExecutionState(
             turn_usage=turn_usage,
             tool_batch_count=tool_batch_count,
-            prefer_stateful_history=prefer_stateful_history,
             degraded_reason=degraded_reason,
             stream_text=stream_text,
         )
@@ -311,12 +316,20 @@ async def run_agent_loop(
                 ):
                     if isinstance(iteration_admission_update, IterationAdmissionResult):
                         iteration_admission_result = iteration_admission_update
+                    elif isinstance(iteration_admission_update, TurnTerminalProjection):
+                        terminal_projection = iteration_admission_update
                     else:
+                        if iteration_admission_update.type == "image_chunk":
+                            saw_non_text_result = True
                         yield iteration_admission_update
                 if iteration_admission_result is None:
                     raise RuntimeError(
                         "iteration admission returned without a result"
                     )
+                active_llm = iteration_runtime.llm
+                iteration_executor.llm = active_llm
+                iteration_admission.llm = active_llm
+                iteration_executor.tool_registry = iteration_runtime.tool_registry
                 turn_tool_schema_state = iteration_admission_result.tool_schema_state
                 initial_user_turn_pending = (
                     iteration_admission_result.initial_turn_pending
@@ -353,7 +366,11 @@ async def run_agent_loop(
                         IterationExecutionResult,
                     ):
                         iteration_execution_result = iteration_execution_update
+                    elif isinstance(iteration_execution_update, TurnTerminalProjection):
+                        terminal_projection = iteration_execution_update
                     else:
+                        if iteration_execution_update.type == "image_chunk":
+                            saw_non_text_result = True
                         yield iteration_execution_update
                 if iteration_execution_result is None:
                     raise RuntimeError(
@@ -362,9 +379,6 @@ async def run_agent_loop(
                 iteration_execution_state = iteration_execution_result.state
                 turn_usage = iteration_execution_state.turn_usage
                 tool_batch_count = iteration_execution_state.tool_batch_count
-                prefer_stateful_history = (
-                    iteration_execution_state.prefer_stateful_history
-                )
                 degraded_reason = (
                     iteration_execution_state.degraded_reason
                 )
@@ -379,11 +393,12 @@ async def run_agent_loop(
                 stream_text=iteration_execution_state.stream_text,
                 scrub_text=_scrub_thinking_tags,
             )
-            turn_kernel.finalize_checkpoint(
+            checkpoint_status = turn_kernel.finalize_checkpoint(
                 session_id=session_id,
                 user_message=user_message,
                 state=state,
                 context_builder=ctx,
+                defer_completed_clear=True,
             )
             for interrupt_event in interrupt_events:
                 yield interrupt_event
@@ -391,25 +406,88 @@ async def run_agent_loop(
             # current messages/tool evidence. This makes deadline resume real.
             deferred_cancel = exc
 
+        validation = validate_terminal_outcome(
+            status=str(state.terminal_status or "completed"),
+            reason=str(state.stopped_reason or ""),
+            reply=state.reply,
+            tool_statuses=(record.status for record in state.tool_calls),
+            has_non_text_result=saw_non_text_result,
+        )
+        if validation.changed:
+            _set_terminal_reason(
+                state,
+                validation.reason,
+                status=validation.status,
+            )
+            state.mark_transition(validation.reason)
+            yield AgentEvent.error(
+                validation.message,
+                recoverable=validation.recoverable,
+                error_type="missing_final_answer",
+                error_code="agent.missing_final_answer",
+            )
+
         # The loop exit is the sole normal terminal transition. Inner provider,
         # admission, and budget paths only set terminal state and report evidence.
-        completed_event = turn_kernel.complete_for_terminal_reason(state.stopped_reason)
-        if completed_event is not None:
-            yield completed_event
+        # QueryEngine owns the only durable terminal CAS. The provider/tool loop
+        # publishes intent and evidence, then drains completely so checkpoint
+        # cleanup cannot race the outer transaction coordinator.
+        terminal_status, terminal_reason = terminal_status_and_reason(
+            state=state,
+            terminal_projection=terminal_projection,
+        )
+        for event in terminal_boundary_events(
+            turn_kernel=turn_kernel,
+            session_id=session_id,
+            user_message=user_message,
+            state=state,
+            context_builder=ctx,
+            usage=turn_usage,
+            terminal_projection=terminal_projection,
+            status=terminal_status,
+            reason=terminal_reason,
+        ):
+            yield event
 
-        if deferred_cancel is None:
-            turn_kernel.finalize_checkpoint(
+        if deferred_cancel is not None:
+            raise deferred_cancel
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        # Every run crosses the durable ``running`` boundary in TurnKernel.create.
+        # An unexpected admission, provider, tool, or final-answer exception must
+        # therefore become one canonical failed terminal transition instead of
+        # escaping with a permanently running record and no public done event.
+        logger.exception("Unhandled MiniCode agent-loop failure")
+        if not turn_kernel.completion_emitted:
+            _set_terminal_reason(state, "runtime_error", status="failed")
+            yield AgentEvent.error(
+                "MiniCode agent loop failed unexpectedly.",
+                recoverable=False,
+                error_type="agent_loop",
+                error_code="agent_loop.runtime_error",
+            )
+            for event in terminal_boundary_events(
+                turn_kernel=turn_kernel,
                 session_id=session_id,
                 user_message=user_message,
                 state=state,
                 context_builder=ctx,
-            )
-        if deferred_cancel is not None:
-            raise deferred_cancel
+                usage=turn_usage,
+                terminal_projection=terminal_projection,
+                status="failed",
+                reason="runtime_error",
+            ):
+                yield event
     finally:
         if bootstrap.hook_manager_token is not None:
             from backend.hooks.manager import unbind_hook_manager
 
             unbind_hook_manager(bootstrap.hook_manager_token)
+        if bootstrap.provider_hook_runner_token is not None:
+            LLMAdapter.unbind_provider_lifecycle_runtime(
+                bootstrap.provider_hook_runner_token
+            )
+        LLMAdapter.unbind_side_call_records(_side_call_records_token)
         LLMAdapter.unbind_turn_usage(_turn_usage_token)
         CostTracker.unbind_session(_cost_session_token)

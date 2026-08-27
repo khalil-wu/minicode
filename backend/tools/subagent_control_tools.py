@@ -1,43 +1,45 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from typing import Any
 
 from backend.agent.message import AgentEvent
-from backend.agent.runtime import default_runtime
 from backend.permissions.context import ToolExecutionContext
+from backend.tools.agent_control_plane import (
+    AgentControlPlane,
+    AgentTarget,
+    AgentTreeScope,
+    canonical_agent_operation,
+)
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.subagent_result import full_subagent_result
-from backend.tools.subagent_runtime import runtime_from_context
+from backend.tools.subagent_runtime import require_runtime_from_context
 
 
-def _authorized_subagent(runtime: Any, subagent_id: str, context: ToolExecutionContext | None) -> bool:
-    record = runtime.get_subagent(subagent_id)
-    get_task_metadata = getattr(runtime, "get_subagent_task_metadata", None)
-    task_metadata = get_task_metadata(subagent_id) if callable(get_task_metadata) else None
-    if record is None and not isinstance(task_metadata, dict):
+def _authorized_subagent(
+    runtime: Any,
+    subagent_id: str,
+    context: ToolExecutionContext | None,
+    *,
+    scope: AgentTreeScope,
+) -> bool:
+    control = AgentControlPlane(context, runtime=runtime)
+    if not control.has_actor_identity:
         return False
-    metadata = context.metadata if context and isinstance(context.metadata, dict) else {}
-    parent_run_id = str(metadata.get("run_id") or "").strip()
-    # Tool callers created outside an active agent turn (maintenance/unit tests)
-    # have no parent identity. Preserve read-only compatibility there ONLY under
-    # a test harness; in production an absent parent identity must not be able to
-    # control (or read) arbitrary subagents, so we deny by default.
-    if not parent_run_id:
-        return bool(os.environ.get("PYTEST_CURRENT_TEST"))
-    record_parent_run_id = (
-        str(getattr(record, "parent_run_id", "") or "")
-        if record is not None
-        else str(task_metadata.get("parent_run_id") or "")
-    )
-    if record_parent_run_id != parent_run_id:
-        return False
-    parent = runtime.get_run(parent_run_id) if hasattr(runtime, "get_run") else None
-    conversation_id = str(getattr(context, "conversation_id", "") or "").strip()
-    if conversation_id and parent is not None and str(getattr(parent, "conversation_id", "") or "") != conversation_id:
-        return False
-    return True
+    return control.resolve_target(subagent_id, scope=scope) is not None
+
+
+def _authorized_target(
+    runtime: Any,
+    subagent_id: str,
+    context: ToolExecutionContext | None,
+    *,
+    scope: AgentTreeScope,
+) -> tuple[AgentControlPlane, AgentTarget | None]:
+    control = AgentControlPlane(context, runtime=runtime)
+    if not control.has_actor_identity:
+        return control, None
+    return control, control.resolve_target(subagent_id, scope=scope)
 
 
 class TaskStopTool(BaseTool):
@@ -86,10 +88,25 @@ class TaskStopTool(BaseTool):
                 result_kind="subagent",
             )
 
-        runtime = runtime_from_context(context) or default_runtime()
-        if not _authorized_subagent(runtime, subagent_id, context):
+        runtime = require_runtime_from_context(context)
+        binding = canonical_agent_operation(self.name)
+        control, target = _authorized_target(
+            runtime,
+            subagent_id,
+            context,
+            scope=binding.scope or "children",
+        )
+        if not control.can_use_operation(binding.operation):
+            return ToolResult(
+                content="Current agent execution profile does not allow interruption.",
+                is_error=True,
+                status="forbidden",
+                result_kind="subagent",
+            )
+        if target is None:
             return ToolResult(content="Subagent is not owned by the current task.", is_error=True, status="forbidden", result_kind="subagent")
-        status = runtime.cancel_subagent_task(subagent_id)
+        outcome = control.interrupt(target)
+        status = outcome.interrupt_status
         emit_event = context.emit_event if context else None
 
         if status == "cancelled":
@@ -97,7 +114,7 @@ class TaskStopTool(BaseTool):
                 await emit_event(
                     "subagent.progress",
                     AgentEvent.subagent_progress(
-                        subagent_id=subagent_id,
+                        subagent_id=outcome.target.subagent_id,
                         detail="cancelling",
                         activity_kind="lifecycle",
                         activity_summary="正在停止子任务",
@@ -105,34 +122,34 @@ class TaskStopTool(BaseTool):
                     ).data,
                 )
             return ToolResult(
-                content=f"Cancellation requested for background subagent {subagent_id}.",
-                display_summary=f"Cancelling {subagent_id}",
+                content=f"Cancellation requested for background subagent {outcome.target.subagent_id}.",
+                display_summary=f"Cancelling {outcome.target.subagent_id}",
                 result_kind="subagent",
                 status="cancelled",
             )
 
         if status == "done":
             return ToolResult(
-                content=f"Background subagent {subagent_id} has already finished.",
-                display_summary=f"{subagent_id} already finished",
+                content=f"Background subagent {outcome.target.subagent_id} has already finished.",
+                display_summary=f"{outcome.target.subagent_id} already finished",
                 result_kind="subagent",
                 status="completed",
             )
 
-        record = runtime.get_subagent(subagent_id)
+        record = runtime.get_subagent(outcome.target.subagent_id)
         if record is not None and record.status != "running":
             return ToolResult(
-                content=f"Subagent {subagent_id} is already {record.status}.",
-                display_summary=f"{subagent_id} {record.status}",
+                content=f"Subagent {outcome.target.subagent_id} is already {record.status}.",
+                display_summary=f"{outcome.target.subagent_id} {record.status}",
                 result_kind="subagent",
                 status=record.status,
             )
 
         return ToolResult(
-            content=f"No running background subagent found for {subagent_id}.",
+            content=f"No running background subagent found for {outcome.target.subagent_id}.",
             is_error=True,
             status="not_found",
-            display_summary=f"{subagent_id} not found",
+            display_summary=f"{outcome.target.subagent_id} not found",
             result_kind="subagent",
         )
 
@@ -154,6 +171,16 @@ class TaskStatusTool(BaseTool):
     read_only = True
     mutates_workspace = False
     max_result_chars = None
+
+    def is_read_only(self, args: dict[str, Any] | None = None) -> bool:
+        return not bool((args or {}).get("consume", False))
+
+    def get_side_effect_kind(self, args: dict[str, Any] | None = None) -> str:
+        # consume=true releases retained session result state and must not be
+        # parallelized, retried, or cached as an observational call.
+        from backend.tools.base import TOOL_SIDE_EFFECT_EXTERNAL, TOOL_SIDE_EFFECT_NONE
+
+        return TOOL_SIDE_EFFECT_NONE if self.is_read_only(args) else TOOL_SIDE_EFFECT_EXTERNAL
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -222,11 +249,26 @@ class TaskStatusTool(BaseTool):
                         status="blocked",
                         result_kind="subagent",
                     )
-                runtime = runtime_from_context(context) or default_runtime()
+                runtime = require_runtime_from_context(context)
+                binding = canonical_agent_operation(self.name)
+                scope = binding.scope or "children"
+                control = AgentControlPlane(context, runtime=runtime)
+                if not control.can_use_operation(binding.operation):
+                    return ToolResult(
+                        content="Current agent execution profile does not allow task observation.",
+                        is_error=True,
+                        status="forbidden",
+                        result_kind="subagent",
+                    )
                 unauthorized = [
                     subagent_id
                     for subagent_id in subagent_ids
-                    if not _authorized_subagent(runtime, subagent_id, context)
+                    if not _authorized_subagent(
+                        runtime,
+                        subagent_id,
+                        context,
+                        scope=scope,
+                    )
                 ]
                 if unauthorized:
                     return ToolResult(
@@ -242,9 +284,10 @@ class TaskStatusTool(BaseTool):
                 except (TypeError, ValueError):
                     wait_seconds = 0.0
                 if wait_seconds:
-                    wait_for_any = getattr(runtime, "wait_for_any_subagent", None)
-                    if callable(wait_for_any):
-                        await wait_for_any(subagent_ids, wait_seconds)
+                    await control.wait_for_any(
+                        subagent_ids,
+                        timeout_seconds=wait_seconds,
+                    )
                 results = await asyncio.gather(*(
                     self.execute({**child_args, "subagent_id": subagent_id}, context=context)
                     for subagent_id in subagent_ids
@@ -292,18 +335,37 @@ class TaskStatusTool(BaseTool):
 
         include_result = bool(args.get("include_result", True))
         consume = bool(args.get("consume", False))
-        runtime = runtime_from_context(context) or default_runtime()
-        if not _authorized_subagent(runtime, subagent_id, context):
+        runtime = require_runtime_from_context(context)
+        binding = canonical_agent_operation(self.name)
+        control, target = _authorized_target(
+            runtime,
+            subagent_id,
+            context,
+            scope=binding.scope or "children",
+        )
+        if not control.can_use_operation(binding.operation):
+            return ToolResult(
+                content="Current agent execution profile does not allow task observation.",
+                is_error=True,
+                status="forbidden",
+                result_kind="subagent",
+            )
+        if target is None:
             return ToolResult(content="Subagent is not owned by the current task.", is_error=True, status="forbidden", result_kind="subagent")
+        subagent_id = target.subagent_id
         try:
             wait_seconds = max(0.0, min(float(args.get("wait_seconds") or 0), 600.0))
         except (TypeError, ValueError):
             wait_seconds = 0.0
         if wait_seconds:
-            wait_for_subagent = getattr(runtime, "wait_for_subagent", None)
-            if callable(wait_for_subagent):
-                await wait_for_subagent(subagent_id, wait_seconds)
-        snapshot = runtime.get_subagent_snapshot(subagent_id, include_result=include_result)
+            await control.wait_for_one(
+                subagent_id,
+                timeout_seconds=wait_seconds,
+            )
+        snapshot = control.subagent_snapshot(
+            subagent_id,
+            include_result=include_result,
+        )
         if snapshot is None:
             return ToolResult(
                 content=f"No subagent found for {subagent_id}.",
@@ -357,7 +419,7 @@ class TaskStatusTool(BaseTool):
                 )
             lines.append(stats + ".")
             if consume and status != "running":
-                runtime.forget_subagent_result(subagent_id)
+                control.forget_subagent_result(subagent_id)
                 lines.append("Retained result cache released.")
         elif result_available:
             lines.append("Result is available. Call task_status with include_result=true to collect it.")
@@ -379,26 +441,29 @@ class TaskStatusTool(BaseTool):
         args: dict[str, Any],
         context: ToolExecutionContext | None,
     ) -> ToolResult:
-        runtime = runtime_from_context(context) or default_runtime()
-        metadata = context.metadata if context and isinstance(context.metadata, dict) else {}
-        parent_run_id = str(metadata.get("run_id") or "").strip()
-        conversation_id = str(getattr(context, "conversation_id", "") or "").strip()
+        runtime = require_runtime_from_context(context)
+        control = AgentControlPlane(context, runtime=runtime)
+        binding = canonical_agent_operation(self.name)
+        if not control.can_use_operation(binding.operation):
+            return ToolResult(
+                content="Current agent execution profile does not allow task observation.",
+                is_error=True,
+                status="forbidden",
+                result_kind="subagent",
+            )
         include_completed = bool(args.get("include_completed", True))
         try:
             limit = max(1, min(int(args.get("limit") or 20), 100))
         except (TypeError, ValueError):
             limit = 20
-        items = [
-            item
-            for item in runtime.list_runs(
-                conversation_id=conversation_id,
-                include_subagents=True,
-            ).get("subagents", [])
-            if isinstance(item, dict)
-            and bool(item.get("background", False))
-            and (not parent_run_id or str(item.get("parent_run_id") or "") == parent_run_id)
-            and (include_completed or str(item.get("status") or "running") in {"pending", "running"})
-        ]
+        candidates = control.select_agents(
+            scope=binding.scope or "children",
+            include_completed=include_completed,
+            background_only=True,
+        )
+        # ``limit`` is applied after sorting, so it cannot be pushed into
+        # select_agents without truncating the wrong subagents.
+        items = list(candidates)
         items.sort(
             key=lambda item: (
                 str(item.get("status") or "running") not in {"pending", "running"},

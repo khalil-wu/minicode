@@ -17,6 +17,7 @@ class ToolProjection:
     result_kind: str
     display_hint: str
     activity_kind: str = ""
+    visibility: str = "timeline"
 
 
 def projection_for_tool(
@@ -32,6 +33,7 @@ def projection_for_tool(
         result_kind=str(metadata.get("result_kind") or "generic"),
         display_hint=str(metadata.get("display_label") or tool_name),
         activity_kind=str(metadata.get("activity_kind") or "genericTool"),
+        visibility=str(metadata.get("visibility") or "timeline"),
     )
 
 
@@ -56,6 +58,10 @@ def display_summary_for_result(
     label = projection_for_tool(tc.name, tool_registry).display_hint
     if status == "blocked":
         return f"Blocked: {label}"
-    if status in {"failed", "timeout", "cancelled"}:
+    if status == "cancelled":
+        return f"Cancelled: {label}"
+    if status == "timeout":
+        return f"Timed out: {label}"
+    if status == "failed":
         return f"Failed: {label}"
     return f"Completed: {label}"

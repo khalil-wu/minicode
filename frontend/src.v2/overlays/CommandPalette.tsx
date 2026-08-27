@@ -6,8 +6,8 @@ import { sendChatMessage } from "../chat/sendChatMessage";
 import { toBackendPermissionMode } from "../protocol/permissions";
 import { hasRuntimePendingUserAction, hasRuntimePendingUserActionForConversation } from "../lib/runtime-session";
 import { buildRuntimeSlashPaletteItems, executeRuntimeSlashCommand } from "../lib/runtime-commands";
+import { buildInterruptCommand } from "../lib/interrupt-command";
 import { hasLocalPendingPromptForConversation } from "../lib/pending-prompts";
-import { workspaceDisplayName } from "../lib/workspace-display";
 import { openSettings } from "../lib/settings-navigation";
 import { capabilityFeatureEnabled } from "../protocol/capabilities";
 import { useFocusTrap } from "../hooks/useFocusTrap";
@@ -19,6 +19,24 @@ interface PaletteAction {
   group: "最近会话" | "导航" | "工作区" | "命令";
   run: () => void | Promise<void>;
 }
+
+/* Bold the first case-insensitive occurrence of the query inside a label so
+   filtering results show WHY each row matched. */
+const highlightMatch = (label: string, query: string): React.ReactNode => {
+  const q = query.trim();
+  if (!q) return label;
+  const idx = label.toLowerCase().indexOf(q.toLowerCase());
+  if (idx < 0) return label;
+  return (
+    <>
+      {label.slice(0, idx)}
+      <strong style={{ color: "var(--accent-primary)", fontWeight: "var(--fw-semibold)" }}>
+        {label.slice(idx, idx + q.length)}
+      </strong>
+      {label.slice(idx + q.length)}
+    </>
+  );
+};
 
 const hasPendingUserAction = (): boolean => {
   const state = useAppStore.getState();
@@ -143,14 +161,12 @@ export const CommandPalette = () => {
       )
     : conversationCandidates.slice(0, 9);
   const recentConversationActions: PaletteAction[] = matchedConversations.map((c, i) => {
-    const project = workspaceDisplayName(c.workspaceRoot || c.worktreePath, "Computer");
-    const branch = c.gitBranch ? ` · ${c.gitBranch}` : "";
-    const shortcut = trimmedQuery ? "" : ` · Ctrl+${i + 1}`;
-    const goalHint = trimmedQuery && c.goal?.text ? ` · ${c.goal.text.slice(0, 60)}` : "";
+    const shortcut = trimmedQuery ? "" : `Ctrl+${i + 1}`;
+    const goalHint = trimmedQuery && c.goal?.text ? c.goal.text.slice(0, 60) : "";
     return {
       id: `conversation.switch.${c.id}`,
       label: c.title || "未命名会话",
-      hint: `${project}${branch}${shortcut}${goalHint}`,
+      hint: goalHint || shortcut,
       group: "最近会话",
       run: () => useAppStore.getState().requestConversationSwitch(c.id),
     };
@@ -177,6 +193,7 @@ export const CommandPalette = () => {
         const state = useAppStore.getState();
         sendClientCommand({
           type: "conversation.create",
+          conversation_type: "main",
           git_isolated: true,
           workspace_root: state.workingDirectory,
           permission_mode: toBackendPermissionMode(state.permissionMode),
@@ -364,11 +381,9 @@ export const CommandPalette = () => {
       hint: "Esc",
       group: "命令",
       run: () => {
-        const conversationId = useAppStore.getState().conversationId;
-        sendClientCommand({
-          type: "interrupt",
-          ...(conversationId ? { conversation_id: conversationId } : {}),
-        });
+        const state = useAppStore.getState();
+        const command = buildInterruptCommand(state);
+        if (state.isStreaming) sendClientCommand(command);
       },
     },
     {
@@ -436,7 +451,7 @@ export const CommandPalette = () => {
     >
       <div
         ref={dialogRef}
-        className="modal-content"
+        className="modal-content command-palette-surface"
         role="dialog"
         aria-modal="true"
         aria-label="命令面板"
@@ -446,8 +461,8 @@ export const CommandPalette = () => {
           width: "min(560px, 100%)",
           background: "var(--surface-raised)",
           border: "1px solid var(--border-subtle)",
-          borderRadius: "var(--radius-md, 12px)",
-          boxShadow: "var(--shadow-strong, var(--shadow-md))",
+          borderRadius: "var(--radius-lg)",
+          boxShadow: "var(--shadow-strong-overlay)",
           overflow: "hidden",
           display: "flex",
           flexDirection: "column",
@@ -455,6 +470,7 @@ export const CommandPalette = () => {
         }}
       >
         <input
+          className="command-palette-input"
           role="combobox"
           aria-expanded="true"
           aria-controls="command-palette-listbox"
@@ -486,6 +502,7 @@ export const CommandPalette = () => {
         />
         <div
           id="command-palette-listbox"
+          className="command-palette-listbox"
           role="listbox"
           aria-label="命令与会话"
           style={{
@@ -502,7 +519,7 @@ export const CommandPalette = () => {
                 fontSize: "var(--text-sm)",
               }}
             >
-              没有匹配结果
+              没有匹配结果 — 试试其他关键词，或按 Esc 关闭
             </div>
           ) : (
             filtered.map((a, i) => (
@@ -511,11 +528,12 @@ export const CommandPalette = () => {
                   <div
                     aria-hidden="true"
                     data-palette-group={a.group}
+                    className="command-palette-group"
                     style={{
                       padding: i === 0 ? "8px 12px 4px" : "12px 12px 4px",
                       color: "var(--text-muted)",
                       fontSize: "var(--text-2xs)",
-                      fontWeight: 650,
+                      fontWeight: "var(--fw-semibold)",
                     }}
                   >
                     {a.group}
@@ -523,6 +541,7 @@ export const CommandPalette = () => {
                 )}
                 <button
                 id={`command-palette-option-${a.id}`}
+                className="command-palette-option"
                 role="option"
                 aria-selected={i === activeIdx}
                 onClick={() => runAction(i)}
@@ -541,25 +560,37 @@ export const CommandPalette = () => {
                   gap: 10,
                 }}
               >
-                <span style={{ flex: 1 }}>{a.label}</span>
+                <span style={{ flex: 1 }}>{highlightMatch(a.label, query)}</span>
                 {a.hint && (
-                  <span
+                  <kbd
+                    className="mc-kbd"
                     style={{
-                      fontFamily: "var(--font-mono)",
-                      fontSize: "var(--text-xs)",
                       color: "var(--text-muted)",
-                      background: "var(--surface-soft)",
-                      padding: "1px 6px",
-                      borderRadius: 4,
                     }}
                   >
                     {a.hint}
-                  </span>
+                  </kbd>
                 )}
                 </button>
               </Fragment>
             ))
           )}
+        </div>
+        <div
+          aria-hidden="true"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            padding: "8px 16px",
+            borderTop: "1px solid var(--border-subtle)",
+            color: "var(--text-muted)",
+            fontSize: "var(--text-2xs)",
+          }}
+        >
+          <span><kbd className="mc-kbd">↑↓</kbd> 导航</span>
+          <span><kbd className="mc-kbd">↵</kbd> 选择</span>
+          <span><kbd className="mc-kbd">Esc</kbd> 关闭</span>
         </div>
       </div>
     </div>

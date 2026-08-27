@@ -11,7 +11,7 @@ import {
   PanelRightClose,
   X,
 } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useAppStore } from "../stores";
 import { RIGHT_SIDEBAR_DEFAULT_WIDTH } from "../stores/shared-helpers";
 import { PanelSkeleton } from "./PanelSkeleton";
@@ -96,7 +96,10 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
   const [localTab, setLocalTab] = useState<StackTab>(normalizeInitialTab(initialTab));
   const [openTabIds, setOpenTabIds] = useState<StackTab[]>(() => Array.from(new Set([...defaultOpenTabs, normalizeInitialTab(initialTab)])));
   const [launcherOpen, setLauncherOpen] = useState(false);
+  const sidebarRef = useRef<HTMLElement | null>(null);
   const tabListRef = useRef<HTMLDivElement | null>(null);
+  const launcherRef = useRef<HTMLElement | null>(null);
+  const launcherButtonRef = useRef<HTMLButtonElement | null>(null);
   const requestedActiveTab = embedded ? localTab : rightStackTab;
   const normalizedRequestedTab = requestedActiveTab === "plan" || requestedActiveTab === "terminal" ? "tasks" : requestedActiveTab;
   const activeTab = normalizedRequestedTab;
@@ -176,8 +179,21 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
   }, [activeTab, addOpenTab]);
 
   useEffect(() => {
+    if (!launcherOpen) return;
+    window.requestAnimationFrame(() => launcherRef.current?.querySelector<HTMLButtonElement>("button")?.focus());
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setLauncherOpen(false);
+      launcherButtonRef.current?.focus();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [launcherOpen]);
+
+  useEffect(() => {
     tabListRef.current
-      ?.querySelector<HTMLElement>(`[data-sidebar-tab="${activeTab}"]`)
+      ?.querySelector<HTMLElement>(`[data-sidebar-tab-frame="${activeTab}"]`)
       ?.scrollIntoView?.({ inline: "nearest", block: "nearest" });
   }, [activeTab, openTabIds]);
 
@@ -204,6 +220,30 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
     lockAndSetTab(tab);
     setLauncherOpen(false);
   };
+
+  const closeRightPanel = () => {
+    // The close control lives inside the panel. Blur it before the next render
+    // marks the aside aria-hidden; otherwise Chromium retains focus in a
+    // hidden subtree and reports a real accessibility violation.
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && sidebarRef.current?.contains(active)) {
+      active.blur();
+    }
+    toggleRightPanel();
+  };
+
+  useLayoutEffect(() => {
+    if (embedded || rightPanelOpen) return;
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && sidebarRef.current?.contains(active)) {
+      active.blur();
+    }
+  }, [embedded, rightPanelOpen]);
+
+  useLayoutEffect(() => {
+    if (!sidebarRef.current) return;
+    (sidebarRef.current as HTMLElement & { inert: boolean }).inert = !embedded && !rightPanelOpen;
+  }, [embedded, rightPanelOpen]);
 
   const moveTabFocus = (index: number) => {
     window.setTimeout(() => {
@@ -278,6 +318,7 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
 
   return (
     <aside
+      ref={sidebarRef}
       className="mc-sidebar-right relative flex flex-col overflow-hidden"
       data-embedded={embedded ? "true" : "false"}
       data-open={embedded || rightPanelOpen ? "true" : "false"}
@@ -286,8 +327,8 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
         "--right-sidebar-width": `${sidebarWidth}px`,
         position: "relative",
         alignSelf: "stretch",
-        margin: embedded || !rightPanelOpen ? 0 : "8px 8px 8px 0",
-        zIndex: embedded ? undefined : 2,
+        margin: 0,
+        zIndex: embedded ? undefined : "var(--z-content)",
         display: "flex",
         flexDirection: "column",
         overflow: "hidden",
@@ -296,16 +337,15 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
         maxWidth: sidebarMaxWidth,
         flex: embedded ? "1 1 auto" : `0 0 ${rightPanelOpen ? sidebarWidth : 0}px`,
         background: "var(--surface-base)",
-        border: embedded || !rightPanelOpen ? 0 : "1px solid var(--border-subtle)",
-        borderRadius: embedded ? 0 : 20,
-        boxShadow: embedded || !rightPanelOpen
-          ? "none"
-          : "0 8px 24px color-mix(in oklch, black 12%, transparent)",
+        border: 0,
+        borderLeft: embedded || !rightPanelOpen ? 0 : "1px solid var(--border-subtle)",
+        borderRadius: 0,
+        boxShadow: "none",
         opacity: embedded || rightPanelOpen ? 1 : 0,
         transform: embedded || rightPanelOpen ? "translateX(0)" : "translateX(8px)",
         visibility: embedded || rightPanelOpen ? "visible" : "hidden",
         pointerEvents: embedded || rightPanelOpen ? "auto" : "none",
-        transition: `width 220ms var(--easing-standard), min-width 220ms var(--easing-standard), max-width 220ms var(--easing-standard), flex-basis 220ms var(--easing-standard), margin 220ms var(--easing-standard), opacity 180ms var(--easing-standard), transform 220ms var(--easing-enter), border-color 180ms var(--easing-standard), box-shadow 220ms var(--easing-standard), visibility 0s linear ${embedded || rightPanelOpen ? 0 : 220}ms`,
+        transition: `width var(--transition-normal), min-width var(--transition-normal), max-width var(--transition-normal), flex-basis var(--transition-normal), margin var(--transition-normal), opacity var(--transition-fast), transform var(--duration-base) var(--easing-enter), border-color var(--transition-fast), box-shadow var(--transition-normal), visibility 0s linear ${embedded || rightPanelOpen ? "0ms" : "var(--duration-base)"}`,
       } as React.CSSProperties}
     >
       {!embedded && (
@@ -333,13 +373,14 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
             key={t.id}
             className="mc-sidebar-right-tab-frame"
             data-active={activeTab === t.id ? "true" : "false"}
-            style={sidebarTabFrameStyle(activeTab === t.id)}
+            data-sidebar-tab-frame={t.id}
           >
             <button
               type="button"
               role="tab"
               id={`right-tab-${t.id}`}
               aria-selected={activeTab === t.id}
+              tabIndex={activeTab === t.id ? 0 : -1}
               aria-controls={`right-panel-${t.id}`}
               data-sidebar-tab={t.id}
               onClick={() => activateTab(t.id)}
@@ -347,7 +388,6 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
               title={t.label}
               aria-label={`打开${t.label}`}
               className="mc-sidebar-right-tab"
-              style={sidebarTabButtonStyle(activeTab === t.id)}
             >
               <span className="mc-sidebar-tab-icon">{t.icon}</span>
               <span className="mc-sidebar-tab-label">{t.label}</span>
@@ -363,7 +403,6 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
                   closeOpenTab(t.id);
                 }}
                 className="mc-sidebar-right-tab-close mc-icon-button mc-icon-button-compact"
-                style={sidebarTabCloseStyle(activeTab === t.id)}
               >
                 <X size={14} />
               </button>
@@ -373,11 +412,14 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
         </div>
         <div className="mc-sidebar-right-actions" data-testid="right-sidebar-actions">
           <button
+            ref={launcherButtonRef}
             type="button"
             onClick={() => setLauncherOpen((open) => !open)}
             title="添加面板"
             aria-label="添加面板"
             aria-pressed={launcherOpen}
+            aria-haspopup="menu"
+            aria-expanded={launcherOpen}
             className="mc-sidebar-right-action mc-sidebar-right-action-add mc-icon-button"
             data-active={launcherOpen ? "true" : "false"}
           >
@@ -386,7 +428,7 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
           {!embedded && (
             <button
             type="button"
-            onClick={toggleRightPanel}
+            onClick={closeRightPanel}
             title="关闭面板"
             aria-label="关闭右侧栏"
             className="mc-sidebar-right-action mc-icon-button"
@@ -403,11 +445,10 @@ export const SidebarRight = ({ embedded = false, initialTab = "tasks" }: Sidebar
         role="tabpanel"
         aria-labelledby={!launcherOpen && activePrimaryTab ? `right-tab-${activeTab}` : undefined}
         aria-label={launcherOpen ? "面板选择" : activePrimaryTab ? undefined : `${activeItem.label}面板`}
-        style={{ background: "var(--surface-base)", minHeight: 0, minWidth: 0 }}
       >
         <div className="panel-content-wrapper" style={{ minHeight: 0, minWidth: 0, overflow: "hidden" }}>
           {launcherOpen && (
-            <nav className="mc-sidebar-launcher" aria-label="面板选择">
+            <nav ref={launcherRef} className="mc-sidebar-launcher" aria-label="面板选择">
               {tabs.map((tab) => (
                 <button
                   key={tab.id}
@@ -476,36 +517,8 @@ const resizeHandleStyle: React.CSSProperties = {
   left: 0,
   width: 9,
   cursor: "col-resize",
-  zIndex: 30,
+  zIndex: "var(--z-composer)",
   background: "transparent",
   transform: "translateX(-4px)",
   touchAction: "none",
 };
-
-const sidebarTabFrameStyle = (active: boolean): React.CSSProperties => ({
-  height: "var(--mc-sidebar-tab-height, 32px)",
-  maxWidth: 152,
-  minWidth: 0,
-  flex: "0 0 auto",
-  borderRadius: "var(--radius-md, 8px)",
-  background: active ? "var(--surface-page)" : "transparent",
-  borderColor: active ? "var(--border-subtle)" : "transparent",
-  color: active ? "var(--text-primary)" : "var(--text-secondary)",
-  overflow: "hidden",
-});
-
-const sidebarTabButtonStyle = (active: boolean): React.CSSProperties => ({
-  height: "100%",
-  minWidth: 0,
-  padding: "0 3px 0 9px",
-  background: "transparent",
-  color: active ? "var(--text-primary)" : "var(--text-secondary)",
-  fontSize: "var(--text-sm)",
-  fontWeight: active ? 620 : 520,
-  whiteSpace: "nowrap",
-});
-
-const sidebarTabCloseStyle = (active: boolean): React.CSSProperties => ({
-  marginRight: 4,
-  color: active ? "var(--text-muted)" : "color-mix(in oklch, var(--text-muted) 72%, transparent)",
-});

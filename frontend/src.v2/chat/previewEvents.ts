@@ -1,6 +1,10 @@
 import { useAppStore } from "../stores";
-import type { ServerEvent } from "../protocol/events";
+import type { PreviewRefreshedEvent, ServerEvent } from "../protocol/events";
 import { pushToast } from "../overlays/ToastContainer";
+import { normalizeWorkspaceRoot } from "../lib/workspace-path";
+
+const isReplayed = (event: ServerEvent): boolean =>
+  (event as ServerEvent & { __replayed?: boolean }).__replayed === true;
 
 export const handlePreviewEvent = (e: ServerEvent): boolean => {
   if (!e.type.startsWith("preview.")) return false;
@@ -9,7 +13,17 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
     (e as unknown as { conversation_id?: unknown }).conversation_id ?? "",
   ).trim();
   const activeConversationId = String(s.conversationId ?? "").trim();
-  if (!eventConversationId || !activeConversationId || eventConversationId !== activeConversationId) {
+  const eventWorkspaceRoot = normalizeWorkspaceRoot(
+    (e as unknown as { workspace_root?: unknown }).workspace_root,
+  );
+  const activeWorkspaceRoot = normalizeWorkspaceRoot(s.workingDirectory);
+  if (
+    !eventConversationId
+    || !activeConversationId
+    || eventConversationId !== activeConversationId
+    || !eventWorkspaceRoot
+    || eventWorkspaceRoot !== activeWorkspaceRoot
+  ) {
     return true;
   }
   switch (e.type) {
@@ -51,9 +65,22 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
       if (ev.url) s.openLivePreview(ev.url);
       return true;
     }
-    case "preview.refreshed":
-      window.dispatchEvent(new Event("preview:auto-refresh"));
+    case "preview.refreshed": {
+      const ev = e as PreviewRefreshedEvent;
+      // A replayed file-watcher notification is historical evidence, not a
+      // request to reload the live iframe and issue a fresh verification call.
+      if (isReplayed(e)) return true;
+      window.dispatchEvent(new CustomEvent("preview:auto-refresh", {
+        detail: {
+          conversation_id: ev.conversation_id,
+          workspace_root: ev.workspace_root,
+          request_id: ev.request_id,
+          path: ev.path,
+          url: ev.url,
+        },
+      }));
       return true;
+    }
     case "preview.launch.config": {
       const ev = e as unknown as {
         configs?: {
@@ -167,7 +194,7 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
           stderr_tail: ev.stderr_tail,
         });
       }
-      pushToast(`Preview server ${ev.id} exited (${ev.exit_code ?? "unknown"})`, "error");
+      pushToast(`预览服务 ${ev.id} 已退出（${ev.exit_code ?? "未知"}）`, "error");
       return true;
     }
     case "preview.server.unhealthy": {
@@ -180,7 +207,7 @@ export const handlePreviewEvent = (e: ServerEvent): boolean => {
           status: "unhealthy",
         });
       }
-      pushToast(`Preview server ${ev.id} unhealthy: ${ev.last_error ?? "not responding"}`, "warning");
+      pushToast(`预览服务 ${ev.id} 状态异常：${ev.last_error ?? "无响应"}`, "warning");
       return true;
     }
     case "preview.launch.stopped": {

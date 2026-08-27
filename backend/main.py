@@ -38,6 +38,8 @@ from backend.workspace import create_workspace_router
 
 # ── Decomposed sub-modules ──
 from backend.api.auth import (
+    _is_artifact_asset_token_authorized,
+    _is_attachment_asset_token_authorized,
     _is_plugin_asset_token_authorized,
     _is_skill_asset_token_authorized,
     _is_workspace_raw_token_authorized,
@@ -46,7 +48,7 @@ from backend.api.auth import (
     _runtime_token_configured,
     _websocket_accept_subprotocol,
 )
-from backend.api.tool_registry import _build_tool_registry as _api_build_tool_registry
+from backend.services.tool_registry_factory import build_tool_registry
 from backend.api.routes_health import _build_status_payload, get_mcp_status, get_mcp_manager
 from backend.api.routes_chat import router as chat_router
 from backend.api.routes_llm import router as llm_router
@@ -62,36 +64,6 @@ logger = logging.getLogger(__name__)
 # console codepage. Idempotent; runs once at import.
 ensure_utf8_console_logging()
 
-_bootstrap: AppBootstrap | None = None
-
-
-def _build_tool_registry(
-    artifact_store: ArtifactStore,
-    *,
-    llm_provider: Any | None = None,
-    mcp_manager: Any | None = None,
-):
-    """Backward-compatible registry builder wrapper.
-
-    Older tests and integrations monkeypatch backend.main._bootstrap. The
-    decomposed registry builder reads backend.api._state.bootstrap, so keep the
-    two surfaces synchronized at the boundary.
-
-    The signature must stay EXPLICIT (not ``*args, **kwargs``):
-    ``AppBootstrap.create_tool_registry`` decides whether to forward
-    ``llm_provider``/``mcp_manager`` by introspecting this wrapper's parameter
-    names. With a varargs signature those names are absent, so the MCP manager
-    is never passed and MCP proxies never register into rebuilt registries —
-    silently breaking MCP hot-reload.
-    """
-    if _state.bootstrap is None and _bootstrap is not None:
-        _state.bootstrap = _bootstrap
-    return _api_build_tool_registry(
-        artifact_store,
-        llm_provider=llm_provider,
-        mcp_manager=mcp_manager,
-    )
-
 # ── Windows event loop policy ──
 if hasattr(asyncio, "WindowsProactorEventLoopPolicy"):
     try:
@@ -101,7 +73,7 @@ if hasattr(asyncio, "WindowsProactorEventLoopPolicy"):
 
 
 from backend.llm.model_registry import (
-    create_llm_adapter as _create_llm_adapter,
+    create_session_llm as _create_session_llm,
 )
 
 
@@ -116,7 +88,11 @@ IS_PRODUCTION = FRONTEND_DIR == FRONTEND_DIST
 
 # ── MCP status broadcast callback (used by AppBootstrap) ──
 
-async def _broadcast_mcp_status_change(server_name: str, _status: Any) -> None:
+async def _broadcast_mcp_status_change(
+    server_name: str,
+    _status: Any,
+    manager: Any | None = None,
+) -> None:
     """Push MCP status + per-server lifecycle/progress to every connected session.
 
     ``mcp_status`` keeps carrying the whole list (back-compat). ``mcp.lifecycle``
@@ -125,25 +101,56 @@ async def _broadcast_mcp_status_change(server_name: str, _status: Any) -> None:
     change, including health-loop auto-reconnects.
     """
     _state.invalidate_status_cache()
-    await _state.ws_manager.broadcast_event(
-        AgentEvent(
-            type="mcp_status",
-            data={"servers": get_mcp_status()},
-        )
-    )
-    manager = get_mcp_manager()
+    manager = manager or get_mcp_manager()
     if manager is None:
         return
+    iter_sessions = getattr(_state.ws_manager, "iter_sessions", None)
+    if callable(iter_sessions):
+        all_sessions = list(iter_sessions())
+    else:
+        raw_sessions = getattr(_state.ws_manager, "_sessions", None)
+        all_sessions = list(raw_sessions.values()) if isinstance(raw_sessions, dict) else []
+    sessions = [
+        session
+        for session in all_sessions
+        if getattr(session, "mcp_manager", None) is manager
+        and bool(getattr(session, "_is_connected", False))
+    ]
+    get_all_status = getattr(manager, "get_all_status", None)
+    if callable(get_all_status):
+        servers = get_all_status()
+    else:
+        get_mcp_status = getattr(_state.bootstrap, "get_mcp_status", None)
+        servers = get_mcp_status() if callable(get_mcp_status) else []
+    for session in sessions:
+        await session._send_event(
+            AgentEvent(
+                type="mcp_status",
+                data={"servers": servers},
+            )
+        )
     lifecycle = manager.get_server_lifecycle(server_name)
     if lifecycle is not None:
-        await _state.ws_manager.broadcast_event(
-            AgentEvent(type="mcp.lifecycle", data=lifecycle)
-        )
+        for session in sessions:
+            await session._send_event(AgentEvent(type="mcp.lifecycle", data=lifecycle))
     progress = manager.get_server_progress(server_name)
     if progress is not None:
-        await _state.ws_manager.broadcast_event(
-            AgentEvent(type="mcp.progress", data=progress)
-        )
+        for session in sessions:
+            await session._send_event(AgentEvent(type="mcp.progress", data=progress))
+
+    # Compatibility for pre-session manager doubles and integrations.  The
+    # production WebSocketManager exposes concrete sessions above, where
+    # manager identity is required and cross-workspace broadcast is impossible.
+    if not all_sessions:
+        broadcast_event = getattr(_state.ws_manager, "broadcast_event", None)
+        if callable(broadcast_event):
+            await broadcast_event(
+                AgentEvent(type="mcp_status", data={"servers": servers})
+            )
+            if lifecycle is not None:
+                await broadcast_event(AgentEvent(type="mcp.lifecycle", data=lifecycle))
+            if progress is not None:
+                await broadcast_event(AgentEvent(type="mcp.progress", data=progress))
 
 
 # ── FastAPI application ──
@@ -152,16 +159,14 @@ async def _broadcast_mcp_status_change(server_name: str, _status: Any) -> None:
 async def lifespan(app: FastAPI):
     """Application lifecycle - delegates to AppBootstrap."""
 
-    global _bootstrap
     _state.bootstrap = AppBootstrap(
-        build_tool_registry=_build_tool_registry,
+        build_tool_registry=build_tool_registry,
         build_status_payload=_build_status_payload,
-        create_llm_adapter=_create_llm_adapter,
+        create_session_llm=_create_session_llm,
         ws_manager=_state.ws_manager,
         on_mcp_status_change=_broadcast_mcp_status_change,
         status_cache_ttl_seconds=_state.STATUS_CACHE_TTL_SECONDS,
     )
-    _bootstrap = _state.bootstrap
     await _state.bootstrap.startup()
     logger.info("MiniCode Backend startup complete")
     try:
@@ -174,10 +179,11 @@ async def lifespan(app: FastAPI):
         # heartbeat thread. Relinquish both only after all sessions and
         # background services have stopped, so a replacement process can
         # recover immediately instead of waiting for lease expiry.
-        from backend.agent.runtime import default_runtime
+        from backend.agent.runtime import default_runtime_if_initialized
 
-        default_runtime().close(release_lease=True)
-        _bootstrap = None
+        runtime = default_runtime_if_initialized()
+        if runtime is not None:
+            runtime.close(release_lease=True)
         logger.info("MiniCode Backend shutdown complete")
 
 
@@ -284,7 +290,9 @@ async def _api_v1_path_alias(request: Request, call_next):
     """Rewrite /api/v1/* -> /api/* so v1 callers reach the same handlers."""
     path = request.scope.get("path", "")
     is_embedded_asset_authorized = (
-        _is_workspace_raw_token_authorized(request)
+        _is_artifact_asset_token_authorized(request)
+        or _is_attachment_asset_token_authorized(request)
+        or _is_workspace_raw_token_authorized(request)
         or _is_skill_asset_token_authorized(request)
         or _is_plugin_asset_token_authorized(request)
     )
@@ -316,11 +324,7 @@ app.add_middleware(
 
 # ── Existing sub-routers ──
 
-from backend.api.projects import router as projects_router
-from backend.api.git import router as git_router
 
-app.include_router(projects_router)
-app.include_router(git_router)
 
 
 # ── Decomposed API routers ──
@@ -470,9 +474,13 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     except Exception as exc:
         await websocket.accept(subprotocol=_websocket_accept_subprotocol(websocket))
         await websocket.send_json(
-            AgentEvent.error(f"LLM initialization failed: {exc}", recoverable=False).to_ws_message()
+            AgentEvent.error(
+                f"LLM initialization failed: {exc}",
+                recoverable=False,
+                error_code="connection.llm_initialization_failed",
+            ).to_ws_message()
         )
-        await websocket.close()
+        await websocket.close(code=1008)
         return
 
     # Create session-level resources
@@ -490,6 +498,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         skill_manager=_state.bootstrap.skill_manager,
         skill_executor=_state.bootstrap.skill_executor,
         memory_manager=_state.bootstrap.memory_manager,
+        mcp_manager=_state.bootstrap.mcp_manager,
     )
 
     try:

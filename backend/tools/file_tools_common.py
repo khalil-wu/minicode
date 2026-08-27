@@ -6,40 +6,40 @@ ReadFile/WriteFile/EditFile/ListFiles. Path resolution lives in path_resolution.
 from __future__ import annotations
 
 import difflib
-import os
+import logging
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from backend.artifact.store import ArtifactStore
+from backend.agent.turn_diff_tracker import TurnDiffTracker
 from backend.permissions.context import ToolExecutionContext
-from backend.security.sensitive_files import is_protected_write_path, is_sensitive_file
-from backend.atomic_io import atomic_write_text
+from backend.atomic_io import atomic_write_text, canonical_file_path_key
 from backend.tools.base import (
     MAX_TOOL_RESULT_BYTES,
+    MAX_TOOL_RESULT_CHARS,
     MAX_TOOL_RESULT_LINES,
-    BaseTool,
-    PermissionLevel,
-    ToolResult,
-    ToolSchema,
 )
-from backend.tools.path_resolution import PathTraversalError, _is_bypass_mode, _resolve_path
-from backend.workspace.path_filters import is_windows_reserved_path
 
-# Pi's Read contract: complete lines up to 2000 lines or 50 KiB, then continue
+logger = logging.getLogger(__name__)
+
+# MiniCode's Read contract: complete lines up to 2000 lines or 50 KiB, then continue
 # with offset/limit. Keep the old token names as derived compatibility aliases.
 READ_FILE_MAX_LINES = MAX_TOOL_RESULT_LINES
 READ_FILE_MAX_BYTES = MAX_TOOL_RESULT_BYTES
-READ_FILE_TOKEN_LIMIT = READ_FILE_MAX_BYTES // 4
-READ_FILE_CONTEXT_PREVIEW_CHARS = READ_FILE_MAX_BYTES
-# Pi's ls contract: the caller may choose the entry limit and the default is
+# MiniCode's FileReadTool DEFAULT_MAX_OUTPUT_TOKENS = 25_000.
+# The byte contract above still bounds a single read; this token ceiling is the
+# separate model-facing budget cc applies, so align it rather than deriving a
+# smaller value from the byte cap.
+READ_FILE_TOKEN_LIMIT = 25_000
+READ_FILE_CONTEXT_PREVIEW_CHARS = MAX_TOOL_RESULT_CHARS
+# MiniCode's ls contract: the caller may choose the entry limit and the default is
 # 500. This is an output contract, not a hidden traversal cap.
 LIST_FILES_MAX_ENTRIES = 500
-# Diff previews use the same output budget as other tool results (Pi's
+# Diff previews use the same output budget as other tool results (MiniCode's
 # 50-KiB/2000-line contract) instead of a second local threshold.
-WRITE_DIFF_EVENT_MAX_CHARS = MAX_TOOL_RESULT_BYTES
+WRITE_DIFF_EVENT_MAX_CHARS = MAX_TOOL_RESULT_CHARS
 
 def _path_arg(args: dict[str, Any]) -> str:
     value = args.get("file_path") or ""
@@ -78,7 +78,9 @@ class _ListFilesCacheEntry:
     result: str
 
 
-_LIST_FILES_CACHE: dict[tuple[str, bool, int | None], _ListFilesCacheEntry] = {}
+# The visibility policy is part of the identity of a listing: two sessions
+# with different effective denylists must not share one cached result.
+_LIST_FILES_CACHE: dict[tuple[str, bool, int | None, str], _ListFilesCacheEntry] = {}
 _LIST_FILES_CACHE_LOCK = Lock()
 
 
@@ -108,8 +110,9 @@ def _lookup_list_files_cache_result(
     recursive: bool,
     *,
     limit: int | None = None,
+    policy_key: str = "",
 ) -> tuple[str | None, bool]:
-    key = (str(path.resolve()), bool(recursive), limit)
+    key = (canonical_file_path_key(path), bool(recursive), limit, policy_key)
     with _LIST_FILES_CACHE_LOCK:
         entry = _LIST_FILES_CACHE.get(key)
     if entry is None:
@@ -129,6 +132,7 @@ def _put_list_files_cache(
     *,
     limit: int | None = None,
     dependencies: tuple[Path, ...] | None = None,
+    policy_key: str = "",
 ) -> None:
     resolved = path.resolve()
     dependency_paths = dependencies or (resolved,)
@@ -138,7 +142,7 @@ def _put_list_files_cache(
     signature = _list_files_signature(normalized_dependencies)
     if signature is None:
         return
-    key = (str(resolved), bool(recursive), limit)
+    key = (canonical_file_path_key(resolved), bool(recursive), limit, policy_key)
     with _LIST_FILES_CACHE_LOCK:
         _LIST_FILES_CACHE[key] = _ListFilesCacheEntry(
             dependencies=normalized_dependencies,
@@ -153,13 +157,52 @@ def clear_list_files_cache() -> None:
         _LIST_FILES_CACHE.clear()
 
 
-def _add_line_numbers(content: str, start_line: int = 1) -> str:
-    """Add cat -n style line numbers (Claude Code pattern).
+def invalidate_workspace_file_caches(
+    *,
+    file_tree_changed: bool = False,
+    clear_file_state: bool = False,
+) -> None:
+    """Invalidate every derived workspace view affected by a file mutation.
 
-    Format: right-aligned 6-digit line number + "→" + content. Claude Code's
+    Dedicated file tools know the paths they changed and can invalidate one
+    file-state entry directly. Shell commands do not: a command may create,
+    delete, rename, or rewrite arbitrary files. Keeping this policy in one
+    place prevents a mutation path from clearing ``list_files`` while leaving
+    MiniCode-style fuzzy discovery or the read cache stale.
+
+    ``clear_file_state`` is intentionally opt-in because direct file tools can
+    invalidate their known paths more cheaply. It is used for shell commands,
+    where the affected path set is unknowable without parsing the shell.
+    """
+    try:
+        clear_list_files_cache()
+    except Exception:
+        logger.debug("failed to invalidate list-files cache", exc_info=True)
+
+    if file_tree_changed:
+        try:
+            from backend.workspace.fuzzy_search import invalidate_global_fuzzy_search
+
+            invalidate_global_fuzzy_search()
+        except Exception:
+            logger.debug("failed to invalidate fuzzy-search cache", exc_info=True)
+
+    if clear_file_state:
+        try:
+            from backend.workspace.file_state_cache import clear_global_file_cache
+
+            clear_global_file_cache()
+        except Exception:
+            logger.debug("failed to clear file-state cache", exc_info=True)
+
+
+def _add_line_numbers(content: str, start_line: int = 1) -> str:
+    """Add cat -n style line numbers (MiniCode pattern).
+
+    Format: right-aligned 6-digit line number + "→" + content. MiniCode's
     addLineNumbers (utils/file.ts) never opts out — it bounds the *read*
     (MAX_LINES_TO_READ) instead of silently dropping the prefix. We bound the
-    read via the Pi line/byte contract, so always number here: previously a file
+    read via the MiniCode line/byte contract, so always number here: previously a file
     over 2000 lines was returned without line numbers, yet edit_file tells the
     model to strip the line-number prefix — so the model had nothing to strip
     and risked mangling real content.
@@ -259,36 +302,57 @@ async def _emit_write_diff(
     context: ToolExecutionContext | None,
     *,
     file_path: str,
-    old_content: str,
-    new_content: str,
+    old_content: str | None,
+    new_content: str | None,
     display_path: str,
+    old_display_path: str | None = None,
+    overwritten_new_content: str | None = None,
 ) -> None:
     emit = getattr(context, "emit_event", None) if context else None
     if emit is None:
         return
+    tracker = getattr(context, "turn_diff_tracker", None)
+    if not isinstance(tracker, TurnDiffTracker):
+        tracker = TurnDiffTracker()
+        context.turn_diff_tracker = tracker
     tool_call_id = str((context.metadata or {}).get("_current_tool_call_id") or "file-write")
-    patch, additions, deletions, truncated = _generate_limited_unified_diff(
-        old_content,
-        new_content,
-        display_path or file_path,
-        max_chars=WRITE_DIFF_EVENT_MAX_CHARS,
-    )
-    if not patch.strip() and additions == 0 and deletions == 0:
-        return
+    old_path = old_display_path or display_path or file_path
+    new_path = display_path or file_path
     try:
-        await emit("diff.git_working_tree", {
-            "files": [{
-                "path": display_path or file_path,
-                "patch": patch,
-                "additions": additions,
-                "deletions": deletions,
-                "is_binary": False,
-                "is_truncated": truncated,
-            }],
-            "untracked": [],
-            "preview": True,
-            "tool_call_id": tool_call_id,
-        })
+        # Keep mutation + snapshot emission under the turn tracker lock. Tool
+        # calls can run concurrently; MiniCode serializes tracker updates so an
+        # older one-file snapshot can never arrive after a newer aggregate.
+        async with tracker.lock:
+            had_diff = tracker.has_unified_diff()
+            tracker.track_change(
+                old_path=old_path,
+                new_path=new_path,
+                old_content=old_content,
+                new_content=new_content,
+                overwritten_new_content=overwritten_new_content,
+            )
+            snapshot = tracker.snapshot()
+            if not had_diff and snapshot.unified_diff is None:
+                return
+            from backend.agent.message import AgentEvent
+
+            thread_id = str(getattr(context, "conversation_id", "") or "")
+            turn_id = str(
+                (context.metadata or {}).get("run_id")
+                or (context.metadata or {}).get("turn_id")
+                or (context.metadata or {}).get("assistant_message_id")
+                or ""
+            )
+            await emit(
+                "turn.diff.updated",
+                AgentEvent.turn_diff_updated(
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    diff=snapshot.unified_diff or "",
+                    revision=snapshot.revision,
+                    tool_call_id=tool_call_id,
+                ).data,
+            )
     except Exception:
         return
 
@@ -387,6 +451,7 @@ __all__ = [
     "_validate_text_arg", "_validate_path_arg_type",
     "_get_cached_list_files_result",
     "_lookup_list_files_cache_result", "_put_list_files_cache", "clear_list_files_cache",
+    "invalidate_workspace_file_caches",
     "_add_line_numbers", "_generate_unified_diff",
     "_generate_limited_unified_diff", "_count_unified_diff_changes",
     "_workspace_display_path", "_emit_write_diff",

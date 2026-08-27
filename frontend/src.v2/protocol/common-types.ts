@@ -28,8 +28,6 @@ export type CommonServerEventType =
   | "mcp.progress"
   // Scheduler
   | "scheduler.list"
-  // Connectors marketplace
-  | "connectors.marketplace.list"
   // Session / control plane
   | "session.restored"
   | "session.replay"
@@ -38,6 +36,11 @@ export type CommonServerEventType =
   | "client.command.ack"
   | "pong"
   | "control_request"
+  // Pi provider OAuth callbacks projected by the session owner
+  | "llm.provider.oauth.auth"
+  | "llm.provider.oauth.device_code"
+  | "llm.provider.oauth.info"
+  | "llm.provider.oauth.progress"
   // UI catalogs / notices
   | "skills.list"
   | "skills.marketplace.list"
@@ -52,6 +55,9 @@ export type CommonClientCommandType =
   // Control plane
   | "control_response"
   | "control_cancel_request"
+  | "llm.provider.oauth.login"
+  | "llm.provider.oauth.logout"
+  | "llm.provider.oauth.status"
   // Skills
   | "skills.list"
   | "skills.install"
@@ -60,10 +66,18 @@ export type CommonClientCommandType =
   | "commands.list"
   // MCP Connectors
   | "mcp.list"
+  | "mcp.inventory.list"
+  | "mcp.inventory.cancel"
   | "mcp.add"
+  | "mcp.update"
+  | "mcp.toggle"
   | "mcp.remove"
   | "mcp.restart"
   | "mcp.oauth.login"
+  | "mcp.oauth.logout"
+  | "mcp.project.approve"
+  | "mcp.project.approve_all"
+  | "mcp.project.reject"
   // Scheduler
   | "scheduler.list"
   | "scheduler.add"
@@ -72,9 +86,6 @@ export type CommonClientCommandType =
   | "scheduler.run_now"
   | "scheduler.retry"
   | "scheduler.cancel"
-  // Connectors marketplace
-  | "connectors.marketplace.list"
-  | "connectors.marketplace.install"
   // Session inspection
   | "session.tasks.inspect"
   | "session.status.inspect"
@@ -85,9 +96,122 @@ export type CommonClientCommandType =
   | "session.restore"
   | "session.sync"
   // Frontend UI
-  | "workspace.set"
-  // Task management
-  | "task.stop";
+  | "workspace.set";
+
+export type McpTransport = "stdio" | "sse" | "http" | "ws";
+
+export type McpEnvVarReference = string | { name: string; source: string };
+
+interface McpServerMutationCommon {
+  name: string;
+  auto_start: boolean;
+  startup_timeout_sec?: number;
+  tool_timeout_sec?: number;
+  required?: boolean;
+  supports_parallel_tool_calls?: boolean;
+  enabled_tools?: string[];
+  disabled_tools?: string[];
+  default_tools_approval_mode?: "auto" | "prompt" | "writes" | "approve";
+  tools?: Record<string, { approval_mode?: "auto" | "prompt" | "writes" | "approve" }>;
+}
+
+export type McpServerMutationPayload = McpServerMutationCommon & (
+  | {
+      transport: "stdio";
+      command: string;
+      args?: string[];
+      env?: Record<string, string>;
+      env_vars?: McpEnvVarReference[];
+      cwd?: string;
+      url?: never;
+      headers?: never;
+      headers_helper?: never;
+      oauth?: never;
+    }
+  | {
+      transport: "sse" | "http";
+      url: string;
+      headers?: Record<string, string>;
+      headers_helper?: string;
+      oauth?: { client_id?: string; callback_port?: number };
+      command?: never;
+      args?: never;
+      env?: never;
+      env_vars?: never;
+      cwd?: never;
+    }
+  | {
+      transport: "ws";
+      url: string;
+      headers?: Record<string, string>;
+      headers_helper?: string;
+      oauth?: never;
+      command?: never;
+      args?: never;
+      env?: never;
+      env_vars?: never;
+      cwd?: never;
+    }
+);
+
+export type McpAddCommand = { type: "mcp.add" } & McpServerMutationPayload;
+
+export type McpUpdateCommand = {
+  type: "mcp.update";
+  original_name: string;
+} & McpServerMutationPayload;
+
+export interface McpInventoryListCommand {
+  type: "mcp.inventory.list";
+  name: string;
+  operation_id: string;
+}
+
+export interface McpInventoryCancelCommand {
+  type: "mcp.inventory.cancel";
+  name: string;
+  operation_id: string;
+}
+
+export interface McpInventoryResource {
+  uri: string;
+  name: string;
+  description?: string;
+  mime_type?: string;
+}
+
+export interface McpInventoryResourceTemplate {
+  uri_template: string;
+  name: string;
+  description?: string;
+  mime_type?: string;
+}
+
+export interface McpInventoryPromptArgument {
+  name: string;
+  description?: string;
+  required?: boolean;
+}
+
+export interface McpInventoryPrompt {
+  name: string;
+  description?: string;
+  arguments?: McpInventoryPromptArgument[];
+}
+
+export interface McpInventoryPayload {
+  server_name: string;
+  capabilities: {
+    resources: boolean;
+    resources_subscribe: boolean;
+    resources_list_changed: boolean;
+    prompts: boolean;
+  };
+  resources: McpInventoryResource[];
+  resource_templates: McpInventoryResourceTemplate[];
+  prompts: McpInventoryPrompt[];
+  empty: boolean;
+}
 
 // ──────────────────────────────────────────────────────────────────
 // Server event payload types
@@ -99,16 +223,58 @@ export interface McpStatusEvent {
     name: string;
     status: string;
     tools?: number;
+    capabilities?: {
+      tools?: boolean;
+      resources?: boolean;
+      resources_subscribe?: boolean;
+      resources_list_changed?: boolean;
+      prompts?: boolean;
+      logging?: boolean;
+    };
     tools_count?: number;
-    transport?: string;
+    transport?: McpTransport;
+    command?: string;
+    args?: string[];
+    env?: Record<string, string>;
+    headers?: Record<string, string>;
+    headers_helper?: string;
+    oauth?: { client_id?: string; callback_port?: number };
+    env_vars?: Array<string | { name?: string; source?: string }>;
+    cwd?: string;
+    url?: string;
+    auto_start?: boolean;
+    editable?: boolean;
+    enabled?: boolean;
+    disabled_reason?: string;
     error?: string;
     source?: string;
+    approval_status?: "approved" | "rejected" | "pending" | "not_applicable";
+    config_path?: string;
+    project_workspace?: string;
     priority?: number;
+    auth_status?: "unsupported" | "not_logged_in" | "oauth";
     phase?: string;
     recoverable?: boolean;
     requires_user_action?: boolean;
     setup_hint?: string;
     docs_url?: string;
+    required?: boolean;
+    supports_parallel_tool_calls?: boolean;
+    enabled_tools?: string[] | null;
+    disabled_tools?: string[];
+    default_tools_approval_mode?: "auto" | "prompt" | "writes" | "approve" | null;
+    cleanup?: {
+      pending: boolean;
+      reason: string;
+      requested_at?: number | null;
+      completed_at?: number | null;
+    };
+    operation_failures?: Array<{
+      operation: string;
+      failure_kind: string;
+      message: string;
+      retryable: boolean;
+    }>;
   }[];
   data?: unknown;
 }
@@ -128,6 +294,7 @@ export interface McpLifecycleEvent {
   status?: string;
   phase: McpLifecyclePhase;
   message?: string;
+  auth_status?: "unsupported" | "not_logged_in" | "oauth";
   recoverable?: boolean;
   requires_user_action?: boolean;
   setup_hint?: string;
@@ -145,29 +312,11 @@ export interface McpProgressEvent {
 
 export interface SchedulerListEvent {
   type: "scheduler.list";
+  conversation_id: string;
+  workspace_root: string;
+  request_id?: string;
   tasks?: { id: string; name: string; prompt: string; schedule: string; timezone?: string; isolation?: "worktree" | "workspace"; conversation_id?: string; permission_mode: string; enabled: boolean; last_run_at?: string | null; next_run_at?: string | null; created_at?: string; workspace_root?: string; last_run_id?: string | null; last_run_status?: string | null; last_error?: string | null }[];
   runs?: { id: string; task_id: string; scheduled_at: string; started_at?: string; finished_at?: string | null; status: string; conversation_id?: string; workspace_root?: string; result_summary?: string; error?: string }[];
-}
-
-export interface ConnectorsMarketplaceListEvent {
-  type: "connectors.marketplace.list";
-  connectors?: {
-    name: string;
-    title: string;
-    description: string;
-    transport: string;
-    command?: string;
-    args?: string[];
-    url?: string;
-    tags?: string[];
-    installed: boolean;
-    auth?: string;
-    requiresUserAction?: boolean;
-    setupHint?: string;
-    docsUrl?: string;
-    autoStart?: boolean;
-    maxRetries?: number;
-  }[];
 }
 
 export interface SkillsListEvent {
@@ -184,6 +333,7 @@ export interface SkillsListEvent {
     version?: string;
     mcp_dependencies?: string[];
     allow_implicit_invocation?: boolean;
+    user_invocable?: boolean;
     default_prompt?: string;
     source_level?: string;
     active?: boolean;
@@ -201,6 +351,79 @@ export interface SkillsMarketplaceListEvent {
   }[];
 }
 
+export interface CommandAvailabilityPayload {
+  kind: string;
+  scope: string;
+  reason?: string;
+}
+
+export interface CommandArgumentPayload {
+  value: string;
+  description: string;
+}
+
+export interface CommandCatalogEntryPayload {
+  id?: string;
+  name: string;
+  command: string;
+  label: string;
+  description: string;
+  type: "local" | "template" | "protocol";
+  kind?: string;
+  source: string;
+  enabled: boolean;
+  availability: CommandAvailabilityPayload;
+  panel?: string;
+  args?: CommandArgumentPayload[];
+  extension_path?: string;
+  source_path?: string;
+  template?: string;
+  search_text?: string;
+  argument_hint?: string;
+  argument_names?: string[];
+  base_dir?: string;
+  is_skill_file?: boolean;
+}
+
+export interface CommandsListEvent {
+  type: "commands.list";
+  /** Null is the explicit session catalog used before a conversation exists. */
+  conversation_id: string | null;
+  request_id?: string;
+  commands: CommandCatalogEntryPayload[];
+}
+
+export interface CheckpointOriginPayload {
+  run_id: string;
+  conversation_id: string;
+  session_id: string;
+  sequence: number;
+  timestamp: number;
+  stopped_reason: string;
+}
+
+export type SystemNoticeEvent = {
+  type: "system_notice";
+  conversation_id: string;
+  data?: Record<string, unknown>;
+  checkpoint_origin?: CheckpointOriginPayload;
+} & (
+  | {
+      content: string;
+      title?: string;
+      message?: string;
+    }
+  | {
+      content?: string;
+      title: string;
+      message: string;
+    }
+);
+
+export interface PongEvent {
+  type: "pong";
+}
+
 export interface ClientCommandAckEvent {
   type: "client.command.ack";
   client_command_id: string;
@@ -215,6 +438,100 @@ export interface RuntimeCapabilitiesEvent {
   session_id?: string;
   source?: string;
   capabilities: AgentCapabilitiesPayload;
+}
+
+export interface ProviderOAuthInfoLink {
+  url: string;
+  label?: string;
+}
+
+export interface ProviderOAuthAuthEvent {
+  type: "llm.provider.oauth.auth";
+  conversation_id: string;
+  provider: string;
+  url: string;
+  instructions?: string;
+}
+
+export interface ProviderOAuthDeviceCodeEvent {
+  type: "llm.provider.oauth.device_code";
+  conversation_id: string;
+  provider: string;
+  userCode: string;
+  verificationUri: string;
+  intervalSeconds?: number;
+  expiresInSeconds?: number;
+}
+
+export interface ProviderOAuthInfoEvent {
+  type: "llm.provider.oauth.info";
+  conversation_id: string;
+  provider: string;
+  message: string;
+  links?: ProviderOAuthInfoLink[];
+}
+
+export interface ProviderOAuthProgressEvent {
+  type: "llm.provider.oauth.progress";
+  conversation_id: string;
+  provider: string;
+  message: string;
+}
+
+export interface ControlCanUseToolRequest {
+  subtype: "can_use_tool";
+  tool_name: string;
+  input: Record<string, unknown>;
+  tool_use_id: string;
+  diff?: string | Record<string, unknown>;
+  source_agent?: string;
+  source_thread?: string;
+  source_tool?: string;
+}
+
+export interface ControlElicitationRequest {
+  subtype: "elicitation";
+  tool_use_id: string;
+  prompt: string;
+  question: string;
+  schema?: Record<string, unknown>;
+  options?: unknown[];
+  choices?: unknown[];
+  allowed_values?: unknown[];
+}
+
+export interface ControlProviderAuthPromptRequest {
+  subtype: "provider_auth_prompt";
+  prompt: string;
+  provider: string;
+  prompt_type: "text" | "secret" | "select" | "manual_code";
+  placeholder?: string;
+  allow_empty: boolean;
+  allow_custom: boolean;
+  options?: Array<{
+    id: string;
+    label: string;
+    description?: string;
+  }>;
+}
+
+export type ControlRequestPayload =
+  | ControlCanUseToolRequest
+  | ControlElicitationRequest
+  | ControlProviderAuthPromptRequest;
+
+export interface ControlRequestEvent {
+  type: "control_request";
+  request_id: string;
+  conversation_id: string;
+  request: ControlRequestPayload;
+  turn_id?: string;
+  message_id?: string;
+  workspace_root?: string;
+  permission_mode?: string;
+  workspace_scope?: string;
+  timeout_seconds?: number;
+  expires_at?: number;
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -250,29 +567,35 @@ export interface SessionRestoredEvent {
   provider_id?: string | null;
   base_url?: string | null;
   wire_api?: string | null;
-    available_models?: string[];
+  available_models?: string[];
   models_source?: string;
   messages?: ConversationTranscriptMessage[];
   error?: string | null;
   missed_events?: boolean;
+  event_log_gap?: boolean;
+  snapshot_required?: boolean;
+  cursor_reset?: boolean;
+  requested_last_seq?: number;
   last_seq?: number;
   current_seq?: number;
   replayed_events?: number;
   session?: SessionSnapshotPayload | null;
+  snapshot_at?: string;
 }
 
 export interface SessionReplayEvent {
   type: "session.replay";
-  last_seq?: number;
-  current_seq?: number;
-  replayed_events?: number;
-  events?: Array<Record<string, unknown>>;
+  last_seq: number;
+  current_seq: number;
+  replayed_events: number;
+  events: Array<Record<string, unknown>>;
 }
 
 export interface SessionSyncedEvent {
   type: "session.synced";
   session_id?: string;
   synced?: boolean;
+  protocol_version?: string;
   active_conversation_id?: string | null;
   active_conversation?: ConversationRecordPayload | null;
   working_directory?: string | null;
@@ -284,12 +607,38 @@ export interface SessionSyncedEvent {
   provider_id?: string | null;
   base_url?: string | null;
   wire_api?: string | null;
-    available_models?: string[];
+  available_models?: string[];
   models_source?: string;
   missed_events?: boolean;
+  event_log_gap?: boolean;
+  snapshot_required?: boolean;
+  cursor_reset?: boolean;
+  requested_last_seq?: number;
   last_seq?: number;
   current_seq?: number;
+  replayed_events?: number;
   session?: SessionSnapshotPayload | null;
+  snapshot_at?: string;
+}
+
+export interface ControlResponseCommand {
+  type: "control_response";
+  request_id: string;
+  conversation_id?: string;
+  turn_id?: string;
+  message_id?: string;
+  response: {
+    subtype: "success";
+    response: Record<string, unknown>;
+  };
+}
+
+export interface ControlCancelRequestCommand {
+  type: "control_cancel_request";
+  request_id: string;
+  conversation_id?: string;
+  turn_id?: string;
+  message_id?: string;
 }
 
 export interface SkillsListCommand {
@@ -305,11 +654,24 @@ export interface SkillsInstallCommand {
   name: string;
 }
 
-export interface SchedulerListCommand {
+interface WorkspaceOwnedCommand {
+  owner_conversation_id?: string;
+  conversation_id?: string;
+  workspace_root?: string;
+}
+
+export interface McpProjectDecisionCommand {
+  type: "mcp.project.approve" | "mcp.project.approve_all" | "mcp.project.reject";
+  name: string;
+  conversation_id: string;
+  workspace_root: string;
+}
+
+export interface SchedulerListCommand extends WorkspaceOwnedCommand {
   type: "scheduler.list";
 }
 
-export interface SchedulerAddCommand {
+export interface SchedulerAddCommand extends WorkspaceOwnedCommand {
   type: "scheduler.add";
   name: string;
   prompt: string;
@@ -317,42 +679,32 @@ export interface SchedulerAddCommand {
   timezone?: string;
   isolation?: "worktree" | "workspace";
   permission_mode?: "confirm" | "auto";
-  conversation_id?: string;
 }
 
-export interface SchedulerRemoveCommand {
+export interface SchedulerRemoveCommand extends WorkspaceOwnedCommand {
   type: "scheduler.remove";
   task_id: string;
 }
 
-export interface SchedulerToggleCommand {
+export interface SchedulerToggleCommand extends WorkspaceOwnedCommand {
   type: "scheduler.toggle";
   task_id: string;
   enabled: boolean;
 }
 
-export interface SchedulerRunNowCommand {
+export interface SchedulerRunNowCommand extends WorkspaceOwnedCommand {
   type: "scheduler.run_now";
   task_id: string;
 }
 
-export interface SchedulerRetryCommand {
+export interface SchedulerRetryCommand extends WorkspaceOwnedCommand {
   type: "scheduler.retry";
   run_id: string;
 }
 
-export interface SchedulerCancelCommand {
+export interface SchedulerCancelCommand extends WorkspaceOwnedCommand {
   type: "scheduler.cancel";
   run_id: string;
-}
-
-export interface ConnectorsMarketplaceListCommand {
-  type: "connectors.marketplace.list";
-}
-
-export interface ConnectorsMarketplaceInstallCommand {
-  type: "connectors.marketplace.install";
-  name: string;
 }
 
 export interface RuntimeCapabilitiesInspectCommand {

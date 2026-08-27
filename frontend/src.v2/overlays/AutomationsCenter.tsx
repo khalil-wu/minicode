@@ -9,11 +9,17 @@ import { backdropStyle, closeBtn, contentStyle, headerStyle, modalStyle } from "
 export const AutomationsCenter = () => {
   const automationsOpen = useAppStore((s) => s.automationsOpen);
   const toggleAutomations = useAppStore((s) => s.toggleAutomations);
+  const conversationId = useAppStore((s) => s.conversationId);
+  const workingDirectory = useAppStore((s) => s.workingDirectory);
   const dialogRef = useFocusTrap(automationsOpen);
 
   useEffect(() => {
-    if (automationsOpen) sendClientCommand({ type: "scheduler.list" });
-  }, [automationsOpen]);
+    if (automationsOpen) sendClientCommand({
+      type: "scheduler.list",
+      owner_conversation_id: conversationId ?? undefined,
+      workspace_root: workingDirectory || undefined,
+    });
+  }, [automationsOpen, conversationId, workingDirectory]);
 
   if (!automationsOpen) return null;
 
@@ -24,7 +30,7 @@ export const AutomationsCenter = () => {
         className="modal-content automations-center"
         role="dialog"
         aria-modal="true"
-        aria-label="Automations"
+        aria-label="自动任务"
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
@@ -37,12 +43,12 @@ export const AutomationsCenter = () => {
         style={{ ...modalStyle, width: "min(820px, 94vw)", height: "min(640px, 88vh)" }}
       >
         <div style={headerStyle}>
-          <h2 style={{ margin: 0, fontSize: 16, color: "var(--text-primary)", fontWeight: 700 }}>Automations</h2>
-          <button className="automations-close" onClick={toggleAutomations} style={closeBtn} aria-label="Close automations"><X size={16} /></button>
+          <h2 style={{ margin: 0, fontSize: "var(--text-lg)", color: "var(--text-primary)", fontWeight: "var(--fw-bold)" }}>自动任务</h2>
+          <button type="button" className="automations-close" onClick={toggleAutomations} style={closeBtn} aria-label="关闭自动任务"><X size={16} /></button>
         </div>
 
         <div style={contentStyle}>
-          <SchedulerTab title="Runs" />
+          <SchedulerTab title="运行记录" />
         </div>
       </div>
     </div>

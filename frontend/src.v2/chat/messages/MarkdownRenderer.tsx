@@ -25,14 +25,21 @@ import "katex/dist/katex.min.css";
 import { useAppStore } from "../../stores";
 import type { Citation } from "../../stores/types";
 import { pushToast } from "../../overlays/ToastContainer";
-import { isPreviewableHttpUrl, openWebInPreview } from "../openWebInPreview";
+import { isPreviewableHttpUrl } from "../openWebInPreview";
+import { openWebInBrowser } from "../openWebInBrowser";
 import { openWebTarget } from "../openWebTarget";
+import { openLocalFilePreview, openWorkspaceFilePreview } from "../openAttachmentPreview";
 import { normalizeCitationText } from "./citationText";
-import { ImageLightbox } from "../../components/ImageLightbox";
 import { BrandIcon } from "../../components/BrandIcon";
 import { workspaceRawResourceUrlWithToken } from "../../protocol/api";
-import { openPath, revealPath } from "../../desktop/runtime";
+import { isDesktop, openPath, revealPath } from "../../desktop/runtime";
 import { useContextMenu } from "../../components/useContextMenu";
+import {
+  isWindowsLikeWorkspacePath,
+  normalizeWorkspacePath,
+  workspacePathWithin,
+  workspacePathsEqual,
+} from "../../lib/workspace-path";
 
 interface Props {
   content: string;
@@ -51,10 +58,12 @@ type ResolvedTheme = "light" | "dark";
 type MarkdownComponents = NonNullable<React.ComponentProps<typeof ReactMarkdown>["components"]>;
 type MarkdownRemarkPlugins = NonNullable<React.ComponentProps<typeof ReactMarkdown>["remarkPlugins"]>;
 type MarkdownRehypePlugins = NonNullable<React.ComponentProps<typeof ReactMarkdown>["rehypePlugins"]>;
+type MarkdownNodePosition = { position?: { start: { line: number }; end: { line: number } } };
 type MarkdownCodeProps = React.HTMLAttributes<HTMLElement> & {
-  node?: { position?: { start: { line: number }; end: { line: number } } };
+  node?: MarkdownNodePosition;
 };
 type MarkdownElementProps<T> = T & { node?: unknown };
+type MarkdownPositionedProps<T> = T & { node?: MarkdownNodePosition };
 type EditorTarget = { path: string; line?: number; column?: number };
 type FileTarget = { path: string };
 type FolderTarget = { path: string };
@@ -425,13 +434,58 @@ const sanitizeMermaidSvg = (rawSvg: string): string => {
   }
 };
 
+/**
+ * Normalize model-authored math before remark-math sees it.
+ *
+ * Models commonly emit display math as `$$formula$$` on one line, or split a
+ * formula over lines with the closing `$$` after prose. That is valid intent
+ * but not valid micromark block-math syntax: remark-math then treats the first
+ * delimiter as an opener and consumes the rest of the answer as one broken
+ * formula. Pair the delimiters here and put them on their own lines. Unpaired
+ * delimiters are escaped while a stream is incomplete, so the visible answer
+ * remains text until the pair arrives.
+ */
+const normalizeDollarMathSegment = (segment: string): string => {
+  let output = "";
+  let cursor = 0;
+
+  while (cursor < segment.length) {
+    const open = segment.indexOf("$$", cursor);
+    if (open < 0) {
+      output += segment.slice(cursor);
+      break;
+    }
+
+    output += segment.slice(cursor, open);
+    const close = segment.indexOf("$$", open + 2);
+    if (close < 0) {
+      // Keep an incomplete stream parseable. The next delta will replace this
+      // escaped marker with a real paired block once its closing delimiter is
+      // present.
+      output += "\\$\\$";
+      output += segment.slice(open + 2);
+      break;
+    }
+
+    const body = segment.slice(open + 2, close).trim();
+    if (!body) {
+      output += "$$$$";
+    } else {
+      output += `\n\n$$\n${body}\n$$\n\n`;
+    }
+    cursor = close + 2;
+  }
+
+  return output;
+};
+
 const normalizeLatexDelimiters = (value: string): string => {
   if (!value || !/[\\$]/.test(value)) return value;
   return value
     .split(markdownCodeSegmentPattern)
     .map((segment) => {
       if (!segment || segment.startsWith("`")) return segment;
-      return segment
+      return normalizeDollarMathSegment(segment)
         .replace(/\\\[([\s\S]*?)\\\]/g, (_match, body: string) => {
           const trimmed = String(body || "").trim();
           return trimmed ? `\n\n$$\n${trimmed}\n$$\n\n` : "";
@@ -463,7 +517,7 @@ const CopyButton = ({ text }: { text: string }) => {
       }}
       className="code-action-btn absolute top-1.5 bg-[var(--surface-raised)] border border-[var(--border-subtle)] rounded-[var(--radius-sm,4px)] px-2 py-0.5 cursor-pointer text-[var(--text-xs)] opacity-0 transition-[opacity,color] duration-150 z-[1]"
     >
-      {copied ? "Copied" : "Copy"}
+      {copied ? "已复制" : "复制"}
     </button>
   );
 };
@@ -481,11 +535,11 @@ const InsertButton = ({ text }: { text: string }) => {
     window.dispatchEvent(event);
     const ok = event.detail.handled || insertIntoActiveEditor(text);
     if (!ok) {
-      pushToast("Open an editable file before inserting code.", "warning", 1800);
+      pushToast("请先打开可编辑文件，再插入代码。", "warning", 1800);
       return;
     }
     setInserted(true);
-    pushToast(`Inserted into ${activeTabPath}`, "success", 1200);
+    pushToast(`已插入 ${activeTabPath}`, "success", 1200);
     window.setTimeout(() => setInserted(false), 1400);
   }, [activeTabPath, canInsert, insertIntoActiveEditor, text]);
 
@@ -499,9 +553,9 @@ const InsertButton = ({ text }: { text: string }) => {
         right: 58,
       }}
       className="code-action-btn absolute top-1.5 bg-[var(--surface-raised)] border border-[var(--border-subtle)] rounded-[var(--radius-sm,4px)] px-2 py-0.5 cursor-pointer text-[var(--text-xs)] opacity-0 transition-[opacity,color] duration-150 z-[1]"
-      title={`Insert into ${activeTabPath}`}
+      title={`插入到 ${activeTabPath}`}
     >
-      {inserted ? "Inserted" : "Insert"}
+      {inserted ? "已插入" : "插入"}
     </button>
   );
 };
@@ -566,26 +620,30 @@ const MermaidBlock = ({ chart, resolvedTheme }: { chart: string; resolvedTheme: 
     import("mermaid")
       .then(async (module) => {
         const mermaid = module.default;
-        mermaid.initialize({
-          startOnLoad: false,
-          securityLevel: "strict",
-          theme: resolvedTheme === "light" ? "default" : "dark",
-          flowchart: { htmlLabels: false },
-          themeVariables: {
-            textColor: resolvedTheme === "light" ? "#111827" : "#f3f4f6",
-            primaryTextColor: resolvedTheme === "light" ? "#111827" : "#f3f4f6",
-            lineColor: resolvedTheme === "light" ? "#4b5563" : "#d1d5db",
-          },
-        });
+      const rootStyle = getComputedStyle(document.documentElement);
+      const tokenColor = (name: string, fallbackLight: string, fallbackDark: string) =>
+        rootStyle.getPropertyValue(name).trim()
+        || (resolvedTheme === "light" ? fallbackLight : fallbackDark);
+      mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: "strict",
+        theme: resolvedTheme === "light" ? "default" : "dark",
+        flowchart: { htmlLabels: false },
+        themeVariables: {
+          textColor: tokenColor("--text-primary", "#111827", "#f3f4f6"),
+          primaryTextColor: tokenColor("--text-primary", "#111827", "#f3f4f6"),
+          lineColor: tokenColor("--text-secondary", "#4b5563", "#d1d5db"),
+        },
+      });
         const rendered = await mermaid.render(renderId, chart);
         const safeSvg = sanitizeMermaidSvg(rendered.svg);
         if (!cancelled) {
           if (safeSvg) setSvg(safeSvg);
-          else setError("Unable to safely render Mermaid diagram.");
+          else setError("无法安全呈现 Mermaid 图表。");
         }
       })
       .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Unable to render Mermaid diagram.");
+        if (!cancelled) setError(err instanceof Error ? err.message : "无法呈现 Mermaid 图表。");
       });
 
     return () => {
@@ -597,7 +655,7 @@ const MermaidBlock = ({ chart, resolvedTheme }: { chart: string; resolvedTheme: 
     return (
       <div className="space-y-2">
         <div className="text-[var(--text-xs)] text-[var(--state-warning)] px-3 py-2 bg-[var(--surface-soft)] border border-[var(--border-subtle)] rounded-[var(--radius-sm,6px)]">
-          Mermaid render failed; showing source.
+          Mermaid 呈现失败，已显示源代码。
         </div>
         <PlainCodeBlock hasLanguage text={chart} />
       </div>
@@ -619,14 +677,7 @@ const MermaidBlock = ({ chart, resolvedTheme }: { chart: string; resolvedTheme: 
 
 // Hoisted component overrides: stable reference, no re-creation per render.
 const useResolvedTheme = () => {
-  const themeMode = useAppStore((s) => s.themeMode);
-  return themeMode === "light"
-    ? "light"
-    : themeMode === "dark"
-      ? "dark"
-      : matchMedia("(prefers-color-scheme: light)").matches
-        ? "light"
-        : "dark";
+  return useAppStore((s) => s.resolvedTheme);
 };
 
 const parsePositiveInt = (value: string | null | undefined): number | undefined => {
@@ -657,31 +708,43 @@ const textFromReactNode = (children: React.ReactNode): string => {
 };
 
 const normalizePathLexically = (value: string): string => {
-  const normalized = normalizeSlashes(value).trim();
+  const normalized = normalizeWorkspacePath(value);
   const driveMatch = /^([A-Za-z]:)(?:\/(.*))?$/.exec(normalized);
-  if (!driveMatch) return normalized.replace(/\/+$/, "");
-
+  const prefix = driveMatch
+    ? `${driveMatch[1]}/`
+    : normalized.startsWith("//")
+      ? "//"
+      : normalized.startsWith("/")
+        ? "/"
+        : "";
+  const body = driveMatch
+    ? driveMatch[2] ?? ""
+    : normalized.slice(prefix.length);
   const segments: string[] = [];
-  for (const segment of (driveMatch[2] ?? "").split("/")) {
+  for (const segment of body.split("/")) {
     if (!segment || segment === ".") continue;
     if (segment === "..") {
-      segments.pop();
+      if (segments.length > 0 && segments[segments.length - 1] !== "..") {
+        segments.pop();
+      } else if (!prefix) {
+        segments.push(segment);
+      }
       continue;
     }
     segments.push(segment);
   }
-  return `${driveMatch[1]}/${segments.join("/")}`.replace(/\/+$/, "");
+  return `${prefix}${segments.join("/")}`.replace(/\/+$/, "") || prefix;
 };
 
 const pathWithinWorkspace = (path: string, workspaceRoot: string): boolean => {
-  const root = normalizePathLexically(workspaceRoot).toLowerCase();
-  const target = normalizePathLexically(path).toLowerCase();
-  return Boolean(root) && (target === root || target.startsWith(`${root}/`));
+  const root = normalizePathLexically(workspaceRoot);
+  const target = normalizePathLexically(path);
+  return workspacePathWithin(target, root);
 };
 
 const absoluteWorkspacePath = (path: string, workspaceRoot: string): string | null => {
   const normalized = normalizeSlashes(path).replace(/^\.\/+/, "");
-  if (/^[A-Za-z]:\//.test(normalized)) {
+  if (/^[A-Za-z]:\//.test(normalized) || normalized.startsWith("/")) {
     const absolute = normalizePathLexically(normalized);
     return pathWithinWorkspace(absolute, workspaceRoot) ? absolute : null;
   }
@@ -694,7 +757,7 @@ const workspaceRelativePath = (path: string, workspaceRoot: string): string | nu
   const root = normalizePathLexically(workspaceRoot);
   const target = normalizePathLexically(path);
   if (!root || !pathWithinWorkspace(target, root)) return null;
-  if (target.toLowerCase() === root.toLowerCase()) return ".";
+  if (workspacePathsEqual(target, root)) return ".";
   return target.slice(root.length).replace(/^\/+/, "");
 };
 
@@ -751,13 +814,18 @@ const workspacePathFromHref = (
   }
 
   candidate = normalizeSlashes(stripFileRefDecorations(candidate).replace(/%5[cC]/g, "/")).replace(/^\.\/+/, "");
-  if (fromLocalFrontend && candidate.startsWith("/") && !/^\/[A-Za-z]:\//.test(candidate)) {
+  if (
+    fromLocalFrontend
+    && candidate.startsWith("/")
+    && !/^\/[A-Za-z]:\//.test(candidate)
+    && isWindowsLikeWorkspacePath(workingDirectory)
+  ) {
     candidate = candidate.replace(/^\/+/, "");
   }
   const safetyPath = options.allowLineTarget
     ? parseEditorPathTarget(candidate)?.path ?? candidate
     : candidate;
-  if (/^[A-Za-z]:\//.test(safetyPath)) {
+  if (/^[A-Za-z]:\//.test(safetyPath) || safetyPath.startsWith("/")) {
     return pathWithinWorkspace(safetyPath, workingDirectory)
       || (options.allowExternalDeliverable && externalDeliverablePathPattern.test(safetyPath))
       ? candidate
@@ -767,8 +835,16 @@ const workspacePathFromHref = (
   return candidate;
 };
 
-const localImageUrlWithinWorkspace = (url: string): string | null => {
-  if (isWorkspaceRawResourceUrl(url)) return url;
+const localImageWithinWorkspace = (url: string): { path: string; src: string } | null => {
+  if (isWorkspaceRawResourceUrl(url)) {
+    try {
+      const parsed = new URL(url, window.location.href);
+      const path = workspacePathFromHref(parsed.searchParams.get("path") || "");
+      return path ? { path, src: url } : null;
+    } catch {
+      return null;
+    }
+  }
   if (!isLocalImageUrl(url)) return null;
   const workingDirectory = String(useAppStore.getState().workingDirectory || "");
   const candidate = workspacePathFromHref(url);
@@ -776,7 +852,9 @@ const localImageUrlWithinWorkspace = (url: string): string | null => {
   const absolutePath = absoluteWorkspacePath(candidate, workingDirectory);
   if (!absolutePath) return null;
   const relativePath = workspaceRelativePath(absolutePath, workingDirectory);
-  return relativePath ? workspaceRawResourceUrlWithToken(relativePath, workingDirectory) : null;
+  return relativePath
+    ? { path: relativePath, src: workspaceRawResourceUrlWithToken(relativePath, workingDirectory) }
+    : null;
 };
 
 const workspaceFileTargetFromHref = (href: string): { path: string; line?: number; column?: number } | null => {
@@ -858,6 +936,41 @@ const shouldRenderInlineCodeAsProse = (value: string): boolean => {
   return proseInlinePattern.test(text);
 };
 
+const markdownHeadingSlug = (value: string): string => {
+  const slug = value
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}\s_-]/gu, "")
+    .replace(/[\s_]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug || "section";
+};
+
+/**
+ * Assign heading anchor ids without mutating render-order state.
+ *
+ * A counter that accumulates as headings render forces the component table to
+ * be rebuilt whenever content changes, which remounts every rendered element.
+ * Ranking duplicates by source line is order-independent and idempotent, so
+ * the same heading keeps the same id across re-renders and the component table
+ * stays referentially stable while text streams in.
+ */
+type HeadingIdAssigner = (base: string, line: number | undefined) => string;
+
+const createHeadingIdAssigner = (scopeId: string): HeadingIdAssigner => {
+  const assignedLines = new Map<string, number[]>();
+  return (base, line) => {
+    if (line == null) return `${scopeId}-${base}`;
+    const lines = assignedLines.get(base) ?? [];
+    if (!lines.includes(line)) {
+      lines.push(line);
+      assignedLines.set(base, lines);
+    }
+    const rank = lines.filter((candidate) => candidate < line).length + 1;
+    return `${scopeId}-${base}${rank > 1 ? `-${rank}` : ""}`;
+  };
+};
+
 const InlineOptionList = ({ text }: { text: string }) => {
   const parts = text.split("/").map((part) => part.trim()).filter(Boolean);
   if (parts.length < 2) return <>{text}</>;
@@ -875,7 +988,7 @@ const InlineOptionList = ({ text }: { text: string }) => {
 
 const fileChipClassName = [
   "md-file-chip",
-  "inline-flex max-w-full items-center gap-1.5 align-baseline",
+  "inline-flex max-w-full items-center gap-1.5 align-middle",
   "rounded-[5px] border px-[5px] py-[1px]",
   "font-[var(--font-mono)] text-[0.88em] leading-[1.42]",
   "no-underline cursor-pointer",
@@ -993,14 +1106,18 @@ const FileReferenceChip = ({ target, children }: { target: EditorTarget; childre
       label: "在编辑器中打开",
       onClick: () => useAppStore.getState().openEditorFile(target.path, undefined, { line: target.line, column: target.column }),
     },
-    { label: "使用默认应用打开", onClick: () => { void openPath(titlePath); } },
-    { label: "在资源管理器中显示", onClick: () => { void revealPath(titlePath); } },
+    // OS shell actions have no meaning in browser mode; offering them there
+    // produced a menu entry that did nothing at all.
+    ...(isDesktop() ? [
+      { label: "使用默认应用打开", onClick: () => { void openPath(titlePath); } },
+      { label: "在资源管理器中显示", onClick: () => { void revealPath(titlePath); } },
+    ] : []),
     { label: "", separator: true },
     { label: "复制路径", onClick: () => { void navigator.clipboard.writeText(titlePath); } },
   ]);
 
   return (
-    <span className="relative inline-flex" onContextMenu={onContextMenu}>
+    <span className="md-file-reference-wrap relative inline" onContextMenu={onContextMenu}>
       <button
         type="button"
         onClick={() => useAppStore.getState().openEditorFile(
@@ -1008,7 +1125,7 @@ const FileReferenceChip = ({ target, children }: { target: EditorTarget; childre
           undefined,
           { line: target.line, column: target.column },
         )}
-        title={`Open ${titlePath}`}
+        title={`在编辑器中打开 ${titlePath}`}
         aria-label={label}
         className={fileChipClassName}
         data-ext={extension || "file"}
@@ -1030,20 +1147,35 @@ const GenericFileReferenceChip = ({ target, children }: { target: FileTarget; ch
   const label = textFromReactNode(children) || target.path;
   const { directory, name } = displayPathParts(label);
   const titlePath = absoluteEditorTitlePath(target.path, workingDirectory || "");
+  const previewInsideWorkspace = pathWithinWorkspace(titlePath, workingDirectory || "");
   const extension = fileExtensionFromPath(target.path) || fileExtensionFromPath(label);
   const { onContextMenu, menu } = useContextMenu(() => [
-    { label: "打开文件", onClick: () => { void openPath(titlePath); } },
-    { label: "在资源管理器中显示", onClick: () => { void revealPath(titlePath); } },
+    {
+      label: "在编辑器中打开（仅文本文件）",
+      disabled: true,
+    },
+    // OS shell actions have no meaning in browser mode; offering them there
+    // produced a menu entry that did nothing at all.
+    ...(isDesktop() ? [
+      { label: "使用默认应用打开", onClick: () => { void openPath(titlePath); } },
+      { label: "在资源管理器中显示", onClick: () => { void revealPath(titlePath); } },
+    ] : []),
     { label: "", separator: true },
     { label: "复制路径", onClick: () => { void navigator.clipboard.writeText(titlePath); } },
   ]);
 
   return (
-    <span className="relative inline-flex" onContextMenu={onContextMenu}>
+    <span className="md-file-reference-wrap relative inline" onContextMenu={onContextMenu}>
       <button
         type="button"
-        onClick={() => { void openPath(titlePath); }}
-        title={`Open ${titlePath}`}
+        onClick={() => {
+          if (previewInsideWorkspace) {
+            openWorkspaceFilePreview({ path: target.path, name, workspaceRoot: workingDirectory });
+          } else {
+            void openPath(titlePath);
+          }
+        }}
+        title={previewInsideWorkspace ? `预览 ${titlePath}` : `打开 ${titlePath}`}
         aria-label={label}
         className={fileChipClassName}
         data-ext={extension || "file"}
@@ -1062,21 +1194,20 @@ const GenericFileReferenceChip = ({ target, children }: { target: FileTarget; ch
 const FolderReferenceChip = ({ target, children }: { target: FolderTarget; children: React.ReactNode }) => {
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const label = textFromReactNode(children) || target.path;
-  const { directory, name } = displayPathParts(label);
+  const { name } = displayPathParts(label.replace(/[\\/]+$/, ""));
   const titlePath = absoluteEditorTitlePath(target.path, workingDirectory || "");
 
   return (
     <button
       type="button"
       onClick={() => useAppStore.getState().requestFileTreeReveal(target.path, "folder")}
-      title={`Reveal ${titlePath}`}
+      title={`在文件树中显示 ${titlePath}`}
       aria-label={label}
       className={`${fileChipClassName} md-folder-chip`}
       data-kind="folder"
     >
       <Folder aria-hidden="true" size={14} strokeWidth={1.8} className="md-folder-chip-icon" />
       <span className="md-file-chip-label">
-        {directory ? <span className="md-file-chip-directory">{directory}</span> : null}
         <span className="md-file-chip-name">{name}</span>
       </span>
     </button>
@@ -1084,14 +1215,13 @@ const FolderReferenceChip = ({ target, children }: { target: FolderTarget; child
 };
 
 const MarkdownImage = (props: React.ImgHTMLAttributes<HTMLImageElement>) => {
-  const [previewOpen, setPreviewOpen] = useState(false);
   const [loadedRemoteUrl, setLoadedRemoteUrl] = useState<string | null>(null);
   const rawSrc = typeof props.src === "string" ? props.src : "";
   const alt = typeof props.alt === "string" ? props.alt : "image";
-  const workspaceLocalSrc = localImageUrlWithinWorkspace(rawSrc);
-  const blockedLocalImage = Boolean(rawSrc) && isLocalImageUrl(rawSrc) && !workspaceLocalSrc;
-  const src = workspaceLocalSrc ?? rawSrc;
-  const remoteSrc = !workspaceLocalSrc && isPreviewableHttpUrl(src) ? src : "";
+  const workspaceLocalImage = localImageWithinWorkspace(rawSrc);
+  const blockedLocalImage = Boolean(rawSrc) && isLocalImageUrl(rawSrc) && !workspaceLocalImage;
+  const src = workspaceLocalImage?.src ?? rawSrc;
+  const remoteSrc = !workspaceLocalImage && isPreviewableHttpUrl(src) ? src : "";
   const remoteImagePolicy = useAppStore((s) => s.remoteImagePolicy);
   const allowedRemoteImageDomains = useAppStore((s) => s.allowedRemoteImageDomains);
   const allowRemoteImageDomain = useAppStore((s) => s.allowRemoteImageDomain);
@@ -1105,7 +1235,7 @@ const MarkdownImage = (props: React.ImgHTMLAttributes<HTMLImageElement>) => {
   }
   const remoteDomainAllowed = Boolean(remoteHostname) && allowedRemoteImageDomains.includes(remoteHostname);
   const remoteImageAllowed = remoteImagePolicy === "allow" || remoteDomainAllowed || loadedRemoteUrl === remoteSrc;
-  const previewable = Boolean(src) && (isPreviewableHttpUrl(src) || isInlineImageDataUrl(src) || Boolean(workspaceLocalSrc));
+  const previewable = Boolean(src) && (isPreviewableHttpUrl(src) || isInlineImageDataUrl(src) || Boolean(workspaceLocalImage));
 
   if (blockedLocalImage || !src) {
     return (
@@ -1113,30 +1243,30 @@ const MarkdownImage = (props: React.ImgHTMLAttributes<HTMLImageElement>) => {
         role="img"
         aria-label={alt}
         className="my-2 inline-flex max-w-full items-center rounded-[var(--radius-sm,6px)] border border-[var(--border-subtle)] bg-[var(--surface-soft)] px-3 py-2 text-[var(--text-sm)] text-[var(--text-muted)]"
-        title="Local image outside the current workspace"
+        title="本地图片位于当前工作区之外"
       >
-        Local image unavailable
+        本地图片不可用
       </span>
     );
   }
 
   if (remoteSrc && (remoteImagePolicy === "block" || !remoteImageAllowed)) {
-    const hostname = remoteHostname || "remote host";
+    const hostname = remoteHostname || "远程主机";
     return (
       <span
         className="my-2 inline-flex max-w-full flex-col items-start gap-2 rounded-[var(--radius-sm,6px)] border border-[var(--border-subtle)] bg-[var(--surface-soft)] px-3 py-2 text-[var(--text-sm)] text-[var(--text-muted)]"
         data-remote-image-placeholder={remoteSrc}
       >
-        <span>{alt} · Image from {hostname}</span>
+        <span>{alt} · 图片来自 {hostname}</span>
         {remoteImagePolicy === "block" ? (
-          <span>Remote images are blocked in Settings.</span>
+          <span>设置中已禁止加载远程图片。</span>
         ) : (
           <span className="inline-flex flex-wrap gap-2">
             <button type="button" className="btn-secondary" onClick={() => setLoadedRemoteUrl(remoteSrc)}>
-              Load image
+              加载图片
             </button>
             <button type="button" className="btn-ghost" onClick={() => allowRemoteImageDomain(hostname)}>
-              Allow {hostname} for this task
+              本任务允许 {hostname}
             </button>
           </span>
         )}
@@ -1145,22 +1275,36 @@ const MarkdownImage = (props: React.ImgHTMLAttributes<HTMLImageElement>) => {
   }
 
   const openPreview = () => {
-    if (workspaceLocalSrc) {
-      setPreviewOpen(true);
+    if (workspaceLocalImage) {
+      openWorkspaceFilePreview({
+        path: workspaceLocalImage.path,
+        name: alt,
+        workspaceRoot: useAppStore.getState().workingDirectory,
+      });
       return;
     }
     if (isPreviewableHttpUrl(src)) {
-      openWebInPreview(src);
+      openWebInBrowser(src);
       return;
     }
-    setPreviewOpen(true);
+    const mediaType = /^data:([^;,]+)/i.exec(src)?.[1] || "image/png";
+    let hash = 0;
+    for (let index = 0; index < src.length; index += 1) {
+      hash = ((hash << 5) - hash + src.charCodeAt(index)) | 0;
+    }
+    openLocalFilePreview({
+      id: `markdown-image-${Math.abs(hash)}`,
+      name: alt,
+      mediaType,
+      url: src,
+    });
   };
 
   // Remote http(s) images open in the right preview panel; local/inline images
   // open in a lightbox. Distinguish the affordance so users don't expect a zoom
   // lightbox when clicking a remote image.
-  const opensInPreviewPanel = !workspaceLocalSrc && isPreviewableHttpUrl(src);
-  const previewTitle = opensInPreviewPanel ? "Open in preview panel" : "Preview image";
+  const opensInPreviewPanel = isPreviewableHttpUrl(src);
+  const previewTitle = "在预览面板中打开";
 
   const image = (
     <img
@@ -1173,33 +1317,34 @@ const MarkdownImage = (props: React.ImgHTMLAttributes<HTMLImageElement>) => {
     />
   );
 
-  return (
-    <>
-      {previewable ? (
-        <button
-          type="button"
-          aria-label={opensInPreviewPanel ? `Open ${alt} in preview` : `Preview ${alt}`}
-          className="block max-w-full border-0 bg-transparent p-0 text-left"
-          onClick={(event) => {
-            if (!event.defaultPrevented) openPreview();
-          }}
-        >
-          {image}
-        </button>
-      ) : image}
-      {previewOpen ? (
-        <ImageLightbox
-          src={src}
-          alt={alt}
-          title={props.title || alt}
-          onClose={() => setPreviewOpen(false)}
-        />
-      ) : null}
-    </>
-  );
+  return previewable ? (
+    <button
+      type="button"
+      aria-label={`在预览中打开 ${alt}`}
+      className="block max-w-full border-0 bg-transparent p-0 text-left"
+      onClick={(event) => {
+        if (!event.defaultPrevented) openPreview();
+      }}
+    >
+      {image}
+    </button>
+  ) : image;
 };
 
-const mdComponents = (resolvedTheme: ResolvedTheme): MarkdownComponents => ({
+const mdComponents = (resolvedTheme: ResolvedTheme, scopeId: string): MarkdownComponents => {
+  const headingId = createHeadingIdAssigner(scopeId);
+  const heading = (level: 1 | 2 | 3) => ({ node, ...props }: MarkdownPositionedProps<React.HTMLAttributes<HTMLHeadingElement>>) => {
+    const base = markdownHeadingSlug(textFromReactNode(props.children));
+    const id = headingId(base, node?.position?.start.line);
+    const Tag: "h1" | "h2" | "h3" = level === 1 ? "h1" : level === 2 ? "h2" : "h3";
+    const className = level === 1
+      ? "text-[length:var(--text-2xl)] font-bold mt-5 mb-2.5 first:mt-0"
+      : level === 2
+        ? "text-[length:var(--text-xl)] font-semibold mt-5 mb-2 first:mt-0"
+        : "text-[length:var(--text-lg)] font-semibold mt-4 mb-1.5 first:mt-0";
+    return <Tag {...props} id={id} tabIndex={-1} className={className} style={{ scrollMarginTop: 16, ...props.style }} />;
+  };
+  return ({
   code({ className, children, node }: MarkdownCodeProps) {
     const text = String(children).replace(/\n$/, "");
     const match = /language-(\w+)/.exec(className ?? "");
@@ -1266,6 +1411,24 @@ const mdComponents = (resolvedTheme: ResolvedTheme): MarkdownComponents => ({
   a: ({ node: _node, ...props }: MarkdownElementProps<React.AnchorHTMLAttributes<HTMLAnchorElement>>) => {
     const href = typeof props.href === "string" ? props.href : "";
     const childrenText = textFromReactNode(props.children);
+    if (href.startsWith("#")) {
+      const targetId = `${scopeId}-${markdownHeadingSlug(decodeURIComponent(href.slice(1)))}`;
+      return (
+        <a
+          {...props}
+          href={`#${targetId}`}
+          className="text-[var(--accent-primary)] underline"
+          onClick={(event) => {
+            event.preventDefault();
+            const element = document.getElementById(targetId);
+            element?.scrollIntoView({ behavior: "smooth", block: "start" });
+            element?.focus({ preventScroll: true });
+          }}
+        >
+          {props.children}
+        </a>
+      );
+    }
     const editorTarget = editorTargetFromHref(href) ?? editorTargetFromLinkText(href, childrenText);
     const fileTarget = editorTarget
       ? null
@@ -1341,14 +1504,15 @@ const mdComponents = (resolvedTheme: ResolvedTheme): MarkdownComponents => ({
   blockquote: ({ node: _node, ...props }: MarkdownElementProps<React.BlockquoteHTMLAttributes<HTMLQuoteElement>>) => (
     <blockquote {...props} className="border border-[var(--border-subtle)] rounded-[10px] bg-[var(--surface-soft)] px-3.5 py-2.5 my-2 text-[var(--text-secondary)]" />
   ),
-  h1: ({ node: _node, ...props }: MarkdownElementProps<React.HTMLAttributes<HTMLHeadingElement>>) => <h1 {...props} className="text-[length:var(--text-2xl)] font-bold mt-5 mb-2.5 first:mt-0" />,
-  h2: ({ node: _node, ...props }: MarkdownElementProps<React.HTMLAttributes<HTMLHeadingElement>>) => <h2 {...props} className="text-[length:var(--text-xl)] font-semibold mt-5 mb-2 first:mt-0" />,
-  h3: ({ node: _node, ...props }: MarkdownElementProps<React.HTMLAttributes<HTMLHeadingElement>>) => <h3 {...props} className="text-[length:var(--text-lg)] font-semibold mt-4 mb-1.5 first:mt-0" />,
+  h1: heading(1),
+  h2: heading(2),
+  h3: heading(3),
   hr: () => <hr className="border-0 h-px my-4 bg-gradient-to-r from-transparent via-[var(--border-subtle)] to-transparent" />,
   img: ({ node: _node, ...props }: MarkdownElementProps<React.ImgHTMLAttributes<HTMLImageElement>>) => {
     return <MarkdownImage {...props} />;
   },
-});
+  });
+};
 
 const remarkPlugins: MarkdownRemarkPlugins = [
   [remarkGfm, { singleTilde: false }],
@@ -1380,53 +1544,89 @@ const preserveWindowsMarkdownFileLinks = (content: string): string => content.re
  * This mirrors cc's StreamingMarkdown approach: find the last closed
  * block boundary so everything before it is final and only the tail
  * re-parses per delta. We check multiple boundary types:
- * - Closed code fences (```...```)
+ * - Closed backtick or tilde code fences
  * - Double-newline paragraph breaks
  * - Completed list items (line starting with dash, bullet, or 1. followed by \n)
  * - Heading boundaries (# ...\n)
  */
-/**
- * Index of the opening ``` of a fence that is still unclosed, or -1.
- *
- * Fences alternate open/close, so an odd count means the last one is still
- * open. Used to keep a mid-stream code block out of the syntax highlighter.
- */
-function findUnclosedFenceStart(content: string): number {
-  let searchFrom = 0;
-  let lastOpen = -1;
-  let open = false;
-  for (;;) {
-    const idx = content.indexOf("```", searchFrom);
-    if (idx < 0) break;
-    open = !open;
-    lastOpen = open ? idx : -1;
-    searchFrom = idx + 3;
-  }
-  return open ? lastOpen : -1;
+interface FenceScanResult {
+  unclosedStart: number;
+  lastClosedEnd: number;
 }
 
-function findStableSplitPoint(content: string): number {
+/** Scan block fences without treating inline backticks or tildes as fences. */
+function scanFences(content: string): FenceScanResult {
+  let open: { marker: "`" | "~"; length: number; start: number } | null = null;
+  let lastClosedEnd = -1;
+  let lineStart = 0;
+
+  while (lineStart <= content.length) {
+    const newline = content.indexOf("\n", lineStart);
+    const lineEnd = newline >= 0 ? newline : content.length;
+    const rawLine = content.slice(lineStart, lineEnd);
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    const completeLineEnd = newline >= 0 ? newline + 1 : content.length;
+
+    if (open) {
+      const close = /^ {0,3}(`+|~+)[\t ]*$/.exec(line);
+      if (
+        close
+        && close[1][0] === open.marker
+        && close[1].length >= open.length
+      ) {
+        open = null;
+        lastClosedEnd = completeLineEnd;
+      }
+    } else {
+      const opening = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+      if (opening) {
+        open = {
+          marker: opening[1][0] as "`" | "~",
+          length: opening[1].length,
+          start: lineStart,
+        };
+      }
+    }
+
+    if (newline < 0) break;
+    lineStart = newline + 1;
+  }
+
+  return {
+    unclosedStart: open?.start ?? -1,
+    lastClosedEnd,
+  };
+}
+
+export function findStableSplitPoint(content: string): number {
+  const fenceScan = scanFences(content);
+  const openFenceStart = fenceScan.unclosedStart;
+  // Paragraph/list boundaries inside a still-open code fence are not stable
+  // Markdown boundaries.  Restrict every candidate below to the content that
+  // precedes the opening fence; the entire growing code block then stays in
+  // the cheap PlainCodeBlock tail until its closing fence arrives.
+  const stableCandidate = openFenceStart >= 0
+    ? content.slice(0, openFenceStart)
+    : content;
   let bestSplit = -1;
 
-  // Closed code fence: ```\n (the closing fence + newline)
-  // Also handle ```\n followed by content — the fence is complete.
-  const fenceClose = content.lastIndexOf("\n```\n");
-  if (fenceClose >= 0) bestSplit = Math.max(bestSplit, fenceClose + 5);
-
-  // Also check for ``` at end (closed but no trailing newline)
-  const fenceEndClose = content.lastIndexOf("\n```");
-  if (fenceEndClose >= 0 && content.substring(fenceEndClose + 4).trim() === "") {
-    bestSplit = Math.max(bestSplit, fenceEndClose + 4);
+  // A validated closing fence is stable with or without a final newline. If
+  // another fence remains open, only retain closes before that opening.
+  if (
+    fenceScan.lastClosedEnd >= 0
+    && fenceScan.lastClosedEnd <= stableCandidate.length
+  ) {
+    bestSplit = Math.max(bestSplit, fenceScan.lastClosedEnd);
   }
 
   // Double-newline paragraph break
-  const paraBreak = content.lastIndexOf("\n\n");
+  const paraBreak = stableCandidate.lastIndexOf("\n\n");
   if (paraBreak >= 0) bestSplit = Math.max(bestSplit, paraBreak + 2);
 
   // Heading boundary: line starting with # followed by newline
-  const headingEnd = content.lastIndexOf("\n# ");
+  const headingEnd = stableCandidate.lastIndexOf("\n# ");
   if (headingEnd >= 0) {
-    const headingNewline = content.indexOf("\n", headingEnd + 3);
+    const headingNewline = stableCandidate.indexOf("\n", headingEnd + 3);
     if (headingNewline >= 0) bestSplit = Math.max(bestSplit, headingNewline + 1);
   }
 
@@ -1434,7 +1634,7 @@ function findStableSplitPoint(content: string): number {
   const listPattern = /(?:^|\n)(?:[-*]|\d+\.)\s+.+\n/g;
   let lastListMatch: RegExpExecArray | null = null;
   let match: RegExpExecArray | null;
-  while ((match = listPattern.exec(content)) !== null) {
+  while ((match = listPattern.exec(stableCandidate)) !== null) {
     lastListMatch = match;
   }
   if (lastListMatch) {
@@ -1489,12 +1689,15 @@ const StreamingTailMarkdown = memo(({ content, components }: { content: string; 
   // token, which is the dominant cost of a long streamed code block. Render the
   // open fence as unhighlighted text until it closes; the closed block then
   // moves into the stable (memoized, highlighted) prefix on the next split.
-  const openFence = findUnclosedFenceStart(content);
+  const openFence = scanFences(content).unclosedStart;
   if (openFence >= 0) {
     const before = content.slice(0, openFence);
     const fenceBody = content.slice(openFence);
     const newlineIdx = fenceBody.indexOf("\n");
-    const infoString = newlineIdx >= 0 ? fenceBody.slice(3, newlineIdx).trim() : "";
+    const openingLine = (newlineIdx >= 0 ? fenceBody.slice(0, newlineIdx) : fenceBody)
+      .replace(/\r$/, "");
+    const opening = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(openingLine);
+    const infoString = opening?.[2].trim() ?? "";
     const codeText = newlineIdx >= 0 ? fenceBody.slice(newlineIdx + 1) : "";
     return (
       <>
@@ -1517,10 +1720,15 @@ StreamingTailMarkdown.displayName = "StreamingTailMarkdown";
 
 export const MarkdownRenderer = memo(({ content, isStreaming, citations }: Props) => {
   const resolved = useResolvedTheme();
-  const components = useMemo(() => mdComponents(resolved), [resolved]);
+  const rawScopeId = useId();
+  const scopeId = useMemo(() => `md-${rawScopeId.replace(/[^a-zA-Z0-9_-]/g, "")}`, [rawScopeId]);
   const displayContent = useMemo(
     () => preserveWindowsMarkdownFileLinks(normalizeLatexDelimiters(normalizeCitationText(content, citations))),
     [content, citations],
+  );
+  const components = useMemo(
+    () => mdComponents(resolved, scopeId),
+    [resolved, scopeId],
   );
   const prevStableRef = useRef("");
 

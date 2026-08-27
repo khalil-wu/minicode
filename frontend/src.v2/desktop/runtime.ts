@@ -1,3 +1,5 @@
+import { pushToast } from "../overlays/ToastContainer";
+
 export interface FsEntry {
   name: string;
   path: string;
@@ -114,6 +116,8 @@ export interface BrowserActionResult {
 
 export interface EmbeddedBrowserState {
   id: string;
+  conversationId: string;
+  conversation_id?: string;
   type: "page" | "loading" | "updated" | "error" | "new-tab-request";
   url: string;
   title: string;
@@ -128,6 +132,7 @@ export interface EmbeddedBrowserState {
 
 export interface EmbeddedBrowserBounds {
   id: string;
+  conversationId: string;
   x: number;
   y: number;
   width: number;
@@ -145,6 +150,47 @@ export interface EmbeddedBrowserSettings {
   downloadPolicy: "block" | "ask" | "allow";
   origin: string;
   permissions: string[];
+}
+
+export interface UpdateActivitySnapshot {
+  runtimeReady: boolean;
+  activeTurns: string[];
+  sideChatStreams: string[];
+  pendingPrompts: string[];
+  uploadingAttachments: string[];
+  dirtyEditors: string[];
+  backgroundTasks: string[];
+}
+
+export interface UpdatePreflightCheck {
+  code: string;
+  severity: "pass" | "warning" | "blocking";
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+export interface UpdatePreflightResult {
+  allowed: boolean;
+  checks: UpdatePreflightCheck[];
+  fingerprint: string;
+  version: string;
+}
+
+export interface UpdateInstallResult {
+  installed: boolean;
+  reason?: string;
+  message?: string;
+  preflight?: UpdatePreflightResult;
+}
+
+export interface UpdateStatus {
+  status: string;
+  sequence?: number;
+  version?: string;
+  previousVersion?: string;
+  failedVersion?: string;
+  percent?: number;
+  message?: string;
 }
 
 interface MiniCodeDesktop {
@@ -167,9 +213,12 @@ interface MiniCodeDesktop {
   updates: {
     check(): Promise<boolean>;
     download(): Promise<boolean>;
-    install(): Promise<boolean>;
-    getStatus(): Promise<{ status: string; version?: string; previousVersion?: string; failedVersion?: string; percent?: number; message?: string }>;
-    onStatus(callback: (payload: { status: string; version?: string; previousVersion?: string; failedVersion?: string; percent?: number; message?: string }) => void): (() => void) | void;
+    reportActivity(snapshot: UpdateActivitySnapshot, requestIds?: string[]): Promise<{ accepted: boolean; revision: number }>;
+    onActivityRequest(callback: (payload: { requestId?: string }) => void): (() => void) | void;
+    preflight(): Promise<UpdatePreflightResult>;
+    install(payload: { fingerprint: string }): Promise<UpdateInstallResult>;
+    getStatus(): Promise<UpdateStatus>;
+    onStatus(callback: (payload: UpdateStatus) => void): (() => void) | void;
   };
   pickDirectory(): Promise<string | null>;
   trustWorkspace(path: string): Promise<string | null>;
@@ -196,14 +245,14 @@ interface MiniCodeDesktop {
   };
   pty: {
     spawn(cwd: string | undefined, conversationId?: string): Promise<{ sessionId?: string; session_id?: string; conversationId?: string; conversation_id?: string; pid?: number; shell?: string; cwd?: string }>;
-    spawnOwned?(cwd: string | undefined, conversationId: string): Promise<{ sessionId?: string; session_id?: string; conversationId?: string; conversation_id?: string; pid?: number; shell?: string; cwd?: string }>;
     write(sessionId: string, data: string, conversationId: string): Promise<void>;
     resize(sessionId: string, cols: number, rows: number, conversationId: string): Promise<void>;
     kill(sessionId: string, conversationId: string): Promise<boolean>;
+    restart(sessionId: string, conversationId: string): Promise<Record<string, unknown> | null>;
     killConversation(conversationId: string): Promise<number>;
     list(conversationId?: string): Promise<Record<string, unknown>[]>;
-    listOwned?(conversationId: string): Promise<Record<string, unknown>[]>;
     snapshot(sessionId: string, maxChars: number | undefined, conversationId: string): Promise<Record<string, unknown> | null>;
+    clear(sessionId: string, conversationId: string): Promise<{ cleared?: boolean; outputCursor?: number }>;
     ackExit(sessionId: string, conversationId: string): Promise<boolean>;
     onData(cb: (data: { sessionId: string; conversationId: string; data: string; startCursor?: number; endCursor?: number }) => void): (() => void) | void;
     onExit(cb: (data: { sessionId: string; conversationId: string; exitCode: number }) => void): (() => void) | void;
@@ -219,17 +268,18 @@ interface MiniCodeDesktop {
     type(endpoint: string | undefined, targetId: string, selector: string, text: string): Promise<BrowserActionResult>;
   };
   embeddedBrowser: {
-    create(payload: { id: string; url: string }): Promise<EmbeddedBrowserState>;
-    list(): Promise<EmbeddedBrowserState[]>;
-    activate(id: string): Promise<boolean>;
+    create(payload: { id: string; url: string; conversationId: string }): Promise<EmbeddedBrowserState>;
+    list(payload: { conversationId: string }): Promise<EmbeddedBrowserState[]>;
+    activate(payload: { id: string; conversationId: string }): Promise<boolean>;
     setBounds(payload: EmbeddedBrowserBounds): Promise<boolean>;
-    navigate(payload: { id: string; url: string }): Promise<EmbeddedBrowserState>;
-    runAction(payload: { id: string; action: "back" | "forward" | "reload" | "stop" | "focus" }): Promise<boolean>;
-    inspect(payload: { id: string; kind: "console" | "network" | "element" | "region" }): Promise<EmbeddedBrowserInspectionResult>;
+    navigate(payload: { id: string; url: string; conversationId: string }): Promise<EmbeddedBrowserState>;
+    runAction(payload: { id: string; conversationId: string; action: "back" | "forward" | "reload" | "stop" | "focus" }): Promise<boolean>;
+    inspect(payload: { id: string; conversationId: string; kind: "console" | "network" | "element" | "region" }): Promise<EmbeddedBrowserInspectionResult>;
     getSettings(payload: { url: string }): Promise<EmbeddedBrowserSettings>;
     setSettings(payload: { downloadPolicy?: "block" | "ask" | "allow"; origin?: string; permission?: string; allowed?: boolean }): Promise<EmbeddedBrowserSettings>;
-    clearSiteData(id: string): Promise<boolean>;
-    close(id: string): Promise<boolean>;
+    clearSiteData(payload: { id: string; conversationId: string }): Promise<boolean>;
+    close(payload: { id: string; conversationId: string }): Promise<boolean>;
+    closeConversation(conversationId: string): Promise<number>;
     onEvent(callback: (payload: EmbeddedBrowserState) => void): (() => void) | void;
   };
 }
@@ -510,9 +560,7 @@ export const ptySpawn = async (cwd: string | undefined, conversationId: string):
   try {
     const pty = desktop()?.pty;
     if (!pty) return null;
-    const raw = pty.spawnOwned
-      ? await pty.spawnOwned(cwd, owner)
-      : await pty.spawn(cwd, owner);
+    const raw = await pty.spawn(cwd, owner);
     const session = normalizePtySession(raw, cwd ?? "");
     return session?.conversationId === owner ? session : null;
   } catch {
@@ -522,6 +570,16 @@ export const ptySpawn = async (cwd: string | undefined, conversationId: string):
 export const ptyWrite = (sessionId: string, data: string, conversationId: string) => desktop()?.pty.write(sessionId, data, conversationId);
 export const ptyResize = (sessionId: string, cols: number, rows: number, conversationId: string) => desktop()?.pty.resize(sessionId, cols, rows, conversationId);
 export const ptyKill = (sessionId: string, conversationId: string) => desktop()?.pty.kill(sessionId, conversationId);
+export const ptyRestart = async (sessionId: string, conversationId: string): Promise<PtySession | null> => {
+  const owner = conversationId.trim();
+  if (!owner) return null;
+  try {
+    const session = normalizePtySession(await desktop()?.pty.restart(sessionId, owner));
+    return session?.conversationId === owner ? session : null;
+  } catch {
+    return null;
+  }
+};
 export const ptyKillConversation = (conversationId: string) => desktop()?.pty.killConversation(conversationId);
 export const ptyAckExit = (sessionId: string, conversationId: string) => desktop()?.pty.ackExit(sessionId, conversationId);
 export const ptyList = async (conversationId: string): Promise<PtySession[]> => {
@@ -530,7 +588,7 @@ export const ptyList = async (conversationId: string): Promise<PtySession[]> => 
   try {
     const pty = desktop()?.pty;
     if (!pty) return [];
-    const sessions = pty.listOwned ? await pty.listOwned(owner) : await pty.list(owner);
+    const sessions = await pty.list(owner);
     return (sessions ?? [])
       .map((session) => normalizePtySession(session))
       .filter((session): session is PtySession => session?.conversationId === owner);
@@ -548,12 +606,47 @@ export const ptySnapshot = async (sessionId: string, conversationId: string, max
     return null;
   }
 };
+export const ptyClear = async (
+  sessionId: string,
+  conversationId: string,
+): Promise<{ cleared: boolean; outputCursor: number }> => {
+  const owner = conversationId.trim();
+  if (!owner) return { cleared: false, outputCursor: 0 };
+  try {
+    const result = await desktop()?.pty.clear(sessionId, owner);
+    return {
+      cleared: result?.cleared === true,
+      outputCursor: Number.isFinite(result?.outputCursor) ? Number(result?.outputCursor) : 0,
+    };
+  } catch {
+    return { cleared: false, outputCursor: 0 };
+  }
+};
 
 // --- Shell / OS ---
 
+/**
+ * Browser mode is a supported deployment (`connectionPresentation` renders
+ * 浏览器预览模式), and there is no OS shell to hand a path to. Returning
+ * `undefined` made every "open with the default app" / "reveal in the file
+ * manager" action a dead click: nothing happened and nothing said why. Report it
+ * once here so no call site — present or future — can swallow it.
+ */
+const requireDesktopShell = (action: string): boolean => {
+  if (isDesktop()) return true;
+  pushToast(`${action}需要桌面版 MiniCode，浏览器预览模式下不可用。`, "warning", 4000);
+  return false;
+};
+
 export const openExternal = (target: string) => desktop()?.openExternal(target);
-export const openPath = (target: string) => desktop()?.openPath(target);
-export const revealPath = (target: string) => desktop()?.revealPath(target);
+export const openPath = (target: string) => {
+  if (!requireDesktopShell("使用默认应用打开文件")) return undefined;
+  return desktop()?.openPath(target);
+};
+export const revealPath = (target: string) => {
+  if (!requireDesktopShell("在文件管理器中显示")) return undefined;
+  return desktop()?.revealPath(target);
+};
 export const exportDiagnostics = () => desktop()?.diagnostics.export();
 export const browserDiscover = async (endpoint?: string): Promise<BrowserDiscoveryResult | null> => {
   try {
@@ -610,22 +703,23 @@ export const browserType = async (
   }
 };
 
-export const embeddedBrowserCreate = (id: string, url: string) =>
-  desktop()?.embeddedBrowser.create({ id, url });
-export const embeddedBrowserList = () =>
-  desktop()?.embeddedBrowser.list();
-export const embeddedBrowserActivate = (id: string) =>
-  desktop()?.embeddedBrowser.activate(id);
+export const embeddedBrowserCreate = (conversationId: string, id: string, url: string) =>
+  desktop()?.embeddedBrowser.create({ id, url, conversationId });
+export const embeddedBrowserList = (conversationId: string) =>
+  desktop()?.embeddedBrowser.list({ conversationId });
+export const embeddedBrowserActivate = (conversationId: string, id: string) =>
+  desktop()?.embeddedBrowser.activate({ id, conversationId });
 export const embeddedBrowserSetBounds = (bounds: EmbeddedBrowserBounds) =>
   desktop()?.embeddedBrowser.setBounds(bounds);
-export const embeddedBrowserNavigate = (id: string, url: string) =>
-  desktop()?.embeddedBrowser.navigate({ id, url });
+export const embeddedBrowserNavigate = (conversationId: string, id: string, url: string) =>
+  desktop()?.embeddedBrowser.navigate({ id, url, conversationId });
 export const embeddedBrowserRunAction = (
+  conversationId: string,
   id: string,
   action: "back" | "forward" | "reload" | "stop" | "focus",
-) => desktop()?.embeddedBrowser.runAction({ id, action });
-export const embeddedBrowserInspect = (id: string, kind: "console" | "network" | "element" | "region") =>
-  desktop()?.embeddedBrowser.inspect({ id, kind });
+) => desktop()?.embeddedBrowser.runAction({ id, action, conversationId });
+export const embeddedBrowserInspect = (conversationId: string, id: string, kind: "console" | "network" | "element" | "region") =>
+  desktop()?.embeddedBrowser.inspect({ id, kind, conversationId });
 export const embeddedBrowserGetSettings = (url: string) => desktop()?.embeddedBrowser.getSettings({ url });
 export const embeddedBrowserSetSettings = (payload: {
   downloadPolicy?: "block" | "ask" | "allow";
@@ -633,9 +727,12 @@ export const embeddedBrowserSetSettings = (payload: {
   permission?: string;
   allowed?: boolean;
 }) => desktop()?.embeddedBrowser.setSettings(payload);
-export const embeddedBrowserClearSiteData = (id: string) => desktop()?.embeddedBrowser.clearSiteData(id);
-export const embeddedBrowserClose = (id: string) =>
-  desktop()?.embeddedBrowser.close(id);
+export const embeddedBrowserClearSiteData = (conversationId: string, id: string) =>
+  desktop()?.embeddedBrowser.clearSiteData({ id, conversationId });
+export const embeddedBrowserClose = (conversationId: string, id: string) =>
+  desktop()?.embeddedBrowser.close({ id, conversationId });
+export const embeddedBrowserCloseConversation = (conversationId: string) =>
+  desktop()?.embeddedBrowser.closeConversation(conversationId);
 export const onEmbeddedBrowserEvent = (callback: (payload: EmbeddedBrowserState) => void) =>
   desktop()?.embeddedBrowser.onEvent(callback);
 

@@ -1,57 +1,121 @@
 """MiniCode's product-facing MCP client.
 
-All standard MCP protocol and transport work is delegated to the official
-``mcp`` Python SDK.  This module only owns MiniCode-specific concerns:
-normalised product models, OAuth/token wiring, callback ownership fencing and
-the deliberately small in-process test/plugin adapter.
+The official ``mcp`` Python SDK owns MCP protocol framing. This module owns the
+single MiniCode client lifecycle, transport selection, OAuth wiring, request
+ownership and product projections.
 """
 
 from __future__ import annotations
 
 import asyncio
-import importlib
-import inspect
 import itertools
 import json
 import logging
+import math
 import os
 import sys
+import time
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+import anyio
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
-from mcp.client.websocket import websocket_client
+from mcp.shared.message import SessionMessage
 from mcp.shared.exceptions import McpError
+from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from pydantic import AnyUrl
+from pydantic import ValidationError
+from websockets.asyncio.client import connect as ws_connect
+from websockets.typing import Subprotocol
 
 from backend.feature_flags import feature_enabled
 from backend.mcp import MAX_MCP_INSTRUCTIONS_LENGTH, truncate_mcp_instructions
+from backend.async_cleanup import (
+    CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+    cancel_and_drain,
+    cancel_and_drain_receipt,
+)
 from backend.mcp.oauth import MCPAuthenticationRequired
-from backend.runtime_env import sanitized_subprocess_env
+from backend.runtime_env import mcp_subprocess_env, sanitized_subprocess_env
+from backend.security.unicode_sanitizer import (
+    UnsafeUnicodeMetadataKey,
+    sanitize_untrusted_metadata,
+    sanitize_untrusted_unicode,
+    unicode_identifier_is_safe,
+)
+from backend.subprocesses import communicate_bounded, spawn_shell
 
 logger = logging.getLogger(__name__)
 
-RETRIABLE_TIMEOUT_TOOLS = {
-    "search",
-    "fetch_page",
-    "mcp__websearch__search",
-    "mcp__websearch__fetch_page",
-}
-_MAX_PAGES = 1_000
+_MAX_PAGES = 100
+_MAX_CATALOG_ITEMS = 2_048
+_MAX_PAGINATION_CURSOR_BYTES = 64 * 1024
+
+# MiniCode's own contract with a user-configured `headers_helper`: the helper is
+# told which server it is being asked to authenticate.
+_HEADERS_HELPER_ENV = ("MINICODE_MCP_SERVER_NAME", "MINICODE_MCP_SERVER_URL")
+
+
+@asynccontextmanager
+async def _websocket_client_with_headers(
+    url: str,
+    headers: dict[str, str],
+) -> AsyncGenerator[
+    tuple[
+        MemoryObjectReceiveStream[SessionMessage | Exception],
+        MemoryObjectSendStream[SessionMessage],
+    ],
+    None,
+]:
+    """Open one MiniCode-owned MCP WebSocket transport."""
+
+    read_stream_writer, read_stream = anyio.create_memory_object_stream[SessionMessage | Exception](0)
+    write_stream, write_stream_reader = anyio.create_memory_object_stream[SessionMessage](0)
+    async with ws_connect(
+        url,
+        subprotocols=[Subprotocol("mcp")],
+        additional_headers=headers or None,
+    ) as websocket:
+
+        async def ws_reader() -> None:
+            async with read_stream_writer:
+                async for raw_text in websocket:
+                    try:
+                        message = types.JSONRPCMessage.model_validate_json(raw_text)
+                        await read_stream_writer.send(SessionMessage(message))
+                    except ValidationError as exc:
+                        await read_stream_writer.send(exc)
+
+        async def ws_writer() -> None:
+            async with write_stream_reader:
+                async for session_message in write_stream_reader:
+                    payload = session_message.message.model_dump(
+                        by_alias=True,
+                        mode="json",
+                        exclude_none=True,
+                    )
+                    await websocket.send(json.dumps(payload))
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(ws_reader)
+            task_group.start_soon(ws_writer)
+            yield read_stream, write_stream
+            task_group.cancel_scope.cancel()
 
 
 class MCPTransport(Enum):
     STDIO = "stdio"
-    HTTP = "http"  # Legacy MCP SSE transport.
-    WEBSOCKET = "websocket"
-    STREAMABLE_HTTP = "streamable_http"
-    IN_PROCESS = "in_process"
+    SSE = "sse"
+    HTTP = "http"
+    WEBSOCKET = "ws"
 
 
 @dataclass
@@ -213,6 +277,17 @@ def _is_timeout_error(exc: BaseException) -> bool:
     return False
 
 
+def _positive_timeout(value: Any, field: str) -> float:
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(float(value))
+        or float(value) <= 0
+    ):
+        raise ValueError(f"{field} must be a positive number")
+    return float(value)
+
+
 class MCPClient:
     """Stable MiniCode facade over the official MCP SDK client session."""
 
@@ -228,32 +303,60 @@ class MCPClient:
         cwd: str | None = None,
         transport: MCPTransport = MCPTransport.STDIO,
         url: str | None = None,
-        timeout: float = 30.0,
         token_store: Any = None,
         interactive_oauth: bool = False,
-        sampling_handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
         elicitation_handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
-        server_factory: Callable[[], dict[str, Any]] | None = None,
         on_disconnect: Callable[[str], Awaitable[None]] | None = None,
+        *,
+        headers: dict[str, str] | None = None,
+        headers_helper: str = "",
+        oauth_client_id: str = "",
+        oauth_callback_port: int | None = None,
+        on_tools_changed: Callable[[str], Awaitable[None]] | None = None,
+        startup_timeout: float | None = None,
+        request_timeout: float | None = None,
+        tool_timeout: float | None = None,
+        workspace_root: Path | None = None,
     ) -> None:
         self.server_name = server_name
         self._command = command
         self._args = list(args or [])
         self._env = dict(env or {})
+        self._headers = dict(headers or {})
+        self._headers_helper = str(headers_helper or "").strip()
+        self._oauth_client_id = str(oauth_client_id or "").strip()
+        self._oauth_callback_port = oauth_callback_port
         self._cwd = cwd
+        # Roots are owned by the client instance.  A client must never resolve
+        # the process-global "active" workspace because reconnects and
+        # concurrent sessions can otherwise expose another conversation's tree.
+        self._workspace_root = (
+            Path(workspace_root).expanduser().resolve()
+            if workspace_root is not None
+            else None
+        )
         self._transport = transport
         self._url = (url or "").strip() or None
-        self._timeout = float(timeout)
+        self._startup_timeout = _positive_timeout(
+            startup_timeout if startup_timeout is not None else 30.0,
+            "startup_timeout",
+        )
+        self._request_timeout = _positive_timeout(
+            request_timeout if request_timeout is not None else 60.0,
+            "request_timeout",
+        )
+        self._tool_timeout = _positive_timeout(
+            tool_timeout if tool_timeout is not None else 100_000.0,
+            "tool_timeout",
+        )
         self._token_store = token_store
         self._tokens = token_store.get(server_name) if token_store is not None else None
         self._interactive_oauth = interactive_oauth
-        self._sampling_handler = sampling_handler
         self._elicitation_handler = elicitation_handler
-        self._server_factory = server_factory
         self._on_disconnect = on_disconnect
+        self._on_tools_changed = on_tools_changed
 
         self._session: ClientSession | None = None
-        self._in_process_server: dict[str, Any] | None = None
         self._lifecycle_task: asyncio.Task[None] | None = None
         self._close_event: asyncio.Event | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -268,11 +371,26 @@ class MCPClient:
         self._read_only_tools: set[str] = set()
         self._tool_owner_seq = itertools.count(1)
         self._active_tool_request_owners: dict[int, dict[str, Any]] = {}
+        self._active_request_tasks: set[asyncio.Task[Any]] = set()
         self._disconnect_notified = False
+        self._cleanup_pending = False
+        self._cleanup_reason = ""
+        self._cleanup_requested_at: float | None = None
+        self._cleanup_completed_at: float | None = None
 
     @property
     def connected(self) -> bool:
         return self._connected
+
+    @property
+    def cleanup_status(self) -> dict[str, Any]:
+        """Expose bounded shutdown evidence without leaking task ownership."""
+        return {
+            "pending": self._cleanup_pending,
+            "reason": self._cleanup_reason,
+            "requested_at": self._cleanup_requested_at,
+            "completed_at": self._cleanup_completed_at,
+        }
 
     @property
     def server_capabilities(self) -> MCPServerCapabilities:
@@ -286,24 +404,20 @@ class MCPClient:
     def has_valid_token(self) -> bool:
         return self._tokens is not None and not self._tokens.is_expired()
 
-    def set_tokens(self, tokens: Any) -> None:
-        self._tokens = tokens
-        if self._token_store is not None and tokens is not None:
-            self._token_store.set(self.server_name, tokens)
-
-    def clear_tokens(self) -> None:
-        self._tokens = None
-        if self._token_store is not None:
-            self._token_store.clear(self.server_name)
-
     def _set_server_instructions(self, value: Any) -> None:
         raw = str(value or "")
-        self._instructions = truncate_mcp_instructions(raw)
-        if len(raw) > MAX_MCP_INSTRUCTIONS_LENGTH:
+        sanitized = sanitize_untrusted_unicode(raw)
+        self._instructions = truncate_mcp_instructions(sanitized)
+        if sanitized != raw:
+            logger.warning(
+                "[MCP:%s] Removed unsafe Unicode from server instructions",
+                self.server_name,
+            )
+        if len(sanitized) > MAX_MCP_INSTRUCTIONS_LENGTH:
             logger.warning(
                 "[MCP:%s] Server instructions truncated from %d to %d characters",
                 self.server_name,
-                len(raw),
+                len(sanitized),
                 MAX_MCP_INSTRUCTIONS_LENGTH,
             )
 
@@ -313,10 +427,6 @@ class MCPClient:
         self._closing = False
         self._disconnect_notified = False
         self._loop = asyncio.get_running_loop()
-        if self._transport == MCPTransport.IN_PROCESS:
-            await self._connect_in_process()
-            return
-
         ready: asyncio.Future[None] = self._loop.create_future()
         self._close_event = asyncio.Event()
         self._lifecycle_task = asyncio.create_task(
@@ -324,7 +434,10 @@ class MCPClient:
             name=f"mcp-session-{self.server_name}",
         )
         try:
-            await asyncio.wait_for(asyncio.shield(ready), timeout=max(self._timeout, 1.0))
+            await asyncio.wait_for(
+                asyncio.shield(ready),
+                timeout=max(self._startup_timeout, 1.0),
+            )
         except BaseException:
             self._closing = True
             self._close_event.set()
@@ -343,11 +456,6 @@ class MCPClient:
             transport_context = await self._sdk_transport_context()
             async with transport_context as streams:
                 read_stream, write_stream = streams[0], streams[1]
-                sampling_callback = (
-                    self._sdk_sampling_callback
-                    if feature_enabled("mcp_sampling") and self._sampling_handler is not None
-                    else None
-                )
                 elicitation_callback = (
                     self._sdk_elicitation_callback
                     if feature_enabled("mcp_elicitation") and self._elicitation_handler is not None
@@ -357,8 +465,7 @@ class MCPClient:
                 async with ClientSession(
                     read_stream,
                     write_stream,
-                    read_timeout_seconds=timedelta(seconds=self._timeout),
-                    sampling_callback=sampling_callback,
+                    read_timeout_seconds=timedelta(seconds=self._request_timeout),
                     elicitation_callback=elicitation_callback,
                     list_roots_callback=roots_callback,
                     message_handler=self._sdk_message_handler,
@@ -385,50 +492,63 @@ class MCPClient:
         finally:
             self._connected = False
             self._session = None
-            if self._oauth_callback is not None:
-                try:
-                    await self._oauth_callback.close()
-                except Exception:
-                    logger.debug("[MCP:%s] OAuth callback close failed", self.server_name, exc_info=True)
-                self._oauth_callback = None
+            await self._close_oauth_callback()
+
+    async def _close_oauth_callback(self) -> bool:
+        callback = self._oauth_callback
+        if callback is None:
+            return True
+        try:
+            await callback.close()
+        except Exception:
+            self._cleanup_pending = True
+            self._cleanup_reason = "oauth_callback_close_failed"
+            return False
+        self._oauth_callback = None
+        return True
 
     async def _sdk_transport_context(self) -> Any:
         if self._transport == MCPTransport.STDIO:
             from backend.config import PROJECT_ROOT
 
             command = sys.executable if self._command == "python" else self._command
-            env = sanitized_subprocess_env(self._env)
+            # Local MCP processes receive the platform core plus variables and
+            # values explicitly selected by the MiniCode server config.
+            env = mcp_subprocess_env(self._env)
             env = self._fix_stdio_pythonpath(env)
             return stdio_client(
                 StdioServerParameters(
                     command=command,
                     args=self._args,
                     env=env,
-                    cwd=self._cwd or str(PROJECT_ROOT),
+                    cwd=self._cwd or None,
                 )
             )
         if not self._url:
             raise ConnectionError(f"MCP transport '{self._transport.value}' requires a URL")
-        if self._transport == MCPTransport.HTTP:
+        headers = await self._resolved_http_headers()
+        if self._transport == MCPTransport.SSE:
             return sse_client(
                 self._url,
-                headers=self._http_headers(),
-                timeout=self._timeout,
+                headers=headers,
+                timeout=self._request_timeout,
+                sse_read_timeout=max(self._request_timeout, self._tool_timeout),
                 auth=await self._http_oauth_auth(),
             )
-        if self._transport == MCPTransport.STREAMABLE_HTTP:
+        if self._transport == MCPTransport.HTTP:
             if not feature_enabled("mcp_streamable_http_transport"):
                 raise ConnectionError("MCP Streamable HTTP transport is disabled by feature flag")
             return streamablehttp_client(
                 self._url,
-                headers=self._http_headers(),
-                timeout=self._timeout,
+                headers=headers,
+                timeout=self._request_timeout,
+                sse_read_timeout=max(self._request_timeout, self._tool_timeout),
                 auth=await self._http_oauth_auth(),
             )
         if self._transport == MCPTransport.WEBSOCKET:
             if not feature_enabled("mcp_websocket_transport"):
                 raise ConnectionError("MCP WebSocket transport is disabled by feature flag")
-            return websocket_client(self._url)
+            return _websocket_client_with_headers(self._url, headers)
         raise ConnectionError(f"Unsupported MCP transport: {self._transport.value}")
 
     @staticmethod
@@ -459,16 +579,53 @@ class MCPClient:
             self.server_name,
             self._token_store,
             interactive=self._interactive_oauth,
+            client_id=self._oauth_client_id,
+            callback_port=self._oauth_callback_port,
         )
         self._oauth_callback = callback
         return provider
 
     def _http_headers(self) -> dict[str, str]:
-        headers: dict[str, str] = {}
+        headers = dict(self._headers)
         if self._tokens is not None and not self._tokens.is_expired():
             token = str(getattr(self._tokens, "access_token", "") or "")
             if token:
                 headers["Authorization"] = f"Bearer {token}"
+        return headers
+
+    async def _resolved_http_headers(self) -> dict[str, str]:
+        headers = self._http_headers()
+        if not self._headers_helper:
+            return headers
+        name_key, url_key = _HEADERS_HELPER_ENV
+        server_url = str(self._url or "")
+        env = sanitized_subprocess_env({
+            name_key: self.server_name,
+            url_key: server_url,
+        })
+        process = await spawn_shell(
+            self._headers_helper,
+            cwd=self._cwd,
+            env=env,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _stderr = await communicate_bounded(
+            process,
+            timeout=10.0,
+            stdout_limit_bytes=1024 * 1024,
+            stderr_limit_bytes=1024 * 1024,
+        )
+        if process.returncode != 0 or not stdout:
+            raise ValueError("headers_helper did not return a valid value")
+        payload = json.loads(stdout.decode("utf-8", errors="strict").strip())
+        if not isinstance(payload, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in payload.items()
+        ):
+            raise ValueError("headers_helper must return a JSON object of string values")
+        headers.update(payload)
         return headers
 
     def _map_connection_error(self, exc: BaseException) -> BaseException:
@@ -509,54 +666,7 @@ class MCPClient:
         self._server_info = _model_dict(server_info) or dict(raw.get("serverInfo") or {})
         self._set_server_instructions(getattr(result, "instructions", raw.get("instructions", "")))
 
-    async def _connect_in_process(self) -> None:
-        if self._server_factory is not None:
-            server = self._server_factory()
-        elif self._args:
-            module = importlib.import_module(self._args[0])
-            factory = getattr(module, "create_mcp_server", None)
-            if factory is None:
-                raise ConnectionError(f"Module {self._args[0]} has no create_mcp_server()")
-            server = factory()
-        else:
-            raise ConnectionError("In-process transport requires server_factory or args[0]")
-        if not isinstance(server, dict) or not callable(server.get("handle_request")):
-            raise ConnectionError("In-process server is missing handle_request")
-        self._in_process_server = server
-        initialized = await self._in_process_request(
-            "initialize",
-            {
-                "protocolVersion": self.PROTOCOL_VERSION,
-                "capabilities": self._product_client_capabilities(),
-                "clientInfo": self.CLIENT_INFO,
-            },
-        )
-        self._apply_initialize_result(initialized)
-        notify = server.get("handle_notification")
-        if callable(notify):
-            await notify("notifications/initialized", {})
-        self._connected = True
-
-    def _product_client_capabilities(self) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        if feature_enabled("mcp_roots"):
-            result["roots"] = {"listChanged": True}
-        if feature_enabled("mcp_sampling") and self._sampling_handler is not None:
-            result["sampling"] = {}
-        if feature_enabled("mcp_elicitation") and self._elicitation_handler is not None:
-            result["elicitation"] = {}
-        return result
-
-    async def _in_process_request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        server = self._in_process_server
-        if server is None:
-            raise ConnectionError("In-process server is not connected")
-        result = await server["handle_request"](method, params or {})
-        return _model_dict(result) if not isinstance(result, dict) else result
-
     async def _request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        if self._transport == MCPTransport.IN_PROCESS:
-            return await self._in_process_request(method, params)
         session = self._session
         if session is None:
             raise ConnectionError(f"MCP server '{self.server_name}' is not connected")
@@ -567,7 +677,7 @@ class MCPClient:
             result = await session.call_tool(
                 str(params.get("name") or ""),
                 dict(params.get("arguments") or {}),
-                read_timeout_seconds=timedelta(seconds=self._timeout),
+                read_timeout_seconds=timedelta(seconds=self._tool_timeout),
                 meta=dict(params.get("_meta") or {}) or None,
             )
         elif method == "resources/list":
@@ -596,10 +706,23 @@ class MCPClient:
         for _ in range(_MAX_PAGES):
             params = {"cursor": cursor} if cursor else None
             result = await self._request(method, params)
-            items.extend(item for item in result.get(result_key, []) if isinstance(item, dict))
+            page_items = [
+                item for item in result.get(result_key, []) if isinstance(item, dict)
+            ]
+            if len(items) + len(page_items) > _MAX_CATALOG_ITEMS:
+                raise ConnectionError(
+                    f"MCP server '{self.server_name}' exceeded the catalog limit of "
+                    f"{_MAX_CATALOG_ITEMS} items"
+                )
+            items.extend(page_items)
             next_cursor = str(result.get("nextCursor") or "").strip() or None
             if next_cursor is None:
                 return items
+            if len(next_cursor.encode("utf-8")) > _MAX_PAGINATION_CURSOR_BYTES:
+                raise ConnectionError(
+                    f"MCP server '{self.server_name}' returned a pagination cursor "
+                    f"exceeding {_MAX_PAGINATION_CURSOR_BYTES} bytes"
+                )
             if next_cursor in seen:
                 raise ConnectionError(f"MCP server '{self.server_name}' repeated pagination cursor")
             seen.add(next_cursor)
@@ -608,19 +731,48 @@ class MCPClient:
 
     async def list_tools(self) -> list[MCPToolDef]:
         if not self._connected:
-            return []
+            raise ConnectionError(f"MCP server '{self.server_name}' is not connected")
         raw_tools = await self._paged("tools/list", "tools")
-        tools = [
-            MCPToolDef(
-                name=str(item.get("name") or ""),
-                description=str(item.get("description") or ""),
-                input_schema=dict(item.get("inputSchema") or {}),
-                annotations=dict(item.get("annotations") or {}),
-                meta=dict(item.get("_meta") or {}),
+        tools: list[MCPToolDef] = []
+        for item in raw_tools:
+            name = str(item.get("name") or "")
+            if not unicode_identifier_is_safe(name):
+                raise ConnectionError(
+                    f"MCP server '{self.server_name}' returned an unsafe tool identifier"
+                )
+            raw_schema = item.get("inputSchema") or {}
+            if not isinstance(raw_schema, dict):
+                raise ConnectionError(
+                    f"MCP server '{self.server_name}' returned a non-object schema for tool '{name}'"
+                )
+            try:
+                input_schema = sanitize_untrusted_metadata(
+                    raw_schema,
+                    reject_unsafe_keys=True,
+                )
+            except UnsafeUnicodeMetadataKey as exc:
+                raise ConnectionError(
+                    f"MCP server '{self.server_name}' returned unsafe schema metadata for tool '{name}'"
+                ) from exc
+            annotations = item.get("annotations") or {}
+            meta = item.get("_meta") or {}
+            tools.append(
+                MCPToolDef(
+                    name=name,
+                    description=sanitize_untrusted_unicode(item.get("description") or ""),
+                    input_schema=input_schema,
+                    annotations=(
+                        sanitize_untrusted_metadata(annotations)
+                        if isinstance(annotations, dict)
+                        else {}
+                    ),
+                    meta=(
+                        sanitize_untrusted_metadata(meta)
+                        if isinstance(meta, dict)
+                        else {}
+                    ),
+                )
             )
-            for item in raw_tools
-            if item.get("name")
-        ]
         self._read_only_tools = {
             tool.name for tool in tools if bool(tool.annotations.get("readOnlyHint", False))
         }
@@ -642,25 +794,55 @@ class MCPClient:
         owner_key = next(self._tool_owner_seq)
         if request_owner:
             self._active_tool_request_owners[owner_key] = dict(request_owner)
+        request_task: asyncio.Task[dict[str, Any]] | None = None
+        cancel_task: asyncio.Task[bool] | None = None
         try:
-            may_retry = tool_name in RETRIABLE_TIMEOUT_TOOLS and tool_name in self._read_only_tools
-            for attempt in range(2 if may_retry else 1):
-                try:
-                    result = await self._request("tools/call", params)
-                    break
-                except BaseException as exc:
-                    if attempt == 0 and may_retry and _is_timeout_error(exc):
-                        logger.warning(
-                            "[MCP:%s] Tool call timed out, retrying once: %s",
-                            self.server_name,
-                            tool_name,
+            try:
+                cancel_event = (
+                    request_owner.get("cancel_event")
+                    if isinstance(request_owner, dict)
+                    else None
+                )
+                request_task = asyncio.create_task(self._request("tools/call", params))
+                self._active_request_tasks.add(request_task)
+                request_task.add_done_callback(self._active_request_tasks.discard)
+                if isinstance(cancel_event, asyncio.Event):
+                    cancel_task = asyncio.create_task(cancel_event.wait())
+                    try:
+                        done, _ = await asyncio.wait(
+                            {request_task, cancel_task},
+                            return_when=asyncio.FIRST_COMPLETED,
                         )
-                        continue
-                    return self._tool_exception(exc)
-            else:  # pragma: no cover - the bounded loop always returns or breaks
-                return self._tool_error("Tool call failed")
+                        if cancel_task in done and cancel_event.is_set():
+                            await cancel_and_drain(
+                                [request_task],
+                                timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                                label=f"MCP tool request {self.server_name}/{tool_name}",
+                            )
+                            raise asyncio.CancelledError
+                        result = request_task.result()
+                    finally:
+                        cancel_task.cancel()
+                        await asyncio.gather(cancel_task, return_exceptions=True)
+                else:
+                    result = await request_task
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                return self._tool_exception(exc)
         finally:
             self._active_tool_request_owners.pop(owner_key, None)
+            if cancel_task is not None and not cancel_task.done():
+                cancel_task.cancel()
+                await asyncio.gather(cancel_task, return_exceptions=True)
+            if request_task is not None and not request_task.done():
+                # Outer cancellation must propagate to the SDK request and
+                # retain its task in _active_request_tasks until true exit.
+                await cancel_and_drain(
+                    [request_task],
+                    timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                    label=f"MCP tool request {self.server_name}/{tool_name}",
+                )
         return MCPCallResult(
             content=list(result.get("content") or []),
             is_error=bool(result.get("isError", False)),
@@ -679,36 +861,54 @@ class MCPClient:
         return MCPCallResult(content=[{"type": "text", "text": message}], is_error=True)
 
     async def list_resources(self) -> list[MCPResourceDef]:
-        if not self._connected or not self._server_capabilities.resources:
+        if not self._connected:
+            raise ConnectionError(f"MCP server '{self.server_name}' is not connected")
+        if not self._server_capabilities.resources:
             return []
-        return [
-            MCPResourceDef(
-                uri=str(item.get("uri") or ""),
-                name=str(item.get("name") or ""),
-                description=str(item.get("description") or ""),
-                mime_type=str(item.get("mimeType") or "text/plain"),
+        resources: list[MCPResourceDef] = []
+        for item in await self._paged("resources/list", "resources"):
+            uri = str(item.get("uri") or "")
+            if not unicode_identifier_is_safe(uri):
+                raise ConnectionError(
+                    f"MCP server '{self.server_name}' returned an unsafe resource URI"
+                )
+            resources.append(
+                MCPResourceDef(
+                    uri=uri,
+                    name=sanitize_untrusted_unicode(item.get("name") or ""),
+                    description=sanitize_untrusted_unicode(item.get("description") or ""),
+                    mime_type=sanitize_untrusted_unicode(item.get("mimeType") or "text/plain"),
+                )
             )
-            for item in await self._paged("resources/list", "resources")
-            if item.get("uri")
-        ]
+        return resources
 
     async def list_resource_templates(self) -> list[MCPResourceTemplateDef]:
-        if not self._connected or not self._server_capabilities.resources:
+        if not self._connected:
+            raise ConnectionError(f"MCP server '{self.server_name}' is not connected")
+        if not self._server_capabilities.resources:
             return []
-        return [
-            MCPResourceTemplateDef(
-                uri_template=str(item.get("uriTemplate") or item.get("uri_template") or ""),
-                name=str(item.get("name") or item.get("uriTemplate") or ""),
-                description=str(item.get("description") or ""),
-                mime_type=str(item.get("mimeType") or item.get("mime_type") or "text/plain"),
+        templates: list[MCPResourceTemplateDef] = []
+        for item in await self._paged("resources/templates/list", "resourceTemplates"):
+            uri_template = str(item.get("uriTemplate") or item.get("uri_template") or "")
+            if not unicode_identifier_is_safe(uri_template):
+                raise ConnectionError(
+                    f"MCP server '{self.server_name}' returned an unsafe resource template URI"
+                )
+            templates.append(
+                MCPResourceTemplateDef(
+                    uri_template=uri_template,
+                    name=sanitize_untrusted_unicode(item.get("name") or uri_template),
+                    description=sanitize_untrusted_unicode(item.get("description") or ""),
+                    mime_type=sanitize_untrusted_unicode(
+                        item.get("mimeType") or item.get("mime_type") or "text/plain"
+                    ),
+                )
             )
-            for item in await self._paged("resources/templates/list", "resourceTemplates")
-            if item.get("uriTemplate") or item.get("uri_template")
-        ]
+        return templates
 
     async def read_resource(self, uri: str) -> str:
         if not self._connected:
-            return ""
+            raise ConnectionError(f"MCP server '{self.server_name}' is not connected")
         result = await self._request("resources/read", {"uri": uri})
         parts: list[str] = []
         for content in result.get("contents", []):
@@ -743,65 +943,69 @@ class MCPClient:
         return result
 
     async def list_prompts(self) -> list[MCPPromptDef]:
-        if not self._connected or not self._server_capabilities.prompts:
+        if not self._connected:
+            raise ConnectionError(f"MCP server '{self.server_name}' is not connected")
+        if not self._server_capabilities.prompts:
             return []
         prompts: list[MCPPromptDef] = []
         for item in await self._paged("prompts/list", "prompts"):
-            arguments = [
-                MCPPromptArgDef(
-                    name=str(arg.get("name") or ""),
-                    description=str(arg.get("description") or ""),
-                    required=bool(arg.get("required", False)),
-                )
-                for arg in item.get("arguments", [])
-                if isinstance(arg, dict) and arg.get("name")
-            ]
             name = str(item.get("name") or "")
-            if name:
-                prompts.append(MCPPromptDef(name, str(item.get("description") or ""), arguments))
+            if not unicode_identifier_is_safe(name):
+                raise ConnectionError(
+                    f"MCP server '{self.server_name}' returned an unsafe prompt identifier"
+                )
+            arguments: list[MCPPromptArgDef] = []
+            unsafe_argument = False
+            for arg in item.get("arguments", []):
+                if not isinstance(arg, dict) or not arg.get("name"):
+                    continue
+                argument_name = str(arg.get("name") or "")
+                if not unicode_identifier_is_safe(argument_name):
+                    unsafe_argument = True
+                    break
+                arguments.append(
+                    MCPPromptArgDef(
+                        name=argument_name,
+                        description=sanitize_untrusted_unicode(arg.get("description") or ""),
+                        required=bool(arg.get("required", False)),
+                    )
+                )
+            if unsafe_argument:
+                raise ConnectionError(
+                    f"MCP server '{self.server_name}' returned unsafe arguments for prompt '{name}'"
+                )
+            prompts.append(
+                MCPPromptDef(
+                    name,
+                    sanitize_untrusted_unicode(item.get("description") or ""),
+                    arguments,
+                )
+            )
         return prompts
 
     async def get_prompt(self, name: str, arguments: dict[str, Any] | None = None) -> str:
         if not self._connected:
-            return ""
+            raise ConnectionError(f"MCP server '{self.server_name}' is not connected")
         result = await self._request("prompts/get", {"name": name, "arguments": arguments or {}})
         lines: list[str] = []
-        description = str(result.get("description") or "").strip()
+        description = sanitize_untrusted_unicode(result.get("description") or "").strip()
         if description:
             lines.append(description)
         for message in result.get("messages", []):
             if not isinstance(message, dict):
                 continue
-            content = _prompt_content_to_text(message.get("content")).strip()
+            content = sanitize_untrusted_unicode(
+                _prompt_content_to_text(message.get("content"))
+            ).strip()
             if content:
-                lines.append(f"{message.get('role') or 'user'}: {content}")
+                role = sanitize_untrusted_unicode(message.get("role") or "user")
+                lines.append(f"{role}: {content}")
         return "\n\n".join(lines).strip()
 
     async def _sdk_list_roots(self, _context: Any) -> types.ListRootsResult | types.ErrorData:
         if not feature_enabled("mcp_roots"):
             return types.ErrorData(code=types.INVALID_REQUEST, message="roots not supported")
         return types.ListRootsResult(roots=[types.Root.model_validate(root) for root in self._client_roots()])
-
-    async def _sdk_sampling_callback(self, context: Any, params: Any) -> Any:
-        if not feature_enabled("mcp_sampling") or self._sampling_handler is None:
-            return types.ErrorData(code=types.INVALID_REQUEST, message="sampling not supported")
-        owner = self._active_callback_owner()
-        if owner is None:
-            return types.ErrorData(code=-32002, message="sampling request has no unambiguous active turn owner")
-        payload = _model_dict(params)
-        payload.update(
-            _minicode_owner=owner,
-            _mcp_server_name=self.server_name,
-            _mcp_request_id=str(context.request_id),
-        )
-        try:
-            result = await self._sampling_handler(payload)
-            return types.CreateMessageResult.model_validate(result)
-        except PermissionError as exc:
-            return types.ErrorData(code=-32003, message=str(exc) or "request rejected")
-        except Exception:
-            logger.debug("[MCP:%s] sampling callback failed", self.server_name, exc_info=True)
-            return types.ErrorData(code=types.INTERNAL_ERROR, message="client request failed")
 
     async def _sdk_elicitation_callback(self, context: Any, params: Any) -> Any:
         if not feature_enabled("mcp_elicitation") or self._elicitation_handler is None:
@@ -833,8 +1037,10 @@ class MCPClient:
 
     async def _sdk_message_handler(self, message: Any) -> None:
         if isinstance(message, Exception):
-            logger.debug("[MCP:%s] SDK transport message error: %s", self.server_name, message)
-            return
+            self._mark_disconnected()
+            raise ConnectionError(
+                f"MCP server '{self.server_name}' transport message failed: {message}"
+            ) from message
         notification = getattr(message, "root", None)
         if isinstance(notification, types.ResourceUpdatedNotification):
             params = _model_dict(notification.params)
@@ -842,6 +1048,19 @@ class MCPClient:
         elif isinstance(notification, types.ResourceListChangedNotification):
             params = _model_dict(notification.params)
             self._record_resource_notification("notifications/resources/list_changed", params)
+        elif isinstance(notification, types.ToolListChangedNotification):
+            if self._on_tools_changed is not None:
+                await self._on_tools_changed(self.server_name)
+        elif isinstance(notification, types.PromptListChangedNotification):
+            logger.debug("[MCP:%s] prompts/list_changed", self.server_name)
+        elif isinstance(notification, types.LoggingMessageNotification):
+            params = _model_dict(notification.params)
+            logger.info(
+                "[MCP:%s] server log %s: %s",
+                self.server_name,
+                params.get("level") or "info",
+                params.get("data") or "",
+            )
 
     def _record_resource_notification(self, method: str, params: dict[str, Any]) -> None:
         self._resource_notifications.append(
@@ -864,15 +1083,11 @@ class MCPClient:
         return dict(next(iter(owners.values()))) if len(owners) == 1 else None
 
     def _client_roots(self) -> list[dict[str, str]]:
-        from backend.config import PROJECT_ROOT
-        from backend.workspace.state import get_active_workspace_root
-
+        # Roots belong to this client's explicit workspace owner. With no owner,
+        # do not consult process-global workspace state.
         candidates: list[Path] = []
-        try:
-            candidates.append(get_active_workspace_root().resolve())
-        except Exception:
-            logger.debug("Could not resolve active workspace root", exc_info=True)
-        candidates.extend([Path.cwd(), PROJECT_ROOT])
+        if self._workspace_root is not None:
+            candidates.append(self._workspace_root)
         roots: list[dict[str, str]] = []
         seen: set[str] = set()
         for candidate in candidates:
@@ -883,18 +1098,17 @@ class MCPClient:
                     continue
                 seen.add(key)
                 roots.append({"uri": resolved.as_uri(), "name": resolved.name or str(resolved)})
-            except Exception:
-                logger.debug("Skipping unresolvable MCP root", exc_info=True)
+            except Exception as exc:
+                raise ConnectionError(
+                    f"MCP workspace root cannot be resolved: {candidate}: {exc}"
+                ) from exc
         return roots
 
     async def _notify_disconnect(self) -> None:
         if self._on_disconnect is None or self._closing or self._disconnect_notified:
             return
         self._disconnect_notified = True
-        try:
-            await self._on_disconnect(self.server_name)
-        except Exception:
-            logger.debug("[MCP:%s] disconnect callback failed", self.server_name, exc_info=True)
+        await self._on_disconnect(self.server_name)
 
     def _mark_disconnected(self) -> None:
         was_connected = self._connected
@@ -907,28 +1121,56 @@ class MCPClient:
                 if self._loop is not None and self._loop.is_running():
                     self._loop.call_soon_threadsafe(lambda: self._loop.create_task(self._notify_disconnect()))
 
-    async def close(self) -> None:
+    async def close(self) -> bool:
+        self._cleanup_requested_at = time.time()
+        self._cleanup_completed_at = None
+        self._cleanup_reason = "close"
         self._closing = True
         self._connected = False
         self._active_tool_request_owners.clear()
-        if self._transport == MCPTransport.IN_PROCESS:
-            server = self._in_process_server
-            self._in_process_server = None
-            close = server.get("close") if server else None
-            if callable(close):
-                result = close()
-                if inspect.isawaitable(result):
-                    await result
-            return
+        # Drain active requests before closing their transport lifecycle.
+        request_tasks = set(self._active_request_tasks)
+        if request_tasks:
+            receipt = await cancel_and_drain_receipt(
+                request_tasks,
+                timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                label=f"MCP {self.server_name} active requests",
+            )
+            if receipt.pending:
+                self._cleanup_pending = True
+                self._cleanup_reason = "active_requests_pending"
+                return False
         if self._close_event is not None:
             self._close_event.set()
         task = self._lifecycle_task
         if task is not None:
             try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=max(self._timeout, 3.0))
+                await asyncio.wait_for(
+                    asyncio.shield(task),
+                    timeout=max(self._request_timeout, 3.0),
+                )
             except asyncio.TimeoutError:
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+                receipt = await cancel_and_drain_receipt(
+                    [task],
+                    timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                    label=f"MCP {self.server_name} lifecycle",
+                )
+                if receipt.pending:
+                    self._cleanup_pending = True
+                    self._cleanup_reason = "lifecycle_pending"
+                    return False
+        if not await self._close_oauth_callback():
+            return False
         self._lifecycle_task = None
         self._close_event = None
         self._session = None
+        self._cleanup_pending = False
+        self._cleanup_completed_at = time.time()
+        return True
+
+    async def finish_pending_cleanup(self) -> bool:
+        """Retain ownership until cancelled requests settle, then close again."""
+        request_tasks = set(self._active_request_tasks)
+        if request_tasks:
+            await asyncio.gather(*request_tasks, return_exceptions=True)
+        return await self.close()

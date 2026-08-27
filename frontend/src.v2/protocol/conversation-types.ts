@@ -44,11 +44,9 @@ export type ConversationClientCommandType =
   | "user_message"
   | "user_message.queue.cancel"
   | "user_message.queue.steer"
-  | "answer"
   | "interrupt"
   | "ping"
   // Approval flow
-  | "approval"
   | "approval.file_diff"
   | "read_artifact"
   // Conversation lifecycle
@@ -65,6 +63,7 @@ export type ConversationClientCommandType =
   | "conversation.unarchive"
   | "conversation.rename"
   | "conversation.memory_mode.set"
+  | "memory.reset"
   | "conversation.permission_mode.set"
   | "conversation.goal.set"
   | "conversation.worktree.cleanup"
@@ -88,27 +87,89 @@ export type ConversationClientCommandType =
 
 export interface ContextUsageEvent {
   type: "context_usage";
+  conversation_id: string;
   used: number;
   limit: number;
+  ledger?: Omit<ContextLedgerEvent, "type" | "conversation_id">;
 }
 
 export interface ContextCompactedEvent {
   type: "context_compacted";
+  conversation_id: string;
   summary: string;
+  before_tokens?: number;
+  after_tokens?: number;
+  retained_categories?: string[];
+  ledger?: Omit<ContextLedgerEvent, "type" | "conversation_id">;
+}
+
+export interface ContextForkedEvent {
+  type: "context_forked";
+  conversation_id: string;
+  fork_id: string;
+  message_index: number;
+  context_history_index: number;
+  history_length: number;
+  estimated_tokens: number;
+  parent_conversation_id: string;
+  branch_created: boolean;
+  branch_activated: boolean;
+  message_id?: string;
+  created_at?: string;
+  status?: string;
+  branch_conversation_id?: string;
+}
+
+export type ContextLedgerCategoryPayload =
+  | "system_runtime"
+  | "guidelines"
+  | "skills"
+  | "files_attachments"
+  | "history"
+  | "tool_results"
+  | "memory"
+  | "compaction_summaries";
+
+export interface ContextLedgerEntryPayload {
+  category: ContextLedgerCategoryPayload;
+  label: string;
+  estimated_tokens: number;
+  item_count: number;
+  source_count: number;
+  sources: string[];
+}
+
+export interface ContextLedgerEvent {
+  type: "context_ledger";
+  conversation_id: string;
+  schema_version: 1;
+  estimated_tokens: number;
+  actual_tokens: number;
+  compaction_count: number;
+  native_attachment_tokens: number;
+  native_attachment_count: number;
+  entries: ContextLedgerEntryPayload[];
+}
+
+export interface ContextSideQueryResultEvent {
+  type: "context_side_query_result";
+  conversation_id: string;
+  query: string;
+  result: string;
+  focus: string;
 }
 
 export interface BudgetUpdateEvent {
   type: "budget_update";
-  used?: number;
-  total?: number;
-  breakdown?: Record<string, number>;
-  buckets?: Record<string, { used: number; limit: number }>;
-  total_used?: number;
-  total_limit?: number;
+  conversation_id: string;
+  used: number;
+  total: number;
+  breakdown: Record<string, number>;
 }
 
 export interface BudgetWarningEvent {
   type: "budget.warning";
+  conversation_id: string;
   bucket: string;
   percent: number;
   will_compact: boolean;
@@ -128,6 +189,32 @@ export interface GoalUpdatedEvent {
   conversation_id?: string;
   goal: GoalInfo;
   source?: string;
+  updated_at?: string;
+  revision?: number;
+}
+
+export interface ConversationHydrationUpdatedEvent {
+  type: "conversation.hydration.updated";
+  conversation_id: string;
+  is_hydrating: boolean;
+}
+
+export interface ConversationCompactionUpdatedEvent {
+  type: "conversation.compaction.updated";
+  conversation_id: string;
+  state: "compacted";
+  summary: string;
+}
+
+export interface ConversationSummaryUpdatedEvent {
+  type: "conversation.summary.updated";
+  conversation_id: string;
+  summary: string;
+  title: string;
+  updated_at: string;
+  memory_mode: "enabled" | "disabled" | "polluted";
+  memory_polluted: boolean;
+  memory_pollution_sources: string[];
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -153,10 +240,14 @@ export interface ConversationTranscriptMessage {
 
 export interface ConversationSummaryPayload {
   id: string;
+  revision?: number;
+  conversation_type?: "main" | "side_chat";
   title?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
-  memory_mode?: string | null;
+  memory_mode?: "enabled" | "disabled" | "polluted" | string | null;
+  memory_polluted?: boolean;
+  memory_pollution_sources?: string[];
   permission_mode?: string | null;
   summary?: string | null;
   compaction_state?: string | null;
@@ -180,8 +271,6 @@ export interface ConversationRecordPayload extends ConversationSummaryPayload {
   permission_deny_rules?: string[];
   permission_overrides?: Record<string, string>;
   compaction_summary?: string | null;
-  inherited_facts?: Record<string, unknown>[];
-  local_facts?: Record<string, unknown>[];
   transcript?: ConversationTranscriptMessage[];
   messages?: ConversationTranscriptMessage[];
   context_snapshot?: Record<string, unknown>;
@@ -189,11 +278,14 @@ export interface ConversationRecordPayload extends ConversationSummaryPayload {
 
 export interface ConversationListEvent {
   type: "conversation.list";
+  inventory_instance_id?: string;
+  inventory_revision?: number;
   conversation_id?: string | null;
   active_conversation_id?: string | null;
   conversations?: ConversationSummaryPayload[];
   active_conversation?: ConversationRecordPayload | null;
   session?: RuntimeSessionSnapshot | null;
+  snapshot_at?: string;
 }
 
 export interface ConversationSwitchedEvent {
@@ -202,6 +294,7 @@ export interface ConversationSwitchedEvent {
   conversation?: ConversationRecordPayload | null;
   is_hydrating?: boolean;
   session?: RuntimeSessionSnapshot | null;
+  snapshot_at?: string;
 }
 
 export interface LlmModelUpdatedEvent {
@@ -214,6 +307,22 @@ export interface LlmModelUpdatedEvent {
   wire_api?: string | null;
   available_models?: string[];
   models_source?: string;
+  reasoning_effort?: string | null;
+  configured_reasoning_effort?: string | null;
+  effective_reasoning_effort?: string | null;
+  reasoning_effort_supported?: boolean;
+  reasoning_effort_levels?: string[];
+  context_window?: number;
+  context_window_source?: string;
+  context_window_verified?: boolean;
+  max_context_window?: number;
+  max_context_window_source?: string;
+  max_context_window_verified?: boolean;
+  max_output_tokens?: number;
+  max_output_tokens_source?: string;
+  max_output_tokens_verified?: boolean;
+  default_reasoning_effort?: string;
+  default_reasoning_summary?: string;
   working_directory?: string | null;
 }
 
@@ -236,14 +345,16 @@ export interface UserMessageCommand {
   workspace_root?: string;
   primaryFile?: string;
   activeTabPath?: string;
-  permission_mode?: "default" | "plan" | "confirm" | "bypass" | "auto" | "accept_edits";
+  permission_mode?: "plan" | "confirm" | "bypass" | "auto";
   agent_mode?: "build" | "plan" | "review" | "explore" | "subagent" | string;
   attachments?: Record<string, unknown>[];
   skills?: { name: string; path: string }[];
   plugins?: { config_name: string; path: string }[];
   assistant_message_id?: string;
   user_message_id?: string;
+  retry_from_message_id?: string;
   queue_if_busy?: boolean;
+  streaming_behavior?: "follow_up" | "steer";
 }
 
 export interface UserMessageQueueCancelCommand {
@@ -260,22 +371,12 @@ export interface UserMessageQueueSteerCommand {
   user_message_id?: string;
 }
 
-export interface ApprovalCommand {
-  type: "approval";
-  tool_call_id: string;
-  action: "approve" | "reject" | "partial";
-  decisions?: Record<string, "approved" | "rejected">;
-}
-
-export interface AnswerCommand {
-  type: "answer";
-  tool_call_id: string;
-  answer: string;
-}
-
 export interface InterruptCommand {
   type: "interrupt";
   conversation_id?: string;
+  turn_id?: string;
+  message_id?: string;
+  task_id?: string;
 }
 
 export interface PingCommand {
@@ -285,17 +386,21 @@ export interface PingCommand {
 export interface ReadArtifactCommand {
   type: "read_artifact";
   artifact_id: string;
-  purpose?: "preview" | "image_preview" | "attachment";
+  conversation_id: string;
+  request_id: string;
+  purpose?: "preview" | "attachment";
 }
 
 export interface ConversationCreateCommand {
   type: "conversation.create";
   conversation_id?: string;
   title?: string;
+  conversation_type?: "main" | "side_chat";
+  /** @deprecated Use conversation_type. */
   side_chat?: boolean;
   git_isolated?: boolean;
   workspace_root?: string;
-  permission_mode?: "default" | "plan" | "confirm" | "bypass" | "auto" | "accept_edits";
+  permission_mode?: "plan" | "confirm" | "bypass" | "auto";
 }
 
 export interface ConversationSwitchCommand {
@@ -388,6 +493,17 @@ export interface ConversationRenameCommand {
   type: "conversation.rename";
   conversation_id: string;
   title: string;
+}
+
+export interface ConversationMemoryModeSetCommand {
+  type: "conversation.memory_mode.set";
+  conversation_id?: string;
+  memory_mode: "enabled" | "disabled";
+}
+
+export interface MemoryResetCommand {
+  type: "memory.reset";
+  confirmed: true;
 }
 
 export interface ConversationGoalSetCommand {

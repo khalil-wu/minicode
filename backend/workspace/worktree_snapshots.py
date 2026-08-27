@@ -17,6 +17,11 @@ from pathlib import Path
 from typing import Any
 
 from backend.config import DATA_ROOT
+from backend.atomic_io import (
+    atomic_write_text,
+    canonical_file_path_key,
+    file_mutation_locks,
+)
 
 WORKTREE_SNAPSHOT_DATA_DIR = DATA_ROOT / "worktree-snapshots"
 _SNAPSHOT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -65,10 +70,11 @@ class WorktreeSnapshotStore:
 
     def save(self, record: WorktreeSnapshotRecord) -> WorktreeSnapshotRecord:
         path = self._path_for(record.id)
-        path.write_text(
-            json.dumps(record.to_dict(), ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        with file_mutation_locks([path]):
+            atomic_write_text(
+                path,
+                json.dumps(record.to_dict(), ensure_ascii=False, indent=2) + "\n",
+            )
         return record
 
     def get(self, snapshot_id: str) -> WorktreeSnapshotRecord | None:
@@ -79,12 +85,13 @@ class WorktreeSnapshotStore:
             path = self._path_for(snapshot_id)
         except ValueError:
             return None
-        if not path.exists():
-            return None
-        try:
-            return WorktreeSnapshotRecord.from_dict(json.loads(path.read_text(encoding="utf-8")))
-        except (OSError, json.JSONDecodeError):
-            return None
+        with file_mutation_locks([path]):
+            if not path.exists():
+                return None
+            try:
+                return WorktreeSnapshotRecord.from_dict(json.loads(path.read_text(encoding="utf-8")))
+            except (OSError, json.JSONDecodeError):
+                return None
 
     def delete(self, snapshot_id: str) -> bool:
         """Delete one metadata record after its matching git ref is removed."""
@@ -92,13 +99,14 @@ class WorktreeSnapshotStore:
             path = self._path_for(snapshot_id)
         except ValueError:
             return False
-        try:
-            path.unlink()
-            return True
-        except FileNotFoundError:
-            return False
-        except OSError:
-            return False
+        with file_mutation_locks([path]):
+            try:
+                path.unlink()
+                return True
+            except FileNotFoundError:
+                return False
+            except OSError:
+                return False
 
     def list(
         self,
@@ -108,19 +116,26 @@ class WorktreeSnapshotStore:
         limit: int = 100,
     ) -> list[WorktreeSnapshotRecord]:
         records: list[WorktreeSnapshotRecord] = []
-        resolved_repo_root = repo_root.resolve() if repo_root is not None else None
-        for path in sorted(self._root.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+        repo_root_key = canonical_file_path_key(repo_root) if repo_root is not None else None
+        candidates: list[tuple[int, Path]] = []
+        for path in self._root.glob("*.json"):
             try:
-                record = WorktreeSnapshotRecord.from_dict(json.loads(path.read_text(encoding="utf-8")))
-            except (OSError, json.JSONDecodeError):
+                candidates.append((path.stat().st_mtime_ns, path))
+            except OSError:
                 continue
+        for _stamp, path in sorted(candidates, reverse=True):
+            with file_mutation_locks([path]):
+                try:
+                    record = WorktreeSnapshotRecord.from_dict(json.loads(path.read_text(encoding="utf-8")))
+                except (OSError, json.JSONDecodeError):
+                    continue
             if conversation_id and record.conversation_id != conversation_id:
                 continue
-            if resolved_repo_root is not None:
+            if repo_root_key is not None:
                 try:
-                    if Path(record.main_repo_path).resolve() != resolved_repo_root:
+                    if canonical_file_path_key(record.main_repo_path) != repo_root_key:
                         continue
-                except OSError:
+                except (OSError, RuntimeError, ValueError):
                     continue
             records.append(record)
             if len(records) >= limit:

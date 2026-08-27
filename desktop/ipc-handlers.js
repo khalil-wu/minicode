@@ -2,7 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { exec } = require("node:child_process");
+const { execFile } = require("node:child_process");
 const { ipcMain, dialog, shell, app } = require("electron");
 
 const {
@@ -10,6 +10,8 @@ const {
   isProbablyTextBuffer,
   hashFileContent,
   atomicWriteText,
+  withFileMutationQueue,
+  withFileMutationQueues,
   countDirEntries,
   isSamePath,
 } = require("./utils");
@@ -193,7 +195,12 @@ async function searchWorkspaceFiles(rootPath, query, limit = 20, kind = "file") 
 
 function checkCommand(command) {
   return new Promise((resolve) => {
-    exec(`${command} --version`, (error) => {
+    const executable = typeof command === "string" ? command.trim() : "";
+    if (!executable || /[\\/\s]/.test(executable)) {
+      resolve(false);
+      return;
+    }
+    execFile(executable, ["--version"], { windowsHide: true }, (error) => {
       resolve(!error);
     });
   });
@@ -222,7 +229,7 @@ function registerIpcHandlers() {
     clickChromeTarget,
     typeIntoChromeTarget,
     ptyManager,
-    lastPickedWorkspaceRoot: getLastPickedWorkspaceRoot,
+    getLastPickedWorkspaceRoot,
     setLastPickedWorkspaceRoot,
   } = ctx;
 
@@ -492,11 +499,11 @@ function registerIpcHandlers() {
   ipcMain.handle("minicode:embeddedBrowser:create", withMainSender("minicode:embeddedBrowser:create", async (_event, payload) => {
     return embeddedBrowser?.create(payload);
   }));
-  ipcMain.handle("minicode:embeddedBrowser:list", withMainSender("minicode:embeddedBrowser:list", () => {
-    return embeddedBrowser?.listTargets() ?? [];
+  ipcMain.handle("minicode:embeddedBrowser:list", withMainSender("minicode:embeddedBrowser:list", (_event, payload) => {
+    return embeddedBrowser?.listTargets(payload?.conversationId || payload?.conversation_id) ?? [];
   }));
-  ipcMain.handle("minicode:embeddedBrowser:activate", withMainSender("minicode:embeddedBrowser:activate", (_event, id) => {
-    return embeddedBrowser?.activate(id) ?? false;
+  ipcMain.handle("minicode:embeddedBrowser:activate", withMainSender("minicode:embeddedBrowser:activate", (_event, payload) => {
+    return embeddedBrowser?.activate(payload?.id, payload?.conversationId || payload?.conversation_id) ?? false;
   }));
   ipcMain.handle("minicode:embeddedBrowser:setBounds", withMainSender("minicode:embeddedBrowser:setBounds", (_event, payload) => {
     return embeddedBrowser?.setBounds(payload) ?? false;
@@ -515,7 +522,11 @@ function registerIpcHandlers() {
         : payload?.kind === "region"
           ? "pick_region"
         : "get_console_logs";
-    return embeddedBrowser?.executeControlCommand({ action, target_id: payload?.id }) ?? { ok: false, value: [] };
+    return embeddedBrowser?.executeControlCommand({
+      action,
+      target_id: payload?.id,
+      conversation_id: payload?.conversationId || payload?.conversation_id,
+    }) ?? { ok: false, value: [] };
   }));
   ipcMain.handle("minicode:embeddedBrowser:getSettings", withMainSender("minicode:embeddedBrowser:getSettings", (_event, payload) => {
     return embeddedBrowser?.getBrowserSettings(payload?.url) ?? { downloadPolicy: "block", origin: "", permissions: [] };
@@ -523,11 +534,14 @@ function registerIpcHandlers() {
   ipcMain.handle("minicode:embeddedBrowser:setSettings", withMainSender("minicode:embeddedBrowser:setSettings", (_event, payload) => {
     return embeddedBrowser?.setBrowserSettings(payload) ?? { downloadPolicy: "block", origin: "", permissions: [] };
   }));
-  ipcMain.handle("minicode:embeddedBrowser:clearSiteData", withMainSender("minicode:embeddedBrowser:clearSiteData", async (_event, id) => {
-    return embeddedBrowser?.clearSiteData(id) ?? false;
+  ipcMain.handle("minicode:embeddedBrowser:clearSiteData", withMainSender("minicode:embeddedBrowser:clearSiteData", async (_event, payload) => {
+    return embeddedBrowser?.clearSiteData(payload) ?? false;
   }));
-  ipcMain.handle("minicode:embeddedBrowser:close", withMainSender("minicode:embeddedBrowser:close", (_event, id) => {
-    return embeddedBrowser?.close(id) ?? false;
+  ipcMain.handle("minicode:embeddedBrowser:close", withMainSender("minicode:embeddedBrowser:close", (_event, payload) => {
+    return embeddedBrowser?.close(payload) ?? false;
+  }));
+  ipcMain.handle("minicode:embeddedBrowser:closeConversation", withMainSender("minicode:embeddedBrowser:closeConversation", (_event, conversationId) => {
+    return embeddedBrowser?.closeConversation(conversationId) ?? 0;
   }));
 
   // -----------------------------------------------------------------------
@@ -622,13 +636,27 @@ function registerIpcHandlers() {
 
   ipcMain.handle("minicode:fs:writeFile", withMainSender("minicode:fs:writeFile", async (_event, targetPath, content) => {
     const fullPath = assertMutableTrustedPath(targetPath, "File");
+    return withFileMutationQueue(fullPath, async () => {
+    // Atomically claim the path with an exclusive create ("wx"). An access()
+    // check followed by a write leaves a window where another writer can create
+    // the file in between, letting this handler silently clobber it despite the
+    // no-overwrite contract below.
+    await fs.promises.mkdir(path.dirname(fullPath), { recursive: true });
+    let handle;
     try {
-      await fs.promises.access(fullPath);
-      throw new Error("Direct writeFile cannot overwrite existing files. Use compareWriteFile with an expected hash.");
+      handle = await fs.promises.open(fullPath, "wx");
     } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
+      if (error?.code === "EEXIST") {
+        throw new Error("Direct writeFile cannot overwrite existing files. Use compareWriteFile with an expected hash.");
+      }
+      throw error;
     }
-    await atomicWriteText(fullPath, content);
+    try {
+      await handle.writeFile(String(content), "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
     const stat = await fs.promises.stat(fullPath);
     return {
       workspace_root: path.dirname(fullPath),
@@ -640,10 +668,12 @@ function registerIpcHandlers() {
       modified_at: stat.mtime.toISOString(),
       language_hint: path.extname(fullPath).slice(1) || "text",
     };
+    });
   }));
 
   ipcMain.handle("minicode:fs:compareWriteFile", withMainSender("minicode:fs:compareWriteFile", async (_event, targetPath, expectedHash, content) => {
     const fullPath = assertMutableTrustedPath(targetPath, "File");
+    return withFileMutationQueue(fullPath, async () => {
     let currentStat = null;
     try {
       currentStat = await fs.promises.stat(fullPath);
@@ -684,10 +714,12 @@ function registerIpcHandlers() {
       modified_at: stat.mtime.toISOString(),
       language_hint: path.extname(fullPath).slice(1) || "text",
     };
+    });
   }));
 
   ipcMain.handle("minicode:fs:createDirectory", withMainSender("minicode:fs:createDirectory", async (_event, targetPath) => {
     const fullPath = assertMutableTrustedPath(targetPath, "Directory");
+    return withFileMutationQueue(fullPath, async () => {
     await fs.promises.mkdir(fullPath, { recursive: true });
     const stat = await fs.promises.stat(fullPath);
     return {
@@ -698,11 +730,13 @@ function registerIpcHandlers() {
       size_bytes: null,
       modified_at: stat.mtime.toISOString(),
     };
+    });
   }));
 
   ipcMain.handle("minicode:fs:renamePath", withMainSender("minicode:fs:renamePath", async (_event, oldPath, newPath) => {
     const fullOldPath = assertMutableTrustedPath(oldPath, "Source path");
     const fullNewPath = assertMutableTrustedPath(newPath, "Destination path");
+    return withFileMutationQueues([fullOldPath, fullNewPath], async () => {
     await fs.promises.rename(fullOldPath, fullNewPath);
     const stat = await fs.promises.stat(fullNewPath);
     return {
@@ -713,10 +747,12 @@ function registerIpcHandlers() {
       size_bytes: stat.isFile() ? stat.size : null,
       modified_at: stat.mtime.toISOString(),
     };
+    });
   }));
 
   ipcMain.handle("minicode:fs:deletePath", withMainSender("minicode:fs:deletePath", async (_event, targetPath, recursive, confirm) => {
     const fullPath = assertMutableTrustedPath(targetPath, "Path");
+    return withFileMutationQueue(fullPath, async () => {
     const stat = await fs.promises.stat(fullPath);
     const isDir = stat.isDirectory();
 
@@ -735,6 +771,7 @@ function registerIpcHandlers() {
       deleted: true,
       is_dir: isDir,
     };
+    });
   }));
 
   // -----------------------------------------------------------------------
@@ -757,6 +794,10 @@ function registerIpcHandlers() {
     return ptyManager.killSession(sessionId, conversationId);
   }));
 
+  ipcMain.handle("minicode:pty:restart", withMainSender("minicode:pty:restart", (_event, sessionId, conversationId) => {
+    return ptyManager.restartSession(sessionId, conversationId);
+  }));
+
   ipcMain.handle("minicode:pty:killConversation", withMainSender("minicode:pty:killConversation", (_event, conversationId) => {
     return ptyManager.killConversation(conversationId);
   }));
@@ -769,13 +810,19 @@ function registerIpcHandlers() {
     return ptyManager.snapshotSession(sessionId, maxChars, conversationId);
   }));
 
+  ipcMain.handle("minicode:pty:clear", withMainSender("minicode:pty:clear", (_event, sessionId, conversationId) => {
+    return ptyManager.clearSession(sessionId, conversationId);
+  }));
+
   ipcMain.handle("minicode:deepLink:ack", withMainSender("minicode:deepLink:ack", (_event, id) => {
     return typeof ctx.acknowledgeDeepLink === "function" ? ctx.acknowledgeDeepLink(id) : false;
   }));
 
   ipcMain.handle("minicode:update:check", withMainSender("minicode:update:check", () => ctx.updater?.check?.() ?? false));
   ipcMain.handle("minicode:update:download", withMainSender("minicode:update:download", () => ctx.updater?.download?.() ?? false));
-  ipcMain.handle("minicode:update:install", withMainSender("minicode:update:install", () => ctx.updater?.install?.() ?? false));
+  ipcMain.handle("minicode:update:activity", withMainSender("minicode:update:activity", (_event, payload) => ctx.updater?.updateActivity?.(payload) ?? { accepted: false, revision: 0 }));
+  ipcMain.handle("minicode:update:preflight", withMainSender("minicode:update:preflight", () => ctx.updater?.preflight?.() ?? { allowed: false, checks: [], fingerprint: "", version: "" }));
+  ipcMain.handle("minicode:update:install", withMainSender("minicode:update:install", (_event, payload) => ctx.updater?.install?.(payload) ?? { installed: false, reason: "unavailable" }));
   ipcMain.handle("minicode:update:status:get", withMainSender("minicode:update:status:get", () => ctx.updater?.getStatus?.() ?? { status: "idle" }));
 
   ipcMain.handle("minicode:pty:ackExit", withMainSender("minicode:pty:ackExit", (_event, sessionId, conversationId) => {

@@ -2,13 +2,16 @@
 
 Foreground and background commands share the same shell and sandbox policy.
 On Windows, workspace-sandbox commands run in PowerShell inside the configured
-Linux container; full-access or approved escalated commands run in host
+Linux container; bypass or approved escalated commands run in host
 PowerShell. Callers can select an explicit host shell only outside the sandbox.
 """
 
 from __future__ import annotations
 
 import base64
+from dataclasses import replace
+from fnmatch import fnmatchcase
+import logging
 import math
 import re
 import shutil
@@ -27,7 +30,6 @@ from backend.terminal.shell_commands import (
 from backend.tools.base import (
     TOOL_SIDE_EFFECT_DESTRUCTIVE,
     TOOL_SIDE_EFFECT_EXTERNAL,
-    TOOL_SIDE_EFFECT_NONE,
     TOOL_SIDE_EFFECT_WORKSPACE,
     MAX_TOOL_RESULT_BYTES,
     MAX_TOOL_RESULT_LINES,
@@ -38,19 +40,17 @@ from backend.tools.base import (
     truncate_text_tail,
 )
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from backend.permissions.context import ToolExecutionContext
     from backend.terminal.manager import BackgroundCommandManager
 
-# Pi's Bash contract has no default timeout. Explicit deadlines are bounded
-# only by the maximum supported Node timer value used upstream.
-MAX_TIMEOUT_MS = 2_147_483_647
+# Every foreground shell command gets a default 2-minute watchdog and a
+# 10-minute ceiling.
+MAX_TIMEOUT_MS = 600_000
 MAX_TIMEOUT_SECONDS = MAX_TIMEOUT_MS / 1000
-# Compatibility names retained for integrations that imported the old
-# constants; unlike the previous implementation, the default is intentionally
-# unbounded and the maximum is the upstream timer limit.
-DEFAULT_TIMEOUT: float | None = None
-MAX_TIMEOUT = MAX_TIMEOUT_SECONDS
+DEFAULT_TIMEOUT: float = 120.0
 
 _WINDOWS_EXPLICIT_SHELL_RE = re.compile(
     r"^\s*(?:"
@@ -61,6 +61,40 @@ _WINDOWS_EXPLICIT_SHELL_RE = re.compile(
     re.IGNORECASE,
 )
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+_DANGEROUS_ENV_EXACT = frozenset(
+    {
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "PYTHONSTARTUP",
+        "BASH_ENV",
+        "ENV",
+        "IFS",
+        "PATH",
+        "PATHEXT",
+        "COMSPEC",
+        "NODE_OPTIONS",
+        "NODE_PATH",
+        "GIT_SSH_COMMAND",
+        "GIT_SSH",
+        "SSH_ASKPASS",
+        "JAVA_TOOL_OPTIONS",
+        "_JAVA_OPTIONS",
+        "PROMPT_COMMAND",
+        "PS4",
+        "RUBYOPT",
+        "PERL5OPT",
+    }
+)
+
+
+def _is_dangerous_env_name(name: str) -> bool:
+    upper = str(name or "").upper()
+    return (
+        upper in _DANGEROUS_ENV_EXACT
+        or upper.startswith("LD_")
+        or upper.startswith("DYLD_")
+        or upper.startswith("GIT_CONFIG_")
+    )
 
 def _as_bool(value: Any) -> bool:
     if isinstance(value, bool):
@@ -99,6 +133,8 @@ def _validated_env(value: Any) -> tuple[dict[str, str], str]:
         key = str(raw_key or "")
         if not _ENV_NAME_RE.fullmatch(key):
             return {}, f"Invalid environment variable name: {key[:128]}"
+        if _is_dangerous_env_name(key):
+            return {}, f"Environment variable {key} is not allowed for command overrides"
         if not isinstance(raw_value, str):
             return {}, f"Environment variable {key} must be a string"
         if "\x00" in raw_value:
@@ -110,8 +146,39 @@ def _validated_env(value: Any) -> tuple[dict[str, str], str]:
 
 
 def _is_bypass_mode(context: Any = None) -> bool:
+    policy = getattr(context, "sandbox_policy", None)
+    if isinstance(policy, SandboxPolicy):
+        return policy.disable_os_sandbox
     permission = getattr(context, "permission", None)
     return getattr(permission, "mode", None) == "bypass"
+
+
+def _command_matches_excluded(command: str, policy: SandboxPolicy) -> bool:
+    return _command_matches_patterns(command, policy.excluded_commands)
+
+
+def _command_matches_patterns(command: str, patterns: tuple[str, ...]) -> bool:
+    if not patterns:
+        return False
+    try:
+        from backend.permissions.checker import _split_shell_compound
+
+        segments = _split_shell_compound(command)
+    except Exception:
+        segments = [command]
+    for segment in segments:
+        candidate = str(segment or "").strip()
+        for pattern in patterns:
+            if pattern.endswith(":*"):
+                prefix = pattern[:-2].strip()
+                if candidate == prefix or candidate.startswith(f"{prefix} "):
+                    return True
+            elif any(token in pattern for token in ("*", "?", "[")):
+                if fnmatchcase(candidate, pattern):
+                    return True
+            elif candidate == pattern or candidate.startswith(f"{pattern} "):
+                return True
+    return False
 
 
 def _sandbox_writable_roots(workspace: Path, context: Any = None) -> tuple[Path, ...]:
@@ -187,6 +254,13 @@ def _workspace_sandbox_policy(
     timeout: float | None,
     env_overrides: dict[str, str] | None = None,
 ) -> SandboxPolicy:
+    snapshot = getattr(context, "sandbox_policy", None)
+    if isinstance(snapshot, SandboxPolicy):
+        return replace(
+            snapshot,
+            env_overrides={**snapshot.env_overrides, **dict(env_overrides or {})},
+            timeout=timeout,
+        )
     return SandboxPolicy(
         workspace_root=workspace,
         writable_roots=_sandbox_writable_roots(workspace, context),
@@ -214,6 +288,9 @@ def _windows_powershell_shell_command(
     prelude = (
         "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
         "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+        # PowerShell 7 colours error records with ANSI escapes; the model reads
+        # the raw bytes, so render plain text. $PSStyle is absent on 5.1.
+        "if ($null -ne $PSStyle) { $PSStyle.OutputRendering = 'PlainText' }; "
         "$ProgressPreference = 'SilentlyContinue'; "
         f"{location}"
         "$global:LASTEXITCODE = $null; "
@@ -241,6 +318,10 @@ def _windows_powershell_shell_command(
             "-NonInteractive",
             "-ExecutionPolicy",
             "Bypass",
+            # Without this, a redirected stderr carries CLIXML-serialized error
+            # records (``#< CLIXML <Objs ...``) instead of the message text.
+            "-OutputFormat",
+            "Text",
             "-EncodedCommand",
             encoded_script,
         ]
@@ -259,10 +340,15 @@ def _model_shell_description() -> str:
     if sys.platform == "win32":
         host_shell = "PowerShell 7" if shutil.which("pwsh.exe") else "Windows PowerShell 5.1"
         return (
-            "Execute a shell command. In normal workspace modes it runs in PowerShell 7 inside the "
-            "MiniCode Linux sandbox container; use workspace-relative paths and cross-platform tools. "
-            f"In full-access or approved escalated mode it runs in host {host_shell}. "
-            "Use the cwd and env arguments instead of shell cd/env setup, and do not assume && is available."
+            "Execute a shell command. On Windows, the command language is PowerShell in both normal "
+            "workspace-sandbox and bypass modes; the sandbox changes permissions/network, not the "
+            "shell language. Use workspace-relative paths and cross-platform tools. "
+            f"In bypass or approved escalated mode it runs in host {host_shell}. "
+            "Use the cwd and env arguments instead of shell cd/env setup, and do not assume && is available. "
+            "On Windows, do not use POSIX-only head/tail/grep/sed/cat commands or inline "
+            "NAME=value command assignments; use Get-Content/Select-String, dedicated workspace tools, "
+            "and the structured env field. If a POSIX command is not recognized, retry with its PowerShell "
+            "equivalent instead of repeating it."
         )
     return "Execute a shell command for builds, tests, installs, git, processes, and scripts."
 
@@ -290,9 +376,15 @@ _DESTRUCTIVE_COMMAND_PATTERNS = tuple(
         r"(?:^|[;&|]\s*)rm\b(?=[^\n]*(?:-[^\s]*[rf]|--recursive|--force))",
         r"(?:^|[;&|]\s*)remove-item\b(?=[^\n]*(?:-recurse|-force))",
         r"(?:^|[;&|]\s*)(?:del|erase|rmdir|rd)\b",
-        r"\bgit\s+(?:reset\s+--hard|clean\s+-[^\s]*f|branch\s+-D)\b",
+        r"\bgit\s+(?:reset\s+--hard|branch\s+-D)\b",
+        # `git clean -fdx` bundles its flags, so a trailing \b after the `f`
+        # could never match. Look ahead for any force flag in the segment.
+        r"\bgit\s+clean\b(?=[^\n;&|]*(?:\s-[a-z]*f|\s--force))",
         r"\bgit\s+push\b[^\n]*(?:--force(?:-with-lease)?|-f)\b",
-        r"\b(?:mkfs(?:\.[a-z0-9]+)?|format)\b",
+        # PowerShell's Format-* cmdlets are read-only output formatting. Only
+        # classify an independent `format` command as destructive.
+        r"\bmkfs(?:\.[a-z0-9]+)?\b",
+        r"(?:^|[;&|]\s*)format(?:\s|$)",
         r"\bdd\b[^\n]*\bof\s*=",
     )
 )
@@ -329,7 +421,7 @@ def _command_side_effect_kind(args: dict[str, Any] | None) -> str:
     )
 
     allowed, _reason = check_catastrophic_command(command)
-    # A shell write to a protected path (.claude/**, .git/**, settings.json, …)
+    # A shell write to a protected path (.minicode/**, .git/**, settings.json, …)
     # is classified destructive so it always requires confirmation, never a
     # silent workspace-write. The dedicated file tools already block these
     # paths; this keeps the shell path from being an unconfirmed bypass.
@@ -353,7 +445,7 @@ def _looks_like_sandbox_denial(stderr: str, exit_code: int) -> bool:
 
     Only accept signatures tied to an OS/network sandbox. Generic application
     errors such as EACCES, connection refused, or "operation not permitted"
-    must not turn the full-access gate into routine error recovery.
+    must not turn the bypass gate into routine error recovery.
     """
     if exit_code == 0:
         return False
@@ -361,6 +453,81 @@ def _looks_like_sandbox_denial(stderr: str, exit_code: int) -> bool:
     if not text:
         return False
     return any(sig in text for sig in _SANDBOX_DENIAL_PATTERNS)
+
+
+_WINDOWS_POSIX_COMMANDS = {
+    "head",
+    "tail",
+    "grep",
+    "sed",
+    "awk",
+    "cat",
+    "export",
+}
+_WINDOWS_INLINE_ENV_RE = re.compile(
+    r"(?:^|[;&|]\s*)([A-Za-z_][A-Za-z0-9_]*)=(?!=)"
+)
+
+
+def _windows_command_portability_hint(
+    command: str,
+    stderr: str,
+    exit_code: int | None,
+) -> str:
+    """Explain the safe, model-actionable fix for POSIX-on-Windows errors."""
+
+    if sys.platform != "win32" or exit_code in (None, 0):
+        return ""
+    error_text = str(stderr or "").lower()
+    if not error_text:
+        return ""
+
+    inline_env = bool(_WINDOWS_INLINE_ENV_RE.search(str(command or "")))
+    command_names = {
+        match.group(1).lower()
+        for match in re.finditer(
+            r"(?<![A-Za-z0-9_.-])([A-Za-z][A-Za-z0-9_.-]*)(?=\s|$)",
+            str(command or ""),
+        )
+    }
+    posix_names = sorted(command_names & _WINDOWS_POSIX_COMMANDS)
+    not_recognized = (
+        "not recognized" in error_text
+        or "commandnotfoundexception" in error_text
+        or "is not recognized as the name" in error_text
+    )
+    if not not_recognized and not inline_env:
+        return ""
+
+    if inline_env:
+        return (
+            "[windows-portability] This command used a POSIX inline environment assignment. "
+            "Retry with run_command's structured env object (for example env={\"PYTHONPATH\":\"..\"}) "
+            "and leave the command as `python ...`; do not repeat `NAME=value command`."
+        )
+    if posix_names:
+        equivalents = {
+            "head": "Get-Content -Head N",
+            "tail": "Get-Content -Tail N",
+            "grep": "Select-String or grep_files",
+            "sed": "apply_patch or a Python edit script",
+            "awk": "a Python script",
+            "cat": "Get-Content -Raw",
+            "export": "run_command's structured env object",
+        }
+        rendered = ", ".join(
+            f"{name} -> {equivalents[name]}" for name in posix_names
+        )
+        return (
+            "[windows-portability] This command used POSIX utilities that are unavailable in the "
+            f"Windows PowerShell shell ({rendered}). Retry once with the PowerShell/tool equivalent; "
+            "do not repeat the failed POSIX command."
+        )
+    return (
+        "[windows-portability] The command was not recognized by the Windows PowerShell shell. "
+        "Check the executable name and retry with a PowerShell-compatible command; use cwd/env "
+        "fields instead of shell setup."
+    )
 
 
 class RunCommandTool(BaseTool):
@@ -377,6 +544,9 @@ class RunCommandTool(BaseTool):
         "Never skip hooks or run destructive git commands unless the user explicitly requests it."
     )
     permission = PermissionLevel.CONFIRM
+
+    def is_capability_available(self, context=None) -> bool:
+        return context is None or context.mode != "plan"
     # Pi-style tail truncation and durable full-output persistence are handled
     # by this tool, so the generic result layer must not truncate it again.
     max_result_chars = None
@@ -390,10 +560,11 @@ class RunCommandTool(BaseTool):
     workspace_path_fields = ("cwd",)
 
     def resolve_timeout(self, args: dict[str, Any]) -> float | None:
-        """Apply an outer watchdog only when the caller supplied a deadline."""
+        """Foreground commands get the default watchdog; background commands none."""
         if _as_bool(args.get("run_in_background", False)):
             return None
-        return _coerce_timeout(args.get("timeout"))
+        timeout = _coerce_timeout(args.get("timeout"))
+        return timeout if timeout is not None else DEFAULT_TIMEOUT
 
     def model_description(self) -> str:
         return _model_shell_description()
@@ -416,14 +587,15 @@ class RunCommandTool(BaseTool):
                         "type": "boolean",
                         "description": (
                             "Run under a persistent background command id; use for servers, watchers, "
-                            "and long-lived processes, then inspect it with monitor."
+                            "and long-lived processes. Inspect or stop only that owned process tree with "
+                            "monitor(action='status'|'write_stdin'|'cancel', command_id=...)."
                         ),
                     },
                     "timeout": {
                         "type": "number",
                         "exclusiveMinimum": 0,
                         "maximum": MAX_TIMEOUT_SECONDS,
-                        "description": "Optional foreground timeout in seconds; there is no default timeout.",
+                        "description": "Optional foreground timeout in seconds; defaults to 120, capped at 600.",
                     },
                     "description": {
                         "type": "string",
@@ -431,7 +603,7 @@ class RunCommandTool(BaseTool):
                     },
                     "with_escalated_permissions": {
                         "type": "boolean",
-                        "description": "Request execution outside the workspace sandbox; explicit user approval is required unless already in full-access mode.",
+                        "description": "Request execution outside the workspace sandbox; explicit user approval is required unless already in bypass mode.",
                     },
                     "justification": {
                         "type": "string",
@@ -442,7 +614,12 @@ class RunCommandTool(BaseTool):
             },
         )
 
-    def streamed_input_preview(self, args: dict[str, Any]) -> dict[str, Any]:
+    def streamed_input_preview(
+        self,
+        args: dict[str, Any],
+        context: Any | None = None,
+        prior: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         return {
             key: args[key]
             for key in ("command", "cwd", "description")
@@ -463,10 +640,10 @@ class RunCommandTool(BaseTool):
             _coerce_timeout(payload.get("timeout"))
         except ValueError as exc:
             return str(exc)
-        from backend.permissions.checker import check_catastrophic_command
-
-        allowed, reason = check_catastrophic_command(command)
-        return "" if allowed else reason
+        # Dangerous-command policy is evaluated at the canonical permission
+        # boundary.  Validation must not reject before the user approval flow
+        # can produce exact request evidence.
+        return ""
 
     def get_side_effect_kind(self, args: dict[str, Any] | None = None) -> str:
         return _command_side_effect_kind(args)
@@ -480,25 +657,42 @@ class RunCommandTool(BaseTool):
         Codex pattern: a model-initiated request to run outside the sandbox is
         never silently granted. When ``with_escalated_permissions`` is set we
         require a CONFIRM gate so the user sees the justification and approves
-        before the command runs with full access. Otherwise defer to the
+        before the command runs in bypass execution. Otherwise defer to the
         centralized policy (which may auto-allow read-only commands).
         """
-        from backend.tools.base import PermissionLevel
-
         command = str((args or {}).get("command") or "").strip()
         if command:
             from backend.permissions.checker import check_catastrophic_command
 
             allowed, _reason = check_catastrophic_command(command)
             if not allowed:
-                return PermissionLevel.ALWAYS_DENY
+                # Dangerous-pattern checks ask rather than deny: the user may
+                # approve a blocked-but-legitimate command.
+                return PermissionLevel.CONFIRM
         if args and _as_bool(args.get("with_escalated_permissions", False)):
+            if getattr(context, "allow_unsandboxed_commands", True) is False:
+                return PermissionLevel.ALWAYS_DENY
             # context here is a PermissionContext (mode on it directly). In bypass
             # mode the command already runs unsandboxed, so escalation is moot;
             # in every other mode the escalation must be confirmed by the user.
             mode = getattr(context, "mode", None)
             if mode != "bypass":
                 return PermissionLevel.CONFIRM
+        excluded_patterns = tuple(
+            getattr(context, "sandbox_excluded_commands", ()) or ()
+        )
+        if command and _command_matches_patterns(command, excluded_patterns):
+            return (
+                PermissionLevel.AUTO
+                if getattr(context, "mode", None) == "bypass"
+                else PermissionLevel.CONFIRM
+            )
+        if (
+            command
+            and getattr(context, "sandbox_auto_allow_commands", False) is True
+            and getattr(context, "mode", None) != "bypass"
+        ):
+            return PermissionLevel.AUTO
         return None
 
     def __init__(
@@ -514,6 +708,7 @@ class RunCommandTool(BaseTool):
         return context_manager or self._background_manager
 
     def get_schema(self) -> ToolSchema:
+        """Host-facing alias retained for direct callers; the model never sees it."""
         return ToolSchema(
             name=self.name,
             description=self.description,
@@ -537,13 +732,14 @@ class RunCommandTool(BaseTool):
                         "type": "number",
                         "exclusiveMinimum": 0,
                         "maximum": MAX_TIMEOUT_SECONDS,
-                        "description": "Optional foreground timeout in seconds; there is no default timeout.",
+                        "description": "Optional foreground timeout in seconds; defaults to 120, capped at 600.",
                     },
                     "run_in_background": {
                         "type": "boolean",
                         "description": (
                             "Run under a persistent command id; use for dev servers, watchers, or background "
-                            "services, then inspect live output with monitor."
+                            "services. Inspect or stop only that owned process tree with "
+                            "monitor(action='status'|'write_stdin'|'cancel', command_id=...)."
                         ),
                     },
                     "description": {
@@ -552,7 +748,7 @@ class RunCommandTool(BaseTool):
                     },
                     "with_escalated_permissions": {
                         "type": "boolean",
-                        "description": "Request full-access execution after a sandbox block; user approval is required. Provide justification.",
+                        "description": "Request bypass execution after a sandbox block; user approval is required. Provide justification.",
                     },
                     "justification": {
                         "type": "string",
@@ -562,6 +758,9 @@ class RunCommandTool(BaseTool):
                 "required": ["command"],
             },
         )
+
+    def get_execution_schema(self) -> ToolSchema:
+        return self.model_schema()
 
     def get_spec(self):
         from backend.tools.contracts import ToolSpec
@@ -582,11 +781,13 @@ class RunCommandTool(BaseTool):
         command = args.get("command", "")
         cwd = args.get("cwd")
         env_overrides, env_error = _validated_env(args.get("env"))
+        run_in_background = _as_bool(args.get("run_in_background", False))
         try:
             timeout = _coerce_timeout(args.get("timeout"))
         except ValueError as exc:
             return self._error_result(str(exc))
-        run_in_background = _as_bool(args.get("run_in_background", False))
+        if timeout is None and not run_in_background:
+            timeout = DEFAULT_TIMEOUT
         escalated = _as_bool(args.get("with_escalated_permissions", False))
         description = args.get("description", "")
 
@@ -594,27 +795,60 @@ class RunCommandTool(BaseTool):
             return self._error_result("Missing command parameter")
         if env_error:
             return self._error_result(env_error)
+        permission = getattr(context, "permission", None)
+        if (
+            escalated
+            and getattr(permission, "allow_unsandboxed_commands", True) is False
+        ):
+            return self._error_result(
+                "Managed sandbox policy does not allow commands to run outside the sandbox."
+            )
 
-        from backend.permissions.checker import PermissionChecker, check_catastrophic_command
+        from backend.permissions.checker import check_catastrophic_command
 
         allowed, reason = check_catastrophic_command(command)
         if not allowed:
-            return self._error_result(reason)
+            from backend.agent.final_tool_request import canonical_tool_request_digest
 
-        checker = PermissionChecker.instance() if hasattr(PermissionChecker, "instance") else None
-        if checker is None and context and hasattr(context, "permission_checker"):
-            checker = context.permission_checker
-        if checker:
-            allowed, reason = checker.validate_command(command)
-            if not allowed:
-                return self._error_result(reason)
+            request_digest = canonical_tool_request_digest(self.name, args)
+            approved = (
+                getattr(context, "metadata", {}).get(
+                    "_approved_request_digests", set()
+                )
+                if context
+                else set()
+            )
+            if request_digest not in approved:
+                return self._error_result(
+                    "This command requires explicit approval before execution. "
+                    f"{reason}"
+                )
+
+        # Catastrophic-command enforcement lives in check_permission as a
+        # CONFIRM gate; a redundant hard error here would block commands the
+        # user just approved.
 
         try:
-            effective_cwd = self._resolve_cwd(cwd, context)
+            effective_cwd = self._resolve_cwd(
+                cwd,
+                context,
+                allow_workspace_escape=escalated,
+            )
         except ValueError as exc:
             return self._error_result(str(exc))
 
         background_manager = self._resolve_background_manager(context)
+        base_policy = _workspace_sandbox_policy(
+            Path(getattr(context, "workspace_root", None) or effective_cwd or Path.cwd()).expanduser().resolve(),
+            context,
+            timeout=timeout,
+            env_overrides=env_overrides,
+        )
+        excluded = _command_matches_excluded(command, base_policy)
+        if (escalated or excluded) and not base_policy.allow_unsandboxed_commands:
+            return self._error_result(
+                "Managed sandbox policy does not allow this command to run outside the sandbox."
+            )
 
         if run_in_background:
             return await self._execute_background(
@@ -624,7 +858,7 @@ class RunCommandTool(BaseTool):
                 description,
                 background_manager,
                 context,
-                escalated=escalated,
+                escalated=escalated or excluded,
                 env_overrides=env_overrides,
             )
 
@@ -633,11 +867,17 @@ class RunCommandTool(BaseTool):
             effective_cwd,
             timeout,
             context,
-            escalated=escalated,
+            escalated=escalated or excluded,
             env_overrides=env_overrides,
         )
 
-    def _resolve_cwd(self, cwd: str | None, context: ToolExecutionContext | None) -> str | None:
+    def _resolve_cwd(
+        self,
+        cwd: str | None,
+        context: ToolExecutionContext | None,
+        *,
+        allow_workspace_escape: bool = False,
+    ) -> str | None:
         workspace_root: Path | None = None
         if context and getattr(context, "workspace_root", None):
             workspace_root = Path(context.workspace_root).expanduser().resolve()
@@ -650,7 +890,7 @@ class RunCommandTool(BaseTool):
             resolved = cwd_path.resolve() if cwd_path.is_absolute() else (
                 (workspace_root / cwd_path).resolve() if workspace_root else cwd_path.resolve()
             )
-            if workspace_root and not _is_bypass_mode(context):
+            if workspace_root and not (allow_workspace_escape or _is_bypass_mode(context)):
                 try:
                     resolved.relative_to(workspace_root)
                 except ValueError as exc:
@@ -688,17 +928,21 @@ class RunCommandTool(BaseTool):
         # background task. The session-owned manager remains responsible for
         # cancellation, process-tree cleanup, output bounds, and completion.
         background_timeout_ms = 0
-        if _is_bypass_mode(context) or escalated:
-            policy = SandboxPolicy.danger_full_access(
-                timeout=0,
-                env_overrides=env_overrides,
-            )
-        else:
-            policy = _workspace_sandbox_policy(
-                workspace,
-                context,
-                timeout=0,
-                env_overrides=env_overrides,
+        base_policy = _workspace_sandbox_policy(
+            workspace,
+            context,
+            timeout=0,
+            env_overrides=env_overrides,
+        )
+        policy = (
+            base_policy.escalated_preserving_denied_reads()
+            if _is_bypass_mode(context) or escalated
+            else base_policy
+        )
+        capability = SandboxRunner(policy).capability(cwd=cwd)
+        if not capability.available:
+            return self._error_result(
+                f"The required sandbox is unavailable, so the background command was not started: {capability.reason}"
             )
 
         try:
@@ -731,14 +975,17 @@ class RunCommandTool(BaseTool):
         except RuntimeError as exc:
             return self._error_result(str(exc))
 
-        sandbox_label = "full access" if policy.disable_os_sandbox else "OS sandbox"
+        sandbox_label = "bypass execution" if policy.disable_os_sandbox else "OS sandbox"
         return ToolResult(
             content=(
                 f"Background command started (ID: {bg_cmd.command_id})\n"
                 f"Command: {command[:100]}\n"
                 f"Working directory: {bg_cmd.cwd}\n"
                 f"Sandbox: {sandbox_label}; background execution uses the same policy as foreground commands.\n"
-                f"Use monitor(command_id='{bg_cmd.command_id}') to inspect live output and status."
+                f"Use monitor(action='status', command_id='{bg_cmd.command_id}') to inspect live output and status.\n"
+                f"Use monitor(action='write_stdin', command_id='{bg_cmd.command_id}', chars='...') to send exact input.\n"
+                f"Use monitor(action='cancel', command_id='{bg_cmd.command_id}') to stop this exact owned process tree.\n"
+                "Do not stop it with process-name matching or a broad system process command."
             ),
             display_summary=f"Started in background: {self.display_label}",
             status="success",
@@ -757,7 +1004,7 @@ class RunCommandTool(BaseTool):
         """Execute a foreground shell command via SandboxRunner.
 
         When ``escalated`` is set (and the call passed the escalation approval
-        gate), the command runs with full access + network, mirroring Codex's
+        gate), the command runs with bypass execution + network, mirroring the
         "retry outside the sandbox" path. Otherwise it runs under the normal
         workspace-write, no-network policy.
         """
@@ -766,20 +1013,18 @@ class RunCommandTool(BaseTool):
             if context is not None and getattr(context, "workspace_root", None)
             else Path(cwd).expanduser().resolve() if cwd else Path.cwd().resolve()
         )
-        sandbox_active = True
-        if _is_bypass_mode(context) or escalated:
-            policy = SandboxPolicy.danger_full_access(
-                timeout=timeout,
-                env_overrides=env_overrides,
-            )
-            sandbox_active = False
-        else:
-            policy = _workspace_sandbox_policy(
-                workspace,
-                context,
-                timeout=timeout,
-                env_overrides=env_overrides,
-            )
+        base_policy = _workspace_sandbox_policy(
+            workspace,
+            context,
+            timeout=timeout,
+            env_overrides=env_overrides,
+        )
+        policy = (
+            base_policy.escalated_preserving_denied_reads()
+            if _is_bypass_mode(context) or escalated
+            else base_policy
+        )
+        sandbox_active = not policy.disable_os_sandbox
         runner = SandboxRunner(policy)
 
         cancel_event = getattr(context, "cancel_event", None) if context else None
@@ -800,29 +1045,37 @@ class RunCommandTool(BaseTool):
         captured_paths = (result.stdout_path, result.stderr_path)
 
         if result.sandbox_unavailable and sandbox_active:
-            # Codex fails closed when the requested sandbox cannot be enforced.
+            # The managed sandbox is required by policy but cannot be enforced.
             # The model may retry with the existing explicit escalation fields,
             # which are guarded by a fresh user approval in check_permission().
             cleanup_captured_output(*captured_paths)
+            retry_hint = (
+                " Retry with with_escalated_permissions=true and a concise justification; "
+            "the user must explicitly approve bypass execution."
+                if policy.allow_unsandboxed_commands
+                else " Managed policy forbids unsandboxed fallback."
+            )
             return self._error_result(
-                "The workspace sandbox is unavailable on this host, so the command was not run. "
-                "Retry with with_escalated_permissions=true and a concise justification; "
-                "the user must explicitly approve full-access execution."
+                "The workspace sandbox is unavailable on this host, so the command was not run."
+                f"{retry_hint}"
             )
 
         exit_code = result.exit_code
 
         # A shell command can change workspace files (sed -i, codegen, git
-        # checkout, ...); invalidate the grep/glob/list caches so a later search
-        # never returns pre-command results. Claude Code has no such cache (it
-        # runs ripgrep every call) — this keeps MiniCode's cache from going stale
-        # after a command. Lazy import avoids a module-load cycle.
+        # checkout, ...). Its affected paths are unknowable without parsing
+        # shell syntax, so invalidate every derived workspace view. This keeps
+        # MiniCode's caches consistent with CC/Pi, which rescan the filesystem
+        # for each search instead of retaining a stale file-tree index.
         try:
-            from backend.tools.file_tools_common import clear_list_files_cache
+            from backend.tools.file_tools_common import invalidate_workspace_file_caches
 
-            clear_list_files_cache()
+            invalidate_workspace_file_caches(file_tree_changed=True, clear_file_state=True)
         except Exception:
-            pass
+            logger.warning(
+                "Failed to invalidate workspace file caches after shell command",
+                exc_info=True,
+            )
 
         output = stdout
         if stderr:
@@ -855,6 +1108,7 @@ class RunCommandTool(BaseTool):
             and not result.timed_out
             and sandbox_active
             and not escalated
+            and policy.allow_unsandboxed_commands
             and _looks_like_sandbox_denial(stderr, exit_code)
         ):
             escalation_hint = (
@@ -866,6 +1120,14 @@ class RunCommandTool(BaseTool):
             )
         if escalation_hint:
             status = f"{status}{escalation_hint}"
+
+        portability_hint = _windows_command_portability_hint(
+            command,
+            stderr,
+            exit_code,
+        )
+        if portability_hint:
+            status = f"{status}\n\n{portability_hint}"
 
         truncation = truncate_text_tail(output)
         if not truncation.truncated:
@@ -896,6 +1158,8 @@ class RunCommandTool(BaseTool):
                 tool_call_id,
                 "run_command",
                 force=True,
+                conversation_id=str(getattr(context, "conversation_id", "") or ""),
+                workspace_root=getattr(context, "workspace_root", None),
             )
             if persisted is not None:
                 full_output_reference = persisted.filepath

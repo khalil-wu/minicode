@@ -1,3 +1,5 @@
-from .registry import CommandRegistry
+"""Slash-command runtime.
 
-__all__ = ["CommandRegistry"]
+Consumers import from ``backend.commands.registry`` /
+``backend.commands.catalog`` directly.
+"""

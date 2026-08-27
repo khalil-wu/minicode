@@ -32,13 +32,27 @@ def build_goal_updated_payload(
     conversation_id: str,
     goal: dict[str, Any],
     source: str,
+    updated_at: str = "",
+    revision: int | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "type": "goal.updated",
         "conversation_id": conversation_id,
         "goal": dict(goal or {}),
         "source": source,
     }
+    if str(updated_at or "").strip():
+        payload["updated_at"] = str(updated_at).strip()
+    if revision is not None:
+        if (
+            isinstance(revision, bool)
+            or not isinstance(revision, int)
+            or revision < 0
+            or revision > 9_007_199_254_740_991
+        ):
+            raise ValueError("revision must be a non-negative integer")
+        payload["revision"] = revision
+    return payload
 
 
 def prepare_goal_action(

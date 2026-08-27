@@ -4,6 +4,7 @@
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import { Children, useState } from 'react'
 import type { ActivityBrowserItem } from './activitySidebarState'
+import { StatusIcon, type StatusIconStatus } from '../components/icons'
 
 // ── Status Mark ──────────────────────────────────────────────────
 
@@ -24,40 +25,20 @@ export const statusMarkLabel = (status: string): string => {
 }
 
 export const StatusMark = ({ status, animated = true }: { status: string; animated?: boolean }) => {
-  const size = 14
-  const color = statusColor(status)
   const label = statusMarkLabel(status)
-  if (status === 'completed' || status === 'done') {
-    return (
-      <svg role="img" aria-label={label} width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
-        <circle cx="8" cy="8" r="7" fill={color} opacity={0.15} />
-        <circle cx="8" cy="8" r="7" stroke={color} strokeWidth="1.5" fill="none" />
-        <path d="M5 8.2 7 10.2 11 6" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-      </svg>
-    )
-  }
-  if (status === 'running' || status === 'in_progress') {
-    return (
-      <svg role="img" aria-label={label} width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
-        <circle cx="8" cy="8" r="7" stroke={color} strokeWidth="1.5" fill="none" strokeDasharray="11 33" strokeLinecap="round">
-          {animated && <animateTransform attributeName="transform" type="rotate" from="0 8 8" to="360 8 8" dur="0.8s" repeatCount="indefinite" />}
-        </circle>
-        <circle cx="8" cy="8" r="3" fill={color} opacity={0.5} />
-      </svg>
-    )
-  }
-  if (status === 'failed' || status === 'error' || status === 'blocked') {
-    return (
-      <svg role="img" aria-label={label} width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
-        <circle cx="8" cy="8" r="7" stroke={color} strokeWidth="1.5" fill="none" />
-        <path d="M6 6l4 4M10 6l-4 4" stroke={color} strokeWidth="1.5" strokeLinecap="round" />
-      </svg>
-    )
-  }
+  const iconStatus: StatusIconStatus = status === 'running' || status === 'in_progress'
+    ? 'running'
+    : status === 'completed' || status === 'done' || status === 'success'
+      ? 'success'
+      : status === 'failed' || status === 'error'
+        ? 'failed'
+        : status === 'blocked'
+          ? 'blocked'
+          : 'pending'
   return (
-    <svg role="img" aria-label={label} width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
-      <circle cx="8" cy="8" r="7" stroke={color} strokeWidth="1.5" fill="none" />
-    </svg>
+    <span role="img" aria-label={label} style={{ display: 'inline-flex', flexShrink: 0 }}>
+      <StatusIcon status={iconStatus} size={14} spinningClassName={animated ? undefined : 'shrink-0'} />
+    </span>
   )
 }
 
@@ -65,8 +46,8 @@ export const StatusMark = ({ status, animated = true }: { status: string; animat
 
 export const PanelHeader = ({ title, meta, action }: { title: string; meta?: string; action?: React.ReactNode }) => (
   <div style={panelHeaderStyle}>
-    <span style={{ fontWeight: 700, color: 'var(--text-primary)', flex: 1 }}>{title}</span>
-    {meta && <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{meta}</span>}
+    <span style={{ fontWeight: "var(--fw-bold)", color: 'var(--text-primary)', flex: 1 }}>{title}</span>
+    {meta && <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', fontFamily: 'var(--font-ui)' }}>{meta}</span>}
     {action}
   </div>
 )
@@ -102,7 +83,7 @@ export const InfoRow = ({ label, value, mono, tone = 'default', title }: { label
 // ── Small Button ─────────────────────────────────────────────────
 
 export const SmallButton = ({ icon, label, onClick, disabled }: { icon: React.ReactNode; label: string; onClick: () => void; disabled?: boolean }) => (
-  <button type="button" disabled={disabled} onClick={onClick} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '4px 7px', background: 'transparent', color: disabled ? 'var(--text-muted)' : 'var(--text-secondary)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm, 4px)', cursor: disabled ? 'not-allowed' : 'pointer', fontSize: 'var(--text-xs)', whiteSpace: 'nowrap' }}>
+  <button type="button" className="mc-row-hover" disabled={disabled} onClick={onClick} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '4px 7px', background: 'transparent', color: disabled ? 'var(--text-muted)' : 'var(--text-secondary)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm, 4px)', cursor: disabled ? 'not-allowed' : 'pointer', fontSize: 'var(--text-xs)', whiteSpace: 'nowrap' }}>
     {icon}
     {label}
   </button>
@@ -200,6 +181,7 @@ export const ActivityButtonRow = ({ children, onClick, title }: { children: Reac
   return (
     <button
       type="button"
+      className="mc-row-hover"
       onClick={onClick}
       style={activityButtonRowStyle(true)}
       title={title}
@@ -239,7 +221,7 @@ const sectionLabelStyle: React.CSSProperties = {
   fontSize: 'var(--text-xs)',
   color: 'var(--text-muted)',
   textTransform: 'uppercase',
-  fontWeight: 700,
+  fontWeight: "var(--fw-bold)",
   paddingTop: 1,
   letterSpacing: 0,
 }
@@ -294,7 +276,7 @@ const activitySectionTitleStyle: React.CSSProperties = {
   overflow: 'hidden',
   color: 'var(--text-secondary)',
   fontSize: 'var(--text-xs)',
-  fontWeight: 700,
+  fontWeight: "var(--fw-bold)",
   letterSpacing: 0,
   textOverflow: 'ellipsis',
   textTransform: 'none',
@@ -311,7 +293,7 @@ const activitySectionCountStyle: React.CSSProperties = {
   border: '1px solid var(--border-subtle)',
   borderRadius: 'var(--radius-sm, 5px)',
   color: 'var(--text-muted)',
-  fontFamily: 'var(--font-mono)',
+  fontFamily: 'var(--font-ui)',
   fontSize: "var(--text-3xs)",
 }
 
@@ -323,7 +305,7 @@ const activitySectionMoreStyle: React.CSSProperties = {
   background: 'transparent',
   color: 'var(--text-muted)',
   cursor: 'pointer',
-  fontFamily: 'var(--font-mono)',
+  fontFamily: 'var(--font-ui)',
   fontSize: "var(--text-3xs)",
 }
 

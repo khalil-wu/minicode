@@ -3,10 +3,10 @@ import { Copy, ExternalLink, Globe, Plus, RotateCcw, Square, Trash2 } from "luci
 import "@xterm/xterm/css/xterm.css";
 import { getWebSocket } from "../hooks/useWebSocket";
 import { useAppStore } from "../stores";
-import { desktop, isDesktop, ptyAckExit, ptyKill, ptyList, ptyResize, ptySnapshot, ptySpawn, ptyWrite } from "../desktop/runtime";
+import { desktop, isDesktop, ptyAckExit, ptyClear, ptyKill, ptyList, ptyResize, ptyRestart, ptySnapshot, ptySpawn, ptyWrite } from "../desktop/runtime";
 import type { TerminalSessionInfo } from "../stores/types";
-import { sendClientCommand } from "../protocol/ws-outbox";
-import { openWebInPreview } from "../chat/openWebInPreview";
+import { commandResultSucceeded, sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
+import { openWebInBrowser } from "../chat/openWebInBrowser";
 import {
   NEW_TERMINAL_SESSION_EVENT,
   consumeNewTerminalSessionRequest,
@@ -34,7 +34,12 @@ type FitAddonLike = {
   fit: () => void;
 };
 
-type XtermWithOptions = XtermLike & { options: { theme?: Record<string, string> } };
+type XtermWithOptions = XtermLike & {
+  options: {
+    theme?: Record<string, string>;
+    fontSize?: number;
+  };
+};
 
 const DEV_SERVER_URL_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):\d+(?:[/?#][^\s'"<>]*)?/gi;
 const TERMINAL_OUTPUT_BUFFER_CHARS = 80_000;
@@ -84,56 +89,98 @@ const portFromUrl = (url: string): number | null => {
   }
 };
 
-const shellName = (session: TerminalSessionInfo, index: number): string => {
-  const name = session.shell?.split(/[/\\]/).pop()?.replace(/\.(exe|cmd|ps1)$/i, "") || `shell ${index + 1}`;
-  return session.terminalMode === "pipe" ? `${name} (basic)` : name;
+export const terminalSessionLabel = (
+  session: TerminalSessionInfo,
+  index: number,
+  sessionCount: number,
+): string => {
+  const name = session.shell?.split(/[/\\]/).pop()?.replace(/\.(exe|cmd|ps1)$/i, "") || "shell";
+  const indexedName = sessionCount > 1 ? `${name} ${index + 1}` : name;
+  return session.terminalMode === "pipe" ? `${indexedName}（基础）` : indexedName;
+};
+
+export const terminalExitCodeLabel = (exitCode: unknown): string =>
+  typeof exitCode === "number" && Number.isSafeInteger(exitCode)
+    ? String(exitCode)
+    : "unknown";
+
+const terminalStatusLabel = (status: TerminalSessionInfo["status"]): string =>
+  status === "exited" ? "已退出" : "运行中";
+
+/**
+ * xterm.js 走 canvas 渲染，读不到 CSS 变量，故此处必须是字面量 —— 但取值不是
+ * 随手挑的：全部由 tokens.css 的 OKLCH 刻度换算而来，保证终端与它所嵌入的
+ * 面板（容器为 --surface-base）同色相、同明度，不再出现"冷灰外壳 + 暖棕终端"
+ * 的接缝。
+ *   background/foreground = --surface-base / --text-secondary
+ *   cursor                = --accent-primary
+ *   ANSI 六色             = --state-* 同色相(28/142/78/240/305/195)，
+ *                           暗色 L=0.74 C=0.13、亮档 L=0.845
+ * 例外：dim 档（暗色 brightBlack、亮色 white）按刻度取值只有 ~2.6:1，读不清，
+ * 故各提一档到 L=0.62 / L=0.56，使其 ≥4.5:1。全部 16 色均已验证达 AA。
+ * 改动 tokens.css 的表面或状态色时，这里需要同步换算并重验对比度。
+ */
+/* Font: resolve from the same tokens every other code surface uses so the
+ * terminal follows --font-mono and the Appearance-tab code zoom setting. */
+const terminalFontFamily = (): string => {
+  const stack = getComputedStyle(document.documentElement).getPropertyValue("--font-mono").trim();
+  return stack || '"JetBrains Mono", Consolas, monospace';
+};
+
+const TERMINAL_BASE_FONT_SIZE = 13;
+
+const terminalFontSize = (): number => {
+  const codeFontPx = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--code-font-size"));
+  if (!Number.isFinite(codeFontPx) || codeFontPx <= 0) return TERMINAL_BASE_FONT_SIZE;
+  // Terminal base is 13px against the 15px code base; keep that ratio under zoom.
+  return Math.max(9, Math.round((TERMINAL_BASE_FONT_SIZE * codeFontPx) / 15));
 };
 
 const terminalTheme = (isLight: boolean): Record<string, string> => (
   isLight
     ? {
-        background: "#fbfaf8",
-        foreground: "#151515",
-        cursor: "#0b78ff",
-        selectionBackground: "#dfe9f8",
-        black: "#2d2923",
-        red: "#a8453f",
-        green: "#4f7f45",
-        yellow: "#9a742d",
-        blue: "#5b6f8f",
-        magenta: "#7b5f8f",
-        cyan: "#4f7f78",
-        white: "#8f8678",
-        brightBlack: "#6f675d",
-        brightRed: "#ba574f",
-        brightGreen: "#5f9352",
-        brightYellow: "#aa8538",
-        brightBlue: "#6d7fa0",
-        brightMagenta: "#8b6fa0",
-        brightCyan: "#60928a",
-        brightWhite: "#2d2923",
+        background: "#ffffff",
+        foreground: "#191b1d",
+        cursor: "#1467c2",
+        selectionBackground: "#cbdbed",
+        black: "#121416",
+        red: "#b33830",
+        green: "#207e18",
+        yellow: "#995800",
+        blue: "#0070ba",
+        magenta: "#7f4bb1",
+        cyan: "#008285",
+        white: "#737577",
+        brightBlack: "#595b5e",
+        brightRed: "#941d19",
+        brightGreen: "#006400",
+        brightYellow: "#7e4000",
+        brightBlue: "#00569c",
+        brightMagenta: "#663294",
+        brightCyan: "#00686b",
+        brightWhite: "#040405",
       }
     : {
-        background: "#25211c",
-        foreground: "#efe8dc",
-        cursor: "#d7bd81",
-        selectionBackground: "#51483d",
-        black: "#1d1a16",
-        red: "#dc7f72",
-        green: "#8fbe76",
-        yellow: "#d8b66b",
-        blue: "#9aa8c7",
-        magenta: "#c3a0cf",
-        cyan: "#93c5bd",
-        white: "#d8cfc0",
-        brightBlack: "#9b9182",
-        brightRed: "#ef9a8d",
-        brightGreen: "#a8d18c",
-        brightYellow: "#e6c77e",
-        brightBlue: "#b0bbd8",
-        brightMagenta: "#d5b4df",
-        brightCyan: "#a9d7cf",
-        brightWhite: "#fff8ed",
+        background: "#050606",
+        foreground: "#e6e8ea",
+        cursor: "#0f92f7",
+        selectionBackground: "#2b343d",
+        black: "#030304",
+        red: "#f2897c",
+        green: "#79bf72",
+        yellow: "#d7a03d",
+        blue: "#52b5f4",
+        magenta: "#be95ec",
+        cyan: "#00c4c4",
+        white: "#bcbec0",
+        brightBlack: "#83868a",
+        brightRed: "#ffafa2",
+        brightGreen: "#a1df99",
+        brightYellow: "#f5c372",
+        brightBlue: "#82d6ff",
+        brightMagenta: "#ddb9ff",
+        brightCyan: "#60e4e3",
+        brightWhite: "#fcfdff",
       }
 );
 
@@ -155,12 +202,15 @@ export const TerminalPanel = () => {
   const activeTerminalSessionId = useAppStore((s) => s.activeTerminalSessionId);
   const conversationId = useAppStore((s) => s.conversationId);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
-  const themeMode = useAppStore((s) => s.themeMode);
+  const resolvedTheme = useAppStore((s) => s.resolvedTheme);
   const terminalSnapshots = useAppStore((s) => s.terminalSnapshots);
   const [booting, setBooting] = useState(true);
   const [autoCreating, setAutoCreating] = useState(false);
+  const creatingRef = useRef(false);
   const [terminalReady, setTerminalReady] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
+  const [terminatingSessionIds, setTerminatingSessionIds] = useState<Set<string>>(() => new Set());
+  const terminatingSessionIdsRef = useRef(new Set<string>());
   const [detectedUrls, setDetectedUrls] = useState<string[]>([]);
   const autoCreateAttemptedRef = useRef(false);
 
@@ -206,6 +256,26 @@ export const TerminalPanel = () => {
     });
   };
 
+  const removeMirroredTerminal = (sessionId: string, conversationOwner: string) => {
+    if (!isDesktop() || !conversationOwner) return;
+    const activeConversationId = useAppStore.getState().conversationId || "";
+    if (activeConversationId !== conversationOwner) return;
+    // The Electron process owns and kills the real PTY. The backend only owns
+    // its reconnectable mirror, so delete that mirror through the existing
+    // terminal.kill lifecycle after the local PTY has been removed. Without
+    // this, deleted/restarted PowerShell tabs remain visible to agent tools as
+    // stale external terminal sessions.
+    sendClientCommand(
+      {
+        type: "terminal.kill",
+        session_id: sessionId,
+        conversation_id: conversationOwner,
+        workspace_root: useAppStore.getState().workingDirectory || undefined,
+      },
+      { silent: true },
+    );
+  };
+
   useEffect(() => {
     activeRef.current = activeTerminalSessionId;
   }, [activeTerminalSessionId]);
@@ -216,10 +286,10 @@ export const TerminalPanel = () => {
     Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit")])
       .then(([{ Terminal }, { FitAddon }]) => {
         if (disposed || !containerRef.current) return;
-        const isLight = document.documentElement.getAttribute("data-theme") === "light";
+        const isLight = useAppStore.getState().resolvedTheme === "light";
         const term = new Terminal({
-          fontSize: 13,
-          fontFamily: "Cascadia Mono, Consolas, JetBrains Mono, Menlo, monospace",
+          fontSize: terminalFontSize(),
+          fontFamily: terminalFontFamily(),
           lineHeight: 1.12,
           letterSpacing: 0,
           cursorBlink: true,
@@ -235,7 +305,7 @@ export const TerminalPanel = () => {
         fitRef.current = fitAddon;
         setTerminalReady(true);
         term.attachCustomKeyEventHandler?.((event: KeyboardEvent) => {
-        const isCopy = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c";
+          const isCopy = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c";
           const isExplicitCopy = isCopy && event.shiftKey;
           if (isExplicitCopy) {
             void copyTerminalSelection(term);
@@ -262,7 +332,7 @@ export const TerminalPanel = () => {
         });
       })
       .catch((error) => {
-        setStatusMessage(`Terminal UI failed to load: ${String(error)}`);
+        setStatusMessage(`终端界面加载失败：${String(error)}`);
       });
 
     return () => {
@@ -276,13 +346,20 @@ export const TerminalPanel = () => {
 
   useEffect(() => {
     if (!termRef.current) return;
-    const isLight = document.documentElement.getAttribute("data-theme") === "light";
+    const isLight = resolvedTheme === "light";
     const term = termRef.current as unknown as XtermWithOptions;
-    term.options = {
-      ...term.options,
-      theme: terminalTheme(isLight),
-    };
-  }, [themeMode]);
+    term.options.theme = terminalTheme(isLight);
+  }, [resolvedTheme]);
+
+  // Follow the Appearance-tab code zoom: xterm needs a numeric px, so re-read
+  // the scaled token and re-fit the grid.
+  const codeTextScale = useAppStore((s) => s.codeTextScale);
+  useEffect(() => {
+    if (!termRef.current) return;
+    const term = termRef.current as unknown as XtermWithOptions;
+    term.options.fontSize = terminalFontSize();
+    safeFit();
+  }, [codeTextScale]);
 
   useEffect(() => {
     const resizeObserver = new ResizeObserver(() => {
@@ -322,9 +399,13 @@ export const TerminalPanel = () => {
       if (e.type === "terminal.output" && e.session_id && e.data) {
         appendOutput(e.session_id, e.data);
       } else if (e.type === "terminal.output" && e.output != null) {
-        appendOutput("web-fallback", `${e.output}\r\n[exit ${e.exit_code ?? 0}]\r\n$ `);
+        appendOutput("web-fallback", `${e.output}\r\n[exit ${terminalExitCodeLabel(e.exit_code)}]\r\n$ `);
       } else if (e.type === "terminal.exit" && e.session_id) {
-        appendOutput(e.session_id, `\r\n[Process exited with code ${e.exit_code ?? 0}]\r\n`);
+        appendOutput(e.session_id, `\r\n[Process exited with code ${terminalExitCodeLabel(e.exit_code)}]\r\n`);
+      } else if (e.type === "terminal.killed" && e.session_id) {
+        delete outputBufferRef.current[e.session_id];
+        delete outputCursorRef.current[e.session_id];
+        hydratedSnapshotRef.current.delete(e.session_id);
       } else if (e.type === "terminal.list") {
         if (mountedRef.current) setBooting(false);
       }
@@ -336,6 +417,8 @@ export const TerminalPanel = () => {
       const d = desktop();
       desktopDataCleanup = d?.pty.onData(({ sessionId, conversationId: owner, data, startCursor, endCursor }) => {
         if (!owner) return;
+        const acceptedCursor = outputCursorRef.current[sessionId];
+        if (endCursor != null && acceptedCursor != null && endCursor <= acceptedCursor) return;
         appendOutput(sessionId, data, startCursor, endCursor);
         mirrorTerminalOutput(sessionId, owner, data);
       }) as (() => void) | undefined;
@@ -358,7 +441,9 @@ export const TerminalPanel = () => {
 
   useEffect(() => {
     autoCreateAttemptedRef.current = false;
-    useAppStore.getState().setTerminalSessions([]);
+    // restoreWorkbenchState has already projected the target conversation's
+    // cached sessions and preferred terminal. Keep them visible until the
+    // authoritative list for this owner arrives and reconciles the cache.
     void refreshSessionsRef.current();
   }, [conversationId]);
 
@@ -377,7 +462,7 @@ export const TerminalPanel = () => {
   }, [activeTerminalSessionId]);
 
   useEffect(() => {
-    if (activeSession && statusMessage === "Starting backend shell...") {
+    if (activeSession && statusMessage === "正在启动后端 Shell...") {
       setStatusMessage("");
     }
   }, [activeSession, statusMessage]);
@@ -414,11 +499,10 @@ export const TerminalPanel = () => {
     const ownerConversationId = useAppStore.getState().conversationId || "";
     setBooting(true);
     setStatusMessage("");
-    let waitForBackendList = false;
     try {
       if (!ownerConversationId) {
         useAppStore.getState().setTerminalSessions([]);
-        setStatusMessage("Select a conversation before opening a terminal.");
+        setStatusMessage("请先选择会话，再打开终端。");
         return;
       }
       if (isDesktop()) {
@@ -460,26 +544,35 @@ export const TerminalPanel = () => {
         for (const session of normalized) mirrorTerminalCreated(session);
         redrawActiveSession();
       } else {
-        // Web 浏览器环境禁用后端列表请求，防止异步覆盖 fallback 终端
-        const sent = getWebSocket()?.send({ type: "terminal.list" }) ?? false;
-        waitForBackendList = sent;
-        if (!sent) useAppStore.getState().setTerminalSessions([]);
+        const result = await sendClientCommandAwaitResult(
+          {
+            type: "terminal.list",
+            conversation_id: ownerConversationId,
+            workspace_root: useAppStore.getState().workingDirectory || undefined,
+          },
+          "terminal.list",
+        );
+        if (!commandResultSucceeded(result)) {
+          useAppStore.getState().setTerminalSessions([]);
+          setStatusMessage(result.message || "刷新终端失败。");
+        }
       }
     } catch (error) {
-      setStatusMessage(`Terminal refresh failed: ${String(error)}`);
+      setStatusMessage(`刷新终端失败：${String(error)}`);
     } finally {
-      if (mountedRef.current && refreshEpoch === refreshEpochRef.current && !waitForBackendList) setBooting(false);
+      if (mountedRef.current && refreshEpoch === refreshEpochRef.current) setBooting(false);
     }
   };
   refreshSessionsRef.current = refreshSessions;
 
   const createSession = async () => {
-    if (autoCreating) return;
+    if (creatingRef.current) return;
     const ownerConversationId = useAppStore.getState().conversationId || "";
     if (!ownerConversationId) {
-      setStatusMessage("Select a conversation before opening a terminal.");
+      setStatusMessage("请先选择会话，再打开终端。");
       return;
     }
+    creatingRef.current = true;
     setAutoCreating(true);
     setStatusMessage("");
     const cwd = workingDirectory || undefined;
@@ -487,9 +580,9 @@ export const TerminalPanel = () => {
       if (isDesktop()) {
         const session = await ptySpawn(cwd, ownerConversationId);
         if (!session) {
-          setStatusMessage("Command Runner ready. Type a command and press Enter.");
+          setStatusMessage("命令运行器已就绪。输入命令后按 Enter。");
           if (!outputBufferRef.current["web-fallback"]) {
-            outputBufferRef.current["web-fallback"] = "Command Runner. Commands run in the current workspace and are not interactive.\r\n$ ";
+            outputBufferRef.current["web-fallback"] = "命令运行器。命令在当前工作区运行，不支持交互式操作。\r\n$ ";
           }
           useAppStore.getState().setActiveTerminalSession(null);
           redrawActiveSession();
@@ -519,14 +612,22 @@ export const TerminalPanel = () => {
           term?.focus?.();
         });
       } else {
-        const sent = getWebSocket()?.send({ type: "terminal.create", cwd }) ?? false;
-        if (sent) {
-          setStatusMessage("Starting backend shell...");
+        const result = await sendClientCommandAwaitResult(
+          {
+            type: "terminal.create",
+            cwd,
+            conversation_id: ownerConversationId,
+            workspace_root: useAppStore.getState().workingDirectory || undefined,
+          },
+          "terminal.create",
+        );
+        if (commandResultSucceeded(result)) {
+          setStatusMessage("正在启动后端 Shell...");
         } else {
-          setStatusMessage("Command Runner ready. Type a command and press Enter.");
+          setStatusMessage(result.message || "命令运行器已就绪。输入命令后按 Enter。");
           useAppStore.getState().setActiveTerminalSession(null);
           if (!outputBufferRef.current["web-fallback"]) {
-            outputBufferRef.current["web-fallback"] = "Command Runner. Commands run in the current workspace and are not interactive.\r\n$ ";
+            outputBufferRef.current["web-fallback"] = "命令运行器。命令在当前工作区运行，不支持交互式操作。\r\n$ ";
           }
           redrawActiveSession();
         }
@@ -536,10 +637,11 @@ export const TerminalPanel = () => {
         });
       }
     } catch (error) {
-      setStatusMessage(`Terminal start failed: ${String(error)}`);
+      setStatusMessage(`启动终端失败：${String(error)}`);
       useAppStore.getState().setActiveTerminalSession(null);
       redrawActiveSession();
     } finally {
+      creatingRef.current = false;
       if (mountedRef.current) setAutoCreating(false);
     }
   };
@@ -556,24 +658,118 @@ export const TerminalPanel = () => {
     return () => window.removeEventListener(NEW_TERMINAL_SESSION_EVENT, openRequestedTerminal);
   }, [terminalReady, booting]);
 
-  const killSession = (sessionId: string) => {
-    delete outputBufferRef.current[sessionId];
-    delete outputCursorRef.current[sessionId];
-    hydratedSnapshotRef.current.delete(sessionId);
-    if (isDesktop()) {
-      const session = useAppStore.getState().terminalSessions.find((item) => item.id === sessionId);
-      if (!session?.conversationId) return;
-      if (session.status === "exited") void ptyAckExit(sessionId, session.conversationId);
-      else void ptyKill(sessionId, session.conversationId);
-      useAppStore.getState().removeTerminalSession(sessionId);
-    } else {
-      sendClientCommand({ type: "terminal.kill", session_id: sessionId });
+  const killSession = async (sessionId: string): Promise<boolean> => {
+    if (terminatingSessionIdsRef.current.has(sessionId)) return false;
+    terminatingSessionIdsRef.current.add(sessionId);
+    setTerminatingSessionIds((current) => new Set(current).add(sessionId));
+    try {
+      if (isDesktop()) {
+        const session = useAppStore.getState().terminalSessions.find((item) => item.id === sessionId);
+        if (!session?.conversationId) return false;
+        setStatusMessage("");
+        try {
+          const removed = session.status === "exited"
+            ? await ptyAckExit(sessionId, session.conversationId)
+            : await ptyKill(sessionId, session.conversationId);
+          if (!removed) {
+            setStatusMessage("无法删除终端，因为该会话已不属于当前对话。");
+            await refreshSessionsRef.current();
+            return false;
+          }
+          delete outputBufferRef.current[sessionId];
+          delete outputCursorRef.current[sessionId];
+          hydratedSnapshotRef.current.delete(sessionId);
+          useAppStore.getState().removeTerminalSession(sessionId);
+          removeMirroredTerminal(sessionId, session.conversationId);
+          return true;
+        } catch (error) {
+          setStatusMessage(`停止终端失败：${String(error)}`);
+          return false;
+        }
+      }
+      const state = useAppStore.getState();
+      try {
+        const result = await sendClientCommandAwaitResult(
+          {
+            type: "terminal.kill",
+            session_id: sessionId,
+            conversation_id: state.conversationId || undefined,
+            workspace_root: state.workingDirectory || undefined,
+          },
+          "terminal.kill",
+        );
+        if (!commandResultSucceeded(result)) {
+          setStatusMessage(result.message || "停止终端失败。");
+          return false;
+        }
+        return true;
+      } catch (error) {
+        setStatusMessage(`停止终端失败：${String(error)}`);
+        return false;
+      }
+    } finally {
+      terminatingSessionIdsRef.current.delete(sessionId);
+      setTerminatingSessionIds((current) => {
+        const next = new Set(current);
+        next.delete(sessionId);
+        return next;
+      });
     }
   };
 
   const restartSession = async (sessionId: string) => {
-    killSession(sessionId);
-    await createSession();
+    if (!isDesktop()) {
+      setStatusMessage("");
+      try {
+        const result = await sendClientCommandAwaitResult(
+          {
+            type: "terminal.restart",
+            session_id: sessionId,
+            conversation_id: useAppStore.getState().conversationId || undefined,
+            workspace_root: useAppStore.getState().workingDirectory || undefined,
+          },
+          "terminal.restart",
+        );
+        if (!commandResultSucceeded(result)) {
+          setStatusMessage(result.message || "重新启动终端失败。");
+          return;
+        }
+        delete outputBufferRef.current[sessionId];
+        delete outputCursorRef.current[sessionId];
+        hydratedSnapshotRef.current.delete(sessionId);
+      } catch (error) {
+        setStatusMessage(`重新启动终端失败：${String(error)}`);
+      }
+      return;
+    }
+    const session = useAppStore.getState().terminalSessions.find((item) => item.id === sessionId);
+    if (!session?.conversationId) return;
+    setStatusMessage("");
+    const replacement = await ptyRestart(sessionId, session.conversationId);
+    if (!replacement) {
+      setStatusMessage("重新启动终端失败。请新建终端后继续。");
+      return;
+    }
+    delete outputBufferRef.current[sessionId];
+    delete outputCursorRef.current[sessionId];
+    hydratedSnapshotRef.current.delete(sessionId);
+    removeMirroredTerminal(sessionId, session.conversationId);
+    const terminalSession: TerminalSessionInfo = {
+      id: replacement.sessionId,
+      conversationId: replacement.conversationId,
+      pid: replacement.pid,
+      shell: replacement.shell,
+      cwd: replacement.cwd,
+      status: "running",
+      createdAt: Date.now(),
+      terminalMode: "pty",
+    };
+    mirrorTerminalCreated(terminalSession);
+    const store = useAppStore.getState();
+    store.removeTerminalSession(sessionId);
+    if (store.conversationId !== session.conversationId) return;
+    store.upsertTerminalSession(terminalSession);
+    store.setActiveTerminalSession(terminalSession.id);
   };
 
   const appendOutput = (sessionId: string, data: string, startCursor?: number, endCursor?: number) => {
@@ -627,7 +823,13 @@ export const TerminalPanel = () => {
       return;
     }
     appendOutput("web-fallback", "\r\n");
-    sendClientCommand({ type: "terminal.exec", command: trimmed, cwd: workingDirectory || undefined });
+    sendClientCommand({
+      type: "terminal.exec",
+      command: trimmed,
+      cwd: workingDirectory || undefined,
+      conversation_id: conversationId || undefined,
+      workspace_root: workingDirectory || undefined,
+    });
   };
 
   const writeWebFallbackInput = (input: string) => {
@@ -668,8 +870,8 @@ export const TerminalPanel = () => {
       }
       const message = statusMessage || (
         isDesktop()
-          ? (booting || autoCreating ? "Starting terminal..." : "No terminal session. Click + to start one.")
-          : "Command Runner ready. Type a command and press Enter."
+          ? (booting || autoCreating ? "正在启动终端..." : "暂无终端会话，点击 + 新建。")
+          : "命令运行器已就绪。输入命令后按 Enter。"
       );
       term.writeln(message);
       if (!isDesktop()) term.write("$ ");
@@ -703,14 +905,20 @@ export const TerminalPanel = () => {
   const writeToSession = (sessionId: string, data: string) => {
     const session = useAppStore.getState().terminalSessions.find((item) => item.id === sessionId);
     if (!session || session.status === "exited") {
-      appendOutput("web-fallback", statusMessage ? "" : "\r\nTerminal session is not running. Switching to Command Runner.\r\n$ ");
+      appendOutput("web-fallback", statusMessage ? "" : "\r\n终端会话未运行，已切换到命令运行器。\r\n$ ");
       activeRef.current = null;
       useAppStore.getState().setActiveTerminalSession(null);
       writeWebFallbackInput(data);
       return;
     }
     if (isDesktop()) void ptyWrite(sessionId, data, session.conversationId);
-    else sendClientCommand({ type: "terminal.input", session_id: sessionId, data });
+    else sendClientCommand({
+      type: "terminal.input",
+      session_id: sessionId,
+      data,
+      conversation_id: session.conversationId,
+      workspace_root: useAppStore.getState().workingDirectory || undefined,
+    });
   };
 
   const safeFit = () => {
@@ -725,7 +933,17 @@ export const TerminalPanel = () => {
     if (isDesktop()) {
       const session = useAppStore.getState().terminalSessions.find((item) => item.id === sessionId);
       if (session?.conversationId) void ptyResize(sessionId, cols, rows, session.conversationId);
-    } else sendClientCommand({ type: "terminal.resize", session_id: sessionId, cols, rows });
+    } else {
+      const state = useAppStore.getState();
+      sendClientCommand({
+        type: "terminal.resize",
+        session_id: sessionId,
+        cols,
+        rows,
+        conversation_id: state.conversationId || undefined,
+        workspace_root: state.workingDirectory || undefined,
+      });
+    }
   };
 
   const copyTerminalSelection = async (term = termRef.current) => {
@@ -734,6 +952,75 @@ export const TerminalPanel = () => {
     await navigator.clipboard?.writeText(text);
     term?.clearSelection?.();
     term?.focus?.();
+  };
+
+  const clearActiveTerminal = async () => {
+    const state = useAppStore.getState();
+    const sessionId = state.activeTerminalSessionId;
+    const session = state.terminalSessions.find((item) => item.id === sessionId);
+    if (!sessionId || !session) {
+      outputBufferRef.current["web-fallback"] = "$ ";
+      webLineRef.current = "";
+      termRef.current?.clear();
+      termRef.current?.write("$ ");
+      termRef.current?.focus?.();
+      return;
+    }
+
+    setStatusMessage("");
+    if (isDesktop()) {
+      const result = await ptyClear(session.id, session.conversationId);
+      if (!result.cleared) {
+        setStatusMessage("无法清空终端，因为该会话已不属于当前对话。");
+        await refreshSessionsRef.current();
+        return;
+      }
+      outputCursorRef.current[session.id] = result.outputCursor;
+      // Keep the backend's reconnectable mirror consistent with the Electron
+      // PTY. A disconnected backend does not invalidate the local clear.
+      sendClientCommand(
+        {
+          type: "terminal.clear",
+          session_id: session.id,
+          conversation_id: session.conversationId,
+          workspace_root: state.workingDirectory || undefined,
+        },
+        { silent: true },
+      );
+    } else {
+      const result = await sendClientCommandAwaitResult(
+        {
+          type: "terminal.clear",
+          session_id: session.id,
+          conversation_id: session.conversationId,
+          workspace_root: state.workingDirectory || undefined,
+        },
+        "terminal.clear",
+      );
+      if (!commandResultSucceeded(result)) {
+        setStatusMessage(result.message || "清空终端失败。");
+        return;
+      }
+    }
+
+    outputBufferRef.current[session.id] = "";
+    hydratedSnapshotRef.current.delete(session.id);
+    state.upsertTerminalSnapshot({
+      id: session.id,
+      conversationId: session.conversationId,
+      pid: session.pid,
+      shell: session.shell,
+      cwd: session.cwd,
+      status: session.status,
+      terminalMode: session.terminalMode,
+      output: "",
+      outputChars: 0,
+      totalOutputChars: 0,
+      truncated: false,
+      capturedAt: Date.now(),
+    });
+    termRef.current?.clear();
+    termRef.current?.focus?.();
   };
 
   return (
@@ -757,18 +1044,84 @@ export const TerminalPanel = () => {
           onClick={() => void createSession()}
           className="w-6 h-6 inline-flex items-center justify-center border-0 bg-transparent cursor-pointer p-0"
           style={{ color: "var(--text-primary)", borderRadius: "var(--radius-sm, 6px)" }}
-          title="New terminal"
-          aria-label="New terminal"
+          title="新建终端"
+          aria-label="新建终端"
         >
           <Plus size={14} />
         </button>
+        {terminalSessions.length > 0 && (
+          <div
+            role="tablist"
+            aria-label="终端会话"
+            className="flex flex-1 items-center gap-0.5 min-w-0 overflow-x-auto"
+            style={{ scrollbarWidth: "thin" }}
+          >
+            {terminalSessions.map((session, index) => {
+              const selected = session.id === activeTerminalSessionId;
+              const label = terminalSessionLabel(session, index, terminalSessions.length);
+              return (
+                <div
+                  key={session.id}
+                  role="presentation"
+                  onMouseDown={(event) => event.stopPropagation()}
+                  className="group h-7 inline-flex items-center border-0 whitespace-nowrap"
+                  style={{
+                    borderRadius: "var(--radius-sm, 4px)",
+                    background: selected ? "var(--surface-raised)" : "transparent",
+                    boxShadow: selected ? "inset 0 -2px 0 var(--accent-primary)" : "none",
+                  }}
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={selected}
+                    title={`${label} - ${terminalStatusLabel(session.status)}`}
+                    onClick={() => useAppStore.getState().setActiveTerminalSession(session.id)}
+                    className="h-7 pl-2 pr-1 inline-flex items-center gap-1.5 border-0 bg-transparent cursor-pointer whitespace-nowrap"
+                    style={{
+                      color: selected ? "var(--text-primary)" : "var(--text-muted)",
+                      fontSize: "var(--text-xs)",
+                    }}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="w-1.5 h-1.5 rounded-full shrink-0"
+                      style={{
+                        background: session.status === "exited" ? "var(--text-muted)" : "var(--state-success)",
+                      }}
+                    />
+                    <span>{label}</span>
+                  </button>
+                  <button
+                    type="button"
+                    title={`删除终端 ${label}`}
+                    aria-label={`删除终端 ${label}`}
+                    disabled={terminatingSessionIds.has(session.id)}
+                    aria-busy={terminatingSessionIds.has(session.id)}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void killSession(session.id);
+                    }}
+                    className={`mr-0.5 w-5 h-5 inline-flex items-center justify-center border-0 bg-transparent cursor-pointer transition-opacity ${selected ? "opacity-100" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"}`}
+                    style={{
+                      color: "var(--text-muted)",
+                      borderRadius: "var(--radius-sm, 4px)",
+                    }}
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
         {liveUrl && (
           <button
             type="button"
-            title={`Open ${liveUrl} in Preview Pane`}
-            aria-label={`Open ${liveUrl} in Preview Pane`}
+            title={`在预览面板中打开 ${liveUrl}`}
+            aria-label={`在预览面板中打开 ${liveUrl}`}
             onClick={() => {
-              openWebInPreview(liveUrl);
+              openWebInBrowser(liveUrl);
             }}
             className="inline-flex items-center gap-1.5 max-w-52 h-7 px-2 cursor-pointer"
             style={{
@@ -787,21 +1140,21 @@ export const TerminalPanel = () => {
             <ExternalLink size={14} />
           </button>
         )}
-        <IconButton label="Refresh terminal list" onClick={() => void refreshSessions()}>
+        <IconButton label="刷新终端列表" onClick={() => void refreshSessions()}>
           <RotateCcw size={14} />
         </IconButton>
-        <IconButton label="Copy selected terminal text" onClick={() => void copyTerminalSelection()}>
+        <IconButton label="复制选中的终端文本" onClick={() => void copyTerminalSelection()}>
           <Copy size={14} />
         </IconButton>
-        <IconButton label="Clear terminal" onClick={() => termRef.current?.clear()}>
+        <IconButton label="清空终端" onClick={() => void clearActiveTerminal()}>
           <Square size={14} />
         </IconButton>
-        {activeSession && (
+        {activeSession?.status === "exited" && (
           <IconButton
-            label={activeSession.status === "exited" ? "Restart terminal" : "Kill terminal"}
-            onClick={() => activeSession.status === "exited" ? void restartSession(activeSession.id) : killSession(activeSession.id)}
+            label="重新启动终端"
+            onClick={() => void restartSession(activeSession.id)}
           >
-            {activeSession.status === "exited" ? <RotateCcw size={14} /> : <Trash2 size={14} />}
+            <RotateCcw size={14} />
           </IconButton>
         )}
       </div>
@@ -809,7 +1162,7 @@ export const TerminalPanel = () => {
         ref={containerRef}
         className="flex-1 w-full min-h-0 p-0.5 overflow-hidden"
         style={{
-          background: terminalTheme(themeMode === "light" || document.documentElement.getAttribute("data-theme") === "light").background,
+          background: terminalTheme(resolvedTheme === "light").background,
           border: "1px solid var(--border-subtle)",
           borderRadius: "var(--radius-sm, 4px)",
         }}

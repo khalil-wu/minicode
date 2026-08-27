@@ -14,8 +14,21 @@ _DEFAULT_SAVED_MS: dict[str, int] = {
     "list_files.result": 12,
     "grep_files.search": 120,
     "glob_files.search": 45,
-    "provider.prompt": 300,
 }
+
+# Prompt-cache reads skip prefill, so the saving scales with how many tokens the
+# provider served from cache. A flat per-request constant reported the same
+# saving for a 64-token and a 64k-token hit, which made the inspector's
+# aggregate "saved" figure track iteration count instead of cache benefit.
+# 25k tokens/s is an order-of-magnitude prefill rate, not a measurement.
+_PROMPT_CACHE_TOKENS_PER_MS = 25
+
+
+def prompt_cache_saved_ms(cache_read_tokens: int) -> int:
+    tokens = max(0, int(cache_read_tokens or 0))
+    if tokens == 0:
+        return 0
+    return max(1, round(tokens / _PROMPT_CACHE_TOKENS_PER_MS))
 
 
 def args_signature(value: Any) -> str:
@@ -77,7 +90,7 @@ async def emit_cache_metric(context: ToolExecutionContext | None, **kwargs: Any)
         return
     event = cache_metric_event(
         run_id=str(getattr(context, "task_id", "") or (context.metadata or {}).get("run_id", "")),
-        turn_id=str((context.metadata or {}).get("turn_id") or (context.metadata or {}).get("assistant_message_id") or ""),
+        turn_id=str((context.metadata or {}).get("run_id") or (context.metadata or {}).get("turn_id") or ""),
         **kwargs,
     )
     await emit(event.type, dict(event.data))

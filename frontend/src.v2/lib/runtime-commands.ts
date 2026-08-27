@@ -1,5 +1,6 @@
 import type { ClientCommand } from "../protocol/events";
 import type { ChatMessage, FileContextRef, SkillContextRef, SkillInfo, SlashCommand } from "../stores/types";
+import { workspaceFilePathsEqual } from "./workspace-path";
 
 type SendClientCommand = (command: ClientCommand) => boolean | void;
 
@@ -14,8 +15,9 @@ type SendUserMessage = (content: string) => Promise<boolean>;
 export type RuntimeCommandState = {
   conversationId?: string | null;
   agentMode?: "build" | "plan" | "review" | "explore";
-  permissionMode?: "ask_permissions" | "plan" | "auto" | "bypass";
+  permissionMode?: "confirm" | "plan" | "auto" | "bypass";
   availableSkills?: SkillInfo[];
+  workingDirectory?: string;
   slashCommands?: SlashCommand[];
   skillsMarketplaceOpen?: boolean;
   automationsOpen?: boolean;
@@ -28,7 +30,7 @@ export type RuntimeCommandState = {
   ) => void;
   toggleSkillsMarketplace?: () => void;
   setAgentMode?: (mode: "build" | "plan" | "review" | "explore") => void;
-  setPermissionMode?: (mode: "ask_permissions" | "plan" | "auto" | "bypass") => void;
+  setPermissionMode?: (mode: "confirm" | "plan" | "auto" | "bypass") => void;
   upsertSystemMessage?: (
     id: string,
     content: string,
@@ -69,12 +71,13 @@ export type RuntimeSlashPaletteItem = RuntimeSlashMenuItem & {
   commandLine: string;
 };
 
-export type RuntimeSlashMenuSelectionState = Pick<RuntimeCommandState, "availableSkills"> & {
+export type RuntimeSlashMenuSelectionState = Pick<RuntimeCommandState, "availableSkills" | "workingDirectory"> & {
   slashCommands?: SlashCommand[];
 };
 
 export type RuntimeSlashMenuSelection =
   | { kind: "close" }
+  | { kind: "skill_picker" }
   | { kind: "skill"; skill: Omit<SkillContextRef, "kind"> }
   | { kind: "tokenize"; command: string }
   | { kind: "execute"; commandLine: string };
@@ -87,10 +90,25 @@ export type RuntimeSlashPanelDraftDeps = {
   sendClientCommand: SendClientCommand;
 };
 
+// MiniCode recursively exposes nested command files with colon-separated
+// names (for example commands/review/security.md -> /review:security). Keep
+// every Composer stage on this same token grammar; dots are valid in
+// file-backed command names as well.
+
 const result = (sent: boolean, reset: RuntimeSlashCommandResult["reset"]): RuntimeSlashCommandResult => ({
   sent,
   reset,
 });
+
+const commandProvenanceLabel = (command: SlashCommand): string => {
+  const source = String(command.source || "").trim().toLowerCase();
+  if (!source || source === "builtin") return "";
+  if (source === "extension") return "MiniCode extension";
+  if (source === "project") return "Project command";
+  if (source === "personal" || source === "user") return "Personal command";
+  if (source === "managed") return "Managed command";
+  return `${command.source} command`;
+};
 
 export const buildRuntimeSlashMenuItems = (slashCommands: SlashCommand[]): RuntimeSlashMenuItem[] => {
   const seen = new Set<string>();
@@ -98,10 +116,19 @@ export const buildRuntimeSlashMenuItems = (slashCommands: SlashCommand[]): Runti
     const name = command.label?.startsWith("/") ? command.label : `/${command.command}`;
     if (seen.has(name)) return [];
     seen.add(name);
+    const provenance = commandProvenanceLabel(command);
+    const availabilityReason = String(command.availability?.reason || "").trim();
     return [{
       name,
-      description: command.description || "",
+      description: [command.description, provenance, availabilityReason].filter(Boolean).join(" · "),
       section: "Commands" as const,
+      keywords: [
+        command.source,
+        command.kind,
+        command.availability?.scope,
+        command.extensionPath,
+        command.sourcePath,
+      ].filter((value): value is string => Boolean(value)),
     }];
   });
 };
@@ -116,7 +143,7 @@ export const buildRuntimeSlashArgMenuItems = (
   slashFilter: string,
   slashCommands: SlashCommand[],
 ): RuntimeSlashMenuItem[] | null => {
-  const match = slashFilter.match(/^\/([a-z][\w-]*)(\s+(\S*))?$/i);
+  const match = slashFilter.match(/^\/([a-z0-9][a-z0-9._:-]*)(\s+(\S*))?$/i);
   if (!match) return null;
   const commandName = match[1].toLowerCase();
   const hasSpace = match[2] !== undefined;
@@ -166,7 +193,7 @@ export const buildRuntimeSlashPaletteItems = (
 };
 
 export const parseRuntimeSlashInput = (content: string): ParsedRuntimeSlashInput | null => {
-  const slashMatch = content.trim().match(/^(\/[a-z][\w-]*)(?:\s+(.*))?$/is);
+  const slashMatch = content.trim().match(/^(\/[a-z0-9][a-z0-9._:-]*)(?:\s+(.*))?$/is);
   if (!slashMatch) return null;
 
   const command = slashMatch[1].toLowerCase();
@@ -189,7 +216,7 @@ export const parseRuntimeSlashInput = (content: string): ParsedRuntimeSlashInput
 
 export const isRuntimeSlashCommandInput = (content: string): boolean => {
   if (!content.startsWith("/") || content.startsWith("//")) return false;
-  return /^\/[a-z][\w-]*(?:\s+.*)?$/i.test(content.trimEnd());
+  return /^\/[a-z0-9][a-z0-9._:-]*(?:\s+.*)?$/i.test(content.trimEnd());
 };
 
 export const getRuntimeSlashCommandLine = (value: string): string | null => {
@@ -204,7 +231,7 @@ export const getRuntimeSlashCommandLine = (value: string): string | null => {
 export const getActiveRuntimeSlashCommand = (value: string): string | null => {
   const line = getRuntimeSlashCommandLine(value);
   if (!line || line === "/") return null;
-  return line.match(/^(\/[a-z][\w-]*)/i)?.[1] ?? null;
+  return line.match(/^(\/[a-z0-9][a-z0-9._:-]*)/i)?.[1] ?? null;
 };
 
 export const shouldTokenizeRuntimeSlashCommand = (
@@ -220,7 +247,7 @@ export const shouldTokenizeRuntimeSlashCommand = (
   return match?.type === "template";
 };
 
-const isSkillsSlashLine = (commandLine: string): boolean => /^\/skills(?:\s|$)/i.test(commandLine);
+const isSkillsSlashLine = (commandLine: string): boolean => /^\/skills?(?:\s|$)/i.test(commandLine);
 
 export const syncRuntimeSlashPanelForDraft = (
   value: string,
@@ -261,13 +288,17 @@ export const resolveRuntimeSlashMenuSelection = (
 ): RuntimeSlashMenuSelection => {
   if (!value) return { kind: "close" };
 
+  if (/^\/skill$/i.test(value.trim())) return { kind: "skill_picker" };
+
   const encodedSkillPath = value.match(/^skill-path:(.+)$/)?.[1];
   const encodedSkillName = value.match(/^skill-name:(.+)$/)?.[1];
   if (encodedSkillPath || encodedSkillName) {
     const skillPath = encodedSkillPath ? decodeURIComponent(encodedSkillPath) : "";
     const skillName = encodedSkillName ? decodeURIComponent(encodedSkillName) : "";
     const selected = (state.availableSkills ?? []).find((skill) => (
-      skillPath ? skill.path === skillPath : skill.name === skillName
+      skillPath
+        ? workspaceFilePathsEqual(skill.path, skillPath, state.workingDirectory)
+        : skill.name === skillName
     ));
     if (selected) {
       return {
@@ -282,7 +313,7 @@ export const resolveRuntimeSlashMenuSelection = (
     }
   }
 
-  const command = value.match(/^(\/[a-z][\w-]*)/i)?.[1] ?? value;
+  const command = value.match(/^(\/[a-z0-9][a-z0-9._:-]*)/i)?.[1] ?? value;
   const commandName = command.replace(/^\//, "").toLowerCase();
   const skill = findExactRuntimeSkill(state.availableSkills, commandName);
   if (skill) {
@@ -308,7 +339,7 @@ export const executeRuntimeSlashCommand = async (
   commandLine: string,
   deps: RuntimeSlashCommandDeps,
 ): Promise<RuntimeSlashCommandResult> => {
-  const command = commandLine.match(/^(\/[a-z][\w-]*)/i)?.[1] ?? commandLine;
+  const command = commandLine.match(/^(\/[a-z0-9][a-z0-9._:-]*)/i)?.[1] ?? commandLine;
   const isTemplate = shouldTokenizeRuntimeSlashCommand(
     command,
     deps.getState().slashCommands ?? [],

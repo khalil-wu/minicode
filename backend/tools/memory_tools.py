@@ -1,42 +1,23 @@
-"""
-记忆操作工具（DESIGN.md §2.2 + §4.3 + §8.2）。
-
-让 Agent 可以读写文件记忆。
-
-工具：
-  read_memory(filename)   — 读取具体记忆文件
-  save_memory(filename, content) — 写入/更新记忆文件
-
-The legacy vector-memory tools below are retained only for explicit opt-in
-compatibility. The default registry does not expose them.
-"""
+"""MiniCode project memory management tools."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import asyncio
+import json
+from typing import TYPE_CHECKING, Any, Callable
+
+from filelock import Timeout as FileLockTimeout
 
 from backend.memory.file_memory import FileMemory
+from backend.memory.local_backend import LocalMemoryBackend, MemoryBackendError
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 
 if TYPE_CHECKING:
     from backend.permissions.context import ToolExecutionContext
 
 
-class ReadMemoryTool(BaseTool):
-    """读取记忆文件。"""
-
-    name = "read_memory"
+class _MemoryTool(BaseTool):
     result_kind = "memory"
-    activity_kind = "fileRead"
-    display_label = "Read memory"
-    read_only = True
-    description = (
-        "Read a persistent memory file that stores user preferences, project context, or feedback across sessions. "
-        "Available files: user_profile.md (user preferences, language, style), "
-        "project_context.md (project goals, tech stack, constraints), "
-        "feedback.md (corrections and confirmed approaches), reference.md (external resources). "
-        "Use this at the start of a session to recall context, or when the user references prior work."
-    )
     permission = PermissionLevel.AUTO
 
     def __init__(self, memory: FileMemory) -> None:
@@ -46,69 +27,201 @@ class ReadMemoryTool(BaseTool):
         workspace_root = getattr(context, "workspace_root", None) if context else None
         return FileMemory.for_workspace(workspace_root) if workspace_root else self._memory
 
+    def _execute_backend_sync(
+        self,
+        context: ToolExecutionContext | None,
+        operation: Callable[[LocalMemoryBackend], dict[str, Any]],
+        *,
+        lock: bool = False,
+    ) -> ToolResult:
+        memory = self._memory_for(context)
+        try:
+            if lock:
+                with memory.reset_lock.acquire(timeout=5.0):
+                    payload = operation(LocalMemoryBackend(memory.memory_dir))
+            else:
+                payload = operation(LocalMemoryBackend(memory.memory_dir))
+        except (MemoryBackendError, ValueError, TypeError) as exc:
+            return self._error_result(str(exc))
+        except FileLockTimeout:
+            return self._error_result("timed out waiting for the memory workspace lock")
+        except OSError as exc:
+            return self._error_result(f"I/O error while reading memories: {exc}")
+        return self._success_result(json.dumps(payload, ensure_ascii=False))
+
+    async def _execute_backend(
+        self,
+        context: ToolExecutionContext | None,
+        operation: Callable[[LocalMemoryBackend], dict[str, Any]],
+        *,
+        lock: bool = False,
+    ) -> ToolResult:
+        """Run file-backed memory I/O off the shared agent event loop.
+
+        MiniCode's memory tools are ordinary asynchronous tool executions.  The
+        local implementation may construct a ``FileLock`` and walk/read a
+        project tree, so keeping that work in the coroutine would stall every
+        WebSocket conversation while another process holds the reset lock.
+        """
+        return await asyncio.to_thread(
+            self._execute_backend_sync,
+            context,
+            operation,
+            lock=lock,
+        )
+
+
+class MemoryListTool(_MemoryTool):
+    name = "memory_list"
+    display_label = "List memories"
+    activity_kind = "fileRead"
+    read_only = True
+    description = "List immediate files and directories under a path in the MiniCode memories store."
+
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
             name=self.name,
             description=self.description,
             parameters={
                 "type": "object",
-                "required": ["filename"],
+                "additionalProperties": False,
                 "properties": {
-                    "filename": {
-                        "type": "string",
-                        "description": (
-                            "记忆文件名（如 user_profile.md、project_context.md、"
-                            "feedback.md、reference.md）"
-                        ),
-                    },
+                    "path": {"type": "string"},
+                    "cursor": {"type": "string"},
+                    "max_results": {"type": "integer", "minimum": 1},
                 },
             },
         )
+
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
-        filename = args.get("filename", "")
-        if not filename:
-            return self._error_result("缺少 filename 参数")
-
-        memory = self._memory_for(context)
-        content = memory.read_file(filename)
-        if content is None:
-            available = ", ".join(memory.list_files())
-            return self._error_result(
-                f"记忆文件 '{filename}' 不存在。可用文件: {available}"
-            )
-
-        return self._success_result(content=content)
+        return await self._execute_backend(
+            context,
+            lambda backend: backend.list(
+                path=args.get("path"),
+                cursor=args.get("cursor"),
+                max_results=args.get("max_results"),
+            ),
+        )
 
 
-class SaveMemoryTool(BaseTool):
-    """写入/更新记忆文件。"""
+class MemoryReadTool(_MemoryTool):
+    name = "memory_read"
+    display_label = "Read memory"
+    activity_kind = "fileRead"
+    read_only = True
+    description = (
+        "Read a MiniCode memory file by relative path, optionally starting at a "
+        "1-indexed line offset and limiting the number of lines returned."
+    )
 
-    name = "save_memory"
-    result_kind = "memory"
+    def get_schema(self) -> ToolSchema:
+        return ToolSchema(
+            name=self.name,
+            description=self.description,
+            parameters={
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["path"],
+                "properties": {
+                    "path": {"type": "string"},
+                    "line_offset": {"type": "integer", "minimum": 1},
+                    "max_lines": {"type": "integer", "minimum": 1},
+                },
+            },
+        )
+
+    async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
+        path = args.get("path")
+        if not isinstance(path, str):
+            return self._error_result("path is required")
+        return await self._execute_backend(
+            context,
+            lambda backend: backend.read(
+                path=path,
+                line_offset=args.get("line_offset", 1),
+                max_lines=args.get("max_lines"),
+            ),
+        )
+
+
+class MemorySearchTool(_MemoryTool):
+    name = "memory_search"
+    display_label = "Search memories"
+    activity_kind = "search"
+    read_only = True
+    description = (
+        "Search MiniCode memory files for substring matches, optionally normalizing "
+        "separators or requiring all query substrings on the same line or within a line window."
+    )
+
+    def get_schema(self) -> ToolSchema:
+        match_mode = {
+            "oneOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["type"],
+                    "properties": {"type": {"type": "string", "enum": ["any", "all_on_same_line"]}},
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["type", "line_count"],
+                    "properties": {
+                        "type": {"type": "string", "enum": ["all_within_lines"]},
+                        "line_count": {"type": "integer", "minimum": 1},
+                    },
+                },
+            ]
+        }
+        return ToolSchema(
+            name=self.name,
+            description=self.description,
+            parameters={
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["queries"],
+                "properties": {
+                    "queries": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+                    "match_mode": match_mode,
+                    "path": {"type": "string"},
+                    "cursor": {"type": "string"},
+                    "context_lines": {"type": "integer", "minimum": 0},
+                    "case_sensitive": {"type": "boolean"},
+                    "normalized": {"type": "boolean"},
+                    "max_results": {"type": "integer", "minimum": 1},
+                },
+            },
+        )
+
+    async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
+        queries = args.get("queries")
+        if not isinstance(queries, list):
+            return self._error_result("queries is required")
+        return await self._execute_backend(
+            context,
+            lambda backend: backend.search(
+                queries=queries,
+                match_mode=args.get("match_mode"),
+                path=args.get("path"),
+                cursor=args.get("cursor"),
+                context_lines=args.get("context_lines", 0),
+                case_sensitive=args.get("case_sensitive", True),
+                normalized=args.get("normalized", False),
+                max_results=args.get("max_results"),
+            ),
+        )
+
+
+class MemoryAddAdHocNoteTool(_MemoryTool):
+    name = "memory_add_ad_hoc_note"
+    display_label = "Add memory note"
     activity_kind = "fileChange"
-    display_label = "Save memory"
     mutates_external_state = True
     description = (
-        "Write or update a persistent memory file for cross-session recall. "
-        "Use this when the user provides explicit preferences (coding style, language, frameworks), "
-        "project context (goals, tech stack, constraints), or corrections to your behavior. "
-        "Files persist across sessions. Use sparingly — only save what the user explicitly states or corrects.\n\n"
-        "RULES:\n"
-        "- Do NOT store what the live workspace already records: code structure, file paths, "
-        "current function signatures, git history, past fixes — these are derivable and go stale.\n"
-        "- Convert relative dates to absolute (\"next Thursday\" → the actual date) so the memory "
-        "stays meaningful later.\n"
-        "- Keep it to the four kinds of durable memory: user profile, project context, "
-        "behavior feedback, and external references."
+        "Create one append-only ad-hoc memory note after the user explicitly asks "
+        "MiniCode to remember, forget, or update something."
     )
-    permission = PermissionLevel.CONFIRM  # 写操作需确认
-
-    def __init__(self, memory: FileMemory) -> None:
-        self._memory = memory
-
-    def _memory_for(self, context: ToolExecutionContext | None) -> FileMemory:
-        workspace_root = getattr(context, "workspace_root", None) if context else None
-        return FileMemory.for_workspace(workspace_root) if workspace_root else self._memory
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -116,40 +229,35 @@ class SaveMemoryTool(BaseTool):
             description=self.description,
             parameters={
                 "type": "object",
-                "required": ["filename", "content"],
+                "additionalProperties": False,
+                "required": ["filename", "note"],
                 "properties": {
                     "filename": {
                         "type": "string",
-                        "description": "记忆文件名（如 user_profile.md）",
+                        "minLength": 24,
+                        "maxLength": 128,
+                        "pattern": r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-[a-z0-9][a-z0-9-]{0,79}\.md$",
+                        "description": (
+                            "Name of the note file to create, in YYYY-MM-DDTHH-MM-SS-<slug>.md "
+                            "format. The slug must use only lowercase ASCII letters, digits, and hyphens."
+                        ),
                     },
-                    "content": {
+                    "note": {
                         "type": "string",
-                        "description": "要写入的完整内容",
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "简短描述（更新 MEMORY.md 索引用，≤80 字符）",
+                        "minLength": 1,
+                        "description": "Verbatim Markdown note to append to the ad-hoc memory notes.",
                     },
                 },
             },
         )
+
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
-        filename = args.get("filename", "")
-        content = args.get("content", "")
-        description = args.get("description", "")
-
-        if not filename or not content:
-            return self._error_result("缺少 filename 或 content 参数")
-
-        memory = self._memory_for(context)
-        success = memory.save_file(filename, content)
-        if not success:
-            return self._error_result(f"写入 '{filename}' 失败")
-
-        # 更新索引描述
-        if description:
-            memory.update_index_entry(filename, description)
-
-        return self._success_result(
-            content=f"已更新记忆文件 '{filename}'（{len(content)} 字符）"
+        filename = args.get("filename")
+        note = args.get("note")
+        if not isinstance(filename, str) or not isinstance(note, str):
+            return self._error_result("filename and note are required")
+        return await self._execute_backend(
+            context,
+            lambda backend: backend.add_ad_hoc_note(filename=filename, note=note),
+            lock=True,
         )

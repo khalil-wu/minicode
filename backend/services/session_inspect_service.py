@@ -151,17 +151,24 @@ def build_usage_inspect_result(
     )
 
     clean_conversation_id = str(conversation_id or "").strip()
-    scoped_budget_snapshot = dict(budget_snapshot)
-    if clean_conversation_id:
-        scoped_budget_snapshot["conversation_id"] = clean_conversation_id
-    budget_event = AgentEvent(type="budget_update", data=scoped_budget_snapshot)
+    raw_breakdown = budget_snapshot.get("breakdown")
+    breakdown = {
+        str(name): int(tokens or 0)
+        for name, tokens in raw_breakdown.items()
+    } if isinstance(raw_breakdown, dict) else {}
+    budget_event = AgentEvent.budget_update(
+        used=used,
+        total=total,
+        breakdown=breakdown,
+        conversation_id=clean_conversation_id,
+    )
 
-    context_usage: dict[str, Any] = {"used": used, "limit": total}
-    if clean_conversation_id:
-        context_usage["conversation_id"] = clean_conversation_id
-    if context_ledger:
-        context_usage["ledger"] = context_ledger
-    context_event = AgentEvent(type="context_usage", data=context_usage)
+    context_event = AgentEvent.context_usage(
+        used=used,
+        limit=total,
+        conversation_id=clean_conversation_id,
+        ledger=context_ledger,
+    )
 
     outcome = CommandOutcome(
         "usage",

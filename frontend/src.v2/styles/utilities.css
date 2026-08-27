@@ -122,7 +122,7 @@
 .cjk-copy,
 .md-prose {
   font-family: var(--font-prose);
-  font-weight: 400;
+  font-weight: var(--fw-regular);
   letter-spacing: 0;
   font-synthesis-weight: none;
   text-rendering: optimizeLegibility;
@@ -130,7 +130,7 @@
 
 .cjk-title {
   font-family: var(--font-cjk);
-  font-weight: 400;
+  font-weight: var(--fw-regular);
   letter-spacing: 0;
   line-height: var(--leading-snug);
   font-synthesis-weight: none;
@@ -139,7 +139,7 @@
 
 .md-prose .md-body {
   font-family: inherit;
-  font-weight: 400;
+  font-weight: var(--fw-regular);
   letter-spacing: 0;
 }
 
@@ -170,7 +170,7 @@
 }
 
 .md-prose strong {
-  font-weight: 600;
+  font-weight: var(--fw-semibold);
 }
 
 .md-prose .md-web-link {
@@ -179,7 +179,7 @@
   align-items: baseline;
   gap: 0.3em;
   color: var(--accent-primary);
-  font-weight: 500;
+  font-weight: var(--fw-medium);
   text-decoration: none;
   overflow-wrap: anywhere;
 }
@@ -232,13 +232,13 @@ html[data-theme="dark"] .md-prose .md-web-link-icon > img {
 
 .md-prose .md-inline-option {
   color: var(--text-primary);
-  font-weight: 500;
+  font-weight: var(--fw-medium);
 }
 
 .md-prose .md-inline-option-separator {
   margin: 0 0.5em;
   color: var(--text-muted);
-  font-weight: 400;
+  font-weight: var(--fw-regular);
 }
 
 .md-prose .md-inline-code-prose {
@@ -286,32 +286,59 @@ html[data-theme="dark"] .md-prose .md-web-link-icon > img {
   color: var(--md-file-type-fg);
   font-family: var(--font-ui);
   font-size: 9px;
-  font-weight: 700;
+  font-weight: var(--fw-bold);
   line-height: 1;
   letter-spacing: 0;
 }
 
 .md-prose .md-file-chip-label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.15em;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  line-height: 1.25;
+}
+
+/* File references are inline prose, not block badges. The icon and label
+   share the paragraph baseline so a generated .py/.docx reference does not
+   lift the following Chinese or Latin text onto a different visual line. */
+.md-prose .md-file-chip,
+.md-prose .md-file-chip + * {
+  vertical-align: baseline;
+}
+
+.md-prose .md-file-reference-wrap {
+  vertical-align: baseline;
+  line-height: inherit;
+}
+
+.md-prose .md-file-chip {
+  align-items: baseline !important;
+}
+
+.md-prose .md-official-file-icon {
+  height: 1.1em;
+  align-self: baseline;
+  vertical-align: baseline;
 }
 
 .md-prose .md-file-chip-directory {
   color: var(--text-muted);
-  font-weight: 400;
+  font-weight: var(--fw-regular);
 }
 
 .md-prose .md-file-chip-name {
   color: var(--md-file-chip-name);
-  font-weight: 600;
+  font-weight: var(--fw-semibold);
 }
 
 .md-prose .md-file-chip-meta {
   margin-left: 0.35em;
   color: var(--text-muted);
-  font-weight: 500;
+  font-weight: var(--fw-medium);
 }
 
 .md-prose .md-folder-chip {
@@ -338,10 +365,12 @@ html[data-theme="dark"] .md-prose .md-web-link-icon > img {
   --md-file-chip-accent: oklch(0.56 0.16 255);
 }
 
+/* JS/JSX 的 badge 底色偏亮（浅色主题蓝、暗色主题黄），白字读不出来，
+   故单独用深色前景；用 OKLCH 表达，与本文件其余色值同一色空间。 */
 .md-prose .md-file-chip[data-ext="js"],
 .md-prose .md-file-chip[data-ext="jsx"] {
   --md-file-chip-accent: oklch(0.64 0.15 255);
-  --md-file-type-fg: #292524;
+  --md-file-type-fg: oklch(0.25 0.008 60);
 }
 
 .md-prose .md-file-chip[data-ext="py"] {
@@ -379,7 +408,7 @@ html[data-theme="dark"] .md-prose .md-file-chip[data-ext="tsx"] {
 html[data-theme="dark"] .md-prose .md-file-chip[data-ext="js"],
 html[data-theme="dark"] .md-prose .md-file-chip[data-ext="jsx"] {
   --md-file-chip-accent: oklch(0.82 0.13 94);
-  --md-file-type-fg: #1c1917;
+  --md-file-type-fg: oklch(0.20 0.006 60);
 }
 
 html[data-theme="dark"] .md-prose .md-file-chip[data-ext="py"] {
@@ -516,7 +545,7 @@ html[data-theme="dark"] .md-prose .md-folder-chip {
   padding-bottom: 0.35em;
   border-bottom: 1px solid var(--border-subtle);
   font-size: 2em;
-  font-weight: 650;
+  font-weight: var(--fw-semibold);
 }
 
 .editor-markdown-preview h2 {
@@ -524,13 +553,13 @@ html[data-theme="dark"] .md-prose .md-folder-chip {
   padding-bottom: 0.28em;
   border-bottom: 1px solid color-mix(in oklch, var(--border-subtle) 75%, transparent);
   font-size: 1.5em;
-  font-weight: 650;
+  font-weight: var(--fw-semibold);
 }
 
 .editor-markdown-preview h3 {
   margin: 1.45em 0 0.65em;
   font-size: 1.22em;
-  font-weight: 650;
+  font-weight: var(--fw-semibold);
 }
 
 .editor-markdown-preview p,

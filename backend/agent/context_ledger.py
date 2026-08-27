@@ -15,9 +15,12 @@ ContextLedgerCategory = Literal[
 ]
 
 
-# Claude Code uses a fixed 2K-token estimate for native image and document
-# blocks when exact provider usage is not yet available. Keep the ledger on
-# that upstream contract instead of deriving tokens from base64 payload size.
+# Native image and document blocks are estimated at a fixed 2K tokens until
+# exact provider usage arrives. A fixed estimate is deliberate: deriving tokens
+# from base64 payload size tracks encoding overhead, not model cost.
+# Mechanism and constant taken from cc (services/compact/microCompact.ts:38
+# IMAGE_MAX_TOKEN_SIZE, which services/tokenEstimation.ts:404 also aligns to);
+# the ledger boundary and its accounting are MiniCode's own.
 NATIVE_ATTACHMENT_TOKEN_ESTIMATE = 2_000
 
 
@@ -44,7 +47,7 @@ def estimate_native_attachments(
     images: list[dict[str, str]] | None,
     documents: list[dict[str, str]] | None,
 ) -> tuple[int, int, list[str]]:
-    """Estimate native multimodal blocks using Claude Code's fixed contract."""
+    """Estimate native multimodal blocks using the fixed per-block contract."""
 
     tokens = 0
     count = 0

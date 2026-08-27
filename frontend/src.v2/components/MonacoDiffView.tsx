@@ -1,6 +1,6 @@
 import { lazy, Suspense, useRef, useEffect, useState, useMemo } from "react";
 import type React from "react";
-import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
+import EditorWorker from "monaco-editor/editor/editor.worker?worker";
 
 const MonacoDiffEditor = lazy(async () => {
   const scope = globalThis as typeof globalThis & { MonacoEnvironment?: { getWorker?: () => Worker } };
@@ -9,13 +9,13 @@ const MonacoDiffEditor = lazy(async () => {
   }
   const [reactMonaco, monaco] = await Promise.all([
     import("@monaco-editor/react"),
-    import("monaco-editor/esm/vs/editor/editor.api.js"),
-    import("monaco-editor/esm/vs/basic-languages/typescript/typescript.contribution.js"),
-    import("monaco-editor/esm/vs/basic-languages/javascript/javascript.contribution.js"),
-    import("monaco-editor/esm/vs/basic-languages/css/css.contribution.js"),
-    import("monaco-editor/esm/vs/basic-languages/html/html.contribution.js"),
-    import("monaco-editor/esm/vs/basic-languages/markdown/markdown.contribution.js"),
-    import("monaco-editor/esm/vs/basic-languages/python/python.contribution.js"),
+    import("monaco-editor/editor/editor.api.js"),
+    import("monaco-editor/languages/definitions/typescript/register.js"),
+    import("monaco-editor/languages/definitions/javascript/register.js"),
+    import("monaco-editor/languages/definitions/css/register.js"),
+    import("monaco-editor/languages/definitions/html/register.js"),
+    import("monaco-editor/languages/definitions/markdown/register.js"),
+    import("monaco-editor/languages/definitions/python/register.js"),
   ]);
   reactMonaco.loader?.config?.({ monaco });
   return { default: reactMonaco.DiffEditor };
@@ -110,7 +110,7 @@ export function MonacoDiffView({
   onAccept,
   onReject,
 }: MonacoDiffViewProps) {
-  const editorRef = useRef<any>(null);
+  const editorRef = useRef<import("monaco-editor").editor.IStandaloneDiffEditor | null>(null);
   const [theme, setTheme] = useState<"vs-dark" | "vs">("vs-dark");
 
   // Sync with app theme
@@ -152,7 +152,7 @@ export function MonacoDiffView({
   return (
     <div
       style={{
-        border: "1px solid var(--border-subtle, #333)",
+        border: "1px solid var(--border-subtle)",
         borderRadius: "6px",
         overflow: "hidden",
       }}
@@ -165,15 +165,15 @@ export function MonacoDiffView({
             alignItems: "center",
             justifyContent: "space-between",
             padding: "6px 12px",
-            background: "var(--surface-2, #252525)",
-            borderBottom: "1px solid var(--border-subtle, #333)",
+            background: "var(--surface-soft)",
+            borderBottom: "1px solid var(--border-subtle)",
           }}
         >
           <span
             style={{
               fontSize: "var(--text-xxs)",
-              color: "var(--text-secondary, #aaa)",
-              fontFamily: "monospace",
+              color: "var(--text-secondary)",
+              fontFamily: "var(--font-mono)",
             }}
           >
             {filePath}
@@ -181,13 +181,13 @@ export function MonacoDiffView({
           {(onAccept || onReject) && (
             <div style={{ display: "flex", gap: "8px" }}>
               {onReject && (
-                <button onClick={onReject} style={rejectBtnStyle}>
-                  Reject
+                <button type="button" onClick={onReject} style={rejectBtnStyle}>
+                  拒绝
                 </button>
               )}
               {onAccept && (
-                <button onClick={onAccept} style={acceptBtnStyle}>
-                  Accept
+                <button type="button" onClick={onAccept} style={acceptBtnStyle}>
+                  接受
                 </button>
               )}
             </div>
@@ -206,7 +206,7 @@ export function MonacoDiffView({
               color: "var(--text-muted)",
             }}
           >
-            Loading diff editor...
+            正在加载差异编辑器…
           </div>
         }
       >
@@ -228,7 +228,7 @@ export function MonacoDiffView({
             padding: { top: 8 },
             originalEditable: false,
           }}
-          onMount={(editor: any) => {
+          onMount={(editor: import("monaco-editor").editor.IStandaloneDiffEditor) => {
             editorRef.current = editor;
           }}
         />
@@ -239,20 +239,20 @@ export function MonacoDiffView({
 
 const acceptBtnStyle: React.CSSProperties = {
   padding: "3px 12px",
-  borderRadius: "4px",
+  borderRadius: "var(--radius-sm)",
   border: "none",
   cursor: "pointer",
-  background: "var(--accent-primary, #0d7c3e)",
-  color: "#fff",
+  background: "var(--accent-primary)",
+  color: "var(--text-on-accent)",
   fontSize: "var(--text-xxs)",
 };
 
 const rejectBtnStyle: React.CSSProperties = {
   padding: "3px 12px",
-  borderRadius: "4px",
-  border: "1px solid var(--border-soft, #555)",
+  borderRadius: "var(--radius-sm)",
+  border: "1px solid var(--border-soft)",
   cursor: "pointer",
   background: "transparent",
-  color: "var(--text-secondary, #aaa)",
+  color: "var(--text-secondary)",
   fontSize: "var(--text-xxs)",
 };

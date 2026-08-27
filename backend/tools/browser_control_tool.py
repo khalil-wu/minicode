@@ -5,12 +5,15 @@ import base64
 import json
 import os
 from ipaddress import ip_address
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import httpx
 
 from backend.permissions.context import ToolExecutionContext
+from backend.permissions.network import assess_network_url
 from backend.tools.base import (
     TOOL_SIDE_EFFECT_EXTERNAL,
     TOOL_SIDE_EFFECT_NONE,
@@ -24,6 +27,7 @@ from backend.tools.contracts import ToolSpec
 
 DEFAULT_CDP_ENDPOINT = "http://127.0.0.1:9222"
 LOOPBACK_HOSTNAMES = {"localhost", "127.0.0.1", "::1"}
+API_IMAGE_MAX_BASE64_SIZE = 5 * 1024 * 1024
 
 
 class BrowserControlTool(BaseTool):
@@ -178,10 +182,13 @@ class BrowserControlTool(BaseTool):
             if not raw_url:
                 return "Missing url for navigate"
             parsed = urlparse(raw_url)
-            if parsed.scheme not in {"http", "https"}:
+            # A workspace HTML target (``file://`` URL or a plain path) is a
+            # valid navigation request: ``execute`` serves it over loopback
+            # first. Only a genuinely unusable scheme is rejected here.
+            if parsed.scheme not in {"http", "https"} and not _is_workspace_html_target(raw_url):
                 return (
-                    "navigate url must use http or https. Serve a workspace HTML file first with "
-                    "preview_server(action='start', path='<file>.html')."
+                    "navigate url must use http or https, or name a workspace HTML file "
+                    "(that file is served over loopback automatically)."
                 )
         elif action == "click":
             selector = str(payload.get("selector") or "").strip()
@@ -236,6 +243,21 @@ class BrowserControlTool(BaseTool):
             return self._error_result(validation)
 
         action = str(args.get("action") or "").strip().lower()
+        if action == "navigate":
+            # A workspace HTML file (or a file:// URL pointing at one) is a
+            # legitimate navigation intent, not a policy violation. Serve it
+            # over the owned loopback preview and continue with that URL so the
+            # model does not have to discover preview_server on its own.
+            resolved_url, resolve_error = await _resolved_navigation_url(
+                str(args.get("url") or "").strip(),
+                context,
+            )
+            if resolve_error:
+                return self._error_result(resolve_error)
+            args = {**args, "url": resolved_url}
+            navigation_error = await _navigation_policy_error(resolved_url, context)
+            if navigation_error:
+                return self._error_result(navigation_error)
         endpoint = _normalize_endpoint(str(args.get("cdp_endpoint") or DEFAULT_CDP_ENDPOINT))
         try:
             embedded_endpoint = str(os.environ.get("MINICODE_EMBEDDED_BROWSER_ENDPOINT") or "").strip()
@@ -302,7 +324,11 @@ class BrowserControlTool(BaseTool):
         context: ToolExecutionContext | None,
     ) -> ToolResult:
         token = str(os.environ.get("MINICODE_EMBEDDED_BROWSER_TOKEN") or "")
+        conversation_id = str(getattr(context, "conversation_id", "") or "").strip()
+        if not conversation_id:
+            return self._error_result("Embedded browser commands require a conversation owner")
         payload = {key: value for key, value in args.items() if key != "cdp_endpoint"}
+        payload["conversation_id"] = conversation_id
         async with httpx.AsyncClient(timeout=None, follow_redirects=False, trust_env=False) as client:
             response = await client.post(
                 f"{endpoint.rstrip('/')}/v1/command",
@@ -328,6 +354,8 @@ class BrowserControlTool(BaseTool):
             data = str(result.get("data") or "")
             if not data:
                 return self._error_result("Embedded browser returned no screenshot data")
+            if len(data) > API_IMAGE_MAX_BASE64_SIZE:
+                return self._error_result("Embedded browser screenshot exceeds the 5 MiB API image limit")
             raw_size = len(base64.b64decode(data, validate=True))
             artifact_store = getattr(context, "artifact_store", None) if context else None
             artifact_id = artifact_store.save(
@@ -427,6 +455,8 @@ class BrowserControlTool(BaseTool):
         data = str((result or {}).get("data") or "")
         if not data:
             return self._error_result("CDP returned no screenshot data")
+        if len(data) > API_IMAGE_MAX_BASE64_SIZE:
+            return self._error_result("CDP screenshot exceeds the 5 MiB API image limit")
         try:
             raw_size = len(base64.b64decode(data, validate=True))
         except Exception:
@@ -468,23 +498,29 @@ class BrowserControlTool(BaseTool):
         return ToolResult(content="\n".join(lines), result_kind=self.result_kind, display_summary="Browser URL")
 
     async def _get_text(self, endpoint: str, args: dict[str, Any]) -> ToolResult:
-        value = await self._evaluate_readonly(endpoint, args, r"document.body ? document.body.innerText : ''")
+        max_chars = _max_chars(args, self._MAX_RESULT_CHARS)
+        value = await self._evaluate_readonly(
+            endpoint,
+            args,
+            f"String(document.body ? document.body.innerText : '').slice(0, {max_chars})",
+        )
         content = _stringify_value(value)
         return ToolResult(
-            content=truncate_tool_result(content, _max_chars(args, self._MAX_RESULT_CHARS)),
+            content=truncate_tool_result(content, max_chars),
             result_kind=self.result_kind,
             display_summary="Browser text",
         )
 
     async def _get_html(self, endpoint: str, args: dict[str, Any]) -> ToolResult:
+        max_chars = _max_chars(args, self._MAX_RESULT_CHARS)
         value = await self._evaluate_readonly(
             endpoint,
             args,
-            r"document.documentElement ? document.documentElement.outerHTML : ''",
+            f"String(document.documentElement ? document.documentElement.outerHTML : '').slice(0, {max_chars})",
         )
         content = _stringify_value(value)
         return ToolResult(
-            content=truncate_tool_result(content, _max_chars(args, self._MAX_RESULT_CHARS)),
+            content=truncate_tool_result(content, max_chars),
             result_kind=self.result_kind,
             display_summary="Browser HTML",
         )
@@ -625,7 +661,7 @@ class BrowserControlTool(BaseTool):
         target_ws = _validate_ws_url(str(target.get("webSocketDebuggerUrl") or ""))
         async with _cdp_session(target_ws) as session:
             await session.call("Runtime.enable")
-            value = _runtime_value(await _runtime_evaluate(session, expression, user_gesture=True))
+            value = _runtime_value(await _runtime_evaluate(session, expression, user_gesture=False))
         content = _stringify_value(value)
         return ToolResult(
             content=truncate_tool_result(content, _max_chars(args, self._MAX_RESULT_CHARS)),
@@ -762,6 +798,216 @@ def _endpoint_error(raw: str) -> str:
     except ValueError as exc:
         return str(exc)
     return ""
+
+
+def _workspace_file_navigation_target(raw_url: str, workspace_root: Any) -> Path | None:
+    """Return the workspace HTML file a non-http navigate target refers to.
+
+    The model reasonably asks to open a file it just wrote, either as a bare
+    workspace path or as ``file://``.  Chrome cannot be pointed at a local file
+    through the preview boundary, so the caller serves it over loopback
+    instead.  Only real HTML files inside the active workspace qualify; anything
+    else stays a validation error so an unsupported scheme is still refused.
+    """
+
+    raw = str(raw_url or "").strip()
+    if not raw or not workspace_root:
+        return None
+    parsed = urlparse(raw)
+    if parsed.scheme in {"http", "https"}:
+        return None
+    if parsed.scheme == "file":
+        local = url2pathname(parsed.path)
+        if parsed.netloc and parsed.netloc.lower() not in LOOPBACK_HOSTNAMES:
+            # A file:// URL with a host is a UNC share, not a workspace file.
+            return None
+    elif parsed.scheme and len(parsed.scheme) > 1:
+        # A real non-file scheme (ftp:, data:, chrome:) is not a workspace path.
+        # Single-letter schemes are Windows drive letters (``C:\...``).
+        return None
+    else:
+        local = raw
+
+    try:
+        root = Path(str(workspace_root)).expanduser().resolve()
+        candidate = Path(local).expanduser()
+        candidate = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+        candidate.relative_to(root)
+    except (OSError, ValueError):
+        return None
+    if candidate.suffix.lower() not in {".html", ".htm"} or not candidate.is_file():
+        return None
+    return candidate
+
+
+async def _serve_workspace_file_for_navigation(
+    target: Path,
+    context: ToolExecutionContext | None,
+) -> tuple[str, str]:
+    """Serve *target* over loopback and return ``(url, error)``.
+
+    Reuses the same owned static preview that ``preview_server`` starts, so the
+    resulting origin passes the navigation policy for exactly this conversation.
+    """
+
+    from backend.preview.launcher import start_static_preview
+
+    workspace_root = getattr(context, "workspace_root", None)
+    try:
+        proc = await start_static_preview(
+            workspace_root,
+            target,
+            session_id=str(getattr(context, "session_id", "") or ""),
+            conversation_id=str(getattr(context, "conversation_id", "") or ""),
+            sandbox_policy=(context.sandbox_policy if context is not None else None),
+        )
+    except Exception as exc:
+        return "", f"Could not serve {target.name} for browser navigation: {exc}"
+    url = str(proc.effective_url or "").strip()
+    if not url:
+        return "", f"Preview server for {target.name} did not report a URL."
+    return url, ""
+
+
+def _is_workspace_html_target(raw_url: str) -> bool:
+    """Return whether *raw_url* could name a workspace HTML file.
+
+    ``validate_input`` runs without an execution context, so the workspace
+    boundary cannot be applied yet.  This only rejects spellings that can never
+    be a local HTML file; ``execute`` performs the authoritative resolution
+    against the real workspace root.
+    """
+
+    raw = str(raw_url or "").strip()
+    if not raw:
+        return False
+    parsed = urlparse(raw)
+    if parsed.scheme == "file":
+        candidate = url2pathname(parsed.path)
+    elif parsed.scheme and len(parsed.scheme) > 1:
+        return False
+    else:
+        candidate = raw
+    return Path(candidate).suffix.lower() in {".html", ".htm"}
+
+
+async def _resolved_navigation_url(
+    raw_url: str,
+    context: ToolExecutionContext | None,
+) -> tuple[str, str]:
+    """Return ``(url, error)`` for a navigate request.
+
+    An http(s) URL passes through untouched.  A workspace HTML file — named
+    directly or through ``file://`` — is served over the conversation's own
+    loopback preview and replaced by that URL, so the model does not need a
+    separate ``preview_server`` round trip to open a file it just wrote.
+    """
+
+    url = str(raw_url or "").strip()
+    if not url:
+        return "", "Missing url for navigate"
+    if urlparse(url).scheme in {"http", "https"}:
+        return url, ""
+
+    workspace_root = getattr(context, "workspace_root", None)
+    target = _workspace_file_navigation_target(url, workspace_root)
+    if target is None:
+        if not workspace_root:
+            return "", (
+                "navigate needs an http or https URL: no active workspace is available "
+                "to serve a local file."
+            )
+        return "", (
+            f"Cannot navigate to '{url}': it is not an existing HTML file inside the "
+            "active workspace."
+        )
+    return await _serve_workspace_file_for_navigation(target, context)
+
+
+async def _navigation_policy_error(
+    raw_url: str,
+    context: ToolExecutionContext | None,
+) -> str:
+    """Apply the network boundary at the browser navigation side effect.
+
+    Browser navigation is more privileged than ``web_fetch`` because the
+    browser may carry cookies, credentials, and origin permissions.  The
+    permission checker still owns the user approval decision, but the tool
+    itself must not turn a model-supplied URL into an SSRF primitive.  Public
+    HTTP(S) targets follow the normal network policy.  Local/private targets
+    are only accepted when they are an actively running preview owned by the
+    same session and conversation (or an equivalent origin explicitly placed
+    in the turn metadata by the preview runtime).
+    """
+
+    url = str(raw_url or "").strip()
+    if not url:
+        return "Missing url for navigate"
+    assessment = await asyncio.to_thread(assess_network_url, url)
+    if assessment.allowed:
+        return ""
+    if await asyncio.to_thread(_is_owned_preview_origin, url, context):
+        return ""
+    return (
+        "Browser navigation to a local, private, or unresolved network target "
+        "is blocked unless it belongs to the active conversation preview. "
+        f"{assessment.reason}"
+    )
+
+
+def _is_owned_preview_origin(
+    url: str,
+    context: ToolExecutionContext | None,
+) -> bool:
+    """Return whether *url* matches a preview origin owned by this turn."""
+
+    conversation_id = str(getattr(context, "conversation_id", "") or "").strip()
+    session_id = str(getattr(context, "session_id", "") or "").strip()
+    if not conversation_id:
+        return False
+
+    candidates: list[str] = []
+    metadata = getattr(context, "metadata", None)
+    if isinstance(metadata, dict):
+        raw_origins = metadata.get("preview_origins")
+        if isinstance(raw_origins, (list, tuple, set)):
+            candidates.extend(str(item).strip() for item in raw_origins if str(item).strip())
+        for key in ("preview_url", "preview_origin"):
+            value = str(metadata.get(key) or "").strip()
+            if value:
+                candidates.append(value)
+
+    try:
+        from backend.preview.launcher import preview_url_is_owned
+
+        if preview_url_is_owned(
+            url,
+            session_id=session_id,
+            conversation_id=conversation_id,
+            workspace_root=getattr(context, "workspace_root", None),
+            extra_urls=tuple(candidates),
+        ):
+            return True
+    except Exception:
+        # A preview registry failure must not weaken the browser boundary.
+        return False
+
+    requested = _url_origin(url)
+    return bool(requested and any(requested == _url_origin(candidate) for candidate in candidates))
+
+
+def _url_origin(value: str) -> tuple[str, str, int] | None:
+    try:
+        parsed = urlparse(str(value or "").strip())
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return None
+    try:
+        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    except ValueError:
+        return None
+    return parsed.scheme.lower(), parsed.hostname.casefold().rstrip("."), port
 
 
 def _normalize_endpoint(raw: str) -> str:

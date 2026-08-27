@@ -1,38 +1,38 @@
 import { useEffect, useRef, useState } from "react";
 
-type Monaco = typeof import("monaco-editor/esm/vs/editor/editor.api.js");
+type Monaco = typeof import("monaco-editor/editor/editor.api.js");
 
 let monacoInstance: Monaco | null = null;
 let monacoLoading: Promise<Monaco> | null = null;
 const SAFE_STYLE_PROPERTIES = new Set(["color", "background-color", "font-style", "font-weight", "text-decoration"]);
 
 const languageLoaders: Record<string, () => Promise<unknown>> = {
-  typescript: () => import("monaco-editor/esm/vs/basic-languages/typescript/typescript.contribution.js"),
-  javascript: () => import("monaco-editor/esm/vs/basic-languages/javascript/javascript.contribution.js"),
-  python: () => import("monaco-editor/esm/vs/basic-languages/python/python.contribution.js"),
-  rust: () => import("monaco-editor/esm/vs/basic-languages/rust/rust.contribution.js"),
-  go: () => import("monaco-editor/esm/vs/basic-languages/go/go.contribution.js"),
-  java: () => import("monaco-editor/esm/vs/basic-languages/java/java.contribution.js"),
-  ruby: () => import("monaco-editor/esm/vs/basic-languages/ruby/ruby.contribution.js"),
-  css: () => import("monaco-editor/esm/vs/basic-languages/css/css.contribution.js"),
-  html: () => import("monaco-editor/esm/vs/basic-languages/html/html.contribution.js"),
-  yaml: () => import("monaco-editor/esm/vs/basic-languages/yaml/yaml.contribution.js"),
-  markdown: () => import("monaco-editor/esm/vs/basic-languages/markdown/markdown.contribution.js"),
-  shell: () => import("monaco-editor/esm/vs/basic-languages/shell/shell.contribution.js"),
-  sql: () => import("monaco-editor/esm/vs/basic-languages/sql/sql.contribution.js"),
-  c: () => import("monaco-editor/esm/vs/basic-languages/cpp/cpp.contribution.js"),
-  cpp: () => import("monaco-editor/esm/vs/basic-languages/cpp/cpp.contribution.js"),
-  csharp: () => import("monaco-editor/esm/vs/basic-languages/csharp/csharp.contribution.js"),
-  swift: () => import("monaco-editor/esm/vs/basic-languages/swift/swift.contribution.js"),
-  kotlin: () => import("monaco-editor/esm/vs/basic-languages/kotlin/kotlin.contribution.js"),
+  typescript: () => import("monaco-editor/languages/definitions/typescript/register.js"),
+  javascript: () => import("monaco-editor/languages/definitions/javascript/register.js"),
+  python: () => import("monaco-editor/languages/definitions/python/register.js"),
+  rust: () => import("monaco-editor/languages/definitions/rust/register.js"),
+  go: () => import("monaco-editor/languages/definitions/go/register.js"),
+  java: () => import("monaco-editor/languages/definitions/java/register.js"),
+  ruby: () => import("monaco-editor/languages/definitions/ruby/register.js"),
+  css: () => import("monaco-editor/languages/definitions/css/register.js"),
+  html: () => import("monaco-editor/languages/definitions/html/register.js"),
+  yaml: () => import("monaco-editor/languages/definitions/yaml/register.js"),
+  markdown: () => import("monaco-editor/languages/definitions/markdown/register.js"),
+  shell: () => import("monaco-editor/languages/definitions/shell/register.js"),
+  sql: () => import("monaco-editor/languages/definitions/sql/register.js"),
+  c: () => import("monaco-editor/languages/definitions/cpp/register.js"),
+  cpp: () => import("monaco-editor/languages/definitions/cpp/register.js"),
+  csharp: () => import("monaco-editor/languages/definitions/csharp/register.js"),
+  swift: () => import("monaco-editor/languages/definitions/swift/register.js"),
+  kotlin: () => import("monaco-editor/languages/definitions/kotlin/register.js"),
 };
 const loadedLanguages = new Set<string>();
 
 async function getMonaco(language: string): Promise<Monaco> {
   if (!monacoLoading) {
-    monacoLoading = import("monaco-editor/esm/vs/editor/editor.api.js").then((m) => {
-      monacoInstance = m;
-      return m;
+    monacoLoading = import("monaco-editor/editor/editor.api.js").then((monaco) => {
+      monacoInstance = monaco;
+      return monaco;
     });
   }
   const monaco = monacoInstance ?? await monacoLoading;

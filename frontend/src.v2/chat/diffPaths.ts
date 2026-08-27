@@ -1,3 +1,10 @@
+import {
+  isWindowsLikeWorkspacePath,
+  normalizeWorkspacePath,
+  workspacePathWithin,
+  workspacePathsEqual,
+} from "../lib/workspace-path";
+
 export function workspaceRelativeDiffPath(path: string, workspaceRoot?: string): string {
   const normalized = normalizePath(path);
   if (!normalized) return "";
@@ -7,12 +14,14 @@ export function workspaceRelativeDiffPath(path: string, workspaceRoot?: string):
     const absolute = relativeFromAbsolutePath(normalized, root);
     if (absolute) return absolute;
 
-    const rootName = basename(root).toLowerCase();
+    const rootName = basename(root);
     const parts = normalized.split("/").filter(Boolean);
+    const compare = (value: string): string =>
+      isWindowsLikeWorkspacePath(root) ? value.toLowerCase() : value;
     if (
       rootName &&
       parts.length > 1 &&
-      parts[0].toLowerCase() === rootName &&
+      compare(parts[0]) === compare(rootName) &&
       !isAbsolutePath(normalized)
     ) {
       return parts.slice(1).join("/");
@@ -24,19 +33,18 @@ export function workspaceRelativeDiffPath(path: string, workspaceRoot?: string):
 
 function relativeFromAbsolutePath(path: string, root: string): string {
   if (!isAbsolutePath(path) || !isAbsolutePath(root)) return "";
-  const pathLower = trimTrailingSlash(path).toLowerCase();
-  const rootLower = trimTrailingSlash(root).toLowerCase();
-  if (pathLower === rootLower) return "";
-  const prefix = `${rootLower}/`;
-  if (!pathLower.startsWith(prefix)) return "";
-  return trimTrailingSlash(path).slice(prefix.length);
+  const normalizedPath = normalizeWorkspacePath(path);
+  const normalizedRoot = normalizeWorkspacePath(root);
+  if (!workspacePathWithin(normalizedPath, normalizedRoot)) return "";
+  if (workspacePathsEqual(normalizedPath, normalizedRoot)) return "";
+  const prefixLength = normalizedRoot.endsWith("/")
+    ? normalizedRoot.length
+    : normalizedRoot.length + 1;
+  return normalizedPath.slice(prefixLength);
 }
 
 function normalizePath(value: string): string {
-  return String(value || "")
-    .trim()
-    .replace(/\\/g, "/")
-    .replace(/\/+/g, "/");
+  return normalizeWorkspacePath(value);
 }
 
 function trimTrailingSlash(value: string): string {

@@ -1,5 +1,6 @@
 import type { ActivityCellState } from "./cellTypes";
 import { purifyToolErrorText } from "../errorMessages";
+import { readableToolLabel } from "../toolDisplayName";
 
 export interface ActivityDetail {
   label: string;
@@ -10,7 +11,26 @@ export interface ActivityDetail {
   durationMs: number | null;
 }
 
-type ActivityToolRecord = NonNullable<ActivityCellState["toolCallRecords"]>[number];
+export type ActivityToolRecord = NonNullable<ActivityCellState["toolCallRecords"]>[number];
+
+export type PlanUpdateStep = {
+  step: string;
+  status: "pending" | "in_progress" | "completed";
+};
+
+/** Read the canonical update_plan payload used by the live composer plan. */
+export function planUpdateSteps(record: ActivityToolRecord): PlanUpdateStep[] {
+  if (record.name !== "update_plan" || !record.args || typeof record.args !== "object") return [];
+  const rawPlan = (record.args as Record<string, unknown>).plan;
+  if (!Array.isArray(rawPlan)) return [];
+  return rawPlan.flatMap((rawStep): PlanUpdateStep[] => {
+    if (!rawStep || typeof rawStep !== "object") return [];
+    const step = String((rawStep as Record<string, unknown>).step ?? "").trim();
+    const status = String((rawStep as Record<string, unknown>).status ?? "pending");
+    if (!step || !["pending", "in_progress", "completed"].includes(status)) return [];
+    return [{ step, status: status as PlanUpdateStep["status"] }];
+  });
+}
 
 export function shortTarget(value: string): string {
   const text = String(value).replace(/\\/g, "/").trim();
@@ -29,16 +49,29 @@ export function readableFallback(value: string | undefined): string {
 }
 
 export function readableTimelineTitle(cell: ActivityCellState): string {
-  return readableFallback(cell.title);
+  const title = readableToolLabel(cell.title);
+  const records = cell.toolCallRecords ?? [];
+  if (cell.activityKind === "webSearch" && records.length > 0) {
+    const names = records.map((record) => String(record.name || "").toLowerCase());
+    const isFetch = names.every((name) => /web_fetch|webfetch/.test(name));
+    const isSearch = names.every((name) => /web_search|websearch/.test(name));
+    const hasFailure = records.some((record) => ["failed", "blocked", "timeout", "cancelled"].includes(String(record.status)));
+    if (!hasFailure && (isFetch || isSearch)) {
+      const action = isFetch ? "获取网页" : "搜索网页";
+      const running = records.some((record) => ["running", "pending"].includes(String(record.status)));
+      return action;
+    }
+  }
+  return title;
 }
 
 export function readableRecordLabel(record: ActivityToolRecord): string {
-  const summary = readableFallback(record.displaySummary);
-  const operation = readableFallback(record.displayHint || record.name);
+  const summary = readableToolLabel(record.displaySummary);
+  const operation = readableToolLabel(record.displayHint || record.name);
   const normalized = summary.match(/^(?:Completed|Failed|Blocked|Cancelled|Timed out):\s*(.+)$/i)?.[1]?.trim();
   return normalized && operation && normalized.toLowerCase() === operation.toLowerCase()
     ? operation
-    : summary || operation || "Tool";
+    : summary || operation || "工具";
 }
 
 /** Return the user-facing target already present in the tool call arguments.
@@ -48,25 +81,54 @@ export function recordInputTarget(record: ActivityToolRecord): string {
   const args = record.args && typeof record.args === "object"
     ? record.args as Record<string, unknown>
     : {};
-  const candidates = [
+  const firstString = (candidates: unknown[]): string => candidates.find((candidate): candidate is string =>
+    typeof candidate === "string" && candidate.trim().length > 0,
+  )?.trim() || "";
+  const name = String(record.name || "").trim().toLowerCase();
+  const activityKind = String(record.activityKind || "").trim().toLowerCase();
+  const path = firstString([
     args.file_path,
     args.filePath,
-    args.directory,
     args.path,
     args.target,
     args.filename,
+    args.directory,
+  ]);
+  const query = firstString([
     args.query,
     args.pattern,
-    args.url,
+  ]);
+  const url = firstString([args.url, record.sourceUrl]);
+
+  if (name === "list_files") return path || record.inputSummary?.trim() || ".";
+
+  // Search operations are most useful when the searched expression is shown
+  // first. Keep the location beside it when the tool supplied one, so a row
+  // can be understood without expanding its details (for example:
+  // `AgentTimeline · frontend/src.v2`).
+  if (activityKind === "workspacesearch" || ["grep_files", "glob_files", "search_files"].includes(name)) {
+    return [query, path].filter(Boolean).join(" · ") || firstString([
+      record.inputSummary,
+      record.displaySummary,
+    ]);
+  }
+  if (activityKind === "websearch") {
+    const isFetch = name === "web_fetch" || name === "webfetch" || String(record.resultKind || "").toLowerCase() === "web";
+    return (isFetch ? url : [query, url].filter(Boolean).join(" · ")) || firstString([
+      record.inputSummary,
+      record.displaySummary,
+    ]);
+  }
+
+  return firstString([
+    path,
     args.command,
     args.selector,
+    args.artifact_id,
+    args.artifactId,
     record.inputSummary,
     record.sourceUrl,
-  ];
-  const value = candidates.find((candidate): candidate is string =>
-    typeof candidate === "string" && candidate.trim().length > 0,
-  );
-  return value?.trim() || "";
+  ]);
 }
 
 export function isHttpUrl(value: string): boolean {
@@ -112,9 +174,37 @@ const detailTargetKind = (record: ActivityToolRecord, target: string): ActivityD
   const isFileTarget = ["read_file", "write_file", "edit_file", "apply_patch"].includes(record.name)
     || typeof args.file_path === "string"
     || typeof args.filename === "string";
-  if (isFileTarget && ["file", "edit"].includes(String(record.resultKind || "").toLowerCase())) return "file";
+  if (isFileTarget && (
+    ["file", "edit"].includes(String(record.resultKind || "").toLowerCase())
+    || String(record.activityKind || "").toLowerCase() === "fileread"
+    || record.name === "read_file"
+    || record.name === "read_artifact"
+  )) return "file";
   return "text";
 };
+
+/** Build the unmerged detail for one authoritative tool record. */
+export function describeRecordDetail(
+  record: ActivityToolRecord,
+  developerMode: boolean,
+): ActivityDetail | null {
+  if (record.name === "update_plan") return null;
+  const label = developerMode
+    ? readableToolLabel(record.displayHint || record.name)
+    : readableRecordLabel(record);
+  const target = recordInputTarget(record);
+  if (!developerMode && !target && !record.displaySummary && !record.displayHint) return null;
+  const targetKind = detailTargetKind(record, target);
+  const lineInfo = readFileLineInfoLabel(record);
+  return {
+    label,
+    target,
+    targetKind,
+    lineInfo: lineInfo || undefined,
+    count: 1,
+    durationMs: record.durationMs ?? null,
+  };
+}
 
 export function describeRecordDetails(
   records: NonNullable<ActivityCellState["toolCallRecords"]>,
@@ -122,26 +212,19 @@ export function describeRecordDetails(
 ): ActivityDetail[] {
   const details = new Map<string, ActivityDetail>();
   for (const record of records) {
-    const label = developerMode ? record.name : readableRecordLabel(record);
-    const target = recordInputTarget(record);
-    if (!developerMode && !target && !record.displaySummary && !record.displayHint) continue;
-    const targetKind = detailTargetKind(record, target);
-    const lineInfo = readFileLineInfoLabel(record);
-    const key = `${label}\n${targetKind}\n${target}\n${lineInfo}`;
+    // update_plan has a dedicated structured disclosure in ActivityCell. A
+    // generic "Update plan" row would duplicate the activity title and hide
+    // the useful step/status payload behind a meaningless tool name.
+    const detail = describeRecordDetail(record, developerMode);
+    if (!detail) continue;
+    const key = `${detail.label}\n${detail.targetKind}\n${detail.target}\n${detail.lineInfo || ""}`;
     const existing = details.get(key);
     if (existing) {
       existing.count += 1;
       existing.durationMs = (existing.durationMs ?? 0) + (record.durationMs ?? 0);
       continue;
     }
-    details.set(key, {
-      label,
-      target,
-      targetKind,
-      lineInfo: lineInfo || undefined,
-      count: 1,
-      durationMs: record.durationMs ?? null,
-    });
+    details.set(key, detail);
   }
   return [...details.values()];
 }
@@ -174,28 +257,28 @@ export function recordOutcomeMeta(record: ActivityToolRecord): string {
 
   if (record.name === "list_files") {
     const count = output.match(/\((\d+) entries\)/i)?.[1];
-    return count ? `${count} entries` : "";
+    return count ? `${count} 项` : "";
   }
   if (record.name === "read_file") {
     const declared = output.match(/\((\d+) lines\b/i)?.[1];
-    if (declared) return `${declared} lines`;
+    if (declared) return `${declared} 行`;
     const body = output.split(/\r?\n\r?\n\[(?:content_hash|range_hash):/i)[0];
     const count = body ? body.split(/\r?\n/).length : 0;
-    return count > 0 ? `${count} lines` : "";
+    return count > 0 ? `${count} 行` : "";
   }
   if (record.name === "glob_files") {
     const count = output.match(/Found (\d+) matching files/i)?.[1];
-    if (count) return `${count} files`;
-    if (/No files matched/i.test(output)) return "0 files";
+    if (count) return `${count} 个文件`;
+    if (/No files matched/i.test(output)) return "0 个文件";
   }
   if (record.name === "grep_files") {
     const declared = output.match(/(?:找到|Found)\s*(\d+)\s*(?:条结果|matches?)/i)?.[1];
-    if (declared) return `${declared} matches`;
-    if (/^\(no matches\)$/i.test(output.trim())) return "0 matches";
+    if (declared) return `${declared} 条结果`;
+    if (/^\(no matches\)$/i.test(output.trim())) return "0 条结果";
     const count = resultLines(output).length;
     if (count > 0) {
       const mode = String(record.args?.output_mode || "files_with_matches");
-      return `${count} ${mode === "files_with_matches" ? "files" : "results"}`;
+      return `${count} ${mode === "files_with_matches" ? "个文件" : "条结果"}`;
     }
   }
   return "";
@@ -205,31 +288,30 @@ export function hasOutputPreview(records?: NonNullable<ActivityCellState["toolCa
   return Boolean(records?.some((record) => recordOutputText(record)));
 }
 
-export function getOutputPreview(records?: NonNullable<ActivityCellState["toolCallRecords"]>): string {
-  const record = records?.length ? records[records.length - 1] : undefined;
-  const output = record ? recordOutputText(record) : "";
-  if (record?.name === "read_file") {
-    // A read result is already bounded by the tool's requested line range.
-    // Preserve it from the first requested line so the visible body agrees
-    // with the Lx-Ly label; tailing is only appropriate for command logs.
+/** Return the bounded output belonging to exactly one tool record. */
+export function getRecordOutputPreview(record: ActivityToolRecord): string {
+  const output = recordOutputText(record);
+  if (!output) return "";
+  const isReadResult = record.name === "read_file"
+    || String(record.activityKind || "").toLowerCase() === "fileread"
+    || String(record.resultKind || "").toLowerCase() === "file";
+  if (isReadResult) {
+    // A read result is already bounded by the requested line range. Preserve
+    // the complete bounded body so each file remains paired with its record.
     return output;
   }
   const tail = output.split("\n").slice(-24).join("\n");
   return tail.length > 1600 ? `...${tail.slice(-1600)}` : tail;
 }
 
+export function getOutputPreview(records?: NonNullable<ActivityCellState["toolCallRecords"]>): string {
+  const outputs = (records ?? [])
+    .map(getRecordOutputPreview)
+    .filter(Boolean);
+  const combined = outputs.join("\n\n");
+  return combined.length > 1600 ? `...${combined.slice(-1600)}` : combined;
+}
+
 export function isLongRunning(startedAt: number | undefined): boolean {
   return startedAt != null && Date.now() - startedAt > 10_000;
-}
-
-export function getLongRunningExplanation(): string {
-  return "This operation is still running.";
-}
-
-export function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  const seconds = Math.floor(ms / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  return `${minutes}m${seconds % 60}s`;
 }

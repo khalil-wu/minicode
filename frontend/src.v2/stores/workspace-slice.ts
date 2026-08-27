@@ -15,19 +15,12 @@ import {
   persistPanelSlots,
   loadInitialLayout,
   preferredRightSidebarWidth,
+  normalizeEditorPath,
 } from "./shared-helpers";
+import { isWindowsLikeWorkspacePath, normalizeWorkspacePath } from "../lib/workspace-path";
 
-const normalizeEditorOpenPath = (path: string, workingDirectory = ""): string => {
-  const raw = String(path || "").trim().replace(/\\/g, "/");
-  if (!raw) return raw;
-  const root = workingDirectory.replace(/\\/g, "/").replace(/\/+$/, "");
-  const rootLower = root.toLowerCase();
-  const rawLower = raw.toLowerCase();
-  if (rootLower && (rawLower === rootLower || rawLower.startsWith(`${rootLower}/`))) {
-    return raw.slice(root.length).replace(/^\/+/, "") || ".";
-  }
-  return raw.replace(/\/+/g, "/").replace(/^\.\/+/, "");
-};
+const normalizeEditorOpenPath = (path: string, workingDirectory = ""): string =>
+  normalizeEditorPath(path, workingDirectory);
 
 const DEFAULT_APP_EXTENSIONS = new Set(["doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp"]);
 
@@ -37,11 +30,17 @@ const shouldOpenWithDefaultApp = (path: string): boolean => {
 };
 
 const resolveLocalOpenPath = (path: string, workingDirectory: string): string => {
-  const normalized = String(path || "").trim();
-  if (/^[a-zA-Z]:[\\/]/.test(normalized) || normalized.startsWith("\\\\") || !workingDirectory.trim()) {
+  const normalized = normalizeWorkspacePath(path);
+  const root = normalizeWorkspacePath(workingDirectory);
+  if (
+    /^[a-zA-Z]:\//.test(normalized)
+    || normalized.startsWith("/")
+    || !root
+  ) {
     return normalized;
   }
-  return `${workingDirectory.replace(/[\\/]+$/, "")}\\${normalized.replace(/^[\\/]+/, "")}`;
+  const separator = isWindowsLikeWorkspacePath(root) ? "\\" : "/";
+  return `${root.replace(/[\\/]+$/, "")}${separator}${normalized.replace(/^[\\/]+/, "")}`;
 };
 
 export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice> = (set, get) => {
@@ -102,11 +101,12 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
         const canonicalSlot: PanelSlot =
           slot.kind === "subagent"
             ? { ...slot, kind: "subagents", label: slot.label ?? "协作" }
-            : slot;
+            : slot.kind === "plan"
+              ? { ...slot, kind: "tasks", label: slot.label ?? "上下文" }
+              : slot;
         const rightStackByKind: Partial<Record<PanelKind, UISlice["rightStackTab"]>> = {
           preview: "preview",
           diff: "diff",
-          plan: "plan",
           tasks: "tasks",
           subagents: "subagents",
           artifacts: "artifacts",
@@ -363,16 +363,45 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
       });
     },
     addBackgroundTask: (task) =>
-      set((s) => ({
-        backgroundTasks: [
+      set((s) => {
+        const sameOwner = (item: typeof task) => (
+          item.id === task.id && item.conversationId === task.conversationId
+        );
+        const isActiveStatus = (status: typeof task.status) => (
+          status === "running" || status === "stalled"
+        );
+        const existing = s.backgroundTasks.find(sameOwner);
+        const settledStatus = existing && !isActiveStatus(existing.status)
+          ? existing.status
+          : undefined;
+        const nextTasks = [
           {
-            ...s.backgroundTasks.find((item) => item.id === task.id),
+            ...existing,
             ...task,
-            timestamp: s.backgroundTasks.find((item) => item.id === task.id)?.timestamp ?? task.timestamp,
+            // Background command ids are one-shot. Replayed start events may
+            // enrich the record but cannot reopen a completed command.
+            status: settledStatus && isActiveStatus(task.status)
+              ? settledStatus
+              : existing?.status === "stalled" && task.status === "running"
+                ? "stalled"
+              : task.status,
+            timestamp: existing?.timestamp ?? task.timestamp,
           },
-          ...s.backgroundTasks.filter((item) => item.id !== task.id),
-        ].slice(0, 30),
-      })),
+          ...s.backgroundTasks.filter((item) => !sameOwner(item)),
+        ];
+        const retainedSettledIds = new Set(
+          nextTasks
+            .filter((item) => !isActiveStatus(item.status))
+            .slice(0, 30)
+            .map((item) => `${item.conversationId}\u0000${item.id}`),
+        );
+        return {
+          backgroundTasks: nextTasks.filter(
+            (item) => isActiveStatus(item.status)
+              || retainedSettledIds.has(`${item.conversationId}\u0000${item.id}`),
+          ),
+        };
+      }),
     addBrowserAnnotation: (annotation) =>
       set((s) => ({
         browserAnnotations: [annotation, ...s.browserAnnotations.filter((item) => item.id !== annotation.id)].slice(0, 80),
@@ -400,7 +429,5 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
     setScheduledTasks: (tasks) => set({ scheduledTasks: tasks }),
     scheduledTaskRuns: [],
     setScheduledTaskRuns: (runs) => set({ scheduledTaskRuns: runs }),
-    marketplaceConnectors: [],
-    setMarketplaceConnectors: (connectors) => set({ marketplaceConnectors: connectors }),
   };
 };

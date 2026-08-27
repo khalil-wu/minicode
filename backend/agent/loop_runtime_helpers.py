@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from typing import Any, cast, get_args
@@ -20,6 +21,7 @@ MAX_OUTPUT_FINISH_REASONS = frozenset(
         "max_output_tokens",
         "max_completion_tokens",
         "incomplete",
+        "model_context_window_exceeded",
     }
 )
 TERMINAL_REASON_VALUES = frozenset(str(value) for value in get_args(TerminalReason))
@@ -78,9 +80,31 @@ def plan_stream_retry(
     stream_retry_policy: Any,
     error_content: str,
     stream_attempt: int,
+    *,
+    query_source: str | None = None,
+    retry_state: Any | None = None,
 ) -> tuple[int, float | None]:
-    """Plan one policy-controlled transient stream retry."""
-    decision = stream_retry_policy.decide_retry(error_content, stream_attempt)
+    """Plan one policy-controlled transient stream retry.
+
+    ``AgentSettings.stream_retry_policy`` is a public injection point. Policies
+    written before source-aware 529 handling accepted only the original two
+    positional arguments, so pass the new context only when the implementation
+    declares it. This preserves the existing extension contract without hiding
+    exceptions raised inside the policy itself.
+    """
+
+    decide_retry = stream_retry_policy.decide_retry
+    parameters = inspect.signature(decide_retry).parameters
+    accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    policy_context: dict[str, Any] = {}
+    if accepts_kwargs or "query_source" in parameters:
+        policy_context["query_source"] = query_source
+    if accepts_kwargs or "retry_state" in parameters:
+        policy_context["retry_state"] = retry_state
+    decision = decide_retry(error_content, stream_attempt, **policy_context)
     if not decision.should_retry:
         return stream_attempt, None
     new_attempt = stream_attempt + 1

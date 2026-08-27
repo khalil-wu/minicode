@@ -1,40 +1,23 @@
-"""update_plan tool — model-driven execution plan with live step progression.
-
-Unlike todo_write (the compact task progress checklist), the plan is a larger
-user-visible execution plan rendered in the Plan panel. Each call emits a full
-`plan_updated` snapshot so the frontend can create or replace the live plan in
-one event.
-"""
+"""MiniCode plan management and checklist tool."""
 
 from __future__ import annotations
 
-import json
 import inspect
+import re
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from backend.agent.message import AgentEvent
 from backend.permissions.context import PermissionContext
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
-from backend.tools.file_tools_common import _atomic_write_text
 
-MAX_PLAN_STEPS = 30
-
-# Model-facing status vocabulary -> frontend PlanStep vocabulary.
-_STATUS_MAP = {
-    "pending": "pending",
-    "in_progress": "running",
-    "completed": "done",
-}
-_VALID_INPUT_STATUSES = set(_STATUS_MAP)
+_VALID_INPUT_STATUSES = {"pending", "in_progress", "completed"}
 
 
-def _context_state_key(context: Any = None) -> str:
-    return str(
-        getattr(context, "conversation_id", "")
-        or getattr(context, "session_id", "")
-        or "default"
-    )
+def _safe_session_filename(value: Any) -> str:
+    text = str(value or "session").strip()
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("._-") or "session"
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -44,7 +27,7 @@ async def _maybe_await(value: Any) -> Any:
 
 
 class UpdatePlanTool(BaseTool):
-    """Create or update the session's visible execution plan."""
+    """Create, replace, or clear the turn's visible task checklist."""
 
     name = "update_plan"
     result_kind = "plan"
@@ -53,20 +36,24 @@ class UpdatePlanTool(BaseTool):
     mutates_workspace = False
     read_only = False  # mutates session plan state
     permission = PermissionLevel.AUTO
+
+    def is_capability_available(self, context=None) -> bool:
+        return context is None or context.mode != "plan"
     description = (
-        "Maintain the larger user-visible execution plan. This is distinct from todo_write: todo_write drives "
-        "the compact live checklist/status island, while update_plan is for a visible phase plan.\n\n"
-        "When to use: the user explicitly asks for a plan, the task is ambiguous enough that a visible approach "
-        "helps alignment, or the work has larger phases that should remain visible while you execute.\n\n"
-        "When not to use: Do not use for routine task tracking, a simple checklist, a single-step fix, or merely "
-        "because todo_write is available. Do not mirror the same routine todo list into both tools.\n\n"
-        "State rules: every call sends the full ordered plan snapshot; at most one step may be in_progress; "
-        "advance status as phases actually progress; mark completed only after the phase is genuinely done. "
-        "Optional explanation should describe why the plan changed, not narrate every tool call."
+        "Updates the task plan. Provide an optional explanation and a list of plan items, each with a step and "
+        "status. At most one step can be in_progress at a time."
     )
 
-    def __init__(self, workspace_root: Path | None = None) -> None:
-        self._workspace_root = workspace_root
+    def check_permission(
+        self,
+        args: dict[str, Any] | None = None,
+        context: PermissionContext | None = None,
+    ) -> PermissionLevel | None:
+        # Codex treats update_plan as a TODO/checklist tool and explicitly
+        # disallows it in Plan mode. Plan-mode proposals use exit_plan_mode.
+        if context is not None and context.mode == "plan":
+            return PermissionLevel.ALWAYS_DENY
+        return None
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -77,144 +64,88 @@ class UpdatePlanTool(BaseTool):
                 "properties": {
                     "plan": {
                         "type": "array",
-                        "description": (
-                            "Full ordered plan snapshot. Use for a larger visible phase plan, not routine todo "
-                            "tracking. At most one step may be in_progress."
-                        ),
+                        "description": "The list of steps",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "step": {"type": "string", "description": "Concise visible phase title."},
+                                "step": {"type": "string", "description": "Task step text."},
                                 "status": {
                                     "type": "string",
                                     "enum": ["pending", "in_progress", "completed"],
+                                    "description": "Step status.",
                                 },
                             },
                             "required": ["step", "status"],
+                            "additionalProperties": False,
                         },
                     },
                     "explanation": {
                         "type": "string",
-                        "description": "Optional note explaining the plan or why this update changed it.",
-                    },
-                    "status": {
-                        "type": "string",
-                        "enum": ["draft", "accepted", "executing", "completed", "cancelled"],
-                        "description": "Optional plan lifecycle state. Omit to infer from step statuses.",
+                        "description": "Optional explanation for this plan update.",
                     },
                 },
                 "required": ["plan"],
+                "additionalProperties": False,
             },
         )
 
-    def _persist_path(self, session_id: str) -> Path | None:
-        if not self._workspace_root:
-            return None
-        return self._workspace_root / ".minicode" / "plans" / f"{session_id}.json"
-
     async def execute(self, args: dict[str, Any], context: Any = None) -> ToolResult:
-        plan = args.get("plan")
-        if not isinstance(plan, list) or not plan:
-            return ToolResult(content="update_plan 需要非空的 plan 步骤数组。", is_error=True)
-        if len(plan) > MAX_PLAN_STEPS:
-            return ToolResult(content=f"计划步骤不能超过 {MAX_PLAN_STEPS} 个。", is_error=True)
-
-        steps: list[dict[str, str]] = []
-        in_progress_count = 0
-        for index, item in enumerate(plan):
-            if not isinstance(item, dict):
-                return ToolResult(content=f"第 {index + 1} 个步骤必须是对象。", is_error=True)
-            title = str(item.get("step", "")).strip()
-            raw_status = str(item.get("status", "pending")).strip().lower()
-            if not title:
-                return ToolResult(content=f"第 {index + 1} 个步骤缺少 step 标题。", is_error=True)
-            if raw_status not in _VALID_INPUT_STATUSES:
-                return ToolResult(
-                    content=f"无效状态 '{raw_status}'，必须是 pending / in_progress / completed。",
-                    is_error=True,
-                )
-            if raw_status == "in_progress":
-                in_progress_count += 1
-            steps.append({
-                "id": f"step-{index}",
-                "title": title,
-                "status": _STATUS_MAP[raw_status],
-            })
-
-        if in_progress_count > 1:
-            return ToolResult(content="任意时刻最多只能有一个 in_progress 步骤。", is_error=True)
-
-        session_id = _context_state_key(context)
-        plan_id = f"plan-{session_id}"
-        current_step = self._current_step(steps)
-        all_done = all(step["status"] == "done" for step in steps)
-        raw_plan_status = str(args.get("status", "") or "").strip().lower()
-        if raw_plan_status and raw_plan_status not in {"draft", "accepted", "executing", "completed", "cancelled"}:
+        unexpected = set(args) - {"plan", "explanation"}
+        if unexpected:
             return ToolResult(
-                content="无效计划状态，必须是 draft / accepted / executing / completed / cancelled。",
+                content=f"update_plan received unsupported fields: {', '.join(sorted(unexpected))}.",
                 is_error=True,
             )
-        if raw_plan_status:
-            plan_status = raw_plan_status
-        elif all_done:
-            plan_status = "completed"
-        elif in_progress_count:
-            plan_status = "executing"
-        else:
-            plan_status = "draft"
-        explanation = str(args.get("explanation", "") or "").strip()
+        plan = args.get("plan")
+        if not isinstance(plan, list):
+            return ToolResult(content="update_plan requires a plan array.", is_error=True)
+        steps: list[dict[str, str]] = []
+        for index, item in enumerate(plan):
+            if not isinstance(item, dict):
+                return ToolResult(content=f"Plan step {index + 1} must be an object.", is_error=True)
+            unexpected_item = set(item) - {"step", "status"}
+            if unexpected_item:
+                return ToolResult(
+                    content=(
+                        f"Plan step {index + 1} received unsupported fields: "
+                        f"{', '.join(sorted(unexpected_item))}."
+                    ),
+                    is_error=True,
+                )
+            title = item.get("step")
+            raw_status = item.get("status")
+            if not isinstance(title, str) or not isinstance(raw_status, str):
+                return ToolResult(
+                    content=f"Plan step {index + 1} requires string step and status fields.",
+                    is_error=True,
+                )
+            if raw_status not in _VALID_INPUT_STATUSES:
+                return ToolResult(
+                    content=f"Invalid status '{raw_status}'; use pending / in_progress / completed.",
+                    is_error=True,
+                )
+            steps.append({"step": title, "status": raw_status})
 
-        self._save(session_id, plan_id, steps, plan_status, current_step)
+        raw_explanation = args.get("explanation")
+        if raw_explanation is not None and not isinstance(raw_explanation, str):
+            return ToolResult(content="update_plan explanation must be a string.", is_error=True)
+        explanation = raw_explanation if isinstance(raw_explanation, str) else None
 
         emit_event = getattr(context, "emit_event", None) if context else None
         if emit_event is not None:
+            metadata = getattr(context, "metadata", None)
+            metadata = metadata if isinstance(metadata, dict) else {}
             await emit_event(
-                "plan_updated",
-                AgentEvent.plan_updated(
-                    plan_id=plan_id,
-                    steps=steps,
-                    status=plan_status,
-                    current_step=current_step,
+                "turn.plan.updated",
+                AgentEvent.turn_plan_updated(
+                    thread_id=str(getattr(context, "conversation_id", "") or ""),
+                    turn_id=str(metadata.get("run_id") or metadata.get("turn_id") or ""),
                     explanation=explanation,
+                    plan=steps,
                 ).data,
             )
 
-        done = sum(1 for step in steps if step["status"] == "done")
-        running = next((step["title"] for step in steps if step["status"] == "running"), "")
-        summary = f"计划已更新：{len(steps)} 步，状态 {plan_status}，已完成 {done}。"
-        if running:
-            summary += f" 进行中：{running}。"
-        elif all_done:
-            summary += " 全部完成。"
-        return ToolResult(content=summary)
-
-    @staticmethod
-    def _current_step(steps: list[dict[str, str]]) -> int:
-        for index, step in enumerate(steps):
-            if step["status"] == "running":
-                return index
-        for index, step in enumerate(steps):
-            if step["status"] == "pending":
-                return index
-        return len(steps)
-
-    def _save(self, session_id: str, plan_id: str, steps: list[dict[str, str]], status: str, current_step: int) -> None:
-        path = self._persist_path(session_id)
-        if not path:
-            return
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            _atomic_write_text(
-                path,
-                json.dumps(
-                    {"plan_id": plan_id, "status": status, "current_step": current_step, "steps": steps},
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-            )
-        except Exception:
-            pass
-
+        return ToolResult(content="Plan updated")
 
 class ExitPlanModeTool(BaseTool):
     """Submit a draft plan and wait for user approval before implementation."""
@@ -226,15 +157,25 @@ class ExitPlanModeTool(BaseTool):
     mutates_workspace = False
     read_only = False
     always_load = True
-    permission = PermissionLevel.AUTO
+    permission = PermissionLevel.CONFIRM
+
+    def is_capability_available(self, context=None) -> bool:
+        return context is not None and context.mode == "plan"
+
+    def capability_permission_level(self, context=None):
+        return PermissionLevel.CONFIRM if self.is_capability_available(context) else PermissionLevel.ALWAYS_DENY
     description = (
-        "Submit the current plan for user approval before leaving plan mode. "
-        "Use after read-only investigation when you have concise implementation steps. "
-        "This tool does not grant write permission; the user must accept or reject the draft plan."
+        "Present the plan for approval and leave plan mode after the user approves. "
+        "Use only after the plan has been written to the session plan file."
     )
 
     def __init__(self, workspace_root: Path | None = None) -> None:
-        self._workspace_root = workspace_root
+        # The session plan file's owner is the live permission context
+        # (backend.agent.plans), which applies the slug/containment/symlink
+        # guards. The registry factory hands every tool the workspace root, so
+        # the argument is accepted and deliberately not stored: a tool-local
+        # root would be a second source of truth for the same file.
+        del workspace_root
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -243,113 +184,183 @@ class ExitPlanModeTool(BaseTool):
             parameters={
                 "type": "object",
                 "properties": {
-                    "plan": {
+                    "command_prompts": {
                         "type": "array",
-                        "description": "Ordered draft implementation steps for the user to approve.",
+                        "description": "Optional categories of prompts needed to implement the plan.",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "step": {"type": "string"},
-                                "status": {
-                                    "type": "string",
-                                    "enum": ["pending", "in_progress", "completed"],
-                                    "default": "pending",
-                                },
+                                "tool": {"type": "string", "enum": ["run_command"]},
+                                "prompt": {"type": "string"},
                             },
-                            "required": ["step"],
+                            "required": ["tool", "prompt"],
+                            "additionalProperties": False,
                         },
                     },
-                    "explanation": {
-                        "type": "string",
-                        "description": "Optional concise rationale for the proposed plan.",
-                    },
                 },
-                "required": ["plan"],
+                "additionalProperties": False,
             },
         )
 
-    def _persist_path(self, session_id: str) -> Path | None:
-        if not self._workspace_root:
-            return None
-        return self._workspace_root / ".minicode" / "plans" / f"{session_id}.json"
+    def get_execution_schema(self) -> ToolSchema:
+        """Accept host-owned approval fields without exposing them to models."""
+
+        parameters = dict(self.get_schema().parameters)
+        properties = dict(parameters.get("properties") or {})
+        properties.update(
+            {
+                "plan": {
+                    "type": "string",
+                    "description": "Plan text approved or edited by the user.",
+                },
+                "plan_file_path": {
+                    "type": "string",
+                    "description": "Host-owned path of the session plan shown for approval.",
+                },
+            }
+        )
+        parameters["properties"] = properties
+        return ToolSchema(
+            name=self.name,
+            description=self.description,
+            parameters=parameters,
+        )
+
+    def check_permission(
+        self,
+        args: dict[str, Any] | None = None,
+        context: PermissionContext | None = None,
+    ) -> PermissionLevel | None:
+        if context is None or context.mode != "plan":
+            return PermissionLevel.ALWAYS_DENY
+        source = str(context.source or "")
+        if source.startswith("teammate:"):
+            # Claude teammates never show a local user approval. Required-plan
+            # teammates route to the leader mailbox; voluntary Plan mode exits
+            # locally.
+            return PermissionLevel.AUTO
+        return PermissionLevel.CONFIRM
 
     async def execute(self, args: dict[str, Any], context: Any = None) -> ToolResult:
-        plan = args.get("plan")
-        if not isinstance(plan, list) or not plan:
-            return ToolResult(content="exit_plan_mode requires a non-empty plan array.", is_error=True)
-        if len(plan) > MAX_PLAN_STEPS:
-            return ToolResult(content=f"Plan cannot exceed {MAX_PLAN_STEPS} steps.", is_error=True)
+        if context is None or not isinstance(getattr(context, "permission", None), PermissionContext):
+            return ToolResult(content="exit_plan_mode requires a live permission context.", is_error=True)
+        if context.permission.mode != "plan":
+            return ToolResult(
+                content="You are not in plan mode. Continue implementation if the plan was already approved.",
+                is_error=True,
+            )
+        from backend.agent.plans import current_plan_paths, read_plan, write_plan
 
-        steps: list[dict[str, str]] = []
-        for index, item in enumerate(plan):
-            if isinstance(item, str):
-                title = item.strip()
-                raw_status = "pending"
-            elif isinstance(item, dict):
-                title = str(item.get("step") or item.get("title") or "").strip()
-                raw_status = str(item.get("status") or "pending").strip().lower()
-            else:
-                return ToolResult(content=f"Plan step {index + 1} must be an object or string.", is_error=True)
-            if not title:
-                return ToolResult(content=f"Plan step {index + 1} is missing text.", is_error=True)
-            if raw_status not in _VALID_INPUT_STATUSES:
-                return ToolResult(
-                    content="Invalid plan step status; use pending / in_progress / completed.",
-                    is_error=True,
-                )
-            steps.append(
-                {
-                    "id": f"step-{index}",
-                    "title": title,
-                    "status": _STATUS_MAP[raw_status],
-                }
+        unexpected = set(args) - {"command_prompts", "plan", "plan_file_path"}
+        if unexpected:
+            return ToolResult(
+                content=f"exit_plan_mode received unsupported fields: {', '.join(sorted(unexpected))}.",
+                is_error=True,
+            )
+        allowed_prompts = args.get("command_prompts")
+        if allowed_prompts is not None:
+            if not isinstance(allowed_prompts, list):
+                return ToolResult(content="command_prompts must be an array.", is_error=True)
+            for index, item in enumerate(allowed_prompts):
+                if (
+                    not isinstance(item, dict)
+                    or set(item) != {"tool", "prompt"}
+                    or item.get("tool") != "run_command"
+                    or not isinstance(item.get("prompt"), str)
+                    or not item["prompt"].strip()
+                ):
+                    return ToolResult(
+                        content=(
+                            f"command_prompts[{index}] must contain exactly tool='run_command' "
+                            "and a non-empty prompt string."
+                        ),
+                        is_error=True,
+                    )
+        paths = current_plan_paths(context.permission)
+        if len(paths) != 1:
+            return ToolResult(content="No exact plan-file owner is bound to this session.", is_error=True)
+        path = paths[0]
+        edited_plan = args.get("plan")
+        if edited_plan is not None and not isinstance(edited_plan, str):
+            return ToolResult(content="The edited plan must be Markdown text.", is_error=True)
+        if isinstance(edited_plan, str):
+            write_plan(path, edited_plan)
+        plan = (edited_plan if isinstance(edited_plan, str) else read_plan(path) or "").strip()
+        if not plan:
+            return ToolResult(
+                content=f"No plan file was found at {path}. Write the plan before calling exit_plan_mode.",
+                is_error=True,
             )
 
-        if sum(1 for step in steps if step["status"] == "running") > 1:
-            return ToolResult(content="At most one plan step can be in_progress.", is_error=True)
+        permission_source = str(context.permission.source or "")
+        is_teammate = permission_source.startswith("teammate:")
+        plan_required = permission_source.endswith(":required_plan")
+        # Restore the mode the session held before entering plan mode. The
+        # WebSocket host still rereads permission_previous_mode from the
+        # repository, so this value only governs standalone SDK/loop callers;
+        # keep the explicit pre-plan mode rather than inventing a second mode
+        # sessions on those paths.
+        pre_plan_mode = str(getattr(context.permission, "pre_plan_mode", "") or "").strip()
+        approved_permission_mode = pre_plan_mode if pre_plan_mode and pre_plan_mode != "plan" else "confirm"
+        if is_teammate and plan_required:
+            mailbox_requester = (context.metadata or {}).get(
+                "teammate_plan_approval_requester"
+            )
+            if not callable(mailbox_requester):
+                return ToolResult(
+                    content="Required teammate Plan approval mailbox is unavailable.",
+                    is_error=True,
+                )
+            response = await _maybe_await(
+                mailbox_requester(
+                    plan=plan,
+                    plan_file_path=str(path),
+                )
+            )
+            if not isinstance(response, dict) or not response.get("queued"):
+                feedback = str((response or {}).get("feedback") or "").strip()
+                return ToolResult(
+                    content=(
+                        "Could not submit the plan to the team leader. Stay in Plan mode."
+                        + (f" Feedback: {feedback}" if feedback else "")
+                    ),
+                    is_error=True,
+                    result_kind="plan",
+                    status="blocked",
+                    display_summary="Plan approval request failed",
+                )
+            return ToolResult(
+                content=(
+                    "Plan submitted to the team leader for approval. "
+                    "Remain in Plan mode until the matching mailbox response arrives.\n\n"
+                    f"request_id: {response.get('request_id')}\n"
+                    f"plan_file_path: {path}"
+                ),
+                result_kind="plan",
+                status="waiting",
+                display_summary="Awaiting team leader approval",
+            )
 
-        session_id = _context_state_key(context)
-        plan_id = f"plan-{session_id}"
-        current_step = UpdatePlanTool._current_step(steps)
-        explanation = str(args.get("explanation") or "").strip()
-        self._save(session_id, plan_id, steps, "draft", current_step)
-
-        emit_event = getattr(context, "emit_event", None) if context else None
-        if emit_event is not None:
-            await emit_event(
-                "plan_updated",
-                AgentEvent.plan_updated(
-                    plan_id=plan_id,
-                    steps=steps,
-                    status="draft",
-                    current_step=current_step,
-                    explanation=explanation,
-                ).data,
+        setter = (context.metadata or {}).get("permission_mode_setter")
+        if callable(setter):
+            # The host rereads permission_previous_mode from the repository;
+            # model/run metadata is intentionally not trusted here.
+            await _maybe_await(
+                setter(
+                    approved_permission_mode or "confirm",
+                    source="exit_plan_mode",
+                )
             )
 
         return ToolResult(
-            content="Draft plan submitted. Now wait for the user to accept or reject it before making changes.",
+            content=(
+                "User has approved your plan. You can now start coding. "
+                f"\n\n## Approved Plan:\n{plan}"
+            ),
             result_kind="plan",
-            status="draft",
-            display_summary="Submitted draft plan",
+            status="completed",
+            display_summary="Exited plan mode",
         )
-
-    def _save(self, session_id: str, plan_id: str, steps: list[dict[str, str]], status: str, current_step: int) -> None:
-        path = self._persist_path(session_id)
-        if not path:
-            return
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            _atomic_write_text(
-                path,
-                json.dumps(
-                    {"plan_id": plan_id, "status": status, "current_step": current_step, "steps": steps},
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-            )
-        except Exception:
-            pass
 
 
 class EnterPlanModeTool(BaseTool):
@@ -363,6 +374,12 @@ class EnterPlanModeTool(BaseTool):
     read_only = False
     always_load = True
     permission = PermissionLevel.AUTO
+
+    def is_capability_available(self, context=None) -> bool:
+        if context is None:
+            return True
+        from backend.tools.subagent_context import is_subagent_permission_context
+        return context.mode != "plan" and not is_subagent_permission_context(context)
     description = (
         "Enter read-only plan mode for investigation and design. "
         "Use when you need to inspect and propose a plan before making changes. "
@@ -381,39 +398,66 @@ class EnterPlanModeTool(BaseTool):
                 "properties": {
                     "reason": {
                         "type": "string",
-                        "description": "Brief reason for switching to plan mode.",
+                        "description": "Optional legacy explanation for entering plan mode.",
                     },
                 },
+                "additionalProperties": False,
             },
         )
 
+    def check_permission(self, args=None, context=None):
+        from backend.tools.subagent_context import is_subagent_permission_context
+
+        if context is not None and is_subagent_permission_context(context):
+            return PermissionLevel.ALWAYS_DENY
+        return PermissionLevel.AUTO
+
     async def execute(self, args: dict[str, Any], context: Any = None) -> ToolResult:
-        reason = str(args.get("reason") or "").strip()
+        unexpected = set(args) - {"reason"}
+        if unexpected or (
+            "reason" in args and not isinstance(args.get("reason"), str)
+        ):
+            return ToolResult(content="enter_plan_mode does not accept arguments.", is_error=True)
         if context is not None:
             current = getattr(context, "permission", None)
             if isinstance(current, PermissionContext) and current.mode != "plan":
-                next_permission = PermissionContext(
-                    mode="plan",
-                    session_overrides=dict(current.session_overrides),
-                    tool_deny_rules=list(current.tool_deny_rules),
-                    filesystem_constraints=dict(current.filesystem_constraints),
-                    workspace_scope=current.workspace_scope,
-                    source="enter_plan_mode",
-                )
-                context.permission = next_permission
                 metadata = getattr(context, "metadata", None)
                 setter = metadata.get("permission_mode_setter") if isinstance(metadata, dict) else None
                 if callable(setter):
                     await _maybe_await(setter("plan", source="enter_plan_mode"))
+                provider = metadata.get("permission_context_provider") if isinstance(metadata, dict) else None
+                if callable(provider):
+                    refreshed = provider()
+                    if isinstance(refreshed, PermissionContext):
+                        context.permission = refreshed
+                if context.permission.mode != "plan":
+                    # Standalone SDK/loop callers do not have the WebSocket
+                    # repository callback. Preserve the same immutable
+                    # transition locally so the next model iteration sees
+                    # plan permissions instead of continuing with build mode.
+                    plan_constraints = dict(context.permission.filesystem_constraints)
+                    if self._workspace_root is not None:
+                        session_id = _safe_session_filename(getattr(context, "session_id", ""))
+                        plan_path = (
+                            self._workspace_root
+                            / ".minicode"
+                            / "plans"
+                            / f"{session_id}.md"
+                        ).resolve()
+                        plan_constraints["plan_files"] = [str(plan_path)]
+                    context.permission = replace(
+                        context.permission,
+                        mode="plan",
+                        source="enter_plan_mode",
+                        pre_plan_mode=current.mode,
+                        approval_policy="on-request",
+                        sandbox_mode="read-only",
+                        filesystem_constraints=plan_constraints,
+                    )
         return ToolResult(
-            content=" ".join(
-                part
-                for part in (
-                    "Plan mode is active.",
-                    f"Reason: {reason}." if reason else "",
-                    "Workspace-changing tools remain unavailable until exit_plan_mode submits a draft plan.",
-                )
-                if part
+            content=(
+                "Plan mode is active. Workspace changes are disabled except for the exact session plan file. "
+                "Write or edit that Markdown plan, then call exit_plan_mode for approval."
             ),
             result_kind="plan",
             display_summary="Entered plan mode",

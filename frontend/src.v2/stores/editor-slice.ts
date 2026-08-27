@@ -1,6 +1,7 @@
 import type { StateCreator } from "zustand";
 import type { AppStore, EditorSlice, EditorTab } from "./types";
 import {
+  editorPathsEqual,
   ensureCodePanelSlots,
   loadPersistedEditorTabs,
   normalizeEditorPath,
@@ -8,6 +9,7 @@ import {
   persistPanelSlots,
   persistEditorTabs,
 } from "./shared-helpers";
+import { isPreviewableMediaPath } from "../lib/media-types";
 
 const panelSlotsAfterClosingLastEditor = (state: AppStore) => {
   if (state.appMode !== "code") {
@@ -31,8 +33,20 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
     openEditorTab: (path) =>
       set((s) => {
         const normalizedPath = normalizeEditorPath(path, s.workingDirectory);
-        const existing = s.editorTabs.find((t) => t.path === normalizedPath);
-        if (existing) return { activeTabPath: normalizedPath };
+        const existing = s.editorTabs.find((t) => editorPathsEqual(t.path, normalizedPath, s.workingDirectory));
+        if (existing) {
+          if (!existing.externalChanged || !isPreviewableMediaPath(normalizedPath)) {
+            return { activeTabPath: existing.path };
+          }
+          return {
+            activeTabPath: existing.path,
+            editorTabs: s.editorTabs.map((tab) => (
+              editorPathsEqual(tab.path, existing.path, s.workingDirectory)
+                ? { ...tab, externalChanged: false }
+                : tab
+            )),
+          };
+        }
         const tab: EditorTab = {
           path: normalizedPath,
           content: "",
@@ -51,15 +65,16 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
     closeEditorTab: (path) =>
       set((s) => {
         const normalizedPath = normalizeEditorPath(path, s.workingDirectory);
-        const idx = s.editorTabs.findIndex((t) => t.path === normalizedPath);
+        const idx = s.editorTabs.findIndex((t) => editorPathsEqual(t.path, normalizedPath, s.workingDirectory));
         if (idx === -1) return {};
-        const next = s.editorTabs.filter((t) => t.path !== normalizedPath);
+        const targetPath = s.editorTabs[idx].path;
+        const next = s.editorTabs.filter((t) => !editorPathsEqual(t.path, targetPath, s.workingDirectory));
         persistEditorTabs(next, s.workingDirectory);
         let activeTabPath = s.activeTabPath;
-        if (activeTabPath === normalizedPath) {
+        if (editorPathsEqual(activeTabPath, targetPath, s.workingDirectory)) {
           activeTabPath = next[Math.max(0, idx - 1)]?.path ?? null;
         }
-        const activeEditorPath = s.activeEditorPath === normalizedPath ? activeTabPath : s.activeEditorPath;
+        const activeEditorPath = editorPathsEqual(s.activeEditorPath, targetPath, s.workingDirectory) ? activeTabPath : s.activeEditorPath;
         if (next.length > 0) return { editorTabs: next, activeTabPath, activeEditorPath };
         const panelSlots = panelSlotsAfterClosingLastEditor(s);
         persistPanelSlots(panelSlots);
@@ -73,12 +88,14 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
     closeOtherEditorTabs: (path) =>
       set((s) => {
         const normalizedPath = normalizeEditorPath(path, s.workingDirectory);
-        const next = s.editorTabs.filter((t) => t.path === normalizedPath);
+        const selected = s.editorTabs.find((t) => editorPathsEqual(t.path, normalizedPath, s.workingDirectory));
+        if (!selected) return {};
+        const next = [selected];
         persistEditorTabs(next, s.workingDirectory);
         return {
           editorTabs: next,
-          activeTabPath: normalizedPath,
-          activeEditorPath: s.activeEditorPath && s.activeEditorPath !== normalizedPath ? normalizedPath : s.activeEditorPath,
+          activeTabPath: selected.path,
+          activeEditorPath: s.activeEditorPath && !editorPathsEqual(s.activeEditorPath, selected.path, s.workingDirectory) ? selected.path : s.activeEditorPath,
         };
       }),
     closeAllEditorTabs: () =>
@@ -93,13 +110,17 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
           panelSlots,
         };
       }),
-    setActiveTab: (path) => set((s) => ({ activeTabPath: normalizeEditorPath(path, s.workingDirectory) })),
+    setActiveTab: (path) => set((s) => {
+      const normalizedPath = normalizeEditorPath(path, s.workingDirectory);
+      const existing = s.editorTabs.find((tab) => editorPathsEqual(tab.path, normalizedPath, s.workingDirectory));
+      return { activeTabPath: existing?.path ?? normalizedPath };
+    }),
     updateTabContent: (path, content) =>
       set((s) => {
         const normalizedPath = normalizeEditorPath(path, s.workingDirectory);
         return {
           editorTabs: s.editorTabs.map((t) =>
-            t.path === normalizedPath && !t.readOnly ? { ...t, content } : t
+            editorPathsEqual(t.path, normalizedPath, s.workingDirectory) && !t.readOnly ? { ...t, content } : t
           ),
         };
       }),
@@ -107,12 +128,13 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
       set((s) => {
         const normalizedPath = normalizeEditorPath(path, s.workingDirectory);
         const loadedTabs = s.editorTabs.map((t) =>
-          t.path === normalizedPath
+          editorPathsEqual(t.path, normalizedPath, s.workingDirectory)
             ? {
                 ...t,
                 content,
                 original: content,
                 contentHash,
+                externalChanged: false,
                 loading: false,
                 error: error ?? null,
                 largeFile: Boolean(meta?.largeFile),
@@ -130,7 +152,7 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
         const normalizedPath = normalizeEditorPath(path, s.workingDirectory);
         return {
           editorTabs: s.editorTabs.map((t) =>
-            t.path === normalizedPath
+            editorPathsEqual(t.path, normalizedPath, s.workingDirectory)
               ? { ...t, original: savedContent, contentHash, externalChanged: false, error: null }
               : t,
           ),
@@ -141,8 +163,7 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
         const normalized = path.replace(/\\/g, "/");
         return {
           editorTabs: s.editorTabs.map((t) => {
-            const tp = t.path.replace(/\\/g, "/");
-            return tp === normalized || tp.endsWith(`/${normalized}`)
+            return editorPathsEqual(t.path, normalized, s.workingDirectory)
               ? { ...t, externalChanged: true }
               : t;
           }),
@@ -153,7 +174,7 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
         const normalizedPath = normalizeEditorPath(path, s.workingDirectory);
         return {
           editorTabs: s.editorTabs.map((t) =>
-            t.path === normalizedPath
+            editorPathsEqual(t.path, normalizedPath, s.workingDirectory)
               ? { ...t, content, original: content, contentHash, externalChanged: false, loading: false, error: null }
               : t,
           ),
@@ -163,11 +184,11 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
       const state = get();
       const path = state.activeTabPath;
       if (!path) return false;
-      const tab = state.editorTabs.find((t) => t.path === path);
+      const tab = state.editorTabs.find((t) => editorPathsEqual(t.path, path, state.workingDirectory));
       if (!tab || tab.loading || tab.error || tab.largeFile || tab.readOnly) return false;
       set((s) => ({
         editorTabs: s.editorTabs.map((t) =>
-          t.path === path
+          editorPathsEqual(t.path, path, s.workingDirectory)
             ? { ...t, content: t.content ? `${t.content}\n${text}` : text }
             : t,
         ),

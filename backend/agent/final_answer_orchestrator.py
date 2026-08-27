@@ -18,6 +18,7 @@ from backend.agent.answer_recovery import (
 from backend.agent.final_answer_runtime import commit_accepted_final_answer
 from backend.agent.loop_process_events import model_process_text_event
 from backend.agent.message import AgentEvent
+from backend.agent.terminal_projection import TurnTerminalProjection
 
 
 FinalAnswerAction = Literal["retry", "terminate"]
@@ -36,7 +37,6 @@ async def orchestrate_final_answer(
     context_builder: Any,
     stream_text: Any,
     turn_kernel: Any,
-    budget_runtime: Any,
     turn_usage: Any,
     provider_phase: str,
     provider_items: list[dict[str, Any]],
@@ -47,8 +47,7 @@ async def orchestrate_final_answer(
     provider_raw_final_text: dict[str, Any],
     provider_raw_done: dict[str, Any],
     degraded_reason: str,
-    stop_hook_feedback_limit: int,
-) -> AsyncIterator[AgentEvent | FinalAnswerOutcome]:
+) -> AsyncIterator[AgentEvent | TurnTerminalProjection | FinalAnswerOutcome]:
     """Run the no-tools acceptance pipeline and return an explicit loop action."""
 
     if stream_text.saw_final_answer_phase:
@@ -75,6 +74,7 @@ async def orchestrate_final_answer(
         stream_text=stream_text,
         turn_usage=turn_usage,
         finish_reason=finish_reason,
+        provider_raw_done=provider_raw_done,
     )
     for event in empty_recovery.events:
         yield event
@@ -105,10 +105,8 @@ async def orchestrate_final_answer(
         state=state,
         context_builder=context_builder,
         stream_text=stream_text,
-        budget_runtime=budget_runtime,
         provider_phase=provider_phase,
         provider_items=provider_items,
-        feedback_limit=stop_hook_feedback_limit,
     )
     for event in stop_hook_acceptance.events:
         yield event

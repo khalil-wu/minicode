@@ -149,7 +149,7 @@ class LSPGoToDefinitionTool(BaseTool):
             )
 
         return ToolResult(
-            content=_format_locations("Definition", locations[:_MAX_LOCATIONS]),
+            content=_format_locations("Definition", locations[:_MAX_LOCATIONS], len(locations)),
             display_summary=f"Definition: {_short_path(locations[0])}" if locations else "",
         )
 
@@ -246,7 +246,7 @@ class LSPFindReferencesTool(BaseTool):
             )
 
         return ToolResult(
-            content=_format_locations("References", locations[:_MAX_LOCATIONS]),
+            content=_format_locations("References", locations[:_MAX_LOCATIONS], len(locations)),
             display_summary=f"References: {len(locations)} found",
         )
 
@@ -341,9 +341,15 @@ class LSPHoverTool(BaseTool):
                 display_summary="No hover info",
             )
 
-        contents = hover.contents[:_MAX_HOVER_CHARS]
+        contents = hover.contents
+        truncated = len(contents) > _MAX_HOVER_CHARS
+        if truncated:
+            contents = contents[:_MAX_HOVER_CHARS]
+        body = f"Hover at {file_path}:{line + 1}:{character + 1}:\n\n{contents}"
+        if truncated:
+            body += f"\n\n[Hover text truncated at {_MAX_HOVER_CHARS} characters.]"
         return ToolResult(
-            content=f"Hover at {file_path}:{line + 1}:{character + 1}:\n\n{contents}",
+            content=body,
             display_summary="Hover info",
         )
 
@@ -430,8 +436,16 @@ class LSPDocumentSymbolsTool(BaseTool):
         lines = [f"Document symbols for {file_path}:", ""]
         for sym in symbols[:_MAX_SYMBOLS]:
             lines.append(f"  {_symbol_kind_name(sym.kind)} {sym.name}  (line {sym.line + 1})")
-            for child in sym.children[:10]:
+            children = sym.children[:10]
+            for child in children:
                 lines.append(f"    {_symbol_kind_name(child.kind)} {child.name}  (line {child.line + 1})")
+            if len(sym.children) > len(children):
+                lines.append(f"    ({len(sym.children) - len(children)} further member(s) not listed)")
+        if len(symbols) > _MAX_SYMBOLS:
+            lines.append("")
+            lines.append(
+                f"Showing the first {_MAX_SYMBOLS} of {len(symbols)} top-level symbols."
+            )
 
         return ToolResult(
             content="\n".join(lines),
@@ -489,10 +503,19 @@ def _workspace_root_for(file_path: str, explicit_root: Any) -> str:
     return workspace_root
 
 
-def _format_locations(title: str, locations: list[LSPLocation]) -> str:
-    lines = [f"{title} ({len(locations)} location(s)):", ""]
+def _format_locations(title: str, locations: list[LSPLocation], total: int) -> str:
+    shown = len(locations)
+    header = (
+        f"{title} ({shown} of {total} location(s)):"
+        if total > shown
+        else f"{title} ({total} location(s)):"
+    )
+    lines = [header, ""]
     for i, loc in enumerate(locations, 1):
         lines.append(f"{i}. {loc.to_display()}")
+    if total > shown:
+        lines.append("")
+        lines.append(f"{total - shown} further location(s) are not listed.")
     return "\n".join(lines)
 
 

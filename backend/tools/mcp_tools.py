@@ -3,7 +3,13 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from backend.tools.base import BaseTool, ToolResult, ToolSchema
+from backend.permissions.context import ToolExecutionContext
+from backend.tools.base import (
+    BaseTool,
+    TOOL_SIDE_EFFECT_EXTERNAL,
+    ToolResult,
+    ToolSchema,
+)
 from backend.tools.contracts import ToolSpec
 
 logger = logging.getLogger(__name__)
@@ -54,7 +60,12 @@ class ListMcpResourcesTool(BaseTool):
             parameters={"type": "object", "properties": {}},
         )
 
-    async def execute(self, args: dict[str, Any]) -> ToolResult:
+    async def execute(
+        self,
+        args: dict[str, Any],
+        context: ToolExecutionContext | None = None,
+    ) -> ToolResult:
+        del context
         if not self._mcp_manager:
             return self._error_result("MCP Manager is not initialized or connected.")
 
@@ -138,7 +149,12 @@ class ReadMcpResourceTool(BaseTool):
             },
         )
 
-    async def execute(self, args: dict[str, Any]) -> ToolResult:
+    async def execute(
+        self,
+        args: dict[str, Any],
+        context: ToolExecutionContext | None = None,
+    ) -> ToolResult:
+        del context
         if not self._mcp_manager:
             return self._error_result("MCP Manager is not initialized or connected.")
 
@@ -148,6 +164,7 @@ class ReadMcpResourceTool(BaseTool):
         server_name = str(args.get("server") or "").strip()
 
         found_content = None
+        failures: list[str] = []
         clients = self._mcp_manager.iter_connected_clients()
         if server_name:
             clients = [
@@ -165,11 +182,14 @@ class ReadMcpResourceTool(BaseTool):
                 if content:
                     found_content = content
                     break
-            except Exception:
-                continue
+            except Exception as exc:
+                failures.append(f"{_name}: {type(exc).__name__}: {exc}")
 
         if not found_content:
-            return self._error_result(f"Could not find or read MCP resource for URI: {uri}")
+            detail = f"Could not find or read MCP resource for URI: {uri}"
+            if failures:
+                detail = f"{detail}. Server failures: {'; '.join(failures)}"
+            return self._error_result(detail)
 
         if self._artifact_store and len(found_content) > 2000:
             artifact_id = self._artifact_store.save(
@@ -194,6 +214,7 @@ class ListMcpResourceTemplatesTool(BaseTool):
     result_kind = "mcp"
     activity_kind = "genericTool"
     display_label = "List MCP resource templates"
+    should_defer = True
 
     def __init__(self, mcp_manager: Any | None) -> None:
         self.name = "list_mcp_resource_templates"
@@ -212,7 +233,12 @@ class ListMcpResourceTemplatesTool(BaseTool):
             parameters={"type": "object", "properties": {}},
         )
 
-    async def execute(self, args: dict[str, Any]) -> ToolResult:
+    async def execute(
+        self,
+        args: dict[str, Any],
+        context: ToolExecutionContext | None = None,
+    ) -> ToolResult:
+        del context
         if not self._mcp_manager:
             return self._error_result("MCP Manager is not initialized or connected.")
 
@@ -236,10 +262,13 @@ class ListMcpResourceTemplatesTool(BaseTool):
 class SubscribeMcpResourceTool(BaseTool):
     """Subscribe to updates for one MCP resource URI."""
 
-    read_only = True
+    read_only = False
+    mutates_external_state = True
+    side_effect_kind = TOOL_SIDE_EFFECT_EXTERNAL
     result_kind = "mcp"
     activity_kind = "genericTool"
     display_label = "MCP resource subscription"
+    should_defer = True
 
     def __init__(self, mcp_manager: Any | None) -> None:
         self.name = "subscribe_mcp_resource"
@@ -264,12 +293,22 @@ class SubscribeMcpResourceTool(BaseTool):
             },
         )
 
-    async def execute(self, args: dict[str, Any]) -> ToolResult:
+    async def execute(
+        self,
+        args: dict[str, Any],
+        context: ToolExecutionContext | None = None,
+    ) -> ToolResult:
+        del context
         client_or_error = self._client_for_args(args)
         if isinstance(client_or_error, ToolResult):
             return client_or_error
         server_name, uri, client = client_or_error
-        ok = await client.subscribe_resource(uri)
+        subscribe = getattr(self._mcp_manager, "subscribe_resource", None)
+        ok = (
+            await subscribe(server_name, uri)
+            if callable(subscribe)
+            else await client.subscribe_resource(uri)
+        )
         if not ok:
             return self._error_result(f"MCP server does not support resource subscriptions or refused URI: {server_name}/{uri}")
         return self._success_result(f"Subscribed to MCP resource updates: {server_name} {uri}")
@@ -297,12 +336,22 @@ class UnsubscribeMcpResourceTool(SubscribeMcpResourceTool):
         self.name = "unsubscribe_mcp_resource"
         self.description = "Unsubscribe from update notifications for one MCP resource URI on a connected server."
 
-    async def execute(self, args: dict[str, Any]) -> ToolResult:
+    async def execute(
+        self,
+        args: dict[str, Any],
+        context: ToolExecutionContext | None = None,
+    ) -> ToolResult:
+        del context
         client_or_error = self._client_for_args(args)
         if isinstance(client_or_error, ToolResult):
             return client_or_error
         server_name, uri, client = client_or_error
-        ok = await client.unsubscribe_resource(uri)
+        unsubscribe = getattr(self._mcp_manager, "unsubscribe_resource", None)
+        ok = (
+            await unsubscribe(server_name, uri)
+            if callable(unsubscribe)
+            else await client.unsubscribe_resource(uri)
+        )
         if not ok:
             return self._error_result(f"MCP server does not support resource subscriptions or refused URI: {server_name}/{uri}")
         return self._success_result(f"Unsubscribed from MCP resource updates: {server_name} {uri}")
@@ -311,10 +360,14 @@ class UnsubscribeMcpResourceTool(SubscribeMcpResourceTool):
 class ListMcpResourceNotificationsTool(BaseTool):
     """Read pending resource update notifications from connected MCP servers."""
 
-    read_only = True
+    # consume_resource_notifications() drains each client's pending queue.
+    read_only = False
+    mutates_external_state = True
+    side_effect_kind = TOOL_SIDE_EFFECT_EXTERNAL
     result_kind = "mcp"
     activity_kind = "genericTool"
     display_label = "List MCP resource notifications"
+    should_defer = True
 
     def __init__(self, mcp_manager: Any | None) -> None:
         self.name = "list_mcp_resource_notifications"
@@ -331,7 +384,12 @@ class ListMcpResourceNotificationsTool(BaseTool):
             parameters={"type": "object", "properties": {}},
         )
 
-    async def execute(self, args: dict[str, Any]) -> ToolResult:
+    async def execute(
+        self,
+        args: dict[str, Any],
+        context: ToolExecutionContext | None = None,
+    ) -> ToolResult:
+        del context
         if not self._mcp_manager:
             return self._error_result("MCP Manager is not initialized or connected.")
 
@@ -361,6 +419,7 @@ class ListMcpPromptsTool(BaseTool):
     result_kind = "mcp"
     activity_kind = "genericTool"
     display_label = "List MCP prompts"
+    should_defer = True
 
     def __init__(self, mcp_manager: Any | None) -> None:
         self.name = "list_mcp_prompts"
@@ -379,7 +438,12 @@ class ListMcpPromptsTool(BaseTool):
             parameters={"type": "object", "properties": {}},
         )
 
-    async def execute(self, args: dict[str, Any]) -> ToolResult:
+    async def execute(
+        self,
+        args: dict[str, Any],
+        context: ToolExecutionContext | None = None,
+    ) -> ToolResult:
+        del context
         if not self._mcp_manager:
             return self._error_result("MCP Manager is not initialized or connected.")
 
@@ -412,6 +476,7 @@ class GetMcpPromptTool(BaseTool):
     result_kind = "mcp"
     activity_kind = "genericTool"
     display_label = "Get MCP prompt"
+    should_defer = True
 
     def __init__(self, mcp_manager: Any | None) -> None:
         self.name = "get_mcp_prompt"
@@ -449,7 +514,12 @@ class GetMcpPromptTool(BaseTool):
             },
         )
 
-    async def execute(self, args: dict[str, Any]) -> ToolResult:
+    async def execute(
+        self,
+        args: dict[str, Any],
+        context: ToolExecutionContext | None = None,
+    ) -> ToolResult:
+        del context
         if not self._mcp_manager:
             return self._error_result("MCP Manager is not initialized or connected.")
 

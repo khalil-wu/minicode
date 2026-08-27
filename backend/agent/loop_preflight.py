@@ -29,6 +29,11 @@ class TurnPreflightResult:
     block_message: str
     session_hook_result: Any | None
     prompt_hook_result: Any | None
+    # SessionStart hooks may provide a synthetic first user message and paths
+    # that should be watched for FileChanged.  Keep both values on the
+    # preflight boundary instead of silently dropping them.
+    initial_user_message: str = ""
+    watch_paths: tuple[str, ...] = ()
 
 
 async def prepare_turn_input(
@@ -47,6 +52,8 @@ async def prepare_turn_input(
     block_message = ""
     session_hook_result = None
     prompt_hook_result = None
+    initial_user_message = ""
+    watch_paths: tuple[str, ...] = ()
 
     hook_manager = get_hook_manager()
     try:
@@ -62,6 +69,29 @@ async def prepare_turn_input(
                 deadline=deadline,
                 cancel_event=cancel_event,
             )
+            initial_user_message = str(
+                getattr(session_hook_result, "initial_user_message", "") or ""
+            ).strip()
+            raw_watch_paths = getattr(session_hook_result, "watch_paths", ())
+            if isinstance(raw_watch_paths, (list, tuple, set)):
+                watch_paths = tuple(
+                    dict.fromkeys(
+                        str(path).strip()
+                        for path in raw_watch_paths
+                        if str(path or "").strip()
+                    )
+                )
+            if initial_user_message:
+                # Headless callers may provide an initial message separately
+                # from the user turn. Consume it only when no user turn exists
+                # and retain the hook value for embedding callers.
+                if not str(user_message or "").strip():
+                    user_message = initial_user_message
+                    state.user_message = user_message
+                elif isinstance(getattr(state, "prompt_context", None), dict):
+                    state.prompt_context["hook_initial_user_message"] = initial_user_message
+            if watch_paths and isinstance(getattr(state, "prompt_context", None), dict):
+                state.prompt_context["hook_watch_paths"] = list(watch_paths)
         if (
             not deadline_reached
             and hook_manager
@@ -95,6 +125,8 @@ async def prepare_turn_input(
         block_message=block_message,
         session_hook_result=session_hook_result,
         prompt_hook_result=prompt_hook_result,
+        initial_user_message=initial_user_message,
+        watch_paths=watch_paths,
     )
 
 

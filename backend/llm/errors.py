@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 
@@ -93,6 +95,11 @@ _NETWORK_KEYWORDS = (
     "connection closed",
     "stream ended before [done]",
     "ended before [done]",
+    "closed before response.completed",
+    "ended before a finish reason",
+    "ended before message_stop",
+    "stream ended without a terminal event",
+    "流式响应在完成前中断",
     "eof_without_terminal",
     "readerror",
     "writeerror",
@@ -112,6 +119,36 @@ class LLMErrorClassification:
 def classify_llm_error(message: str | BaseException | None) -> LLMErrorClassification:
     text = _normalize_error_text(message)
     status_codes = _extract_status_codes(message)
+
+    # A provider's structured code is stronger than the transport status.
+    # Gateways may use 503 for a configuration/model routing failure; that
+    # must remain visible as a fatal model error instead of entering the
+    # retry ladder as generic network unavailability.
+    structured = _structured_provider_error_signal(message)
+    if structured is not None:
+        return structured
+
+    if (
+        "provider_error_type=protocol" in text
+        or "provider_error_code=convert_request_failed" in text
+        or "convert_request_failed" in text
+    ):
+        return LLMErrorClassification(
+            fatal=True,
+            retryable=False,
+            error_type="provider_protocol",
+            provider_error_type="protocol",
+        )
+
+    # A structured HTTP server status is authoritative. Gateway-generated
+    # 52x pages commonly contain words such as "Cloudflare" or "blocked";
+    # treating those pages as policy refusals makes a transient outage fatal.
+    # Keep 529's established overloaded/busy meaning and classify every other
+    # 5xx response as a retryable provider/network failure.
+    if 529 in status_codes:
+        return LLMErrorClassification(fatal=False, retryable=True, error_type="api", provider_error_type="busy")
+    if any(500 <= code <= 599 for code in status_codes):
+        return LLMErrorClassification(fatal=False, retryable=True, error_type="api", provider_error_type="network")
 
     if "provider_error_type=proxy" in text:
         return LLMErrorClassification(fatal=True, retryable=False, error_type="api", provider_error_type="proxy")
@@ -134,6 +171,8 @@ def classify_llm_error(message: str | BaseException | None) -> LLMErrorClassific
         )
     if "provider_error_type=rate_limit" in text:
         return LLMErrorClassification(fatal=False, retryable=True, error_type="api", provider_error_type="rate_limit")
+    if "provider_error_type=busy" in text:
+        return LLMErrorClassification(fatal=False, retryable=True, error_type="api", provider_error_type="busy")
     if "provider_error_type=network" in text:
         return LLMErrorClassification(fatal=False, retryable=True, error_type="api", provider_error_type="network")
 
@@ -145,23 +184,52 @@ def classify_llm_error(message: str | BaseException | None) -> LLMErrorClassific
             provider_error_type="unsupported_capability",
         )
 
-    if 407 in status_codes or _contains_any(text, ("proxy authentication required", "proxy auth")):
+    # A structured HTTP status is authoritative, for the same reason 5xx is
+    # handled above: a gateway's own error page carries words like
+    # "Cloudflare", "forbidden" or "billing", so letting the keyword tables
+    # decide first turned a genuine 429 into a fatal policy block that the
+    # retry ladder skipped entirely.
+    if 407 in status_codes:
         return LLMErrorClassification(fatal=True, retryable=False, error_type="api", provider_error_type="proxy")
-    if 401 in status_codes or _contains_any(text, _AUTH_KEYWORDS):
+    if 401 in status_codes:
         return LLMErrorClassification(fatal=True, retryable=False, error_type="auth", provider_error_type="auth")
-    if 402 in status_codes or _contains_any(text, _BILLING_KEYWORDS):
+    if 402 in status_codes:
         return LLMErrorClassification(fatal=True, retryable=False, error_type="billing", provider_error_type="billing")
+    if 429 in status_codes:
+        return LLMErrorClassification(fatal=False, retryable=True, error_type="api", provider_error_type="rate_limit")
+    # Content filtering is the more specific reading of a 403 than a generic
+    # policy block, so it keeps its precedence over the numeric rule.
     if _contains_any(text, _CONTENT_FILTER_KEYWORDS):
         return LLMErrorClassification(fatal=True, retryable=False, error_type="blocked", provider_error_type="content_filter")
-    if 403 in status_codes or _contains_any(text, _BLOCKED_KEYWORDS):
+    if 403 in status_codes:
         return LLMErrorClassification(fatal=True, retryable=False, error_type="blocked", provider_error_type="blocked")
     if (400 in status_codes or 404 in status_codes) and _contains_any(text, _MODEL_KEYWORDS):
         return LLMErrorClassification(fatal=True, retryable=False, error_type="model", provider_error_type="model")
-    if 429 in status_codes or _contains_any(text, ("rate limit", "rate_limit", "too many requests")):
+    if any(code in status_codes for code in (408, 409, 425)):
+        return LLMErrorClassification(fatal=False, retryable=True, error_type="api", provider_error_type="network")
+
+    # Keyword fallbacks, for providers that surface no usable status code.
+    if _contains_any(text, ("proxy authentication required", "proxy auth")):
+        return LLMErrorClassification(fatal=True, retryable=False, error_type="api", provider_error_type="proxy")
+    if _contains_any(text, _AUTH_KEYWORDS):
+        return LLMErrorClassification(fatal=True, retryable=False, error_type="auth", provider_error_type="auth")
+    if _contains_any(text, _BILLING_KEYWORDS):
+        return LLMErrorClassification(fatal=True, retryable=False, error_type="billing", provider_error_type="billing")
+    if _contains_any(text, _BLOCKED_KEYWORDS):
+        return LLMErrorClassification(fatal=True, retryable=False, error_type="blocked", provider_error_type="blocked")
+    if _contains_any(text, ("rate limit", "rate_limit", "too many requests")):
         return LLMErrorClassification(fatal=False, retryable=True, error_type="api", provider_error_type="rate_limit")
-    if "concurrency limit exceeded" in text:
+    if _contains_any(
+        text,
+        (
+            "concurrency limit exceeded",
+            "overloaded",
+            "resourceexhausted",
+            "resource exhausted",
+        ),
+    ):
         return LLMErrorClassification(fatal=False, retryable=True, error_type="api", provider_error_type="busy")
-    if any(code in status_codes for code in (500, 502, 503, 504)) or _contains_any(text, _NETWORK_KEYWORDS):
+    if _contains_any(text, _NETWORK_KEYWORDS):
         return LLMErrorClassification(fatal=False, retryable=True, error_type="api", provider_error_type="network")
 
     # Size-class recoveries: media rejections and prompt-too-long should enter the
@@ -215,6 +283,227 @@ def is_fatal_llm_error(message: str | BaseException | None) -> bool:
 
 def is_retryable_llm_error(message: str | BaseException | None) -> bool:
     return classify_llm_error(message).retryable
+
+
+def llm_error_text(message: str | BaseException | None) -> str:
+    """Return the lowercased, flattened text of an LLM failure.
+
+    Unlike ``str(exc)`` this walks the ``__cause__``/``__context__`` chain and
+    includes the HTTP response body, so a raw ``httpx.HTTPStatusError`` — whose
+    ``str()`` is only ``Client error '400 Bad Request' for url ...`` — remains
+    inspectable by the adapters' keyword probes.
+    """
+
+    return _normalize_error_text(message)
+
+
+def llm_error_status_code(message: str | BaseException | None) -> int | None:
+    """Return the first structured HTTP status carried by an LLM failure."""
+
+    for item in _error_chain(message):
+        for value in (
+            getattr(item, "status_code", None),
+            getattr(getattr(item, "response", None), "status_code", None),
+        ):
+            try:
+                if value is not None:
+                    return int(value)
+            except (TypeError, ValueError):
+                continue
+    codes = sorted(_extract_status_codes(message))
+    return codes[0] if codes else None
+
+
+def retry_after_seconds(
+    message: str | BaseException | None,
+    *,
+    maximum: float = 60.0,
+) -> float:
+    """Parse HTTP ``Retry-After`` metadata from an exception chain.
+
+    Both the delay-seconds and HTTP-date forms from RFC 9110 are supported.
+    The default 60s maximum matches pi's DEFAULT_MAX_RETRY_DELAY_MS so a
+    provider cannot make the Agent sleep indefinitely.
+    """
+
+    limit = max(0.0, float(maximum))
+    for item in _error_chain(message):
+        direct = getattr(item, "retry_after_seconds", None)
+        if direct is not None:
+            try:
+                return max(0.0, min(float(direct), limit))
+            except (TypeError, ValueError):
+                pass
+        response = getattr(item, "response", None)
+        headers = getattr(response, "headers", None)
+        if headers is None:
+            headers = getattr(item, "headers", None)
+        raw = None
+        if headers is not None:
+            try:
+                raw = headers.get("retry-after")
+                if raw is None:
+                    raw = headers.get("Retry-After")
+            except (AttributeError, TypeError):
+                raw = None
+        if raw is None:
+            continue
+        try:
+            return max(0.0, min(float(raw), limit))
+        except (TypeError, ValueError):
+            try:
+                target = parsedate_to_datetime(str(raw))
+                if target.tzinfo is None:
+                    target = target.replace(tzinfo=UTC)
+                delay = (target - datetime.now(UTC)).total_seconds()
+                return max(0.0, min(delay, limit))
+            except (TypeError, ValueError, OverflowError):
+                continue
+    return 0.0
+
+
+_ADAPTER_ERROR_RETRY_AFTER_MAXIMUM = 300.0
+
+_PROVIDER_SECRET_TEXT_RE = re.compile(
+    r"(?i)"
+    r"(?:bearer\s+|(?:api[_ -]?key|authorization)\s*[:=]\s*)[^\s,;]+"
+    r"|\bsk(?:-[A-Za-z0-9_-]+|_[A-Za-z0-9_-]+)\b"
+)
+
+
+def _provider_response_body(exc: BaseException) -> str:
+    response = getattr(exc, "response", None)
+    for owner in (response, exc):
+        if owner is None:
+            continue
+        for attr in ("text", "body", "content"):
+            value = getattr(owner, attr, None)
+            if value:
+                if isinstance(value, bytes):
+                    return value.decode("utf-8", errors="replace")
+                if isinstance(value, (dict, list)):
+                    try:
+                        return json.dumps(value, ensure_ascii=False)
+                    except (TypeError, ValueError):
+                        return str(value)
+                return str(value)
+    return ""
+
+
+def _safe_provider_diagnostic_text(value: Any, *, limit: int = 400) -> str:
+    """Bound and redact provider text before it enters a trace or UI event."""
+
+    from backend.secret_redaction import redact_secrets
+
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return ""
+    text = redact_secrets(text)
+    text = _PROVIDER_SECRET_TEXT_RE.sub("[redacted]", text)
+    return text[: max(1, limit)]
+
+
+def _provider_error_body_details(body: str) -> dict[str, Any]:
+    """Extract only compact, non-body fields from a provider error payload."""
+
+    try:
+        payload = json.loads(body) if body else {}
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    error_obj = payload.get("error")
+    if not isinstance(error_obj, dict):
+        error_obj = payload
+    details: dict[str, Any] = {}
+    for key in (
+        "message",
+        "code",
+        "type",
+        "param",
+        "status",
+        "status_code",
+        "request_id",
+    ):
+        value = error_obj.get(key)
+        if value is None or isinstance(value, (dict, list)):
+            continue
+        if key == "message":
+            value = _safe_provider_diagnostic_text(value)
+        elif isinstance(value, str):
+            value = _safe_provider_diagnostic_text(value, limit=160)
+        details[key] = value
+    return details
+
+
+def _structured_provider_error_signal(
+    message: str | BaseException | None,
+) -> LLMErrorClassification | None:
+    """Classify stable provider error fields without depending on wording."""
+
+    for item in _error_chain(message):
+        body = _provider_response_body(item) if isinstance(item, BaseException) else str(item or "")
+        details = _provider_error_body_details(body)
+        if not details:
+            continue
+        code = str(details.get("code") or "").strip().casefold()
+        schema_type = str(details.get("type") or "").strip().casefold()
+        signal = f"{code} {schema_type}"
+        if "convert_request_failed" in signal:
+            return LLMErrorClassification(True, False, "provider_protocol", "protocol")
+        if any(token in signal for token in ("invalid_api_key", "authentication_error", "unauthorized")):
+            return LLMErrorClassification(True, False, "auth", "auth")
+        if any(token in signal for token in ("insufficient_quota", "quota_exceeded", "billing_error")):
+            return LLMErrorClassification(True, False, "billing", "billing")
+        if any(token in signal for token in ("rate_limit", "rate_limited", "too_many_requests")):
+            return LLMErrorClassification(False, True, "api", "rate_limit")
+        if any(token in signal for token in ("model_not_found", "invalid_model")):
+            return LLMErrorClassification(True, False, "model", "model")
+        if any(token in signal for token in ("content_filter", "safety_filter")):
+            return LLMErrorClassification(True, False, "blocked", "content_filter")
+        if any(token in signal for token in ("context_length_exceeded", "prompt_too_long")):
+            return LLMErrorClassification(False, True, "prompt_too_long", "prompt_too_long")
+    return None
+
+
+def llm_error_raw(exc: BaseException, provider: str) -> dict[str, Any]:
+    """Build the normalized ``StreamEvent.raw`` payload for a failed request.
+
+    ``backend/agent/provider_stream_error_event.py`` classifies the failure and
+    schedules the retry ladder from ``status_code``, ``provider_error_code``,
+    ``provider_error_schema_type`` and ``retry_after_seconds``. Every ERROR
+    event that crosses the provider boundary must therefore carry them, so all
+    adapters and the shared stream wrapper build the shape here rather than
+    each assembling a partial dict of their own.
+    """
+
+    classification = classify_llm_error(exc)
+    raw: dict[str, Any] = {
+        "provider": provider,
+        "exception_type": type(exc).__name__,
+        "provider_error_type": classification.provider_error_type,
+        "error_type": classification.error_type,
+    }
+    status = llm_error_status_code(exc)
+    if status is not None:
+        raw["status_code"] = status
+    retry_after = retry_after_seconds(
+        exc,
+        maximum=_ADAPTER_ERROR_RETRY_AFTER_MAXIMUM,
+    )
+    if retry_after > 0:
+        raw["retry_after_seconds"] = retry_after
+    body_details = _provider_error_body_details(_provider_response_body(exc))
+    provider_error_code = str(body_details.get("code") or "").strip()
+    provider_error_schema_type = str(body_details.get("type") or "").strip()
+    provider_error_message = str(body_details.get("message") or "").strip()
+    if provider_error_code:
+        raw["provider_error_code"] = provider_error_code
+    if provider_error_schema_type:
+        raw["provider_error_schema_type"] = provider_error_schema_type
+    if provider_error_message:
+        raw["provider_error_message"] = provider_error_message
+    return raw
 
 
 def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
@@ -356,6 +645,8 @@ def sanitize_llm_error_message(
         return "\u6a21\u578b\u540d\u6216\u6a21\u578b\u914d\u7f6e\u65e0\u6548\uff0c\u8bf7\u68c0\u67e5 provider\u3001Base URL \u548c model \u8bbe\u7f6e\u3002" + suffix
     if kind == "unsupported_capability":
         return "\u5f53\u524d\u6a21\u578b\u4e0d\u652f\u6301\u56fe\u7247\u8f93\u5165\uff0c\u8bf7\u5207\u6362\u5230\u652f\u6301\u89c6\u89c9\u8f93\u5165\u7684\u6a21\u578b\u3002" + suffix
+    if kind == "protocol":
+        return "\u6240\u9009 API \u683c\u5f0f\u65e0\u6cd5\u88ab\u5f53\u524d\u670d\u52a1\u5546\u6216\u7f51\u5173\u5904\u7406\uff0c\u8bf7\u68c0\u67e5 API \u683c\u5f0f\u4e0e Base URL\u3002MiniCode \u672a\u5207\u6362\u5230\u5176\u4ed6\u534f\u8bae\u3002" + suffix
     if kind == "network":
         return "\u6a21\u578b\u670d\u52a1\u7f51\u7edc\u8bf7\u6c42\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002" + suffix
     return "\u6a21\u578b\u8c03\u7528\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u6216\u5207\u6362\u6a21\u578b\u3002" + suffix

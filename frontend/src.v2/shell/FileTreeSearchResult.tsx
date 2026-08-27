@@ -34,7 +34,7 @@ export const SearchResultRow = ({
   onContextMenu: (menu: ContextMenuState) => void;
   onNavigate?: () => void;
 }) => {
-  const selected = isSameTreePath(activeEditorPath, result.path);
+  const selected = isSameTreePath(activeEditorPath, result.path, workingDirectory);
   const isDir = result.kind === "folder";
   const gitStatus = gitMap.get(result.path);
   const parent = result.path.replace(/\\/g, "/").split("/").slice(0, -1).join("/");

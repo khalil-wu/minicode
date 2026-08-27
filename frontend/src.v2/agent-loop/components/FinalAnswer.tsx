@@ -16,7 +16,7 @@ export function FinalAnswer({
     <section
       className="chat-turn-answer agent-loop-final-answer"
       data-streaming={isStreaming ? "true" : "false"}
-      aria-label="Assistant response"
+      aria-label="助手回复"
     >
       {renderCell({
         cell,

@@ -1,4 +1,6 @@
 import { canonicalWorkspacePath } from "../lib/workspace-display";
+import { normalizeWorkspaceRoot } from "../lib/workspace-path";
+import { safeJsonParse } from "../lib/safe-parse";
 
 const STORAGE_PREFIX = "minicode.prompt-history.v1";
 export const PROMPT_HISTORY_LIMIT = 100;
@@ -12,8 +14,8 @@ const storage = (): Storage | null => {
 };
 
 export const promptHistoryWorkspaceKey = (workspaceRoot: string | null | undefined): string => {
-  const canonical = canonicalWorkspacePath(workspaceRoot).replace(/\\/g, "/").replace(/\/$/, "");
-  const normalized = /^[a-z]:\//i.test(canonical) ? canonical.toLowerCase() : canonical;
+  const canonical = canonicalWorkspacePath(workspaceRoot);
+  const normalized = normalizeWorkspaceRoot(canonical);
   return normalized || "global";
 };
 
@@ -24,7 +26,7 @@ export const readPromptHistory = (workspaceRoot: string | null | undefined): str
   const target = storage();
   if (!target) return [];
   try {
-    const parsed = JSON.parse(target.getItem(keyFor(workspaceRoot)) || "[]");
+    const parsed = safeJsonParse<unknown>(target.getItem(keyFor(workspaceRoot)) || "[]", []);
     if (!Array.isArray(parsed)) return [];
     return parsed.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).slice(0, PROMPT_HISTORY_LIMIT);
   } catch {

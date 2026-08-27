@@ -7,6 +7,7 @@ from typing import Any
 
 from backend.agent.answer_commit_projection import build_answer_commit_projection
 from backend.agent.message import AgentEvent
+from backend.agent.terminal_projection import TurnTerminalProjection
 
 
 async def commit_accepted_final_answer(
@@ -24,7 +25,7 @@ async def commit_accepted_final_answer(
     provider_phase: str,
     provider_items: list[dict[str, Any]],
     usage: Any,
-) -> AsyncIterator[AgentEvent]:
+) -> AsyncIterator[AgentEvent | TurnTerminalProjection]:
     """Commit the model-authored answer without a hidden review call."""
 
     runtime.update_phase(run_record.run_id, "final", summary="Preparing final answer")
@@ -37,12 +38,12 @@ async def commit_accepted_final_answer(
     )
     for event in projection.text_events:
         yield event
-    for event in answer_committer.commit_history_and_terminal(
+    yield answer_committer.commit_answer(
         projection=projection,
         final_text=candidate_text,
         provider_phase=provider_phase,
         provider_items=provider_items,
         usage=usage,
         provider_raw=provider_raw_done,
-    ):
-        yield event
+        finish_reason=finish_reason,
+    )

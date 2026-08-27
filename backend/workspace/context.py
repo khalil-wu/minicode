@@ -1,9 +1,9 @@
 """
-项目工作区上下文管理（参考 Claude Code 的 FileStateCache + Project Discovery）。
+项目工作区上下文管理（MiniCode 实现）。
 
 核心功能：
   - 发现项目结构（.git, package.json, pyproject.toml 等）
-  - 加载 CLAUDE.md 项目指令
+  - 加载 MINICODE.md 项目指令
   - 构建文件索引（支持 .gitignore 过滤）
   - 提供项目元信息给 Agent
 """
@@ -40,8 +40,8 @@ DEFAULT_IGNORED_DIRS = {
     ".vite",
     ".idea",
     ".vscode",
-    ".claude",
-    ".codex",
+    ".minicode",
+    ".minicode",
     ".venv",
     "venv",
     "env",
@@ -61,6 +61,7 @@ DEFAULT_IGNORED_DIRS = {
     ".coverage",
     "htmlcov",
     ".ipynb_checkpoints",
+    # ML experiment output dirs that can contain thousands of binary artifacts.
     "data",
     "datasets",
     "dataset",
@@ -119,7 +120,7 @@ class ProjectMetadata:
     project_type: str  # "python" | "node" | "rust" | "unknown"
     name: str
     description: str = ""
-    claude_md_content: str = ""  # CLAUDE.md 内容
+    has_project_instructions: bool = False
     gitignore_patterns: list[str] = field(default_factory=list)
     file_count: int = 0
     total_size: int = 0  # bytes
@@ -143,7 +144,7 @@ class WorkspaceContext:
       1. 项目发现与分析
       2. 文件索引构建
       3. .gitignore 规则解析
-      4. CLAUDE.md 加载
+      4. MiniCode 项目指令发现
     """
 
     def __init__(self, root_path: str | Path, *, max_index_files: int = DEFAULT_INDEX_MAX_FILES):
@@ -169,19 +170,20 @@ class WorkspaceContext:
         project_type = self._detect_project_type()
         project_name = self.root_path.name
 
-        # 2. 加载 CLAUDE.md
-        claude_md_content = self._load_claude_md()
+        # 2. 发现 MiniCode 项目指令。指令内容由 instruction_discovery 统一加载，
+        # workspace metadata 只报告是否存在，避免产生第二套 prompt 真相源。
+        has_project_instructions = self._has_project_instructions()
 
         # 3. 加载 .gitignore
         self._gitignore_patterns = self._load_gitignore()
         self._gitignore_spec = GitIgnoreSpec.from_lines(self._gitignore_patterns)
 
-        # 先就位 metadata（CLAUDE.md / 项目类型立即可用），文件统计在索引完成后回填
+        # 先就位 metadata（指令状态 / 项目类型立即可用），文件统计在索引完成后回填
         self.metadata = ProjectMetadata(
             root_path=self.root_path,
             project_type=project_type,
             name=project_name,
-            claude_md_content=claude_md_content,
+            has_project_instructions=has_project_instructions,
             gitignore_patterns=self._gitignore_patterns,
         )
 
@@ -213,17 +215,20 @@ class WorkspaceContext:
             return "java"
         return "unknown"
 
-    def _load_claude_md(self) -> str:
-        """加载 CLAUDE.md 项目指令"""
-        claude_md_path = self.root_path / "CLAUDE.md"
-        if claude_md_path.exists():
-            try:
-                content = claude_md_path.read_text(encoding="utf-8")
-                logger.info(f"加载 CLAUDE.md: {len(content)} 字符")
-                return content
-            except Exception as e:
-                logger.warning(f"读取 CLAUDE.md 失败: {e}")
-        return ""
+    def _has_project_instructions(self) -> bool:
+        """Return whether the project declares any MiniCode instruction source."""
+
+        config_dir = self.root_path / ".minicode"
+        if any(
+            (config_dir / name).is_file()
+            for name in ("INSTRUCTIONS.md", "INSTRUCTIONS.local.md")
+        ):
+            return True
+        rules_dir = config_dir / "rules"
+        try:
+            return rules_dir.is_dir() and any(path.is_file() for path in rules_dir.rglob("*.md"))
+        except OSError:
+            return False
 
     def _load_gitignore(self) -> list[str]:
         """加载 .gitignore 规则"""
@@ -363,6 +368,6 @@ class WorkspaceContext:
             "description": self.metadata.description,
             "file_count": self.metadata.file_count,
             "total_size": self.metadata.total_size,
-            "has_claude_md": bool(self.metadata.claude_md_content),
+            "has_project_instructions": self.metadata.has_project_instructions,
             "index_truncated": self.index_truncated,
         }

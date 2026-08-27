@@ -43,6 +43,7 @@ TOOL_TURN_RUNTIME = ROOT / "backend" / "agent" / "tool_turn_runtime.py"
 TURN_RECOVERY_RUNTIME = ROOT / "backend" / "agent" / "turn_recovery_runtime.py"
 LOOP_BOOTSTRAP = ROOT / "backend" / "agent" / "loop_bootstrap.py"
 LOOP_COMPONENTS = ROOT / "backend" / "agent" / "loop_components.py"
+LOOP_HOOK_PROJECTION = ROOT / "backend" / "agent" / "loop_hook_projection.py"
 TURN_ITERATION_ADMISSION = (
     ROOT / "backend" / "agent" / "turn_iteration_admission.py"
 )
@@ -121,6 +122,7 @@ def main() -> int:
     turn_recovery_runtime_imports = _imports(TURN_RECOVERY_RUNTIME)
     loop_bootstrap_imports = _imports(LOOP_BOOTSTRAP)
     loop_components_imports = _imports(LOOP_COMPONENTS)
+    loop_hook_projection_imports = _imports(LOOP_HOOK_PROJECTION)
     turn_iteration_admission_imports = _imports(TURN_ITERATION_ADMISSION)
     turn_iteration_execution_imports = _imports(TURN_ITERATION_EXECUTION)
     turn_iteration_execution_text = TURN_ITERATION_EXECUTION.read_text(encoding="utf-8")
@@ -349,6 +351,10 @@ def main() -> int:
     ):
         if dependency not in loop_components_imports:
             failures.append(f"loop_components.py must own {label}")
+    if "backend.agent.loop_hook_projection" not in loop_imports:
+        failures.append("loop.py must depend on extracted hook projection")
+    if "backend.agent.loop" in loop_hook_projection_imports:
+        failures.append("loop_hook_projection.py must not import loop.py")
     if "backend.agent.agent_registry" not in runtime_imports:
         failures.append("AgentRuntime must depend on AgentRegistry")
     run_manager_text = RUN_MANAGER.read_text(encoding="utf-8")
@@ -361,8 +367,13 @@ def main() -> int:
         failures.append("SessionRunManager must persist follow-up queue state")
     if "finish_user_message_dispatch" not in handler_text:
         failures.append("queued dispatch must acknowledge or replay its inflight command")
-    if ".tmp" not in durable_queue_text or ".replace(" not in durable_queue_text:
-        failures.append("durable queue writes must use atomic temp-file replacement")
+    if (
+        "atomic_write_text" not in durable_queue_text
+        or "from backend.atomic_io" not in durable_queue_text
+    ):
+        failures.append(
+            "durable queue writes must use the shared atomic text publisher"
+        )
     if '"turn_inputs"' not in durable_queue_text:
         failures.append("promoted turn inputs must remain durable until acknowledged")
     if "acknowledge_consumed_turn_input" not in agent_runner_text:

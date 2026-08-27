@@ -4,6 +4,8 @@ import { sendClientCommand } from "../protocol/ws-outbox";
 import { pushToast } from "../overlays/ToastContainer";
 import { openSettings } from "../lib/settings-navigation";
 import { capabilityFeatureEnabled } from "../protocol/capabilities";
+import { matchesShortcut, matchesShiftedShortcutVariant, type ShortcutActionId } from "../lib/keyboard-shortcuts";
+import { buildInterruptCommand } from "../lib/interrupt-command";
 
 let lastZoomToastAt = 0;
 
@@ -31,11 +33,19 @@ export const useKeyboardShortcuts = () => {
       const createConversationInCurrentMode = () => {
         s.createConversation({ appMode: s.appMode, bindWorkspace: Boolean(s.workingDirectory) });
       };
+      const match = (action: ShortcutActionId) => matchesShortcut(e, s.shortcutBindings[action]);
 
       // The topmost dialog owns its keyboard context. Individual dialogs
-      // handle Enter/Escape and navigation locally; global application
-      // shortcuts must not mutate conversations or panels through them.
-      if (isModalTarget(e.target) && e.key !== "Escape") return;
+      // handle Enter/Escape and navigation locally. Modal-routing shortcuts
+      // remain global so users can close or switch top-level surfaces while a
+      // search field is focused; workspace mutations stay blocked.
+      if (isModalTarget(e.target) && e.key !== "Escape") {
+        if (match("commandPalette")) { e.preventDefault(); s.toggleCommandPalette(); return; }
+        if (match("settings")) { e.preventDefault(); s.toggleSettings(); return; }
+        if (match("shortcutHelp")) { e.preventDefault(); s.toggleShortcutsHelp(); return; }
+        if (match("openGeneralSettings")) { e.preventDefault(); openSettings("general"); return; }
+        return;
+      }
 
       // Alt+1/2/3 for mode switching (no Ctrl required)
       if (e.altKey && !mod) {
@@ -51,15 +61,12 @@ export const useKeyboardShortcuts = () => {
         // which cancels the plan and blocks every in-progress todo.
         if (!s.isStreaming) return;
         e.preventDefault();
-        s.interrupt();
-        sendClientCommand({
-          type: "interrupt",
-          ...(s.conversationId ? { conversation_id: s.conversationId } : {}),
-        });
+        const command = buildInterruptCommand(s);
+        sendClientCommand(command);
         return;
       }
 
-      if (!mod) return;
+      if (!mod && !e.altKey && !e.key.startsWith("F")) return;
 
       // Ctrl/Cmd+1..9 jumps directly to the Nth non-archived conversation.
       if (!e.shiftKey && !e.altKey && e.key >= "1" && e.key <= "9") {
@@ -72,188 +79,110 @@ export const useKeyboardShortcuts = () => {
         return;
       }
 
-      switch (e.key) {
-        case "r":
-        case "R":
-          if (!e.shiftKey && !e.altKey) {
-            e.preventDefault();
-            window.dispatchEvent(new Event("composer:history-search"));
-          }
-          break;
-        case "l":
-          if (e.shiftKey) {
-            e.preventDefault();
-            createConversationInCurrentMode();
-          } else {
-            e.preventDefault();
-            s.setDraft("");
-            document.querySelector<HTMLTextAreaElement>("textarea")?.focus();
-          }
-          break;
-        case "o":
-        case "O":
-          e.preventDefault();
-          {
-            const next = s.viewMode === "normal" ? "verbose" : s.viewMode === "verbose" ? "summary" : "normal";
-            s.setViewMode(next);
-            announceViewMode(next);
-          }
-          break;
-        case "d":
-        case "D":
-          if (e.shiftKey) {
-            e.preventDefault();
-            // Toggle diff pane
-            const hasDiff = s.panelSlots.some(p => p.kind === "diff");
-            if (hasDiff) {
-              const diffPanels = s.panelSlots.filter(p => p.kind === "diff");
-              diffPanels.forEach(p => s.removePanel(p.id));
-            } else {
-              s.addPanel({ id: "diff-" + Date.now(), kind: "diff" });
-            }
-          }
-          break;
-        case "p":
-        case "P":
-          if (e.shiftKey) {
-            e.preventDefault();
-            s.setAppMode("code");
-            s.setRightStackTab("preview");
-          } else {
-            e.preventDefault();
-            if (capabilityFeatureEnabled(s.runtimeCapabilities, "global_search", true)) {
-              s.toggleQuickOpen();
-            }
-          }
-          break;
-        case "m":
-        case "M":
-          if (e.shiftKey) {
-            e.preventDefault();
-            document.dispatchEvent(new CustomEvent("open-permission-menu"));
-          }
-          break;
-        case "i":
-        case "I":
-          if (e.shiftKey) {
-            e.preventDefault();
-            document.dispatchEvent(new CustomEvent("open-model-menu"));
-          }
-          break;
-        case "e":
-        case "E":
-          if (e.shiftKey) {
-            e.preventDefault();
-            openSettings("general");
-          }
-          break;
-        case "k":
-        case "K":
-          if (!e.shiftKey) {
-            e.preventDefault();
-            s.toggleCommandPalette();
-          }
-          break;
-        case "n":
-          e.preventDefault();
-          createConversationInCurrentMode();
-          break;
-        case ",":
-          e.preventDefault();
-          s.toggleSettings();
-          break;
-        case "/":
-          e.preventDefault();
-          s.toggleShortcutsHelp();
-          break;
-        case "=":
-        case "+":
-          e.preventDefault();
-          {
-            const next = s.textScale + 0.04;
-            s.setTextScale(next);
-            announceZoom(useAppStore.getState().textScale);
-          }
-          break;
-        case "-":
-          e.preventDefault();
-          {
-            const next = s.textScale - 0.04;
-            s.setTextScale(next);
-            announceZoom(useAppStore.getState().textScale);
-          }
-          break;
-        case "0":
-          e.preventDefault();
-          s.setTextScale(1.0);
-          announceZoom(1.0);
-          break;
-        case "j":
-          e.preventDefault();
-          s.setAppMode("code");
-          if (!s.dockCollapsed && s.activeBottomTab === "terminal") s.closeBottomDock();
-          else s.openBottomTab("terminal");
-          break;
-        case "\\":
-          e.preventDefault();
-          {
-            const focused = s.panelSlots.find((slot) => slot.focused);
-            if (focused && s.panelSlots.length > 1) s.removePanel(focused.id);
-          }
-          break;
-        case "b":
-          if (!e.shiftKey) {
-            e.preventDefault();
-            if (s.leftSidebarWidth > 0) {
-              sidebarWidthRef.current = s.leftSidebarWidth;
-              s.setLeftSidebarWidth(0);
-            } else {
-              s.setLeftSidebarWidth(sidebarWidthRef.current);
-            }
-          } else {
-            e.preventDefault();
-            s.setAppMode("code");
-            s.setRightStackTab("preview");
-          }
-          break;
-        case "v":
-          if (e.shiftKey) {
-            e.preventDefault();
-            const next = s.viewMode === "normal" ? "verbose" : s.viewMode === "verbose" ? "summary" : "normal";
-            s.setViewMode(next);
-            announceViewMode(next);
-          }
-          break;
-        case ";":
-          e.preventDefault();
-          s.toggleSideChat();
-          break;
-        case "s":
-          if (!e.shiftKey) {
-            e.preventDefault();
-            window.dispatchEvent(new Event("editor:save"));
-          }
-          break;
-        case "w":
-          if (!e.shiftKey) {
-            e.preventDefault();
-            window.dispatchEvent(new Event("editor:close-tab"));
-          }
-          break;
-        case "Tab":
-          e.preventDefault();
-          {
-            const convs = s.conversations.filter((c) => !c.archived);
-            if (convs.length < 2) break;
-            const idx = convs.findIndex((c) => c.id === s.conversationId);
-            const next = e.shiftKey
-              ? convs[(idx - 1 + convs.length) % convs.length]
-              : convs[(idx + 1) % convs.length];
-            if (next) {
-              s.requestConversationSwitch(next.id);
-            }
-          }
-          break;
+      if (match("promptHistory")) {
+        e.preventDefault();
+        window.dispatchEvent(new Event("composer:history-search"));
+        return;
+      }
+      if (match("clearComposer")) {
+        e.preventDefault();
+        s.setDraft("");
+        document.querySelector<HTMLTextAreaElement>("textarea")?.focus();
+        return;
+      }
+      if (match("processDetail")) {
+        e.preventDefault();
+        const next = s.viewMode === "normal" ? "verbose" : s.viewMode === "verbose" ? "summary" : "normal";
+        s.setViewMode(next);
+        announceViewMode(next);
+        return;
+      }
+      if (match("toggleDiff")) {
+        e.preventDefault();
+        const diffPanels = s.panelSlots.filter((panel) => panel.kind === "diff");
+        if (diffPanels.length) diffPanels.forEach((panel) => s.removePanel(panel.id));
+        else s.addPanel({ id: `diff-${Date.now()}`, kind: "diff" });
+        return;
+      }
+      if (match("openPreview")) {
+        e.preventDefault();
+        s.setAppMode("code");
+        s.setRightStackTab("preview");
+        return;
+      }
+      if (match("globalSearch")) {
+        e.preventDefault();
+        if (capabilityFeatureEnabled(s.runtimeCapabilities, "global_search", true)) s.toggleQuickOpen();
+        return;
+      }
+      if (match("permissionMenu")) {
+        e.preventDefault();
+        document.dispatchEvent(new CustomEvent("open-permission-menu"));
+        return;
+      }
+      if (match("modelMenu")) {
+        e.preventDefault();
+        document.dispatchEvent(new CustomEvent("open-model-menu"));
+        return;
+      }
+      if (match("openGeneralSettings")) {
+        e.preventDefault();
+        openSettings("general");
+        return;
+      }
+      if (match("commandPalette")) { e.preventDefault(); s.toggleCommandPalette(); return; }
+      if (match("newConversation")) { e.preventDefault(); createConversationInCurrentMode(); return; }
+      if (match("settings")) { e.preventDefault(); s.toggleSettings(); return; }
+      if (match("shortcutHelp")) { e.preventDefault(); s.toggleShortcutsHelp(); return; }
+      if (match("zoomIn")) {
+        e.preventDefault();
+        s.setTextScale(s.textScale + 0.04);
+        announceZoom(useAppStore.getState().textScale);
+        return;
+      }
+      if (match("zoomOut")) {
+        e.preventDefault();
+        s.setTextScale(s.textScale - 0.04);
+        announceZoom(useAppStore.getState().textScale);
+        return;
+      }
+      if (match("zoomReset")) { e.preventDefault(); s.setTextScale(1); announceZoom(1); return; }
+      if (match("terminal")) {
+        e.preventDefault();
+        s.setAppMode("code");
+        if (!s.dockCollapsed && s.activeBottomTab === "terminal") s.closeBottomDock();
+        else s.openBottomTab("terminal");
+        return;
+      }
+      if (match("closePanel")) {
+        e.preventDefault();
+        const focused = s.panelSlots.find((slot) => slot.focused);
+        if (focused && s.panelSlots.length > 1) s.removePanel(focused.id);
+        return;
+      }
+      if (match("leftSidebar")) {
+        e.preventDefault();
+        if (s.leftSidebarWidth > 0) {
+          sidebarWidthRef.current = s.leftSidebarWidth;
+          s.setLeftSidebarWidth(0);
+        } else {
+          s.setLeftSidebarWidth(sidebarWidthRef.current);
+        }
+        return;
+      }
+      if (match("sideChat")) { e.preventDefault(); s.toggleSideChat(); return; }
+      if (match("saveFile")) { e.preventDefault(); window.dispatchEvent(new Event("editor:save")); return; }
+      if (match("closeEditor")) { e.preventDefault(); window.dispatchEvent(new Event("editor:close-tab")); return; }
+      const reverseConversation = matchesShiftedShortcutVariant(e, s.shortcutBindings.nextConversation);
+      if (match("nextConversation") || reverseConversation) {
+        e.preventDefault();
+        const conversations = s.conversations.filter((conversation) => !conversation.archived);
+        if (conversations.length < 2) return;
+        const index = conversations.findIndex((conversation) => conversation.id === s.conversationId);
+        const next = reverseConversation
+          ? conversations[(index - 1 + conversations.length) % conversations.length]
+          : conversations[(index + 1) % conversations.length];
+        if (next) s.requestConversationSwitch(next.id);
       }
     };
     window.addEventListener("keydown", onKey);

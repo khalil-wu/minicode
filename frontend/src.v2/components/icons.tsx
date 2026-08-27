@@ -82,9 +82,9 @@ export function BrandMark({
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
     >
-      <rect x="4" y="4" width="56" height="56" rx="15" fill="var(--text-primary, #111318)" />
-      <path d="M18 42V22h5.5L32 34.2 40.5 22H46v20h-6V31.5l-8 11-8-11V42h-6Z" fill="var(--surface-base, #f7f8fa)" />
-      <rect x="39" y="47" width="10" height="3" rx="1.5" fill="var(--accent-primary, #5b8cff)" />
+      <rect x="4" y="4" width="56" height="56" rx="15" fill="var(--text-primary)" />
+      <path d="M18 42V22h5.5L32 34.2 40.5 22H46v20h-6V31.5l-8 11-8-11V42h-6Z" fill="var(--surface-base)" />
+      <rect x="39" y="47" width="10" height="3" rx="1.5" fill="var(--accent-primary)" />
     </svg>
   );
 }

@@ -4,7 +4,7 @@ import asyncio
 import logging
 from typing import Any, TYPE_CHECKING
 
-from backend.agent.message import AgentEvent
+from backend.ws.command_scope import resolve_command_scope
 
 if TYPE_CHECKING:
     from backend.ws.handler import WebSocketSession
@@ -12,13 +12,27 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-async def handle_workspace_import(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+async def _activate_workspace_for_command(
+    session: "WebSocketSession",
+    data: dict[str, Any],
+    *,
+    command: str,
+) -> bool:
+    """Single owner for every explicit workspace activation command.
+
+    ``workspace.import``, ``workspace.switch`` and ``workspace.set`` are the
+    same capability, so they share one implementation: activate the path, rebind
+    the active conversation, publish the authoritative switched payload and
+    refresh every renderer's inventory. Errors are reported under the command the
+    client actually sent so its pending state resolves.
+    """
+
     from backend.services.workspace_service import parse_workspace_import_request, workspace_conversation_switched_payload
 
     request = parse_workspace_import_request(data)
     if request.error_event is not None:
         from backend.ws.command_results import emit_command_error
-        await emit_command_error(session, "workspace.import", request.error_event)
+        await emit_command_error(session, command, request.error_event)
         return True
 
     project_path = request.project_path
@@ -26,7 +40,7 @@ async def handle_workspace_import(session: "WebSocketSession", data: dict[str, A
         str(project_path),
         announce=True,
         wait_for_initialize=True,
-        error_command="workspace.import",
+        error_command=command,
     )
     if activated and session.active_conversation_id:
         branch = await asyncio.to_thread(session._git_branch_for, project_path)
@@ -38,13 +52,46 @@ async def handle_workspace_import(session: "WebSocketSession", data: dict[str, A
             worktree_path="",
             git_isolated=False,
         )
-        if updated is not None:
-            await session._send_ws_payload(
-                workspace_conversation_switched_payload(updated),
-                log_context="conversation.switched",
+        if updated is None:
+            # The conversation disappeared between activation and rebinding, so
+            # the workspace the client now sees is not bound to anything. Saying
+            # nothing left the UI showing a successful switch over a lost bind.
+            from backend.ws.command_results import emit_command_error
+
+            await emit_command_error(
+                session,
+                command,
+                "The workspace was activated but its conversation no longer exists; "
+                "the binding was not saved.",
+                data={
+                    "workspace_root": str(project_path),
+                    "conversation_id": str(session.active_conversation_id or ""),
+                    "reason": "conversation_missing",
+                },
             )
-        await session._send_conversation_list()
+            return True
+        await session._send_ws_payload(
+            workspace_conversation_switched_payload(updated),
+            log_context="conversation.switched",
+        )
+        from backend.ws.handlers.conversation import _broadcast_conversation_lists
+
+        broadcast_errors = await _broadcast_conversation_lists(session)
+        if broadcast_errors:
+            await session._emit_command_result(
+                command,
+                "Workspace activated, but one or more windows need to resynchronize.",
+                level="warning",
+                data={
+                    "workspace_root": str(project_path),
+                    "projection_errors": broadcast_errors,
+                },
+            )
     return True
+
+
+async def handle_workspace_import(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    return await _activate_workspace_for_command(session, data, command="workspace.import")
 
 
 async def handle_workspace_recent(session: "WebSocketSession", data: dict[str, Any]) -> bool:
@@ -55,29 +102,108 @@ async def handle_workspace_recent(session: "WebSocketSession", data: dict[str, A
     return True
 
 
-async def handle_workspace_set(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+async def handle_workspace_recent_remove(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    from backend.services.workspace_service import remove_workspace_recent
+    from backend.workspace.recent_projects import RecentProjectPersistenceError
     from backend.ws.command_results import emit_command_error
 
-    path_str = str(data.get("path", "")).strip()
-    if not path_str:
-        await emit_command_error(session, "workspace.set", "Path is required")
+    path = str(data.get("path") or "").strip()
+    if not path:
+        await emit_command_error(session, "workspace.recent.remove", "Path is required")
         return True
-    return await handle_workspace_import(session, {"path": path_str})
+    try:
+        removed, payload = await asyncio.to_thread(remove_workspace_recent, path)
+    except RecentProjectPersistenceError:
+        logger.exception("Failed to persist removal of recent workspace metadata")
+        await session._emit_command_result(
+            "workspace.recent.remove",
+            "Recent workspace metadata could not be saved; the list was left unchanged and no project files were touched.",
+            level="error",
+            data={"path": path, "reason": "persistence_failed", "retryable": True},
+        )
+        return True
+    await session._send_ws_payload(payload, log_context="workspace.recent.list")
+    await session._emit_command_result(
+        "workspace.recent.remove",
+        "Recent workspace entry removed." if removed else "Recent workspace entry was already absent.",
+        level="success",
+        data={"path": path, "removed": removed},
+    )
+    return True
+
+
+async def handle_workspace_recent_clear(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    from backend.services.workspace_service import clear_workspace_recent
+    from backend.workspace.recent_projects import RecentProjectPersistenceError
+
+    try:
+        removed, payload = await asyncio.to_thread(clear_workspace_recent)
+    except RecentProjectPersistenceError:
+        logger.exception("Failed to persist clearing recent workspace metadata")
+        await session._emit_command_result(
+            "workspace.recent.clear",
+            "Recent workspace metadata could not be saved; the list was left unchanged and no project files were touched.",
+            level="error",
+            data={"reason": "persistence_failed", "retryable": True},
+        )
+        return True
+    await session._send_ws_payload(payload, log_context="workspace.recent.list")
+    await session._emit_command_result(
+        "workspace.recent.clear",
+        "Recent workspace list cleared.",
+        level="success",
+        data={"removed_count": removed},
+    )
+    return True
+
+
+async def handle_workspace_set(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    """Desktop "open folder" activation.
+
+    The renderer sends the path as ``path``; extensions and restored state use
+    the ``workspace_root``/``workspaceRoot`` spellings, so all three are accepted
+    here and normalized before the shared activation path runs.
+    """
+
+    path_str = str(
+        data.get("path") or data.get("workspace_root") or data.get("workspaceRoot") or ""
+    ).strip()
+    return await _activate_workspace_for_command(
+        session,
+        {**data, "path": path_str},
+        command="workspace.set",
+    )
 
 
 async def handle_git_pr_status(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     from backend.services.workspace_service import fetch_git_pr_status_payload
+    from backend.ws.command_results import emit_command_error
 
-    payload = await fetch_git_pr_status_payload(session._current_workspace_root())
+    try:
+        scope = resolve_command_scope(session, data)
+    except ValueError as exc:
+        await emit_command_error(session, "git.pr_status", exc)
+        return True
+    payload = await fetch_git_pr_status_payload(scope.workspace_root)
+    scope.apply(payload)
     await session._send_ws_payload(
         payload,
         log_context="git.pr_status",
     )
-    await _start_pr_auto_fix_if_needed(session, payload)
+    await _start_pr_auto_fix_if_needed(
+        session,
+        payload,
+        conversation_id=scope.conversation_id,
+    )
     return True
 
 
-async def _start_pr_auto_fix_if_needed(session: "WebSocketSession", payload: dict[str, Any]) -> None:
+async def _start_pr_auto_fix_if_needed(
+    session: "WebSocketSession",
+    payload: dict[str, Any],
+    *,
+    conversation_id: str = "",
+) -> None:
     automation = payload.get("automation") if isinstance(payload.get("automation"), dict) else {}
     if not automation.get("auto_fix"):
         return
@@ -92,12 +218,7 @@ async def _start_pr_auto_fix_if_needed(session: "WebSocketSession", payload: dic
     signature = f"{pr.get('number')}:{','.join(sorted(str(check.get('name') or '') for check in failed))}"
     if getattr(session, "_last_pr_auto_fix_signature", "") == signature:
         return
-    conversation_id = str(getattr(session, "active_conversation_id", "") or "")
-    if not conversation_id:
-        ensure = getattr(session, "_ensure_active_conversation", None)
-        if callable(ensure):
-            ensure()
-        conversation_id = str(getattr(session, "active_conversation_id", "") or "")
+    conversation_id = str(conversation_id or "").strip()
     if not conversation_id:
         return
     failed_names = ", ".join(str(check.get("name") or "CI check") for check in failed)
@@ -105,41 +226,12 @@ async def _start_pr_auto_fix_if_needed(session: "WebSocketSession", payload: dic
         f"PR #{pr.get('number')} has failing checks: {failed_names}. "
         "Inspect the failures, implement the smallest correct fix, run the relevant verification, and summarize the result."
     )
-    cancel_event = asyncio.Event()
-    managed = session.task_manager.create(
-        "pr.auto_fix",
-        session._run_agent(
-            prompt,
-            conversation_id=conversation_id,
-            metadata={"source": "pr_auto_fix", "pr_number": pr.get("number")},
-            cancel_event=cancel_event,
-        ),
-    )
-    if managed.task is None:
-        return
-    session._register_agent_run(
+    await session._start_agent_run(
+        prompt,
         conversation_id=conversation_id,
-        task=managed.task,
-        task_id=managed.id,
-        cancel_event=cancel_event,
+        metadata={"source": "pr_auto_fix", "pr_number": pr.get("number")},
     )
     session._last_pr_auto_fix_signature = signature
-
-    async def _cleanup() -> None:
-        try:
-            await managed.task
-        except Exception:
-            await session._send_event(AgentEvent.error("PR 自动修复任务失败。", recoverable=True, error_type="api"))
-        finally:
-            session._cleanup_agent_run(
-                conversation_id=conversation_id,
-                task=managed.task,
-                task_id=managed.id,
-                cancel_event=cancel_event,
-            )
-
-    cleanup_task = asyncio.create_task(_cleanup())
-    session._track_command_task(cleanup_task)
 
 
 async def handle_git_pr_automation_set(session: "WebSocketSession", data: dict[str, Any]) -> bool:
@@ -159,6 +251,8 @@ HANDLERS: dict[str, Any] = {
     "workspace.import": handle_workspace_import,
     "workspace.switch": handle_workspace_import,
     "workspace.recent": handle_workspace_recent,
+    "workspace.recent.remove": handle_workspace_recent_remove,
+    "workspace.recent.clear": handle_workspace_recent_clear,
     "workspace.set": handle_workspace_set,
     "git.pr_status": handle_git_pr_status,
     "git.pr_automation.set": handle_git_pr_automation_set,

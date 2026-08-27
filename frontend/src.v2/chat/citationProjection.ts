@@ -18,19 +18,29 @@ export const providerCitationsToBase = (
   providerCitations: ProviderRawCitation[] | undefined,
 ): Citation[] | undefined => {
   if (!providerCitations?.length) return undefined;
-  return providerCitations.map((citation) => ({
-    source: citation.url,
-    url: citation.url,
-    title: citation.title || undefined,
-    label: (() => {
+  const normalized = providerCitations.flatMap((citation): Citation[] => {
+    const url = String(citation.url || "").trim();
+    const source = String(citation.source || url).trim();
+    if (!source) return [];
+    let fallbackLabel = citation.title || source;
+    if (url) {
       try {
-        return new URL(citation.url).host.replace(/^www\./i, "");
+        fallbackLabel = new URL(url).host.replace(/^www\./i, "");
       } catch {
-        return citation.url;
+        fallbackLabel = url;
       }
-    })(),
-    range: citation.range ?? [0, 0],
-  }));
+    }
+    return [{
+      source,
+      ...(url ? { url } : {}),
+      title: citation.title || undefined,
+      locationType: citation.location_type,
+      providerNative: true,
+      label: citation.label || fallbackLabel,
+      range: citation.range ?? [0, 0],
+    }];
+  });
+  return normalized.length > 0 ? normalized : undefined;
 };
 
 export const resolveCitations = (
@@ -39,9 +49,14 @@ export const resolveCitations = (
   markdownSource: string,
   providerCitations?: ProviderRawCitation[],
 ): ChatMessage["citations"] => {
-  const citations = providerCitationsToBase(providerCitations) ?? messageCitations ?? [];
+  const providerOwned = providerCitationsToBase(providerCitations);
+  const citations = providerOwned ?? messageCitations ?? [];
   const citedIndexes = extractInlineCitationIndexes(markdownSource);
-  if (citedIndexes.size === 0) return [];
+  // Provider-native citation metadata is authoritative even when a provider
+  // renders citations without model-authored [n] markers (Anthropic does this
+  // for citations_delta). Backend/tool-derived citations remain hidden unless
+  // the answer explicitly binds them, so tool output cannot fabricate sources.
+  if (citedIndexes.size === 0) return providerOwned ?? [];
 
   // Bind only citations supplied by the provider or backend. Tool output order
   // cannot establish which source a model-authored marker refers to.

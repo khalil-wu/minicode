@@ -260,13 +260,13 @@ def workspace_git_diff_payload(root: Path, file: str) -> dict[str, Any]:
 
 def workspace_git_worktree_payload(root: Path) -> dict[str, Any]:
     try:
-        from backend.workspace.worktree import WorktreeManager, summarize_worktree_status
+        from backend.workspace.worktree import WorktreeManager, isolated_worktree_root, summarize_worktree_status
 
         manager = WorktreeManager(root)
         worktrees = manager.list_worktrees()
         status = summarize_worktree_status(root, worktrees)
         common_dir = resolve_git_common_dir(root)
-        isolated_root = (status.main_repo_path or root) / ".claude" / "worktrees"
+        isolated_root = isolated_worktree_root(status.main_repo_path or root)
 
         entries: list[dict[str, Any]] = []
         for worktree in status.worktrees:
@@ -359,14 +359,14 @@ def _project_import_failure() -> dict[str, Any]:
 
 
 def remove_workspace_git_worktree_payload(*, root: Path, path: str, force: bool) -> dict[str, Any]:
-    from backend.workspace.worktree import WorktreeManager, summarize_worktree_status
+    from backend.workspace.worktree import WorktreeManager, isolated_worktree_root, summarize_worktree_status
 
     target = Path(path).resolve()
     try:
         manager = WorktreeManager(root)
         worktrees = manager.list_worktrees()
         status = summarize_worktree_status(root, worktrees)
-        isolated_root = (status.main_repo_path or root) / ".claude" / "worktrees"
+        isolated_root = isolated_worktree_root(status.main_repo_path or root)
         target_entry = next((item for item in worktrees if item.path.resolve() == target), None)
         if target_entry is None:
             return {"removed": False, "path": str(target), "error": "Worktree not found"}
@@ -377,7 +377,7 @@ def remove_workspace_git_worktree_payload(*, root: Path, path: str, force: bool)
                 "removed": False,
                 "path": str(target),
                 "branch": target_entry.branch,
-                "error": "Only isolated worktrees under .claude/worktrees can be removed",
+                "error": "Only isolated worktrees under .minicode/worktrees can be removed",
             }
 
         removal = manager.safe_remove_worktree(target, force=force)

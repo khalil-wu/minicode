@@ -1,6 +1,20 @@
+.model-brand-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  line-height: 0;
+}
+
+.model-brand-icon-framed {
+  box-shadow: inset 0 1px color-mix(in oklch, white 28%, transparent);
+}
+
 .model-brand-icon-color,
 .model-brand-icon-mono {
   display: block;
+  max-width: 100%;
+  max-height: 100%;
   object-fit: contain;
 }
 

@@ -1,16 +1,30 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
+
+from backend.conversations.public_projection import project_public_conversation
+
+
+def _snapshot_now() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def seq_from_restore_payload(data: dict[str, Any]) -> int:
     for key in ("last_seq", "last_seen_seq", "last_event_seq"):
         value = data.get(key)
-        try:
-            seq = int(value)
-        except (TypeError, ValueError):
+        if isinstance(value, bool):
             continue
-        if seq > 0:
+        if isinstance(value, int):
+            seq = value
+        elif isinstance(value, str) and value.strip().isdigit():
+            try:
+                seq = int(value.strip())
+            except ValueError:
+                continue
+        else:
+            continue
+        if 0 < seq <= 9_007_199_254_740_991:
             return seq
     return 0
 
@@ -50,6 +64,10 @@ def build_session_restored_payload(
     last_seq: int,
     current_seq: int,
     replayed_events: int = 0,
+    event_log_gap: bool = False,
+    snapshot_required: bool = False,
+    cursor_reset: bool = False,
+    requested_last_seq: int | None = None,
     provider_id: str = "",
     base_url: str = "",
     wire_api: str = "",
@@ -77,9 +95,17 @@ def build_session_restored_payload(
         "messages": result.get("messages", []),
         "error": result.get("error"),
         "missed_events": bool(missed_events),
+        "event_log_gap": bool(event_log_gap),
+        "snapshot_required": bool(snapshot_required),
+        "cursor_reset": bool(cursor_reset),
+        "requested_last_seq": max(
+            0,
+            int(last_seq if requested_last_seq is None else requested_last_seq),
+        ),
         "last_seq": last_seq,
         "current_seq": current_seq,
         "replayed_events": max(0, int(replayed_events or 0)),
+        "snapshot_at": _snapshot_now(),
     }
 
 
@@ -96,6 +122,7 @@ def build_restore_conversation_switched_payload(
         "conversation": active_payload,
         "is_hydrating": is_hydrating,
         "session": runtime_snapshot,
+        "snapshot_at": _snapshot_now(),
     }
 
 
@@ -118,8 +145,14 @@ def build_session_synced_payload(
     replayed_events: int = 0,
     event_log_gap: bool = False,
     snapshot_required: bool = False,
+    cursor_reset: bool = False,
+    requested_last_seq: int | None = None,
 ) -> dict[str, Any]:
-    active_is_visible = active_conversation is not None and not getattr(active_conversation, "archived", False)
+    active_is_visible = (
+        active_conversation is not None
+        and not getattr(active_conversation, "archived", False)
+        and getattr(active_conversation, "conversation_type", "main") == "main"
+    )
     return {
         "type": "session.synced",
         "protocol_version": protocol_version,
@@ -127,7 +160,7 @@ def build_session_synced_payload(
         "synced": result["synced"],
         "session": result["session"],
         "active_conversation_id": active_conversation_id if active_is_visible else None,
-        "active_conversation": active_conversation.to_dict() if active_is_visible else None,
+        "active_conversation": project_public_conversation(active_conversation) if active_is_visible else None,
         "working_directory": str(workspace_root) if workspace_root is not None else "",
         "model": selected_model,
         "current_model": selected_model,
@@ -145,4 +178,10 @@ def build_session_synced_payload(
         "replayed_events": max(0, int(replayed_events or 0)),
         "event_log_gap": bool(event_log_gap),
         "snapshot_required": bool(snapshot_required),
+        "cursor_reset": bool(cursor_reset),
+        "requested_last_seq": max(
+            0,
+            int(last_seq if requested_last_seq is None else requested_last_seq),
+        ),
+        "snapshot_at": _snapshot_now(),
     }

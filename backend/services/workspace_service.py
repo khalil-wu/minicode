@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from backend.agent.message import AgentEvent
+from backend.atomic_io import atomic_write_text, file_mutation_locks
+from backend.conversations.public_projection import project_public_conversation
 from backend.runtime_env import sanitized_git_env
 from backend.subprocesses import communicate, spawn_exec
 
@@ -136,7 +138,9 @@ def workspace_matches_context(workspace_path: str, workspace_context: Any | None
         target_root = str(normalize_project_import_path(workspace_path)).strip()
     except Exception:
         return False
-    return current_root.lower() == target_root.lower() or os.path.normpath(current_root) == os.path.normpath(target_root)
+    return os.path.normcase(os.path.normpath(current_root)) == os.path.normcase(
+        os.path.normpath(target_root)
+    )
 
 
 def workspace_context_root(workspace_context: Any | None) -> str:
@@ -167,12 +171,32 @@ def record_recent_workspace_project(project_path: Path, metadata: Any) -> None:
     )
 
 
-def workspace_imported_payload(workspace_context: Any, metadata: Any) -> dict[str, Any]:
+def workspace_imported_payload(
+    workspace_context: Any,
+    metadata: Any,
+    *,
+    conversation_id: str,
+    workspace_root: str | Path,
+    request_id: str = "",
+) -> dict[str, Any]:
+    owner = str(conversation_id or "").strip()
+    if not owner:
+        raise ValueError("workspace.imported requires a conversation owner")
+    canonical_root = str(Path(workspace_root).resolve())
+    file_count = int(metadata.file_count)
+    project = dict(workspace_context.to_dict())
+    # One canonical value prevents the renderer from comparing a resolved
+    # workspace owner with a differently formatted metadata path.
+    project["root_path"] = canonical_root
+    project["file_count"] = file_count
     return {
         "type": "workspace.imported",
-        "project": workspace_context.to_dict(),
+        "conversation_id": owner,
+        "workspace_root": canonical_root,
+        **({"request_id": str(request_id).strip()} if str(request_id).strip() else {}),
+        "project": project,
         "summary": workspace_context.get_project_summary(),
-        "file_count": metadata.file_count,
+        "file_count": file_count,
     }
 
 
@@ -190,24 +214,38 @@ def list_workspace_recent_payload(*, limit: int = 10) -> dict[str, Any]:
     return workspace_recent_payload(store.list(limit=limit))
 
 
+def remove_workspace_recent(path: str, *, limit: int = 10) -> tuple[bool, dict[str, Any]]:
+    """Remove one MRU entry without touching the project directory."""
+
+    from backend.workspace.recent_projects import RecentProjectStore
+
+    store = RecentProjectStore()
+    removed = store.remove(path)
+    return removed, workspace_recent_payload(store.list(limit=limit))
+
+
+def clear_workspace_recent(*, limit: int = 10) -> tuple[int, dict[str, Any]]:
+    """Clear MRU metadata without deleting any workspace from disk."""
+
+    from backend.workspace.recent_projects import RecentProjectStore
+
+    store = RecentProjectStore()
+    removed = store.clear()
+    return removed, workspace_recent_payload(store.list(limit=limit))
+
+
 def workspace_conversation_switched_payload(conversation: Any) -> dict[str, Any]:
     return {
         "type": "conversation.switched",
         "conversation_id": conversation.id,
-        "conversation": conversation.to_dict(),
+        "conversation": project_public_conversation(conversation),
         "is_hydrating": False,
     }
 
 
-def git_branch_for(path: Path, workspace_state: Any | None = None) -> str:
-    """Return the current branch for a workspace path, using cached state when available."""
+def git_branch_for(path: Path) -> str:
+    """Return the current branch for a workspace path."""
     root = path.resolve()
-    if workspace_state is not None:
-        state_root = getattr(workspace_state, "root", None)
-        get_git_branch = getattr(workspace_state, "get_git_branch", None)
-        if state_root is not None and callable(get_git_branch) and root == Path(state_root).resolve():
-            return get_git_branch()
-
     try:
         result = subprocess.run(
             ["git", "branch", "--show-current"],
@@ -353,6 +391,15 @@ async def fetch_git_pr_status_payload(workspace_root: Any) -> dict[str, Any]:
         code, out = await _run_gh_pr_view(gh_path, cwd=str(workspace_root))
         if code == 0 and out:
             pr_info, checks = parse_gh_pr_status(out)
+            # cc ghPrStatus guards: skip PRs from the default branch (gh pr
+            # view there returns the most recently MERGED PR) and merged or
+            # closed PRs — downstream auto_fix/auto_merge must never act on
+            # them.
+            state = str((pr_info or {}).get("state") or "").upper()
+            branch = str((pr_info or {}).get("branch") or "")
+            if state in {"MERGED", "CLOSED"} or branch in {"main", "master"}:
+                pr_info = None
+                checks = []
             payload = git_pr_status_payload(pr=pr_info, checks=checks)
         else:
             payload = git_pr_status_payload()
@@ -375,10 +422,11 @@ def read_pr_automation(workspace_root: Any) -> dict[str, Any]:
     defaults = {"auto_fix": False, "auto_merge": False}
     if path is None or not path.exists():
         return defaults
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return defaults
+    with file_mutation_locks([path]):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return defaults
     return {
         "auto_fix": bool(raw.get("auto_fix", False)),
         "auto_merge": bool(raw.get("auto_merge", False)),
@@ -389,13 +437,16 @@ def write_pr_automation(workspace_root: Any, data: dict[str, Any]) -> dict[str, 
     path = _pr_automation_path(workspace_root)
     if path is None:
         raise ValueError("Open a workspace before configuring PR automation")
-    current = read_pr_automation(workspace_root)
-    for key in ("auto_fix", "auto_merge"):
-        if key in data:
-            current[key] = bool(data[key])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(current, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    return current
+    with file_mutation_locks([path]):
+        current = read_pr_automation(workspace_root)
+        for key in ("auto_fix", "auto_merge"):
+            if key in data:
+                current[key] = bool(data[key])
+        atomic_write_text(
+            path,
+            json.dumps(current, indent=2, ensure_ascii=False) + "\n",
+        )
+        return current
 
 
 async def set_git_pr_automation_payload(workspace_root: Any, data: dict[str, Any]) -> dict[str, Any]:
@@ -406,9 +457,29 @@ async def set_git_pr_automation_payload(workspace_root: Any, data: dict[str, Any
         if not gh_path:
             auto_merge_error = "gh CLI not found; Auto-merge was saved but cannot be enabled remotely."
         else:
-            code, output = await _run_gh_pr_merge_auto(gh_path, cwd=str(workspace_root))
-            if code != 0:
-                auto_merge_error = output or "gh pr merge --auto failed"
+            # MiniCode requires an explicit pr_number and confirmation before
+            # touching gh pr merge; never arm --auto blindly — verify an open,
+            # non-default-branch PR is actually attached to this checkout.
+            view_code, view_out = await _run_gh_pr_view(gh_path, cwd=str(workspace_root))
+            armed = False
+            if view_code == 0 and view_out:
+                pr_info, _checks = parse_gh_pr_status(view_out)
+                state = str((pr_info or {}).get("state") or "").upper()
+                branch = str((pr_info or {}).get("branch") or "")
+                armed = (
+                    bool(pr_info)
+                    and state not in {"MERGED", "CLOSED", ""}
+                    and branch not in {"main", "master"}
+                )
+            if not armed:
+                auto_merge_error = (
+                    "Auto-merge was saved but not armed: no open PR is attached "
+                    "to this branch (merged/closed/default-branch PRs are ignored)."
+                )
+            else:
+                code, output = await _run_gh_pr_merge_auto(gh_path, cwd=str(workspace_root))
+                if code != 0:
+                    auto_merge_error = output or "gh pr merge --auto failed"
     payload = await fetch_git_pr_status_payload(workspace_root)
     payload["automation"] = current
     if auto_merge_error:

@@ -21,7 +21,7 @@ const AgentEditor = lazy(() => import("./overlays/AgentEditor").then((m) => ({ d
 
 const RouteLoading = () => (
   <div className="app-route-loading" role="status" aria-label="正在加载页面">
-    <LoaderCircle className="spin" aria-hidden="true" />
+    <LoaderCircle className="animate-spin" aria-hidden="true" />
   </div>
 );
 

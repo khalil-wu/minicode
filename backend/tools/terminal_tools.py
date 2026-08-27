@@ -3,10 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 from backend.permissions.context import ToolExecutionContext
-from backend.tools.base import MAX_TOOL_RESULT_BYTES, BaseTool, PermissionLevel, ToolResult, ToolSchema
+from backend.tools.base import MAX_TOOL_RESULT_CHARS, BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.output_limits import (
-    CLAUDE_BASH_OUTPUT_DEFAULT_CHARS,
-    CLAUDE_BASH_OUTPUT_MAX_CHARS,
+    TERMINAL_OUTPUT_DEFAULT_CHARS,
+    TERMINAL_OUTPUT_MAX_CHARS,
 )
 from backend.tools.untrusted import wrap_untrusted_content
 
@@ -24,7 +24,7 @@ class ReadTerminalTool(BaseTool):
     )
     permission = PermissionLevel.AUTO
     read_only = True
-    max_result_chars = MAX_TOOL_RESULT_BYTES
+    max_result_chars = MAX_TOOL_RESULT_CHARS
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -40,8 +40,8 @@ class ReadTerminalTool(BaseTool):
                     "max_chars": {
                         "type": "integer",
                         "minimum": 1,
-                        "maximum": CLAUDE_BASH_OUTPUT_MAX_CHARS,
-                        "description": f"Maximum recent output characters to return. Default {CLAUDE_BASH_OUTPUT_DEFAULT_CHARS}.",
+                        "maximum": TERMINAL_OUTPUT_MAX_CHARS,
+                        "description": f"Maximum recent output characters to return. Default {TERMINAL_OUTPUT_DEFAULT_CHARS}.",
                     },
                 },
             },
@@ -68,10 +68,10 @@ class ReadTerminalTool(BaseTool):
             return self._error_result("No terminal session is available for this conversation.")
 
         try:
-            max_chars = int(args.get("max_chars") or CLAUDE_BASH_OUTPUT_DEFAULT_CHARS)
+            max_chars = int(args.get("max_chars") or TERMINAL_OUTPUT_DEFAULT_CHARS)
         except (TypeError, ValueError):
-            max_chars = CLAUDE_BASH_OUTPUT_DEFAULT_CHARS
-        max_chars = max(1, min(max_chars, CLAUDE_BASH_OUTPUT_MAX_CHARS))
+            max_chars = TERMINAL_OUTPUT_DEFAULT_CHARS
+        max_chars = max(1, min(max_chars, TERMINAL_OUTPUT_MAX_CHARS))
         snapshot = manager.snapshot(
             session_id,
             max_chars=max_chars,

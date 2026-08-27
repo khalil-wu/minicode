@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from dataclasses import replace
 from typing import Any
 
 from backend.agent.message import AgentEvent
+from backend.agent.skill_activation import activate_turn_skills
 from backend.agent.tool_schema_derivation import (
     TurnToolSchemaDerivation,
     derive_turn_tool_schema_state,
+    effective_toolset_policy,
 )
-from backend.llm.capabilities import require_tool_calling
+from backend.llm.capabilities import (
+    capabilities_for_adapter,
+    is_gpt_image_model,
+    require_tool_calling,
+)
+from backend.tools.toolsets import ACTIVE_TOOLSET_POLICY_METADATA_KEY, ToolsetPolicy
 
 
 @dataclass(slots=True)
@@ -42,11 +50,12 @@ class TurnIterationRuntime:
         metadata: dict[str, Any],
         workspace_root: Any,
         mcp_instructions: str,
-        tool_schema_budget: Any,
         mcp_registry_version: Any,
         active_toolset_policy_factory: Any,
         populate_prompt_context: Any,
         run_record: Any,
+        skill_manager: Any | None = None,
+        agent_session: Any | None = None,
     ) -> None:
         self.context = context
         self.state = state
@@ -58,11 +67,35 @@ class TurnIterationRuntime:
         self.metadata = metadata
         self.workspace_root = workspace_root
         self.mcp_instructions = mcp_instructions
-        self.tool_schema_budget = tool_schema_budget
         self.mcp_registry_version = mcp_registry_version
         self.active_toolset_policy_factory = active_toolset_policy_factory
         self.populate_prompt_context = populate_prompt_context
         self.run_record = run_record
+        self.skill_manager = skill_manager
+        self.agent_session = agent_session
+
+    def sync_active_session_model(self) -> Any:
+        """Project Pi's mutable AgentSession model into this iteration."""
+
+        owner = self.agent_session
+        active_llm = getattr(owner, "llm", None) if owner is not None else None
+        if active_llm is not None:
+            self.llm = active_llm
+            self.tool_context.llm = active_llm
+            bind_llm = getattr(self.context, "bind_llm", None)
+            if callable(bind_llm):
+                bind_llm(active_llm)
+        active_budget = getattr(owner, "token_budget", None)
+        if active_budget is not None:
+            if hasattr(self.context, "_budget"):
+                self.context._budget = active_budget
+        active_registry = (
+            getattr(owner, "tool_registry", None) if owner is not None else None
+        )
+        if active_registry is not None:
+            self.tool_registry = active_registry
+            self.tool_context.metadata["_tool_registry"] = active_registry
+        return self.llm
 
     async def prepare(
         self,
@@ -71,12 +104,47 @@ class TurnIterationRuntime:
         initial_turn_pending: bool,
         pending_turn_context: list[str],
     ) -> TurnIterationPreparation:
+        self.sync_active_session_model()
         self.turn_kernel.refresh_live_permission_context()
-        active_policy = self.active_toolset_policy_factory(
+        base_policy = self.active_toolset_policy_factory(
             permission_context=self.tool_context.permission,
         )
+        active_policy = effective_toolset_policy(
+            base_policy=base_policy,
+            tool_registry=self.tool_registry,
+            disabled_tools=self.state.disabled_tools,
+            requires_explicit_workspace=bool(
+                self.metadata.get("requires_explicit_workspace")
+            ),
+            workspace_root=self.workspace_root,
+            permission_mode=str(self.tool_context.permission.mode or ""),
+        )
+        loaded_deferred_tools = frozenset(
+            str(name).strip()
+            for name in getattr(self.state, "loaded_deferred_tools", set())
+            if str(name).strip()
+        )
+        if active_policy is not None and loaded_deferred_tools:
+            get_tool_spec = getattr(self.tool_registry, "get_tool_spec", None)
+            if callable(get_tool_spec):
+                loaded_deferred_tools = frozenset(
+                    name
+                    for name in loaded_deferred_tools
+                    if active_policy.is_available(get_tool_spec(name))
+                )
+        if loaded_deferred_tools:
+            base_policy = active_policy or ToolsetPolicy.default()
+            active_policy = replace(
+                base_policy,
+                enabled_tools=frozenset(base_policy.enabled_tools) | loaded_deferred_tools,
+            )
+        # The execution boundary reads the policy from metadata as well as
+        # the schema builder.  Publish the *final* policy after deferred tools
+        # have been activated; writing the pre-activation value here would let
+        # a valid tool_search result render in the next schema while a direct
+        # model tool call is still rejected by the runtime guard.
+        self.tool_context.metadata[ACTIVE_TOOLSET_POLICY_METADATA_KEY] = active_policy
         base_schemas = self.tool_registry.get_schemas(
-            budget=self.tool_schema_budget,
             permission_checker=self.permission_checker,
             permission_context=self.tool_context.permission,
             toolset_policy=active_policy,
@@ -84,7 +152,6 @@ class TurnIterationRuntime:
         )
         schema_state = derive_turn_tool_schema_state(
             base_tool_schemas=base_schemas,
-            disabled_tools=self.state.disabled_tools,
             mcp_instructions=self.mcp_instructions,
             tool_registry=self.tool_registry,
             permission_checker=self.permission_checker,
@@ -92,6 +159,23 @@ class TurnIterationRuntime:
             toolset_policy=active_policy,
             previous=previous_tool_schema_state,
         )
+        active_capabilities = capabilities_for_adapter(self.llm)
+        dedicated_image_model = is_gpt_image_model(active_capabilities.model) or (
+            active_capabilities.image_generation is True
+            and active_capabilities.tool_calling is False
+        )
+        if dedicated_image_model:
+            # Dedicated Images API models are valid main-turn models, but they
+            # never receive local function schemas or tool runtime guidance.
+            # Keeping tool_calling=False accurately describes the provider;
+            # the empty schema is what makes this image-only turn admissible.
+            schema_state = replace(
+                schema_state,
+                tool_schemas=[],
+                tool_names=[],
+                runtime_guidance="",
+                deferred_tools_prompt_block="",
+            )
         self.populate_prompt_context(
             state=self.state,
             metadata=self.metadata,
@@ -111,6 +195,13 @@ class TurnIterationRuntime:
         )
 
         if boundary_input.should_start_turn:
+            if self.skill_manager is not None:
+                async for skill_event in activate_turn_skills(
+                    self.skill_manager,
+                    boundary_input.content,
+                    self.state,
+                ):
+                    events.append(skill_event)
             original_attachments = self.state.attachments
             if boundary_input.attachments is not None:
                 self.state.attachments = [dict(item) for item in boundary_input.attachments]
@@ -122,6 +213,19 @@ class TurnIterationRuntime:
             for content in pending_turn_context:
                 self.context.append_user_context(content)
             pending_turn_context.clear()
+
+        # Claude collects completed AsyncHookRegistry responses for every
+        # model query, not only when the next user turn starts.  Poll the
+        # conversation-owned manager at this same iteration boundary so a
+        # hook that finishes while tools are running can affect the next
+        # provider call without leaking into another conversation.
+        from backend.hooks.manager import get_hook_manager
+
+        hook_manager = get_hook_manager()
+        take_async_context = getattr(hook_manager, "take_async_context", None)
+        if callable(take_async_context):
+            for content in take_async_context():
+                self.context.append_user_context(content)
 
         capability = require_tool_calling(self.llm, tool_count=len(tool_schemas))
         if capability.ok:

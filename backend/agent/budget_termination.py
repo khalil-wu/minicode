@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Awaitable
 
 from backend.agent.message import AgentEvent
+from backend.agent.terminal_projection import TurnTerminalProjection
 from backend.agent.turn_budget import BudgetBoundary
 
 
@@ -21,7 +22,7 @@ class BudgetTerminationDependencies:
     context: Any
     set_terminal_reason: Callable[..., Any]
     run_stop_failure_hook: Callable[..., Awaitable[None]]
-    terminal_event: Callable[[str, str], AgentEvent]
+    terminal_projection: Callable[[str, str], TurnTerminalProjection]
 
 
 class BudgetTerminationCoordinator:
@@ -33,10 +34,10 @@ class BudgetTerminationCoordinator:
     async def apply(
         self,
         boundary: BudgetBoundary,
-    ) -> tuple[bool, tuple[AgentEvent, ...]]:
+    ) -> tuple[bool, tuple[AgentEvent | TurnTerminalProjection, ...]]:
         deps = self._deps
         state = deps.state
-        events: list[AgentEvent] = []
+        events: list[AgentEvent | TurnTerminalProjection] = []
         state.mark_transition(
             "budget_boundary",
             budget_reason=boundary.reason,
@@ -50,13 +51,15 @@ class BudgetTerminationCoordinator:
         if callable(reconcile):
             reconcile()
 
-        # max_retries means the provider kept erroring past the recovery budget —
-        # a genuine failure, so it stays failed+error. Every other boundary
-        # (max turns/tool-calls/tokens/cost/time/context) is a normal resource
-        # limit: Claude Code returns {reason:'max_turns'} with an informational
-        # attachment instead of erroring, so terminate as partial and surface the
-        # limit as a progress notice.
-        is_failure_boundary = boundary.reason == "max_retries"
+        # MiniCode exposes max turns and max USD as error result subtypes,
+        # and an exhausted provider/context recovery cannot produce a valid
+        # answer. Host-only time/tool/token limits remain partial results.
+        is_failure_boundary = boundary.reason in {
+            "max_iterations",
+            "max_turn_cost_usd",
+            "max_retries",
+            "budget_exceeded",
+        }
         terminal_status = "failed" if is_failure_boundary else "partial"
         deps.set_terminal_reason(state, boundary.reason, status=terminal_status)
         if is_failure_boundary:
@@ -71,15 +74,20 @@ class BudgetTerminationCoordinator:
             events.append(
                 AgentEvent.progress(
                     boundary.user_message,
-                    stage="budget",
+                    stage="status",
                     status="info",
+                    id=f"budget:{boundary.reason}",
+                    phase="status",
+                    label=boundary.label,
+                    summary=boundary.detail or boundary.user_message,
                 )
             )
-        await deps.run_stop_failure_hook(
-            boundary.reason,
-            error_details=boundary.detail,
-            last_assistant_message=state.reply,
-        )
+        if boundary.reason in {"max_retries", "budget_exceeded"}:
+            await deps.run_stop_failure_hook(
+                boundary.reason,
+                error_details=boundary.detail,
+                last_assistant_message=state.reply,
+            )
 
-        events.append(deps.terminal_event(terminal_status, boundary.reason))
+        events.append(deps.terminal_projection(terminal_status, boundary.reason))
         return False, tuple(events)

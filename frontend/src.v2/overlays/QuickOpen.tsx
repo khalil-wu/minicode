@@ -1,14 +1,18 @@
 import { useEffect, useRef, useState } from "react";
+import { FileText } from "../lib/icons";
 import { useAppStore } from "../stores";
 import { isDesktop, fsSearchFiles } from "../desktop/runtime";
 import { searchWorkspaceFiles } from "../protocol/workspace";
 import { capabilityFeatureEnabled } from "../protocol/capabilities";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 
+const fileNameOf = (path: string) => path.split(/[\\/]/).pop() || path;
+
 export const QuickOpen = () => {
   const visible = useAppStore((s) => s.quickOpenVisible);
   const storeResults = useAppStore((s) => s.quickOpenResults);
   const storeLoading = useAppStore((s) => s.quickOpenLoading);
+  const editorTabs = useAppStore((s) => s.editorTabs);
   const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities);
   const enabled = capabilityFeatureEnabled(runtimeCapabilities, "global_search", true);
   const [query, setQuery] = useState("");
@@ -28,6 +32,12 @@ export const QuickOpen = () => {
       useAppStore.setState({ quickOpenResults: [], quickOpenLoading: false });
     }
   }, [visible, enabled]);
+
+  // Clear the debounce timer on unmount so a pending setState cannot fire
+  // after the component is gone.
+  useEffect(() => {
+    return () => clearTimeout(debounceRef.current);
+  }, []);
 
   const close = () => useAppStore.setState({ quickOpenVisible: false });
 
@@ -75,6 +85,13 @@ export const QuickOpen = () => {
 
   if (!visible || !enabled) return null;
 
+  // Empty query falls back to the files already open in the editor — a
+  // "recents" section without new state, since tabs ARE the recents.
+  const showingOpenTabs = !query.trim();
+  const results = showingOpenTabs
+    ? editorTabs.map((tab) => ({ path: tab.path, name: fileNameOf(tab.path) }))
+    : storeResults;
+
   return (
     <div
       className="overlay-backdrop"
@@ -95,7 +112,7 @@ export const QuickOpen = () => {
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-label="Quick open file"
+        aria-label="快速打开文件"
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
         onKeyDown={(event) => {
@@ -109,8 +126,8 @@ export const QuickOpen = () => {
           width: "min(600px, 100%)",
           background: "var(--surface-raised)",
           border: "1px solid var(--border-subtle)",
-          borderRadius: "var(--radius-md, 12px)",
-          boxShadow: "var(--shadow-strong, var(--shadow-md))",
+          borderRadius: "var(--radius-lg)",
+          boxShadow: "var(--shadow-strong-overlay)",
           overflow: "hidden",
           display: "flex",
           flexDirection: "column",
@@ -122,25 +139,26 @@ export const QuickOpen = () => {
           value={query}
           onChange={(e) => search(e.target.value)}
           role="combobox"
-          aria-expanded={storeResults.length > 0}
+          aria-label="搜索文件"
+          aria-expanded={results.length > 0}
           aria-controls="quick-open-results"
-          aria-activedescendant={storeResults[activeIdx] ? `qo-${activeIdx}` : undefined}
+          aria-activedescendant={results[activeIdx] ? `qo-${activeIdx}` : undefined}
           onKeyDown={(e) => {
             if (e.key === "ArrowDown") {
               e.preventDefault();
-              setActiveIdx((i) => Math.min(i + 1, storeResults.length - 1));
+              setActiveIdx((i) => Math.min(i + 1, results.length - 1));
             } else if (e.key === "ArrowUp") {
               e.preventDefault();
               setActiveIdx((i) => Math.max(i - 1, 0));
             } else if (e.key === "Enter") {
               e.preventDefault();
-              if (storeResults[activeIdx]) {
-                if (e.shiftKey) mentionFile(storeResults[activeIdx]);
-                else openFile(storeResults[activeIdx]);
+              if (results[activeIdx]) {
+                if (e.shiftKey) mentionFile(results[activeIdx]);
+                else openFile(results[activeIdx]);
               }
             }
           }}
-          placeholder="Search files... (Enter to open, Shift+Enter to @mention)"
+          placeholder="搜索文件…"
           style={{
             background: "transparent",
             border: 0,
@@ -153,15 +171,25 @@ export const QuickOpen = () => {
         <div id="quick-open-results" role="listbox" style={{ borderTop: "1px solid var(--border-subtle)", maxHeight: 360, overflowY: "auto" }}>
           {storeLoading && (
             <div style={{ padding: 14, color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>
-              Searching...
+              正在搜索…
             </div>
           )}
-          {!storeLoading && query && storeResults.length === 0 && (
+          {!storeLoading && showingOpenTabs && results.length > 0 && (
+            <div aria-hidden="true" style={{ padding: "8px 16px 4px", color: "var(--text-muted)", fontSize: "var(--text-2xs)", fontWeight: "var(--fw-semibold)" }}>
+              打开的文件
+            </div>
+          )}
+          {!storeLoading && showingOpenTabs && results.length === 0 && (
             <div style={{ padding: 14, color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>
-              No files found.
+              输入关键词搜索工作区文件。
             </div>
           )}
-          {storeResults.map((file, i) => (
+          {!storeLoading && !showingOpenTabs && results.length === 0 && (
+            <div style={{ padding: 14, color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>
+              未找到文件。
+            </div>
+          )}
+          {results.map((file, i) => (
             <button
               key={file.path}
               id={`qo-${i}`}
@@ -183,12 +211,30 @@ export const QuickOpen = () => {
                 gap: 10,
               }}
             >
-              <span style={{ color: "var(--accent-primary)", fontWeight: 500 }}>{file.name}</span>
+              <FileText size={14} style={{ color: "var(--text-muted)", flexShrink: 0 }} aria-hidden="true" />
+              <span style={{ color: "var(--accent-primary)", fontWeight: "var(--fw-medium)" }}>{file.name}</span>
               <span style={{ flex: 1, color: "var(--text-muted)", fontSize: "var(--text-xs)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {file.path}
               </span>
             </button>
           ))}
+        </div>
+        <div
+          aria-hidden="true"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            padding: "8px 16px",
+            borderTop: "1px solid var(--border-subtle)",
+            color: "var(--text-muted)",
+            fontSize: "var(--text-2xs)",
+          }}
+        >
+          <span><kbd className="mc-kbd">↑↓</kbd> 导航</span>
+          <span><kbd className="mc-kbd">↵</kbd> 打开</span>
+          <span><kbd className="mc-kbd">⇧↵</kbd> 添加到上下文</span>
+          <span><kbd className="mc-kbd">Esc</kbd> 关闭</span>
         </div>
       </div>
     </div>

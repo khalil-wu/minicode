@@ -8,11 +8,11 @@ from typing import Any
 
 from fastapi import APIRouter, Query, Response
 
-from backend.agent.claude_md import load_project_guideline_bundle
+from backend.agent.instruction_discovery import load_project_guideline_bundle
 from backend.config import PROJECT_ROOT
 from backend.workspace.state import get_active_workspace_root
 from backend.services.health_service import (
-    build_capability_fallback_payload,
+    build_capability_unavailable_payload,
     build_capability_status_payload,
     build_doctor_payload,
     build_health_payload,
@@ -22,7 +22,7 @@ from backend.services.health_service import (
 )
 
 from . import _state
-from .tool_registry import _build_tool_registry
+from backend.services.tool_registry_factory import build_tool_registry as _build_tool_registry
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +109,16 @@ def _build_capability_status_payload() -> dict[str, Any]:
         return snapshot
     except Exception as exc:
         logger.warning("Capability snapshot build failed: %s", exc)
-        result = build_capability_fallback_payload()
+        result = build_capability_unavailable_payload()
+        result.update(
+            {
+                "status": "error",
+                "error": {
+                    "type": "capability_snapshot_failed",
+                    "detail": type(exc).__name__,
+                },
+            }
+        )
         _state.capability_cache_payload = result
         _state.capability_cache_expires_at = now + 5
         return result

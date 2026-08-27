@@ -9,19 +9,11 @@ class SchedulerServiceError(ValueError):
     """User-recoverable scheduler operation failure."""
 
 
-_SCHEDULED_PERMISSION_ALIASES = {
-    "ask": "confirm",
-    "ask_permissions": "confirm",
-    "auto_approve": "auto",
-}
-
-
 def scheduled_permission_mode(value: Any, *, reject_unsafe: bool = False) -> str:
     """Scheduled runs may be interactive-confirm or normal auto, never bypass."""
     raw = str(value or "confirm").strip().lower()
-    normalized = _SCHEDULED_PERMISSION_ALIASES.get(raw, raw)
-    if normalized in {"confirm", "auto"}:
-        return normalized
+    if raw in {"confirm", "auto"}:
+        return raw
     if reject_unsafe:
         raise SchedulerServiceError("Scheduled task permission mode must be 'confirm' or 'auto'")
     return "confirm"

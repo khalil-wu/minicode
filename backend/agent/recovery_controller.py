@@ -5,8 +5,11 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
+
 from backend.agent.context import ContextBuilder
 from backend.agent.message import AgentEvent
+from backend.agent.terminal_projection import TurnTerminalProjection
 from backend.agent.state import AgentState, TerminalReason
 from backend.llm.base import ToolCallEvent, UsageInfo
 
@@ -87,7 +90,7 @@ class RecoveryProfile:
 @dataclass(frozen=True, slots=True)
 class RecoveryDependencies:
     scrub_thinking_tags: Callable[[str], str]
-    usage_done_event: Callable[..., AgentEvent]
+    usage_terminal_projection: Callable[..., TurnTerminalProjection]
     run_stop_failure_hook: Callable[..., Awaitable[None]]
 
 
@@ -113,7 +116,7 @@ class RecoveryController:
         full_text: str,
         pending_tool_calls: list[ToolCallEvent],
         profile: RecoveryProfile,
-    ) -> AsyncIterator[AgentEvent]:
+    ) -> AsyncIterator[AgentEvent | TurnTerminalProjection]:
         state = self.state
         ctx = self.ctx
         deps = self.dependencies
@@ -146,7 +149,7 @@ class RecoveryController:
             )
             if completed is not None:
                 yield completed
-            yield deps.usage_done_event(
+            yield deps.usage_terminal_projection(
                 usage,
                 status="partial",
                 reason=profile.partial_stopped_reason,

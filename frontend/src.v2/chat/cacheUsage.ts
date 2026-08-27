@@ -1,5 +1,8 @@
 export type PromptCacheUsageLike = {
   input?: number;
+  ordinaryInput?: number;
+  inputIncludesCacheRead?: boolean;
+  inputIncludesCacheWrite?: boolean;
   cacheRead?: number;
   cacheWrite?: number;
   promptCacheTotal?: number;
@@ -20,16 +23,34 @@ const nonNegativeNumber = (value: unknown): number => {
 export const promptCacheEffectivePromptTokens = (usage: PromptCacheUsageLike | null | undefined): number => {
   if (!usage) return 0;
   const authoritative = finiteNumber(usage.promptCacheTotal);
-  if (authoritative != null && authoritative >= 0) return authoritative;
+  if (authoritative != null && authoritative > 0) return authoritative;
 
   const input = nonNegativeNumber(usage.input);
+  const ordinary = finiteNumber(usage.ordinaryInput);
   const cacheRead = nonNegativeNumber(usage.cacheRead);
   const cacheWrite = nonNegativeNumber(usage.cacheWrite);
-  const provider = String(usage.provider || "").toLowerCase();
-  if (provider.includes("anthropic")) {
-    return input + cacheRead + cacheWrite;
+  if (ordinary != null && ordinary >= 0) {
+    return ordinary + cacheRead + cacheWrite;
   }
-  return Math.max(input, cacheRead) + cacheWrite;
+  let normalizedOrdinary = input;
+  if (usage.inputIncludesCacheRead !== false) {
+    normalizedOrdinary -= Math.min(cacheRead, normalizedOrdinary);
+  }
+  if (usage.inputIncludesCacheWrite !== false) {
+    normalizedOrdinary -= Math.min(cacheWrite, Math.max(0, normalizedOrdinary));
+  }
+  return Math.max(0, normalizedOrdinary) + cacheRead + cacheWrite;
+};
+
+export const promptCacheOrdinaryInputTokens = (usage: PromptCacheUsageLike | null | undefined): number => {
+  if (!usage) return 0;
+  const authoritative = finiteNumber(usage.ordinaryInput);
+  if (authoritative != null && authoritative >= 0) return authoritative;
+  const total = promptCacheEffectivePromptTokens(usage);
+  return Math.max(
+    0,
+    total - nonNegativeNumber(usage.cacheRead) - nonNegativeNumber(usage.cacheWrite),
+  );
 };
 
 export const promptCacheHitRate = (usage: PromptCacheUsageLike | null | undefined): number | null => {

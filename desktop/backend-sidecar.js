@@ -99,7 +99,6 @@ function startBackendSidecar() {
     desktopDir = "",
     documentsDir = "",
     downloadsDir = "",
-    codexSandboxExe = "",
   } = config;
 
   const child = spawn(pythonCommand, ["-m", "backend"], {
@@ -109,6 +108,7 @@ function startBackendSidecar() {
       PYTHONUNBUFFERED: "1",
       PYTHONUTF8: "1",
       PYTHONIOENCODING: "utf-8",
+      PYTHONDONTWRITEBYTECODE: "1",
       MINICODE_BACKEND_HOST: backendHost,
       MINICODE_BACKEND_PORT: String(resolvedBackendPort),
       MINICODE_API_BASE_URL: resolvedApiBaseUrl,
@@ -119,7 +119,6 @@ function startBackendSidecar() {
       MINICODE_DESKTOP_DIR: desktopDir,
       MINICODE_DOCUMENTS_DIR: documentsDir,
       MINICODE_DOWNLOADS_DIR: downloadsDir,
-      MINICODE_CODEX_SANDBOX_EXE: codexSandboxExe,
       PYTHONPATH: [getAppRoot(), process.env.PYTHONPATH].filter(Boolean).join(require("node:path").delimiter),
     },
     windowsHide: true,

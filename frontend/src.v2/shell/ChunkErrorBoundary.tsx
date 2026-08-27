@@ -24,21 +24,25 @@ export class ChunkErrorBoundary extends React.Component<ChunkErrorBoundaryProps,
   render() {
     const { error } = this.state;
     if (!error) return this.props.children;
-    if (this.props.fallback) return this.props.fallback;
+    if (this.props.fallback) {
+      return React.isValidElement<{ error?: Error }>(this.props.fallback)
+        ? React.cloneElement(this.props.fallback, { error })
+        : this.props.fallback;
+    }
 
     const chunkError = isChunkLoadError(error);
     return (
       <div style={fallbackStyle}>
         <div style={fallbackTitleStyle}>
-          {chunkError ? "App assets changed" : "Panel failed to render"}
+          {chunkError ? "应用资源已更新" : "面板渲染失败"}
         </div>
         <div style={fallbackTextStyle}>
           {chunkError
-            ? "This window is using an older frontend bundle. Reload to pick up the latest build."
-            : error.message || "An unexpected UI error occurred."}
+            ? "当前窗口仍在使用旧版前端资源，请重新加载以应用最新版本。"
+            : error.message || "界面发生意外错误。"}
         </div>
         <button type="button" onClick={() => window.location.reload()} style={reloadButtonStyle}>
-          Reload
+          重新加载
         </button>
       </div>
     );
@@ -62,7 +66,7 @@ const fallbackStyle: React.CSSProperties = {
 
 const fallbackTitleStyle: React.CSSProperties = {
   color: "var(--text-primary)",
-  fontWeight: 650,
+  fontWeight: "var(--fw-semibold)",
 };
 
 const fallbackTextStyle: React.CSSProperties = {

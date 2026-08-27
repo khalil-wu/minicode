@@ -26,11 +26,15 @@ export type {
   ItemStartedEvent,
   AgentMessageDeltaEvent,
   ItemCompletedEvent,
+  ImageChunkLiveEvent,
+  ImageChunkReplayEvent,
+  ImageChunkEvent,
   ThinkingDeltaEvent,
   ToolCallEvent,
   ToolErrorInfo,
   ToolResultEvent,
   ToolOutputDeltaEvent,
+  CommandOutputChunkEvent,
   AgentItemEvent,
   AgentProgressEvent,
   RuntimeSpanEvent,
@@ -47,12 +51,13 @@ export type {
   StreamEventEvent,
   RateLimitEvent,
   SessionStateEvent,
-  ToolUseSummaryEvent,
   SubagentStartEvent,
   SubagentEventEvent,
   SubagentMailboxEvent,
   SubagentProgressEvent,
   SubagentDoneEvent,
+  SubagentPlanApprovalRequestedEvent,
+  ParentNotificationsEvent,
   CitationAddEvent,
   ArtifactPreviewEvent,
   InspectorUpdateEvent,
@@ -61,14 +66,14 @@ export type {
   RuntimeSessionSnapshot,
   SessionTaskUpdateEvent,
   TaskUpdateEvent,
-  PlanStep,
-  PlanStepUpdatedEvent,
-  PlanUpdatedEvent,
-  TaskEditCommand,
-  PlanEditCommand,
+  TurnPlanStep,
+  TurnPlanUpdatedEvent,
+  TurnDiffUpdatedEvent,
   AgentResumeCommand,
   SubagentCancelCommand,
   SubagentStatusCommand,
+  SubagentTranscriptCommand,
+  SubagentPlanReviewCommand,
   SendMessageCommand,
   InspectorFocusCommand,
 } from "./streaming-types";
@@ -78,10 +83,18 @@ export type {
   ConversationClientCommandType,
   ContextUsageEvent,
   ContextCompactedEvent,
+  ContextForkedEvent,
+  ContextLedgerCategoryPayload,
+  ContextLedgerEntryPayload,
+  ContextLedgerEvent,
+  ContextSideQueryResultEvent,
   BudgetUpdateEvent,
   BudgetWarningEvent,
   GoalInfo,
   GoalUpdatedEvent,
+  ConversationHydrationUpdatedEvent,
+  ConversationCompactionUpdatedEvent,
+  ConversationSummaryUpdatedEvent,
   ConversationTranscriptMessage,
   ConversationSummaryPayload,
   ConversationRecordPayload,
@@ -92,8 +105,6 @@ export type {
   UserMessageCommand,
   UserMessageQueueCancelCommand,
   UserMessageQueueSteerCommand,
-  ApprovalCommand,
-  AnswerCommand,
   InterruptCommand,
   PingCommand,
   ReadArtifactCommand,
@@ -111,6 +122,8 @@ export type {
   ConversationWorktreeHandoffExecuteCommand,
   ConversationArchiveCommand,
   ConversationRenameCommand,
+  ConversationMemoryModeSetCommand,
+  MemoryResetCommand,
   ConversationGoalSetCommand,
   LlmModelSetCommand,
   LlmConfigSetCommand,
@@ -156,12 +169,16 @@ export type {
   TerminalSnapshotEvent,
   TerminalResizedEvent,
   BackgroundStartedEvent,
+  BackgroundStalledEvent,
   BackgroundCompletedEvent,
   TerminalCreateCommand,
+  TerminalListCommand,
   TerminalInputCommand,
   TerminalResizeCommand,
   TerminalKillCommand,
+  TerminalRestartCommand,
   TerminalSnapshotRequestCommand,
+  TerminalClearCommand,
   TerminalMirrorCreatedCommand,
   TerminalMirrorOutputCommand,
   TerminalMirrorExitCommand,
@@ -173,15 +190,29 @@ export type {
   WorkspaceClientCommandType,
   FileChangedEvent,
   CommandResultEvent,
+  ArtifactContentEvent,
   EnvListEvent,
   GitPrStatusEvent,
   GitDiffFilePayload,
   GitDiffWorkingTreeEvent,
   GitDiffStagedEvent,
   GitDiffActionEvent,
+  WorkspaceRecentProjectPayload,
+  WorkspaceRecentListEvent,
+  WorkspaceProjectPayload,
+  WorkspaceImportedEvent,
+  CheckpointRecordPayload,
+  CheckpointCreatedEvent,
+  CheckpointListEvent,
+  CheckpointRewoundEvent,
   RunCheckpointRecord,
   RunCheckpointListEvent,
   RunCheckpointResumeEvent,
+  GuidelinesUpdatedEvent,
+  PermissionModeUpdatedEvent,
+  PermissionRulePayload,
+  PermissionRulesPayload,
+  PermissionRulesUpdatedEvent,
   EnvListCommand,
   EnvSetCommand,
   EnvDeleteCommand,
@@ -191,15 +222,41 @@ export type {
 export type {
   CommonServerEventType,
   CommonClientCommandType,
+  McpTransport,
+  McpEnvVarReference,
+  McpServerMutationPayload,
+  McpAddCommand,
+  McpUpdateCommand,
+  McpInventoryListCommand,
+  McpInventoryCancelCommand,
+  McpInventoryPayload,
   McpStatusEvent,
   McpLifecycleEvent,
   McpProgressEvent,
   SchedulerListEvent,
-  ConnectorsMarketplaceListEvent,
   SkillsListEvent,
   SkillsMarketplaceListEvent,
+  CommandAvailabilityPayload,
+  CommandArgumentPayload,
+  CommandCatalogEntryPayload,
+  CommandsListEvent,
+  CheckpointOriginPayload,
+  SystemNoticeEvent,
+  PongEvent,
   RuntimeCapabilitiesEvent,
   ClientCommandAckEvent,
+  ProviderOAuthInfoLink,
+  ProviderOAuthAuthEvent,
+  ProviderOAuthDeviceCodeEvent,
+  ProviderOAuthInfoEvent,
+  ProviderOAuthProgressEvent,
+  ControlCanUseToolRequest,
+  ControlElicitationRequest,
+  ControlProviderAuthPromptRequest,
+  ControlRequestPayload,
+  ControlRequestEvent,
+  ControlResponseCommand,
+  ControlCancelRequestCommand,
   SessionSnapshotPayload,
   SessionWorkspacePayload,
   SessionRestoredEvent,
@@ -215,8 +272,6 @@ export type {
   SchedulerRunNowCommand,
   SchedulerRetryCommand,
   SchedulerCancelCommand,
-  ConnectorsMarketplaceListCommand,
-  ConnectorsMarketplaceInstallCommand,
   RuntimeCapabilitiesInspectCommand,
 } from "./common-types";
 
@@ -270,35 +325,43 @@ export interface UntypedServerEvent {
     | "item.started"
     | "agent_message.delta"
     | "item.completed"
+    | "image_chunk"
     | "thinking_delta"
     | "thinking"
     | "tool_call"
     | "tool_result"
     | "tool_output_delta"
+    | "command_output_chunk"
     | "agent.run.started"
     | "agent.run.completed"
     | "user_message.queue.updated"
     | "agent.item"
     | "agent.progress"
     | "runtime.span"
-    | "approval_request"
-    | "permission.decision"
+      | "permission.decision"
     | "approval.cancelled"
-    | "ask_user"
-    | "done"
+    | "approval.file_diff"
+      | "done"
     | "error"
+    | "stream_event"
+    | "rate_limit"
+    | "session.state_changed"
     | "context_usage"
     | "context_compacted"
+    | "context_forked"
+    | "context_ledger"
+    | "context_side_query_result"
     | "budget_update"
     | "budget.warning"
-    | "plan_step_updated"
-    | "plan_updated"
+    | "turn.plan.updated"
+    | "turn.diff.updated"
     | "task.update"
     | "subagent.start"
     | "subagent.event"
     | "subagent.mailbox"
     | "subagent.progress"
     | "subagent.done"
+    | "parent.notifications"
     | "citation.add"
     | "artifact.preview"
     | "inspector.update"
@@ -307,7 +370,24 @@ export interface UntypedServerEvent {
     | "mcp.progress"
     | "env.list"
     | "git.pr_status"
-  | "scheduler.list"
+    | "diff.git_working_tree"
+    | "diff.git_staged"
+    | "diff.git_stage_file"
+    | "diff.git_unstage_file"
+    | "diff.git_stage_all"
+    | "diff.git_unstage_all"
+    | "diff.git_revert_file"
+    | "scheduler.list"
+    | "workspace.recent.list"
+    | "workspace.imported"
+    | "checkpoint.created"
+    | "checkpoint.list"
+    | "checkpoint.rewound"
+    | "checkpoint.run.list"
+    | "checkpoint.run.resume"
+    | "guidelines.updated"
+    | "permission.mode.updated"
+    | "permission.rules.updated"
     | "file.changed"
     | "terminal.output"
     | "terminal.exit"
@@ -317,17 +397,32 @@ export interface UntypedServerEvent {
     | "terminal.snapshot"
     | "terminal.resized"
     | "background.started"
+    | "background.stalled"
     | "background.completed"
     | "command.result"
+    | "artifact_content"
     | "goal.updated"
+    | "conversation.hydration.updated"
+    | "conversation.compaction.updated"
+    | "conversation.summary.updated"
     | "conversation.list"
     | "conversation.switched"
     | "llm.model.updated"
     | "skills.list"
     | "skills.marketplace.list"
+    | "commands.list"
+    | "system_notice"
+    | "client.command.ack"
     | "session.restored"
+    | "session.replay"
     | "session.synced"
     | "runtime.capabilities"
+    | "pong"
+    | "control_request"
+    | "llm.provider.oauth.auth"
+    | "llm.provider.oauth.device_code"
+    | "llm.provider.oauth.info"
+    | "llm.provider.oauth.progress"
     | "preview.servers.updated"
     | "preview.server.detected"
     | "preview.server.stopped"
@@ -341,6 +436,7 @@ export interface UntypedServerEvent {
     | "preview.server.crashed"
     | "preview.server.unhealthy"
     | "preview.verified"
+    | "stream_resume"
   >;
   [key: string]: unknown;
 }
@@ -349,19 +445,27 @@ export interface UntypedClientCommand {
   type: Exclude<
     ClientCommandType,
     | "user_message"
-    | "approval"
-    | "answer"
+    | "user_message.queue.cancel"
+    | "user_message.queue.steer"
     | "interrupt"
     | "ping"
-    | "task.edit"
+    | "control_response"
+    | "control_cancel_request"
     | "agent.resume"
     | "subagent.cancel"
+    | "subagent.status"
+    | "subagent.transcript"
+    | "subagent.plan_review"
+    | "send_message"
     | "inspector.focus"
     | "terminal.create"
+    | "terminal.list"
     | "terminal.input"
     | "terminal.resize"
     | "terminal.kill"
+    | "terminal.restart"
     | "terminal.snapshot.request"
+    | "terminal.clear"
     | "terminal.mirror.created"
     | "terminal.mirror.output"
     | "terminal.mirror.exit"
@@ -377,10 +481,13 @@ export interface UntypedClientCommand {
     | "scheduler.remove"
   | "scheduler.toggle"
   | "scheduler.run_now"
-  | "scheduler.retry"
-  | "scheduler.cancel"
-    | "connectors.marketplace.list"
-    | "connectors.marketplace.install"
+    | "scheduler.retry"
+    | "scheduler.cancel"
+    | "mcp.add"
+    | "mcp.update"
+    | "mcp.project.approve"
+    | "mcp.project.approve_all"
+    | "mcp.project.reject"
     | "env.list"
     | "env.set"
     | "env.delete"
@@ -392,11 +499,16 @@ export interface UntypedClientCommand {
     | "conversation.switch"
     | "conversation.clear"
     | "conversation.truncate"
+    | "context.fork"
     | "conversation.delete"
     | "conversation.worktree.cleanup"
+    | "conversation.worktree.handoff.preflight"
+    | "conversation.worktree.handoff.execute"
     | "conversation.archive"
     | "conversation.unarchive"
     | "conversation.rename"
+    | "conversation.memory_mode.set"
+    | "memory.reset"
     | "conversation.goal.set"
     | "preview.detect"
     | "preview.navigate"
@@ -405,9 +517,19 @@ export interface UntypedClientCommand {
     | "preview.launch.start"
     | "preview.launch.stop"
     | "preview.verify"
+    | "checkpoint.list"
+    | "checkpoint.rewind"
+    | "checkpoint.run.list"
   >;
   [key: string]: unknown;
 }
+
+export type ProviderOAuthCommand = {
+  type: "llm.provider.oauth.login" | "llm.provider.oauth.logout" | "llm.provider.oauth.status";
+  provider: string;
+  conversation_id?: string;
+  client_command_id?: string;
+};
 
 // ──────────────────────────────────────────────────────────────────
 // Discriminated unions of all typed payloads + catch-all
@@ -417,10 +539,12 @@ import type {
   ItemStartedEvent,
   AgentMessageDeltaEvent,
   ItemCompletedEvent,
+  ImageChunkEvent,
   ThinkingDeltaEvent,
   ToolCallEvent,
   ToolResultEvent,
   ToolOutputDeltaEvent,
+  CommandOutputChunkEvent,
   AgentItemEvent,
   AgentProgressEvent,
   RuntimeSpanEvent,
@@ -437,15 +561,16 @@ import type {
   StreamEventEvent,
   RateLimitEvent,
   SessionStateEvent,
-  ToolUseSummaryEvent,
-  PlanStepUpdatedEvent,
-  PlanUpdatedEvent,
+  TurnPlanUpdatedEvent,
+  TurnDiffUpdatedEvent,
   TaskUpdateEvent,
   SubagentStartEvent,
   SubagentEventEvent,
   SubagentMailboxEvent,
   SubagentProgressEvent,
   SubagentDoneEvent,
+  SubagentPlanApprovalRequestedEvent,
+  ParentNotificationsEvent,
   CitationAddEvent,
   ArtifactPreviewEvent,
   InspectorUpdateEvent,
@@ -454,9 +579,15 @@ import type {
 import type {
   ContextUsageEvent,
   ContextCompactedEvent,
+  ContextForkedEvent,
+  ContextLedgerEvent,
+  ContextSideQueryResultEvent,
   BudgetUpdateEvent,
   BudgetWarningEvent,
   GoalUpdatedEvent,
+  ConversationHydrationUpdatedEvent,
+  ConversationCompactionUpdatedEvent,
+  ConversationSummaryUpdatedEvent,
   ConversationListEvent,
   ConversationSwitchedEvent,
   LlmModelUpdatedEvent,
@@ -488,19 +619,29 @@ import type {
   TerminalSnapshotEvent,
   TerminalResizedEvent,
   BackgroundStartedEvent,
+  BackgroundStalledEvent,
   BackgroundCompletedEvent,
 } from "./terminal-types";
 
 import type {
   FileChangedEvent,
   CommandResultEvent,
+  ArtifactContentEvent,
   EnvListEvent,
   GitPrStatusEvent,
   GitDiffWorkingTreeEvent,
   GitDiffStagedEvent,
   GitDiffActionEvent,
+  WorkspaceRecentListEvent,
+  WorkspaceImportedEvent,
+  CheckpointCreatedEvent,
+  CheckpointListEvent,
+  CheckpointRewoundEvent,
   RunCheckpointListEvent,
   RunCheckpointResumeEvent,
+  GuidelinesUpdatedEvent,
+  PermissionModeUpdatedEvent,
+  PermissionRulesUpdatedEvent,
 } from "./workspace-types";
 
 import type {
@@ -508,11 +649,18 @@ import type {
   McpLifecycleEvent,
   McpProgressEvent,
   SchedulerListEvent,
-  ConnectorsMarketplaceListEvent,
   SkillsListEvent,
   SkillsMarketplaceListEvent,
+  CommandsListEvent,
+  SystemNoticeEvent,
+  PongEvent,
   RuntimeCapabilitiesEvent,
   ClientCommandAckEvent,
+  ControlRequestEvent,
+  ProviderOAuthAuthEvent,
+  ProviderOAuthDeviceCodeEvent,
+  ProviderOAuthInfoEvent,
+  ProviderOAuthProgressEvent,
   SessionRestoredEvent,
   SessionReplayEvent,
   SessionSyncedEvent,
@@ -520,20 +668,25 @@ import type {
 
 export interface ServerEventEnvelope {
   seq?: number;
+  previous_replay_seq?: number;
   event_id?: string;
   timestamp?: string;
   task_id?: string;
   turn_id?: string;
+  client_command_id?: string;
+  client_command_type?: string;
 }
 
 type ServerEventPayload =
   | ItemStartedEvent
   | AgentMessageDeltaEvent
   | ItemCompletedEvent
+  | ImageChunkEvent
   | ThinkingDeltaEvent
   | ToolCallEvent
   | ToolResultEvent
   | ToolOutputDeltaEvent
+  | CommandOutputChunkEvent
   | AgentItemEvent
   | AgentProgressEvent
   | RuntimeSpanEvent
@@ -546,18 +699,26 @@ type ServerEventPayload =
   | AskUserEvent
   | DoneEvent
   | ErrorEvent
+  | StreamEventEvent
+  | RateLimitEvent
+  | SessionStateEvent
   | ContextUsageEvent
   | ContextCompactedEvent
+  | ContextForkedEvent
+  | ContextLedgerEvent
+  | ContextSideQueryResultEvent
   | BudgetUpdateEvent
   | BudgetWarningEvent
-  | PlanStepUpdatedEvent
-  | PlanUpdatedEvent
+  | TurnPlanUpdatedEvent
+  | TurnDiffUpdatedEvent
   | TaskUpdateEvent
   | SubagentStartEvent
   | SubagentEventEvent
   | SubagentMailboxEvent
   | SubagentProgressEvent
   | SubagentDoneEvent
+  | SubagentPlanApprovalRequestedEvent
+  | ParentNotificationsEvent
   | CitationAddEvent
   | ArtifactPreviewEvent
   | InspectorUpdateEvent
@@ -569,10 +730,17 @@ type ServerEventPayload =
   | GitDiffWorkingTreeEvent
   | GitDiffStagedEvent
   | GitDiffActionEvent
+  | WorkspaceRecentListEvent
+  | WorkspaceImportedEvent
+  | CheckpointCreatedEvent
+  | CheckpointListEvent
+  | CheckpointRewoundEvent
   | RunCheckpointListEvent
   | RunCheckpointResumeEvent
+  | GuidelinesUpdatedEvent
+  | PermissionModeUpdatedEvent
+  | PermissionRulesUpdatedEvent
   | SchedulerListEvent
-  | ConnectorsMarketplaceListEvent
   | FileChangedEvent
   | TerminalOutputEvent
   | TerminalExitEvent
@@ -582,17 +750,30 @@ type ServerEventPayload =
   | TerminalSnapshotEvent
   | TerminalResizedEvent
   | BackgroundStartedEvent
+  | BackgroundStalledEvent
   | BackgroundCompletedEvent
   | CommandResultEvent
+  | ArtifactContentEvent
   | GoalUpdatedEvent
+  | ConversationHydrationUpdatedEvent
+  | ConversationCompactionUpdatedEvent
+  | ConversationSummaryUpdatedEvent
   | ConversationListEvent
   | ConversationSwitchedEvent
   | LlmModelUpdatedEvent
   | UserMessageQueueUpdatedEvent
   | SkillsListEvent
   | SkillsMarketplaceListEvent
+  | CommandsListEvent
+  | SystemNoticeEvent
+  | PongEvent
   | RuntimeCapabilitiesEvent
   | ClientCommandAckEvent
+  | ControlRequestEvent
+  | ProviderOAuthAuthEvent
+  | ProviderOAuthDeviceCodeEvent
+  | ProviderOAuthInfoEvent
+  | ProviderOAuthProgressEvent
   | SessionRestoredEvent
   | SessionReplayEvent
   | SessionSyncedEvent
@@ -618,8 +799,6 @@ import type {
   UserMessageCommand,
   UserMessageQueueCancelCommand,
   UserMessageQueueSteerCommand,
-  ApprovalCommand,
-  AnswerCommand,
   InterruptCommand,
   PingCommand,
   ReadArtifactCommand,
@@ -637,27 +816,32 @@ import type {
   ConversationWorktreeHandoffExecuteCommand,
   ConversationArchiveCommand,
   ConversationRenameCommand,
+  ConversationMemoryModeSetCommand,
+  MemoryResetCommand,
   ConversationGoalSetCommand,
   LlmModelSetCommand,
   LlmConfigSetCommand,
 } from "./conversation-types";
 
 import type {
-  TaskEditCommand,
-  PlanEditCommand,
   AgentResumeCommand,
   SubagentCancelCommand,
   SubagentStatusCommand,
+  SubagentTranscriptCommand,
+  SubagentPlanReviewCommand,
   SendMessageCommand,
   InspectorFocusCommand,
 } from "./streaming-types";
 
 import type {
   TerminalCreateCommand,
+  TerminalListCommand,
   TerminalInputCommand,
   TerminalResizeCommand,
   TerminalKillCommand,
+  TerminalRestartCommand,
   TerminalSnapshotRequestCommand,
+  TerminalClearCommand,
   TerminalMirrorCreatedCommand,
   TerminalMirrorOutputCommand,
   TerminalMirrorExitCommand,
@@ -685,9 +869,14 @@ import type {
   SchedulerRunNowCommand,
   SchedulerRetryCommand,
   SchedulerCancelCommand,
-  ConnectorsMarketplaceListCommand,
-  ConnectorsMarketplaceInstallCommand,
   RuntimeCapabilitiesInspectCommand,
+  ControlResponseCommand,
+  ControlCancelRequestCommand,
+  McpAddCommand,
+  McpUpdateCommand,
+  McpInventoryListCommand,
+  McpInventoryCancelCommand,
+  McpProjectDecisionCommand,
 } from "./common-types";
 
 import type {
@@ -695,6 +884,8 @@ import type {
   EnvSetCommand,
   EnvDeleteCommand,
   GitPrAutomationSetCommand,
+  CheckpointListCommand,
+  CheckpointRewindCommand,
   RunCheckpointListCommand,
 } from "./workspace-types";
 
@@ -706,22 +897,25 @@ type ClientCommandPayload =
   | UserMessageCommand
   | UserMessageQueueCancelCommand
   | UserMessageQueueSteerCommand
-  | ApprovalCommand
-  | AnswerCommand
   | InterruptCommand
   | PingCommand
-  | TaskEditCommand
-  | PlanEditCommand
+  | ControlResponseCommand
+  | ControlCancelRequestCommand
   | AgentResumeCommand
   | SubagentCancelCommand
   | SubagentStatusCommand
+  | SubagentTranscriptCommand
+  | SubagentPlanReviewCommand
   | SendMessageCommand
   | InspectorFocusCommand
   | TerminalCreateCommand
+  | TerminalListCommand
   | TerminalInputCommand
   | TerminalResizeCommand
   | TerminalKillCommand
+  | TerminalRestartCommand
   | TerminalSnapshotRequestCommand
+  | TerminalClearCommand
   | TerminalMirrorCreatedCommand
   | TerminalMirrorOutputCommand
   | TerminalMirrorExitCommand
@@ -738,13 +932,18 @@ type ClientCommandPayload =
   | SchedulerRunNowCommand
   | SchedulerRetryCommand
   | SchedulerCancelCommand
-  | ConnectorsMarketplaceListCommand
-  | ConnectorsMarketplaceInstallCommand
   | RuntimeCapabilitiesInspectCommand
+  | McpAddCommand
+  | McpUpdateCommand
+  | McpInventoryListCommand
+  | McpInventoryCancelCommand
+  | McpProjectDecisionCommand
   | EnvListCommand
   | EnvSetCommand
   | EnvDeleteCommand
   | GitPrAutomationSetCommand
+  | CheckpointListCommand
+  | CheckpointRewindCommand
   | RunCheckpointListCommand
   | ReadArtifactCommand
   | ConversationCreateCommand
@@ -761,7 +960,10 @@ type ClientCommandPayload =
   | ConversationWorktreeHandoffExecuteCommand
   | ConversationArchiveCommand
   | ConversationRenameCommand
+  | ConversationMemoryModeSetCommand
+  | MemoryResetCommand
   | ConversationGoalSetCommand
+  | ProviderOAuthCommand
   | PreviewDetectCommand
   | PreviewNavigateCommand
   | PreviewRefreshCommand
@@ -796,29 +998,27 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   "agent.progress",
   "runtime.span",
   "task.update",
-  "approval_request",
   "permission.decision",
   "approval.cancelled",
   "approval.file_diff",
-  "ask_user",
   "done",
   "error",
   "stream_resume",
   "stream_event",
   "rate_limit",
   "session.state_changed",
-  "tool_use_summary",
   // Subagents + citations + inspector
   "subagent.start",
   "subagent.event",
   "subagent.mailbox",
   "subagent.progress",
   "subagent.done",
+  "subagent.plan_approval_requested",
   "parent.notifications",
   "citation.add",
   "inspector.update",
-  "plan_step_updated",
-  "plan_updated",
+  "turn.plan.updated",
+  "turn.diff.updated",
   // Context lifecycle
   "context_usage",
   "context_compacted",
@@ -859,6 +1059,7 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   "terminal.snapshot",
   "terminal.resized",
   "background.started",
+  "background.stalled",
   "background.completed",
   // Workspace / file watcher
   "file.changed",
@@ -883,7 +1084,6 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   "mcp.lifecycle",
   "mcp.progress",
   "scheduler.list",
-  "connectors.marketplace.list",
   "session.restored",
   "session.replay",
   "session.synced",
@@ -891,6 +1091,10 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   "client.command.ack",
   "pong",
   "control_request",
+  "llm.provider.oauth.auth",
+  "llm.provider.oauth.device_code",
+  "llm.provider.oauth.info",
+  "llm.provider.oauth.progress",
   "skills.list",
   "skills.marketplace.list",
   "commands.list",
@@ -910,8 +1114,6 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "user_message",
   "user_message.queue.cancel",
   "user_message.queue.steer",
-  "approval",
-  "answer",
   "interrupt",
   "ping",
   // Control plane
@@ -934,6 +1136,7 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "conversation.unarchive",
   "conversation.rename",
   "conversation.memory_mode.set",
+  "memory.reset",
   "conversation.permission_mode.set",
   "conversation.goal.set",
   "conversation.worktree.cleanup",
@@ -955,6 +1158,9 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "runtime.capabilities.inspect",
   // LLM
   "llm.model.set",
+  "llm.provider.oauth.login",
+  "llm.provider.oauth.logout",
+  "llm.provider.oauth.status",
   "llm.config.set",
   // Checkpoints
   "checkpoint.list",
@@ -965,8 +1171,10 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "terminal.input",
   "terminal.resize",
   "terminal.kill",
+  "terminal.restart",
   "terminal.list",
   "terminal.snapshot.request",
+  "terminal.clear",
   "terminal.mirror.created",
   "terminal.mirror.output",
   "terminal.mirror.exit",
@@ -975,17 +1183,18 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "workspace.import",
   "workspace.switch",
   "workspace.recent",
+  "workspace.recent.remove",
+  "workspace.recent.clear",
   "workspace.set",
   // Session restore / sync
   "session.restore",
   "session.sync",
   // Streaming / task management
-  "task.edit",
-  "plan.edit",
-  "task.stop",
   "agent.resume",
   "subagent.cancel",
   "subagent.status",
+  "subagent.transcript",
+  "subagent.plan_review",
   "send_message",
   "inspector.focus",
   // Skills / commands catalog
@@ -1011,10 +1220,18 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "diff.git_revert_file",
   // MCP / Environment / Git status
   "mcp.list",
+  "mcp.inventory.list",
+  "mcp.inventory.cancel",
   "mcp.add",
+  "mcp.update",
+  "mcp.toggle",
   "mcp.remove",
   "mcp.restart",
   "mcp.oauth.login",
+  "mcp.oauth.logout",
+  "mcp.project.approve",
+  "mcp.project.approve_all",
+  "mcp.project.reject",
   "env.list",
   "env.set",
   "env.delete",
@@ -1028,13 +1245,9 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "scheduler.run_now",
   "scheduler.retry",
   "scheduler.cancel",
-  // Connectors marketplace
-  "connectors.marketplace.list",
-  "connectors.marketplace.install",
 ]);
 
-export const isServerEvent = (t: string): t is ServerEventType =>
-  SERVER_EVENT_TYPES.has(t as ServerEventType);
-
-export const isClientCommand = (t: string): t is ClientCommandType =>
-  CLIENT_COMMAND_TYPES.has(t as ClientCommandType);
+// SERVER_EVENT_TYPES / CLIENT_COMMAND_TYPES have no runtime callers in this
+// file: the sets are consumed by protocol/server-event-validation.ts and are
+// parsed by scripts/check-protocol-sync.py to detect backend/frontend drift.
+// Do not delete them because grep shows no in-app call site.

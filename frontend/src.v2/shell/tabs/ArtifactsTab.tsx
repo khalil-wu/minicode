@@ -1,13 +1,13 @@
-import { ChevronRight, FileText, FileType, Image, Link, Paperclip } from 'lucide-react'
+import { ChevronRight, FileText, FileType, FolderOpen, Image, Link, Paperclip } from 'lucide-react'
 import { useMemo } from 'react'
-import { getWebSocket } from '../../hooks/useWebSocket'
+import { EmptyState } from '../../components/EmptyState'
+import { openArtifactPreview, openAttachmentPreview, openWorkspaceFilePreview } from '../../chat/openAttachmentPreview'
 import { useAppStore } from '../../stores'
 import type { ArtifactContentState, ChatMessage, MessageAttachmentRef, ReplyAttachmentMeta } from '../../stores/types'
 import {
   ActivityButtonRow,
   ActivityIcon,
   ActivitySection,
-  EmptyLine,
   InfoCard,
   InfoRow,
   PanelHeader,
@@ -34,7 +34,7 @@ export const ArtifactsTab = () => {
     return (
       <div style={panelStyle}>
         <PanelHeader title="文件" />
-        <EmptyLine>No active conversation.</EmptyLine>
+        <EmptyState compact icon={<FolderOpen size={20} />} title="暂无活动对话" hint="开始对话后，生成的文件与附件会显示在这里。" />
       </div>
     )
   }
@@ -43,7 +43,7 @@ export const ArtifactsTab = () => {
     return (
       <div style={panelStyle}>
         <PanelHeader title="文件" />
-        <EmptyLine>No generated files, previews, or attachments yet.</EmptyLine>
+        <EmptyState compact icon={<FolderOpen size={20} />} title="暂无生成文件或附件" hint="Agent 生成文件、预览或附件后会显示在这里。" />
       </div>
     )
   }
@@ -69,14 +69,33 @@ const ArtifactSection = ({ title, items }: { title: string; items: ArtifactItem[
   const openItem = (item: ArtifactItem) => {
     const store = useAppStore.getState()
     if (item.artifactId) {
-      store.setPreviewArtifact(null)
-      store.addPanel({ id: `artifact-${item.artifactId}`, kind: 'preview', label: item.label.slice(0, 24) || 'Artifact' })
-      store.setRightStackTab('preview')
-      getWebSocket()?.send({ type: 'read_artifact', artifact_id: item.artifactId })
+      if (item.kind === 'attachment') {
+        openAttachmentPreview({
+          artifactId: item.artifactId,
+          name: item.label,
+          mediaType: item.mediaType,
+          kind: item.kind,
+        })
+        return
+      }
+      openArtifactPreview({
+        artifactId: item.artifactId,
+        name: item.label,
+        mediaType: item.mediaType,
+        kind: item.kind,
+        conversationId: store.conversationId || undefined,
+      })
       return
     }
     if (item.path) {
-      store.openEditorFile(item.path, item.label)
+      openWorkspaceFilePreview({
+        path: item.path,
+        name: item.label,
+        mediaType: item.mediaType,
+        kind: item.kind,
+        workspaceRoot: store.workingDirectory,
+        conversationId: store.conversationId || undefined,
+      })
       return
     }
     if (item.url) {
@@ -224,7 +243,7 @@ const labelStyle: React.CSSProperties = {
   color: 'var(--text-primary)',
   fontSize: 'var(--text-xs)',
   lineHeight: 1.3,
-  fontWeight: 650,
+  fontWeight: "var(--fw-semibold)",
   overflow: 'hidden',
   textOverflow: 'ellipsis',
   whiteSpace: 'nowrap',

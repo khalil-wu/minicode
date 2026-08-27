@@ -13,16 +13,31 @@ class PermissionContentRuleResult:
     should_emit_config_change: bool = False
 
 
-def add_permission_content_rule(rule: str, *, deny: bool = False) -> PermissionContentRuleResult:
+def add_permission_content_rule(
+    rule: str,
+    *,
+    deny: bool = False,
+    scope: str = "global",
+) -> PermissionContentRuleResult:
     from backend.config import add_permission_content_rule as save_permission_content_rule
 
     clean_rule = str(rule or "").strip()
     clean_deny = bool(deny)
+    clean_scope = str(scope or "global").strip().lower()
+    if clean_scope != "global":
+        return PermissionContentRuleResult(
+            CommandOutcome(
+                "permissions.content_rule.add",
+                f"Unsupported permission rule scope: {clean_scope}",
+                level="warning",
+                data={"scope": clean_scope},
+            )
+        )
     if not clean_rule:
         return PermissionContentRuleResult(
             CommandOutcome(
                 "permissions.content_rule.add",
-                "Rule is required, e.g. Bash(npm run:*) or Edit(src/**)",
+                "Rule is required, e.g. run_command(npm run:*) or edit_file(src/**)",
                 level="warning",
             )
         )
@@ -41,9 +56,9 @@ def add_permission_content_rule(rule: str, *, deny: bool = False) -> PermissionC
     return PermissionContentRuleResult(
         CommandOutcome(
             "permissions.content_rule.add",
-            f"{'Denied' if clean_deny else 'Allowed'} rule saved: {clean_rule}",
+            f"Global {'deny' if clean_deny else 'allow'} rule saved: {clean_rule}",
             level="success",
-            data={"rule": clean_rule, "deny": clean_deny, "rules": updated},
+            data={"rule": clean_rule, "deny": clean_deny, "scope": "global", "rules": updated},
         ),
         updated_rules=updated,
         should_emit_config_change=True,

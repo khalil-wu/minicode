@@ -12,11 +12,35 @@
 import type { AgentCapabilitiesPayload } from "./capabilities";
 import type { InspectorTargetKind, ProviderRawMetadata } from "../stores/types";
 
+export const AGENT_PROGRESS_STAGES = [
+  "status",
+  "planning",
+  "tool",
+  "approval",
+  "verification",
+  "image_generation",
+  "cache",
+  "final",
+] as const;
+
+export type AgentProgressStage = (typeof AGENT_PROGRESS_STAGES)[number];
+
+export const AGENT_PROGRESS_STATUSES = [
+  "running",
+  "completed",
+  "partial",
+  "failed",
+  "info",
+] as const;
+
+export type AgentProgressStatus = (typeof AGENT_PROGRESS_STATUSES)[number];
+
 export const AGENT_PROGRESS_PHASES = [
   "orienting",
   "planning",
   "model",
   "tool",
+  "image_generation",
   "approval",
   "verify",
   "final",
@@ -65,31 +89,31 @@ export type StreamingServerEventType =
   | "stream_event"
   | "rate_limit"
   | "session.state_changed"
-  | "tool_use_summary"
   // Subagents
   | "subagent.start"
   | "subagent.event"
   | "subagent.mailbox"
   | "subagent.progress"
   | "subagent.done"
+  | "subagent.plan_approval_requested"
   | "parent.notifications"
   // Citations + inspector
   | "citation.add"
   | "inspector.update"
-  // Plan step tracking (plan.update is dead code, removed)
-  | "plan_step_updated"
-  | "plan_updated";
+  // MiniCode current-turn checklist and aggregate diff snapshots
+  | "turn.plan.updated"
+  | "turn.diff.updated";
 
 // ──────────────────────────────────────────────────────────────────
 // Client command type strings (streaming domain)
 // ──────────────────────────────────────────────────────────────────
 
 export type StreamingClientCommandType =
-  | "task.edit"
-  | "plan.edit"
   | "agent.resume"
   | "subagent.cancel"
   | "subagent.status"
+  | "subagent.transcript"
+  | "subagent.plan_review"
   | "send_message"
   | "inspector.focus";
 
@@ -101,31 +125,57 @@ export interface AgentMessageItem {
   id: string;
   type: "agent_message";
   text: string;
-  source?: "model_final" | "reply" | "partial" | string;
+  source?: "model_final" | "reply" | "partial" | "commentary" | "model_preamble" | "post_tool" | "runtime" | string;
   status?: "in_progress" | "completed" | "partial" | string;
 }
 
 export interface ItemStartedEvent {
   type: "item.started";
+  conversation_id: string;
   item: AgentMessageItem;
-  message_id?: string;
+  message_id: string;
 }
 
 export interface AgentMessageDeltaEvent {
   type: "agent_message.delta";
+  conversation_id: string;
   item_id: string;
   delta: string;
+  source?: AgentMessageItem["source"];
   message_id?: string;
 }
 
 export interface ItemCompletedEvent {
   type: "item.completed";
+  conversation_id: string;
   item: AgentMessageItem;
   finish_reason?: string;
   provider_raw?: ProviderRawMetadata;
   attachments?: ReplyAttachment[];
-  message_id?: string;
+  message_id: string;
 }
+
+export interface ImageChunkLiveEvent {
+  type: "image_chunk";
+  conversation_id: string;
+  message_id: string;
+  image_data: string;
+  media_type: "image/png" | "image/jpeg" | "image/webp" | "image/gif";
+  image_data_omitted?: never;
+  image_data_size?: number;
+}
+
+export interface ImageChunkReplayEvent {
+  type: "image_chunk";
+  conversation_id: string;
+  message_id: string;
+  media_type: "image/png" | "image/jpeg" | "image/webp" | "image/gif";
+  image_data?: never;
+  image_data_omitted: true;
+  image_data_size: number;
+}
+
+export type ImageChunkEvent = ImageChunkLiveEvent | ImageChunkReplayEvent;
 
 export interface ReplyAttachment {
   /** Absolute or workspace-relative file path. */
@@ -138,11 +188,15 @@ export interface ReplyAttachment {
 
 export interface ThinkingDeltaEvent {
   type: "thinking_delta" | "thinking";
+  conversation_id: string;
+  message_id: string;
   content: string;
   source?: "provider" | "model_preamble" | "post_tool" | "runtime" | string;
   visibility?: "debug" | "timeline" | "compact" | string;
-  is_raw_provider_reasoning?: boolean;
-  provider_reasoning_type?: string;
+  phase?: string;
+  item_id?: string;
+  content_index?: number;
+  lifecycle?: "start" | "delta" | "end" | string;
 }
 
 export interface ToolCallEvent {
@@ -156,6 +210,7 @@ export interface ToolCallEvent {
   input_summary?: string;
   result_kind?: "web" | "command" | "file" | "edit" | "search" | "mcp" | "generic" | string;
   activity_kind?: string;
+  visibility?: "timeline" | "compact" | "debug" | string;
   group_id?: string;
   step_id?: string;
   turn_id?: string;
@@ -163,6 +218,8 @@ export interface ToolCallEvent {
   seq?: number;
   iteration_id?: string;
   phase?: "tool" | "approval" | "model" | "final" | "recover" | string;
+  /** Live +/- line counts projected while the tool's arguments stream in. */
+  diff?: { plus?: number; minus?: number } | null;
 }
 
 export interface ToolErrorInfo {
@@ -193,6 +250,7 @@ export interface ToolResultEvent {
   display_summary?: string;
   result_kind?: "web" | "command" | "file" | "edit" | "search" | "mcp" | "generic" | string;
   activity_kind?: string;
+  visibility?: "timeline" | "compact" | "debug" | string;
   group_id?: string;
   step_id?: string;
   limitation?: string;
@@ -230,6 +288,17 @@ export interface ToolOutputDeltaEvent {
   step_id?: string;
 }
 
+export interface CommandOutputChunkEvent {
+  type: "command_output_chunk";
+  conversation_id: string;
+  message_id: string;
+  content: string;
+  stream: "stdout" | "stderr";
+  turn_id?: string;
+  id?: string;
+  tool_call_id?: string;
+}
+
 export interface PermissionDecisionEvent {
   type: "permission.decision";
   tool_call_id: string;
@@ -248,12 +317,14 @@ export interface PermissionDecisionEvent {
 
 export interface AgentItemEvent {
   type: "agent.item";
+  conversation_id: string;
+  message_id: string;
   id: string;
   item_id?: string;
   loop_id?: string;
   iteration_id?: string;
   parent_id?: string;
-  kind: "process_text" | "action_summary" | "observation" | "status" | "plan" | "tool_group" | string;
+  kind: "process_text" | "observation" | "status" | "plan" | "tool_group" | string;
   source?: "model" | "runtime" | "system" | "tool" | string;
   role?: "assistant" | "runtime" | string;
   status?: "running" | "completed" | "failed" | "info" | string;
@@ -263,7 +334,6 @@ export interface AgentItemEvent {
   visibility?: "timeline" | "compact" | "debug" | string;
   created_at?: number;
   order?: number;
-  seq?: number;
   default_collapsed?: boolean;
   group_id?: string;
   step_id?: string;
@@ -277,10 +347,12 @@ export interface AgentItemEvent {
 
 export interface AgentProgressEvent {
   type: "agent.progress";
+  conversation_id: string;
+  message_id: string;
   id: string;
-  stage: "status" | "planning" | "tool" | "approval" | "final";
+  stage: AgentProgressStage;
   phase?: AgentProgressPhase;
-  status: "running" | "completed" | "partial" | "failed" | "info";
+  status: AgentProgressStatus;
   message: string;
   label?: string;
   summary?: string;
@@ -297,15 +369,16 @@ export interface AgentProgressEvent {
 
 export interface RuntimeSpanEvent {
   type: "runtime.span";
+  conversation_id: string;
   event: string;
   span_id: string;
   parent_span_id?: string;
   run_id?: string;
   turn_id?: string;
-  message_id?: string;
+  message_id: string;
   iteration_id?: string;
   phase?: "context" | "provider" | "model" | "tool" | "approval" | "final" | "recovery" | "recover" | string;
-  status?: "running" | "completed" | "failed" | "info" | string;
+  status: "running" | "completed" | "failed" | "cancelled" | "interrupted" | "superseded" | "partial" | "info";
   label?: string;
   summary?: string;
   started_at?: number;
@@ -316,8 +389,8 @@ export interface RuntimeSpanEvent {
   agent_id?: string;
   waiting_on?: string;
   blocking_reason?: string;
-  ui_visible?: boolean;
-  debug_only?: boolean;
+  ui_visible: boolean;
+  debug_only: boolean;
   data?: Record<string, unknown>;
 }
 
@@ -328,7 +401,7 @@ export interface AgentRunRecordPayload {
   turn_id?: string;
   role?: string;
   phase?: "plan" | "execute" | "verify" | "recover" | "final" | string;
-  status?: "running" | "completed" | "failed" | "cancelled" | string;
+  status?: "running" | "completed" | "partial" | "failed" | "cancelled" | "interrupted" | string;
   budget?: Record<string, unknown>;
   started_at?: number;
   completed_at?: number | null;
@@ -336,6 +409,7 @@ export interface AgentRunRecordPayload {
   session_id?: string;
   summary?: string;
   error?: string;
+  terminal_reason?: string;
 }
 
 export interface AgentRunStartedEvent extends AgentRunRecordPayload {
@@ -351,19 +425,30 @@ export interface ApprovalRequestEvent {
   tool_call_id: string;
   tool_name: string;
   args: Record<string, unknown>;
+  conversation_id: string;
+  turn_id?: string;
+  message_id?: string;
+  workspace_root?: string;
+  permission_mode?: string;
+  workspace_scope?: string;
   source_agent?: string;
   source_thread?: string;
   source_tool?: string;
   diff?: unknown;
+  timeout_seconds?: number;
+  expires_at?: number;
 }
 
 export interface ApprovalFileDiffEvent {
   type: "approval.file_diff";
-  tool_call_id?: string;
-  path?: string;
-  patch?: string;
-  is_large?: boolean;
-  is_truncated?: boolean;
+  conversation_id: string;
+  tool_call_id: string;
+  path: string;
+  patch: string;
+  is_large: boolean;
+  is_truncated: boolean;
+  turn_id?: string;
+  workspace_root?: string;
 }
 
 export interface ApprovalCancelledEvent {
@@ -374,24 +459,36 @@ export interface ApprovalCancelledEvent {
 
 export interface AskUserEvent {
   type: "ask_user";
+  conversation_id: string;
   tool_call_id: string;
   question: string;
+  options?: string[];
+  turn_id?: string;
+  message_id?: string;
 }
 
 export interface DoneEvent {
   type: "done";
-  status?: "completed" | "partial" | "failed" | "cancelled";
+  conversation_id: string;
+  message_id: string;
+  status: "completed" | "partial" | "failed" | "cancelled" | "interrupted";
   reason?: string;
+  duration_ms?: number;
+  failure_recoverable?: boolean;
   usage: {
     input_tokens: number;
     output_tokens: number;
     cache_creation_input_tokens: number;
     cache_read_input_tokens: number;
+    input_includes_cache_read: boolean;
+    input_includes_cache_write?: boolean;
+    ordinary_input_tokens?: number;
+    cache_deleted_input_tokens?: number;
     prompt_cache_total_tokens?: number;
     prompt_cache_hit_rate?: number;
     reasoning_output_tokens?: number;
+    cost_usd?: number;
   };
-  providerRaw?: ProviderRawMetadata;
   provider_raw?: ProviderRawMetadata;
 }
 
@@ -400,8 +497,14 @@ export interface ErrorEvent {
   message: string;
   recoverable: boolean;
   error_type: "api" | "tool" | "budget" | "stagnant" | string;
+  conversation_id?: string;
+  message_id?: string;
+  tool_call_id?: string;
+  request_id?: string;
   error_code?: string;
+  provider?: string;
   provider_error_type?: "busy" | "rate_limit" | "auth" | "network" | "billing" | "blocked" | "unknown" | string;
+  attachments?: Array<Record<string, unknown>>;
 }
 
 export interface StreamResumeEvent {
@@ -480,16 +583,12 @@ export interface SessionStateEvent {
   reason?: string;
 }
 
-export interface ToolUseSummaryEvent {
-  type: "tool_use_summary";
-  summary: string;
-  iteration_id?: string;
-  tool_call_ids?: string[];
-  tool_count?: number;
-  generated_by?: "runtime" | "llm";
-}
-
 // ── Subagent events ─────────────────────────────────────────────
+
+export interface SubagentTranscriptSnapshot {
+  seq: number;
+  messages?: Record<string, unknown>[];
+}
 
 export interface SubagentStartEvent {
   type: "subagent.start";
@@ -513,6 +612,7 @@ export interface SubagentStartEvent {
   waiting_on?: string;
   last_progress_at?: number;
   record?: Record<string, unknown>;
+  transcript_snapshot?: SubagentTranscriptSnapshot;
 }
 
 export interface SubagentEventEvent {
@@ -540,6 +640,7 @@ export interface SubagentProgressEvent {
   activity_kind?: string;
   activity_summary?: string;
   user_visible?: boolean;
+  transcript_snapshot?: SubagentTranscriptSnapshot;
 }
 
 export interface SubagentDoneEvent {
@@ -562,6 +663,30 @@ export interface SubagentDoneEvent {
   prompt_cache_fork?: Record<string, unknown>;
   cancel_requested?: boolean;
   cancelled?: boolean;
+  transcript_snapshot?: SubagentTranscriptSnapshot;
+}
+
+/** A teammate submitted a plan and is blocked until the leader decides.
+ *
+ * The runtime only auto-approves when the permission mode pre-authorizes broad
+ * execution; otherwise it surfaces the request and waits for the user, so this
+ * event must become a blocking prompt (answered with subagent.plan_review). */
+export interface SubagentPlanApprovalRequestedEvent {
+  type: "subagent.plan_approval_requested";
+  conversation_id: string;
+  subagent_id: string;
+  request_id: string;
+  teammate_name?: string;
+  team_name?: string;
+  plan_file_path?: string;
+  plan_content?: string;
+}
+
+export interface ParentNotificationsEvent {
+  type: "parent.notifications";
+  count: number;
+  parent_run_id: string;
+  conversation_id: string;
 }
 
 // ── Citations + inspector ───────────────────────────────────────
@@ -578,16 +703,21 @@ export interface CitationAddEvent {
 
 export interface ArtifactPreviewEvent {
   type: "artifact.preview";
+  conversation_id: string;
+  message_id: string;
   artifact_id: string;
   kind: "file" | "diff" | "image" | "json" | "code" | "text";
   summary: string;
   bytes?: number;
   media_type?: string;
   url?: string;
+  text_offset?: number;
 }
 
 export interface InspectorUpdateEvent {
   type: "inspector.update";
+  conversation_id: string;
+  request_id?: string;
   target_kind: InspectorTargetKind;
   target_id: string;
   payload: Record<string, unknown>;
@@ -668,12 +798,32 @@ export interface RuntimeSessionSnapshot {
   provider_capabilities?: AgentCapabilitiesPayload["provider_capabilities"];
   invoked_skill_names?: string[];
   permission_mode?: string;
-  permission_profile?: "ask" | "auto" | "full_access" | string;
+  permission_profile?: "confirm" | "plan" | "auto" | "bypass" | string;
   permission_source?: string;
   workspace_scope?: "computer" | "project" | "worktree" | string;
   sandbox_status?: {
     os?: "enforced" | "app_layer" | "disabled" | string;
     network?: "restricted" | "approval_required" | "enabled" | string;
+    policy_configured?: boolean;
+    probe_status?: string;
+    enforcement?: string;
+    requested?: {
+      filesystem?: boolean;
+      network?: boolean;
+      deny_read?: boolean;
+      protected_paths?: boolean;
+    };
+    backend_available?: boolean | null;
+    backend?: string;
+    filesystem_isolated?: boolean | null;
+    network_isolated?: boolean | null;
+    deny_read_isolated?: boolean | null;
+    protected_paths_isolated?: boolean | null;
+    fail_closed?: boolean;
+    unavailable_action?: string;
+    reason?: string;
+    policy_limitations?: string[];
+    probed_at?: number;
   };
   mcp?: {
     connected?: number;
@@ -698,70 +848,72 @@ export interface SessionTaskUpdateEvent {
 
 export type TaskUpdateEvent = TodoTaskUpdateEvent | TodoTaskSnapshotEvent | SessionTaskUpdateEvent;
 
-/**
- * PlanStep is used by plan_updated, plan_step_updated, and plan.edit.
- */
-export interface PlanStep {
-  id: string;
-  title: string;
-  detail?: string;
-  status: "pending" | "running" | "done" | "skipped" | "failed";
-  tool_hint?: string;
+export interface TurnPlanStep {
+  step: string;
+  status: "pending" | "in_progress" | "completed";
 }
 
-export interface PlanStepUpdatedEvent {
-  type: "plan_step_updated";
-  plan_id: string;
-  step_id?: string;
-  step_index?: number;
-  status: PlanStep["status"];
-  title?: string;
-  detail?: string;
-  current_step?: number;
+export interface TurnPlanUpdatedEvent {
+  type: "turn.plan.updated";
+  thread_id: string;
+  conversation_id: string;
+  turn_id: string;
+  explanation?: string | null;
+  plan: TurnPlanStep[];
+  message_id?: string;
 }
 
-export interface PlanUpdatedEvent {
-  type: "plan_updated";
-  plan_id: string;
-  status: string;
-  current_step?: number;
-  steps: PlanStep[];
-  explanation?: string;
+/** MiniCode app-server ``turn/diff/updated`` notification. */
+export interface TurnDiffUpdatedEvent {
+  type: "turn.diff.updated";
+  thread_id: string;
+  conversation_id: string;
+  turn_id: string;
+  message_id?: string;
+  task_id?: string;
+  diff: string;
+  revision?: number;
+  tool_call_id?: string;
 }
 
 // ──────────────────────────────────────────────────────────────────
 // Client command payloads (streaming domain)
 // ──────────────────────────────────────────────────────────────────
 
-export interface TaskEditCommand {
-  type: "task.edit";
-  todo_id: string;
-  status: "pending" | "in_progress" | "completed" | "blocked";
+interface ConversationOwnedCommand {
+  conversation_id: string;
+  workspace_root?: string;
 }
 
-export interface PlanEditCommand {
-  type: "plan.edit";
-  plan_id: string;
-  action: "accept" | "reject";
-  steps?: PlanStep[];
-  current_step?: number;
-}
-
-export interface AgentResumeCommand {
+export interface AgentResumeCommand extends ConversationOwnedCommand {
   type: "agent.resume";
-  conversation_id?: string;
 }
 
-export interface SubagentCancelCommand {
+export interface SubagentCancelCommand extends ConversationOwnedCommand {
   type: "subagent.cancel";
   subagent_id: string;
 }
 
-export interface SubagentStatusCommand {
+export interface SubagentStatusCommand extends ConversationOwnedCommand {
   type: "subagent.status";
   subagent_id: string;
   include_result?: boolean;
   include_messages?: boolean;
+}
+
+export interface SubagentTranscriptCommand extends ConversationOwnedCommand {
+  type: "subagent.transcript";
+  subagent_id: string;
+}
+
+/** The leader's decision on a teammate plan approval request. */
+export interface SubagentPlanReviewCommand {
+  type: "subagent.plan_review";
+  subagent_id: string;
+  request_id: string;
+  approved: boolean;
+  /** Explicit owner when known; the runtime rejects a stale conversation. */
+  conversation_id?: string;
 }
 
 export interface SendMessageCommand {
@@ -775,7 +927,7 @@ export interface SendMessageCommand {
   team_name?: string;
 }
 
-export interface InspectorFocusCommand {
+export interface InspectorFocusCommand extends ConversationOwnedCommand {
   type: "inspector.focus";
   target_kind: InspectorTargetKind;
   target_id: string;

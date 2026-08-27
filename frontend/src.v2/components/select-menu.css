@@ -1,0 +1,187 @@
+.mc-select-menu {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+
+.mc-select-native-proxy {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.mc-select-trigger {
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px 7px 11px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-base);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--mc-font-body);
+  line-height: 1.35;
+  letter-spacing: 0;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--transition-fast), background-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.mc-select-trigger > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mc-select-menu-mono .mc-select-trigger,
+.mc-select-menu-mono .mc-select-option {
+  font-family: var(--font-mono);
+}
+
+.mc-select-trigger > svg {
+  color: var(--text-tertiary);
+  transition: transform var(--transition-fast);
+}
+
+.mc-select-menu[data-open="true"] .mc-select-trigger {
+  border-color: var(--accent-primary);
+  background: var(--surface-page);
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--accent-primary) 15%, transparent);
+}
+
+.mc-select-menu[data-open="true"] .mc-select-trigger > svg {
+  transform: rotate(180deg);
+}
+
+.mc-select-trigger:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+}
+
+.mc-select-trigger:focus-visible {
+  outline: 2px solid color-mix(in oklch, var(--accent-primary) 55%, transparent);
+  outline-offset: 1px;
+}
+
+.mc-select-trigger:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.mc-select-popover {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 1200;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 5px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+   background: var(--surface-raised);
+  box-shadow: var(--shadow-lg);
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+  animation: mc-select-enter var(--duration-micro) var(--easing-enter);
+}
+
+.mc-select-popover[data-placement="bottom"] {
+  top: calc(100% + 6px);
+  transform-origin: top;
+}
+
+.mc-select-popover[data-placement="top"] {
+  bottom: calc(100% + 6px);
+  transform-origin: bottom;
+}
+
+.mc-select-option-wrap {
+  display: contents;
+}
+
+.mc-select-group {
+  padding: 7px 9px 4px 31px;
+  color: var(--text-tertiary);
+  font-size: var(--mc-font-caption);
+  font-weight: var(--fw-semibold);
+}
+
+.mc-select-option {
+  width: 100%;
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius-sm, 7px);
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--mc-font-body);
+  letter-spacing: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mc-select-option:hover:not(:disabled),
+.mc-select-option:focus-visible {
+  outline: 0;
+  background: var(--surface-hover);
+}
+
+.mc-select-option[aria-selected="true"] {
+  background: var(--surface-active);
+  font-weight: var(--fw-semibold);
+}
+
+.mc-select-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.mc-select-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent-primary);
+  visibility: hidden;
+}
+
+.mc-select-check[data-visible="true"] {
+  visibility: visible;
+}
+
+.mc-select-option-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes mc-select-enter {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mc-select-popover,
+  .mc-select-trigger > svg {
+    animation: none;
+    transition: none;
+  }
+}

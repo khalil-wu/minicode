@@ -6,7 +6,9 @@ export const activeVisibleConversation = (
 ): ConversationMeta | null => {
   if (!conversationId) return null;
   const conversation = conversations.find((item) => item.id === conversationId);
-  return conversation && !conversation.archived ? conversation : null;
+  return conversation && conversation.conversationType !== "side_chat" && !conversation.archived
+    ? conversation
+    : null;
 };
 
 export const hasVisibleActiveConversation = (

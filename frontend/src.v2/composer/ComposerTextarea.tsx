@@ -1,6 +1,7 @@
 import { Sparkles, X } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { buildPastedTextFile, shouldAttachPastedText } from "./pastedText";
+import { useAppStore } from "../stores";
 
 interface Props {
   value: string;
@@ -48,6 +49,7 @@ export const ComposerTextarea = ({
   onRecallHistory,
   onEscape,
 }: Props) => {
+  const sendShortcut = useAppStore((state) => state.sendShortcut);
   const ref = useRef<HTMLTextAreaElement>(null);
   const lastValRef = useRef(value);
   const baseHeight = minimal ? 40 : MIN_HEIGHT;
@@ -197,7 +199,10 @@ export const ComposerTextarea = ({
             return;
           }
         }
-        if (e.key === "Enter" && !e.shiftKey) {
+        const submitWithEnter = sendShortcut === "enter"
+          ? e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey
+          : e.key === "Enter" && (e.ctrlKey || e.metaKey);
+        if (submitWithEnter) {
           // Ignore Enter while an IME composition is active (CJK input commits
           // with Enter); otherwise the half-composed text is sent. Mirrors the
           // Keep IME composition from being mistaken for a submit shortcut.
@@ -206,7 +211,7 @@ export const ComposerTextarea = ({
           onSubmit();
         }
       }}
-      placeholder={placeholder ?? "随心输入"}
+      placeholder={placeholder ?? "描述任务或提出问题…"}
       autoFocus
       className="composer-textarea bg-transparent border-0 outline-0 resize-none overflow-y-auto tracking-normal transition-colors duration-[140ms]"
       style={{
@@ -221,7 +226,7 @@ export const ComposerTextarea = ({
         fontFamily: "var(--font-prose)",
         fontSize: "var(--text-md)",
         lineHeight: "var(--leading-relaxed)",
-        fontWeight: 400,
+        fontWeight: "var(--fw-regular)",
         letterSpacing: 0,
         padding: commandLabel || skillTokens.length > 0
           ? (compact ? "7px 12px 6px" : "6px 14px 8px")
@@ -238,7 +243,8 @@ export const ComposerTextarea = ({
         {commandLabel && (
           <button
             type="button"
-            title="Clear command"
+            title="清除命令"
+            aria-label="清除命令"
             onClick={onClearCommand}
             className="composer-prefix-token"
             style={commandPrefixStyle}
@@ -293,7 +299,7 @@ const prefixBaseStyle: React.CSSProperties = {
   borderRadius: "var(--radius-sm, 5px)",
   cursor: "pointer",
   fontSize: "var(--text-xs)",
-  fontWeight: 650,
+  fontWeight: "var(--fw-semibold)",
 };
 
 const commandPrefixStyle: React.CSSProperties = {
@@ -312,7 +318,7 @@ const skillPrefixStyle: React.CSSProperties = {
 
 const prefixGlyphStyle: React.CSSProperties = {
   fontFamily: "var(--font-mono)",
-  fontWeight: 800,
+  fontWeight: "var(--fw-bold)",
 };
 
 const prefixNameStyle: React.CSSProperties = {

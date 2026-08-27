@@ -2,9 +2,10 @@ import { useEffect, useRef } from "react";
 import { useAppStore } from "../stores";
 import { wsProtocols, wsUrl } from "../protocol/api";
 import type { ClientCommand, ServerEvent } from "../protocol/events";
-import { normalizeInboundServerEvent } from "../protocol/server-event-validation";
+import { isUnknownServerEventType, normalizeInboundServerEvent } from "../protocol/server-event-validation";
 import {
   commandWithClientCommandId,
+  rejectAllPendingCommandResults,
   rejectClientCommandResult,
   registerWebSocketSender,
 } from "../protocol/ws-outbox";
@@ -21,10 +22,14 @@ import { handleCommandResultEvent } from "../chat/commandResultEvents";
 import { handlePreviewEvent } from "../chat/previewEvents";
 import { handleDiffEvent } from "../chat/diffEvents";
 import { handleNoticeEvent } from "../chat/noticeEvents";
+import { handleControlPlaneProjectionEvent } from "../chat/controlPlaneEvents";
 import { createStreamBuffer } from "../lib/stream-buffer";
+import { clearStreamingState } from "../chat/streamingState";
+import { safeJsonParse } from "../lib/safe-parse";
 import { LS, readLS } from "../stores/shared-helpers";
+import { hasInterruptFence } from "../lib/interrupt-command";
 
-// Transport policy follows Claude Code's WebSocket transport: reconnects are
+// Transport policy follows MiniCode's WebSocket transport: reconnects are
 // bounded by a total budget, use bounded jitter, and heartbeat liveness is
 // decided by the matching pong rather than arbitrary inbound traffic.
 const RECONNECT_BASE_MS = 1_000;
@@ -34,7 +39,20 @@ const RECONNECT_JITTER_FACTOR = 0.25;
 const PING_INTERVAL_MS = 10_000;
 const PONG_TIMEOUT_MS = 60_000;
 const MAX_BUFFERED_CLIENT_COMMANDS = 1_000;
-const PERMANENT_CLOSE_CODES = new Set([1002, 4001, 4003]);
+const PERMANENT_CLOSE_CODES = new Set([1002, 1008, 4001, 4003]);
+// Browsers reject server-only close code 1012 from WebSocket.close(). Use a
+// private client code so replay/protocol recovery can still reconnect normally.
+export const CLIENT_RESYNC_CLOSE_CODE = 4002;
+
+export const closeWebSocketForResync = (socket: WebSocket, reason: string): void => {
+  try {
+    socket.close(CLIENT_RESYNC_CLOSE_CODE, reason);
+  } catch {
+    // A closing/closed socket may reject a reasoned close; a plain close is
+    // still preferable to surfacing an unhandled InvalidAccessError.
+    try { socket.close(); } catch { /* noop */ }
+  }
+};
 
 export interface QueuedCommand {
   cmd: ClientCommand;
@@ -42,9 +60,7 @@ export interface QueuedCommand {
 }
 
 export const isTimeSensitiveCommand = (cmd: ClientCommand): boolean =>
-  cmd.type === "approval"
-  || cmd.type === "answer"
-  || cmd.type === "control_response"
+  cmd.type === "control_response"
   || cmd.type === "control_cancel_request"
   || cmd.type === "interrupt";
 
@@ -56,7 +72,6 @@ export const coalescingKeyForClientCommand = (cmd: ClientCommand): string => {
   };
   switch (cmd.type) {
     case "commands.list":
-    case "connectors.marketplace.list":
     case "conversation.list":
     case "diff.git_staged":
     case "diff.git_working_tree":
@@ -83,16 +98,20 @@ export const coalescingKeyForClientCommand = (cmd: ClientCommand): string => {
 };
 
 export const isQueueableWhenOffline = (cmd: ClientCommand): boolean => {
+  if (cmd.type === "interrupt") return hasInterruptFence(cmd);
   if (isTimeSensitiveCommand(cmd)) return true;
   return (
     cmd.type === "user_message"
     || cmd.type === "conversation.list"
+    || cmd.type === "conversation.switch"
     || cmd.type === "session.restore"
     || cmd.type === "commands.list"
     || cmd.type === "skills.list"
-    || cmd.type === "interrupt"
   );
 };
+
+export const shouldDeferCommandUntilSessionRestore = (cmd: ClientCommand): boolean =>
+  cmd.type === "interrupt" || isQueueableWhenOffline(cmd);
 
 export const shouldReplayQueuedCommand = (
   queued: QueuedCommand,
@@ -124,7 +143,7 @@ export const workspaceRootForConversationRestore = (state: {
 
 export const conversationIdForSessionRestore = (state: {
   conversationId?: string | null;
-  conversations?: Array<{ id?: string; archived?: boolean }>;
+  conversations?: Array<{ id?: string; archived?: boolean; conversationType?: "main" | "side_chat" }>;
 }): string => {
   const activeId = typeof state.conversationId === "string" ? state.conversationId.trim() : "";
   if (activeId) return activeId;
@@ -132,37 +151,46 @@ export const conversationIdForSessionRestore = (state: {
   if (!persistedId) return "";
   const conversations = state.conversations ?? [];
   if (conversations.length === 0) return persistedId;
-  return conversations.some((item) => item.id === persistedId && !item.archived) ? persistedId : "";
+  return conversations.some((item) => (
+    item.id === persistedId
+    && item.conversationType !== "side_chat"
+    && !item.archived
+  )) ? persistedId : "";
 };
 
 let singleton: WebSocketHandle | null = null;
 const subscribers = new Set<(data: unknown) => void>();
 const BROWSER_SESSION_STORAGE_KEY = "minicode.websocket.session_id";
-const browserSessionId = (() => {
+type SessionStorageHost = { sessionStorage?: Pick<Storage, "getItem" | "setItem"> };
+
+export const rendererSessionId = (renderer: SessionStorageHost): string => {
+  let existing = "";
   try {
-    const existing = typeof window !== "undefined"
-      ? window.sessionStorage.getItem(BROWSER_SESSION_STORAGE_KEY)?.trim()
-      : "";
-    if (existing && /^session_[A-Za-z0-9_-]+$/.test(existing)) return existing;
+    existing = renderer.sessionStorage?.getItem(BROWSER_SESSION_STORAGE_KEY)?.trim() ?? "";
   } catch {
-    // Fall through to an in-memory id when storage is unavailable.
+    // Storage can be unavailable in hardened or test renderers.
   }
+  if (existing && /^session_[A-Za-z0-9_-]+$/.test(existing)) return existing;
   const created = `session_${
     typeof crypto.randomUUID === "function"
       ? crypto.randomUUID().replace(/-/g, "")
       : `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 18)}`
   }`;
   try {
-    if (typeof window !== "undefined") {
-      window.sessionStorage.setItem(BROWSER_SESSION_STORAGE_KEY, created);
-    }
+    renderer.sessionStorage?.setItem(BROWSER_SESSION_STORAGE_KEY, created);
   } catch {
-    // The current page can still use the generated id for this lifetime.
+    // The current document can still use the generated id for its lifetime.
   }
   return created;
-})();
+};
+
+const browserSessionId = rendererSessionId(
+  (typeof window !== "undefined" ? window : globalThis) as SessionStorageHost,
+);
 const RECENT_INBOUND_EVENT_IDS_MAX = 1024;
+const MAX_RECOVERY_BUFFERED_EVENTS = 1000;
 const NON_REPLAYABLE_CURSOR_EVENT_TYPES = new Set<string>([
+  "artifact_content",
   "conversation.list",
   "conversation.switched",
   "llm.model.updated",
@@ -171,20 +199,77 @@ const NON_REPLAYABLE_CURSOR_EVENT_TYPES = new Set<string>([
   "runtime.capabilities",
   "session.restored",
   "session.synced",
+  "stream_event",
   "stream_resume",
 ]);
 
 const recentInboundEventIds: string[] = [];
 const recentInboundEventIdSet = new Set<string>();
+const processedReplaySeqs = new Set<number>();
+const failedReplaySeqs = new Set<number>();
 const pendingClientCommandAckIdQueue: string[] = [];
 const pendingClientCommands = new Map<string, ClientCommand>();
+const latestProjectionCommandIds = new Map<string, string>();
 let lastReceivedServerSeq = 0;
+
+// Commands can project more than one event, and different command types can
+// compete for the same user-visible state. Track the latest command by the
+// state domain it owns instead of only by command type; otherwise a delayed
+// restore could overwrite a newer manual switch, or an old switch's list could
+// replace metadata from a newer switch.
+const COMMAND_PROJECTION_DOMAINS: Readonly<
+  Record<string, Readonly<Record<string, readonly string[]>>>
+> = {
+  "conversation.list": {
+    "conversation.list": ["conversation-list"],
+  },
+  "conversation.switch": {
+    "conversation.switched": ["active-conversation"],
+    "conversation.list": ["conversation-list"],
+  },
+  "session.restore": {
+    "session.restored": ["session-state", "active-conversation"],
+    "conversation.switched": ["active-conversation"],
+    "session.replay": ["session-recovery"],
+    "stream_resume": ["session-recovery"],
+  },
+  "session.sync": {
+    "session.synced": ["session-state", "active-conversation"],
+    "session.replay": ["session-recovery"],
+    "stream_resume": ["session-recovery"],
+  },
+};
+
+const projectionDomainsForEvent = (commandType: string, eventType: string): readonly string[] =>
+  COMMAND_PROJECTION_DOMAINS[commandType]?.[eventType] ?? [];
+
+const projectionDomainsForCommand = (commandType: string): string[] => Array.from(new Set(
+  Object.values(COMMAND_PROJECTION_DOMAINS[commandType] ?? {}).flat(),
+));
+
+const rememberSentCommandProjection = (command: ClientCommand, clientCommandId: string): void => {
+  for (const domain of projectionDomainsForCommand(command.type)) {
+    latestProjectionCommandIds.set(domain, clientCommandId);
+  }
+};
+
+const isSupersededPendingProjectionCommand = (command: ClientCommand): boolean => {
+  const clientCommandId = String(command.client_command_id || "").trim();
+  if (!clientCommandId) return false;
+  const domains = projectionDomainsForCommand(command.type);
+  return domains.length > 0 && domains.some((domain) => {
+    const latestCommandId = latestProjectionCommandIds.get(domain);
+    return Boolean(latestCommandId && latestCommandId !== clientCommandId);
+  });
+};
 
 export const getWebSocket = (): WebSocketHandle | null => singleton;
 
 export const resetRecentInboundEventIdsForTests = () => {
   recentInboundEventIds.length = 0;
   recentInboundEventIdSet.clear();
+  processedReplaySeqs.clear();
+  failedReplaySeqs.clear();
   lastReceivedServerSeq = 0;
 };
 
@@ -192,21 +277,142 @@ export const getLastReceivedServerSeqForTests = (): number => lastReceivedServer
 
 export const shouldAdvanceReplayCursor = (event: ServerEvent): boolean => {
   const conversationId = (event as unknown as { conversation_id?: unknown }).conversation_id;
+  const seq = Number((event as { seq?: unknown }).seq);
   return typeof conversationId === "string" && conversationId.trim().length > 0
+    // A missing wire sequence cannot participate in durable replay continuity.
+    // Process it as a legacy/transient event without moving the cursor.
+    && Number.isSafeInteger(seq) && seq >= 0
     && !NON_REPLAYABLE_CURSOR_EVENT_TYPES.has(event.type)
     && !event.type.startsWith("session.");
 };
 
 export const shouldProcessInboundEvent = (event: ServerEvent): boolean => {
+  const seq = Number((event as { seq?: unknown }).seq);
+  if (
+    shouldAdvanceReplayCursor(event)
+    && Number.isSafeInteger(seq)
+    && seq <= lastReceivedServerSeq
+  ) {
+    return false;
+  }
+  if (Number.isFinite(seq) && failedReplaySeqs.size > 0 && seq > Math.min(...failedReplaySeqs)) {
+    return false;
+  }
   const eventId = event.event_id;
   if (typeof eventId !== "string" || !eventId) return true;
   return !recentInboundEventIdSet.has(eventId);
 };
 
+export const assertInboundReplayCursorContinuity = (event: ServerEvent): void => {
+  if (!shouldAdvanceReplayCursor(event)) return;
+  const seq = Number(event.seq);
+  if (!Number.isSafeInteger(seq) || seq <= lastReceivedServerSeq) {
+    throw new Error("Durable event sequence does not advance the active cursor.");
+  }
+  const replayed = (event as ServerEvent & { __replayed?: unknown }).__replayed === true;
+  const hasDurableLink = Object.prototype.hasOwnProperty.call(event, "previous_replay_seq");
+  if (!replayed && !hasDurableLink) return;
+  const previousReplaySeq = Number(event.previous_replay_seq);
+  if (!Number.isSafeInteger(previousReplaySeq) || previousReplaySeq !== lastReceivedServerSeq) {
+    throw new Error("Durable event does not continue the active replay chain.");
+  }
+};
+
+const reportedUnknownServerEventTypes = new Set<string>();
+
+/** Drop one event this client build cannot represent, and say so.
+ *
+ * The durable cursor has to move past it: leaving the cursor behind makes the
+ * backend replay the same undeliverable event after every reconnect, which is
+ * a loop no resync can break. Returns false when an earlier unprocessed hole
+ * means the cursor must not advance yet. */
+export const skipUndeliverableInboundEvent = (rawEvent: unknown, seq: number): boolean => {
+  const type = rawEvent && typeof rawEvent === "object"
+    ? String((rawEvent as { type?: unknown }).type ?? "")
+    : "";
+  if (type && !reportedUnknownServerEventTypes.has(type)) {
+    reportedUnknownServerEventTypes.add(type);
+    console.error("[ws] Server sent an event this client cannot represent:", type);
+    pushToast(`收到无法处理的服务端事件 “${type}”，已忽略。前后端协议版本可能不一致。`, "error", 8000);
+  }
+  if (!Number.isSafeInteger(seq) || seq <= lastReceivedServerSeq) return true;
+  const firstHole = failedReplaySeqs.size > 0 ? Math.min(...failedReplaySeqs) : Infinity;
+  if (seq >= firstHole) return false;
+  lastReceivedServerSeq = seq;
+  return true;
+};
+
 export const commitProcessedInboundEvent = (event: ServerEvent): void => {
   const seq = Number((event as { seq?: unknown }).seq);
-  if (shouldAdvanceReplayCursor(event) && Number.isFinite(seq) && seq > lastReceivedServerSeq) {
-    lastReceivedServerSeq = seq;
+  if (event.type === "session.restored" || event.type === "session.synced") {
+    const snapshot = event as ServerEvent & {
+      current_seq?: unknown;
+      cursor_reset?: unknown;
+      last_seq?: unknown;
+      replayed_events?: unknown;
+      requested_last_seq?: unknown;
+    };
+    const currentSeq = Number(snapshot.current_seq);
+    const snapshotLastSeq = Number(snapshot.last_seq);
+    const replayedEvents = Number(snapshot.replayed_events ?? 0);
+    if (
+      Number.isSafeInteger(currentSeq)
+      && currentSeq >= 0
+      && Number.isSafeInteger(snapshotLastSeq)
+      && snapshotLastSeq >= 0
+      && Number.isSafeInteger(replayedEvents)
+      && replayedEvents === 0
+    ) {
+      if (snapshot.cursor_reset === true) {
+        const requestedLastSeq = Number(snapshot.requested_last_seq);
+        if (
+          !Number.isSafeInteger(requestedLastSeq)
+          || requestedLastSeq <= currentSeq
+          || snapshotLastSeq !== currentSeq
+        ) {
+          throw new Error("Session snapshot contains an invalid replay cursor reset.");
+        }
+        lastReceivedServerSeq = currentSeq;
+        processedReplaySeqs.clear();
+        failedReplaySeqs.clear();
+      } else {
+        if (snapshotLastSeq !== lastReceivedServerSeq || currentSeq < snapshotLastSeq) {
+          throw new Error("Session snapshot does not continue the requested replay cursor.");
+        }
+        lastReceivedServerSeq = currentSeq;
+        for (const processed of Array.from(processedReplaySeqs)) {
+          if (processed <= currentSeq) processedReplaySeqs.delete(processed);
+        }
+        for (const failed of Array.from(failedReplaySeqs)) {
+          if (failed <= currentSeq) failedReplaySeqs.delete(failed);
+        }
+      }
+    }
+  } else if (shouldAdvanceReplayCursor(event) && Number.isSafeInteger(seq)) {
+    assertInboundReplayCursorContinuity(event);
+    failedReplaySeqs.delete(seq);
+    const replayed = (event as ServerEvent & { __replayed?: unknown }).__replayed === true;
+    if (replayed) {
+      const previousReplaySeq = Number(event.previous_replay_seq);
+      if (
+        !Number.isSafeInteger(previousReplaySeq)
+        || previousReplaySeq !== lastReceivedServerSeq
+        || seq <= previousReplaySeq
+      ) {
+        throw new Error("Replayed event does not continue the durable cursor chain.");
+      }
+      lastReceivedServerSeq = seq;
+      processedReplaySeqs.delete(seq);
+    } else {
+      // Live wire seq can jump over transient envelopes. WebSocket delivery is
+      // ordered, so a successfully applied durable live event becomes the new
+      // cursor unless an earlier handler failure has frozen the stream.
+      const firstHole = failedReplaySeqs.size > 0 ? Math.min(...failedReplaySeqs) : Infinity;
+      if (seq >= firstHole) {
+        throw new Error("Live durable event overtook an unprocessed replay event.");
+      }
+      lastReceivedServerSeq = Math.max(lastReceivedServerSeq, seq);
+    }
   }
   const eventId = event.event_id;
   if (typeof eventId !== "string" || !eventId || recentInboundEventIdSet.has(eventId)) return;
@@ -218,21 +424,97 @@ export const commitProcessedInboundEvent = (event: ServerEvent): void => {
   }
 };
 
+export const markInboundEventFailed = (event: ServerEvent): void => {
+  const seq = Number((event as { seq?: unknown }).seq);
+  if (shouldAdvanceReplayCursor(event) && Number.isFinite(seq)) {
+    failedReplaySeqs.add(seq);
+  }
+};
+
 export const eventsFromSessionReplay = (event: ServerEvent): ServerEvent[] => {
   if (event.type !== "session.replay") return [];
-  const events = Array.isArray((event as { events?: unknown }).events)
-    ? (event as { events: unknown[] }).events
-    : [];
-  return events.flatMap((rawEvent) => {
-    const replayed = normalizeInboundServerEvent(rawEvent);
-    if (!replayed || replayed.type === "session.replay") return [];
-    return [{ ...replayed, __replayed: true } as ServerEvent];
-  });
+  const envelope = event as ServerEvent & {
+    current_seq?: unknown;
+    events?: unknown;
+    last_seq?: unknown;
+    replayed_events?: unknown;
+  };
+  const lastSeq = Number(envelope.last_seq);
+  const currentSeq = Number(envelope.current_seq);
+  const replayedEvents = Number(envelope.replayed_events);
+  const events = Array.isArray(envelope.events) ? envelope.events : [];
+  if (
+    !Number.isSafeInteger(lastSeq)
+    || lastSeq < 0
+    || !Number.isSafeInteger(currentSeq)
+    || currentSeq < lastSeq
+    || !Number.isSafeInteger(replayedEvents)
+    || replayedEvents !== events.length
+    || lastSeq !== lastReceivedServerSeq
+  ) {
+    throw new Error("Session replay envelope does not match the active durable cursor.");
+  }
+  let expectedPreviousSeq = lastSeq;
+  const replayed: ServerEvent[] = [];
+  for (const rawEvent of events) {
+    const candidate = (rawEvent && typeof rawEvent === "object" ? rawEvent : {}) as Record<string, unknown>;
+    const replayedSeq = Number(candidate.seq);
+    const previousReplaySeq = Number(candidate.previous_replay_seq);
+    if (
+      !Number.isSafeInteger(replayedSeq)
+      || replayedSeq <= expectedPreviousSeq
+      || !Number.isSafeInteger(previousReplaySeq)
+      || previousReplaySeq !== expectedPreviousSeq
+    ) {
+      throw new Error("Session replay contains a discontinuous durable chain.");
+    }
+    expectedPreviousSeq = replayedSeq;
+    const normalized = normalizeInboundServerEvent(rawEvent);
+    if (!normalized || normalized.type === "session.replay") {
+      // One event this build cannot represent must not strand the batch.
+      // Rejecting the whole envelope left the durable cursor behind, so the
+      // backend replayed the same undeliverable event after every reconnect —
+      // the connect/disconnect loop no resync could break. Carry it through as
+      // undeliverable so the caller advances the cursor past it in order.
+      replayed.push({
+        type: String(candidate.type ?? ""),
+        seq: replayedSeq,
+        __replayed: true,
+        __undeliverable: true,
+      } as unknown as ServerEvent);
+      continue;
+    }
+    replayed.push({ ...normalized, __replayed: true } as unknown as ServerEvent);
+  }
+  if (
+    (events.length > 0 && expectedPreviousSeq !== currentSeq)
+    || (events.length === 0 && lastSeq !== currentSeq)
+  ) {
+    throw new Error("Session replay does not reach its advertised current cursor.");
+  }
+  return replayed;
 };
+
+/** True when a replayed event was carried through only to move the cursor. */
+export const isUndeliverableReplayEvent = (event: ServerEvent): boolean =>
+  (event as ServerEvent & { __undeliverable?: unknown }).__undeliverable === true;
 
 export const resetPendingClientCommandAcksForTests = () => {
   pendingClientCommandAckIdQueue.length = 0;
   pendingClientCommands.clear();
+  latestProjectionCommandIds.clear();
+};
+
+export const isSupersededCommandProjection = (event: ServerEvent): boolean => {
+  const commandId = String(event.client_command_id || "").trim();
+  const commandType = String(event.client_command_type || "").trim();
+  if (!commandId || !commandType) return false;
+  const domains = projectionDomainsForEvent(commandType, event.type);
+  if (domains.length === 0) return false;
+  return domains.some((domain) => {
+    const latestCommandId = latestProjectionCommandIds.get(domain);
+    return Boolean(latestCommandId && latestCommandId !== commandId);
+  });
 };
 
 export const getPendingClientCommandAckIdsForTests = (): string[] =>
@@ -241,7 +523,12 @@ export const getPendingClientCommandAckIdsForTests = (): string[] =>
 const pendingClientCommandPayloads = (): ClientCommand[] =>
   pendingClientCommandAckIdQueue
     .map((id) => pendingClientCommands.get(id))
-    .filter((cmd): cmd is ClientCommand => Boolean(cmd));
+    .filter((cmd): cmd is ClientCommand => Boolean(cmd))
+    // A newer projection command already expresses the user's current intent.
+    // Replaying an older unacknowledged switch/restore after reconnect would
+    // make stale state authoritative again even though ingress rejects its old
+    // response. Keep it pending for a late ACK, but never transmit it again.
+    .filter((cmd) => !isSupersededPendingProjectionCommand(cmd));
 
 const hasPendingClientCommand = (clientCommandId: string): boolean =>
   pendingClientCommands.has(clientCommandId);
@@ -298,10 +585,50 @@ export const useWebSocketConnection = () => {
     const coalescedCommands = new Map<string, ClientCommand>();
     const coalescedMicrotasks = new Set<string>();
     let awaitingSessionRestore = false;
+    let recoveryReplayPending = false;
+    let recoverySwitchPending = false;
+    let recoverySwitchWillRefreshCatalog = false;
+    let bufferedRecoveryEvents: ServerEvent[] = [];
     let reconnectStartedAt: number | null = null;
+    // A client-initiated resync that keeps failing must stay inside one
+    // reconnect budget. Resetting the budget on every ``open`` turned a
+    // repeating resync into an unbounded 1s loop that reported itself as a
+    // successful reconnect.
+    let resyncCloseSeen = false;
     let reconnectExhausted = false;
-
     let hasConnectedOnce = false;
+
+    const clearUndeliverableCommands = (reason: string) => {
+      rejectAllPendingCommandResults(reason);
+      pendingClientCommandAckIdQueue.length = 0;
+      pendingClientCommands.clear();
+      queue.current = [];
+      coalescedMicrotasks.clear();
+      coalescedCommands.clear();
+      awaitingSessionRestore = false;
+      recoveryReplayPending = false;
+      recoverySwitchPending = false;
+      recoverySwitchWillRefreshCatalog = false;
+      bufferedRecoveryEvents = [];
+    };
+
+    const stopReconnecting = (reason: string, message: string) => {
+      reconnectExhausted = true;
+      clearUndeliverableCommands(reason);
+      // No further transport means no further terminal event. `session.restore`
+      // is what normally repairs streaming flags after a reconnect, and it can
+      // no longer arrive, so spinners would spin forever. Seal them here — the
+      // one place that knows reconnection is over. The turn genuinely failed
+      // from this client's point of view, so it is recorded as such instead of
+      // being left to render as a finished turn.
+      clearStreamingState({ textStreamBuffer, thinkingStreamBuffer }, {
+        clearAllConversations: true,
+        terminalStatus: "failed",
+        failureMessage: message,
+        failureRecoverable: false,
+      });
+      pushToast(message, "error", 0);
+    };
 
     const bufferedCommandCount = (): number =>
       pendingClientCommands.size + queue.current.length + coalescedCommands.size;
@@ -344,6 +671,9 @@ export const useWebSocketConnection = () => {
         active.send(JSON.stringify(command));
       } catch {
         return false;
+      }
+      if (clientCommandId) {
+        rememberSentCommandProjection(command, clientCommandId);
       }
       trackPendingClientCommandAck(command);
       return true;
@@ -400,10 +730,22 @@ export const useWebSocketConnection = () => {
       }
     };
 
+    const discardBufferedCommandType = (type: ClientCommand["type"]): void => {
+      for (const [clientCommandId, command] of Array.from(pendingClientCommands.entries())) {
+        if (command.type === type) clearPendingClientCommandAck(clientCommandId);
+      }
+      queue.current = queue.current.filter((queued) => queued.cmd.type !== type);
+      const key = coalescingKeyForClientCommand({ type } as ClientCommand);
+      if (key) coalescedCommands.delete(key);
+    };
+
     const connect = () => {
       if (!alive || reconnectExhausted) return;
       timer = null;
-      const url = wsUrl("/ws", { session_id: browserSessionId });
+      const url = wsUrl("/ws", {
+        session_id: browserSessionId,
+        protocol: "control_v1",
+      });
       const protocols = wsProtocols();
       const ws = protocols ? new WebSocket(url, protocols) : new WebSocket(url);
       ref.current = ws;
@@ -428,11 +770,10 @@ export const useWebSocketConnection = () => {
         if (!alive || ref.current !== ws) return;
         const wasReconnect = hasConnectedOnce || reconnectAttempt.current > 0;
         reconnectAttempt.current = 0;
-        reconnectStartedAt = null;
+        if (!resyncCloseSeen) reconnectStartedAt = null;
         useAppStore.getState().setConnected(true);
 
-        // 🆕 显示重连成功提示（如果不是首次连接）
-        if (wasReconnect) {
+        if (wasReconnect && !resyncCloseSeen) {
           pushToast("已重新连接", "success", 2000);
         }
 
@@ -442,6 +783,10 @@ export const useWebSocketConnection = () => {
           ? workspaceRootForConversationRestore({ ...state, conversationId: restoreConversationId })
           : "";
         awaitingSessionRestore = Boolean(hasConnectedOnce || restoreConversationId);
+        recoveryReplayPending = false;
+        recoverySwitchPending = false;
+        recoverySwitchWillRefreshCatalog = false;
+        bufferedRecoveryEvents = [];
         if (awaitingSessionRestore) {
           textStreamBuffer.destroy();
           thinkingStreamBuffer.destroy();
@@ -452,7 +797,12 @@ export const useWebSocketConnection = () => {
             ...(restoreWorkspaceRoot ? { last_workspace_root: restoreWorkspaceRoot } : {}),
           });
         }
-        sendOrCoalesceCommand({ type: "conversation.list" });
+        // A list snapshot can be generated before restore commits the canonical
+        // active owner. Serialize it behind restore so a late pre-restore list
+        // cannot remove restored state or activate an obsolete conversation.
+        if (!awaitingSessionRestore) {
+          sendOrCoalesceCommand({ type: "conversation.list" });
+        }
 
         if (!awaitingSessionRestore) {
           replayPendingClientCommands();
@@ -460,12 +810,17 @@ export const useWebSocketConnection = () => {
         }
 
         sendOrCoalesceCommand({ type: "commands.list" });
+        // Composer mounts before this connection effect registers its sender,
+        // so its eager catalog request can legitimately be dropped. Refresh
+        // both catalogs from the transport lifecycle, which is also what keeps
+        // them current after a reconnect.
+        sendOrCoalesceCommand({ type: "skills.list" });
         hasConnectedOnce = true;
 
         pingInterval = window.setInterval(() => {
           if (ws.readyState !== WebSocket.OPEN) return;
-          if (!sendCommandNow({ type: "ping" })) return;
           if (awaitingPong) return;
+          if (!sendCommandNow({ type: "ping" })) return;
           awaitingPong = true;
           pongTimeout = window.setTimeout(() => {
             pongTimeout = null;
@@ -479,21 +834,45 @@ export const useWebSocketConnection = () => {
         clearHeartbeatTimers();
         heartbeatCleanup = () => {};
         ref.current = null;
+        recoveryReplayPending = false;
+        recoverySwitchPending = false;
+        recoverySwitchWillRefreshCatalog = false;
+        bufferedRecoveryEvents = [];
         useAppStore.getState().setConnected(false);
-        if (hasConnectedOnce) {
-          pushToast("Connection lost. Reconnecting...", "warning", Infinity);
-        }
 
         const closeCode = Number((event as CloseEvent).code || 0);
+        if (closeCode === CLIENT_RESYNC_CLOSE_CODE) resyncCloseSeen = true;
         if (PERMANENT_CLOSE_CODES.has(closeCode)) {
-          reconnectExhausted = true;
+          const terminal = closeCode === 1008
+            ? {
+                reason: "连接被服务拒绝，操作未完成",
+                message: "连接被服务拒绝，请检查登录、来源或 Provider 配置后重试。",
+              }
+            : closeCode === 4001
+            ? {
+                reason: "连接认证已失效，操作未完成",
+                message: "连接认证已失效，请重新登录或刷新应用。",
+              }
+            : closeCode === 4003
+              ? {
+                  reason: "连接授权被拒绝，操作未完成",
+                  message: "当前连接没有访问权限，请检查授权后重试。",
+                }
+              : {
+                  reason: "连接协议错误，操作未完成",
+                  message: "连接协议错误，无法继续。请刷新应用后重试。",
+                };
+          stopReconnecting(terminal.reason, terminal.message);
           return;
         }
         const now = Date.now();
         if (reconnectStartedAt === null) reconnectStartedAt = now;
         const remainingBudget = RECONNECT_BUDGET_MS - (now - reconnectStartedAt);
         if (remainingBudget <= 0) {
-          reconnectExhausted = true;
+          stopReconnecting(
+            "无法重新连接，操作未完成",
+            "无法重新连接到 MiniCode。请检查服务状态或网络后刷新重试。",
+          );
           return;
         }
         const base = Math.min(
@@ -515,15 +894,91 @@ export const useWebSocketConnection = () => {
         }
       });
 
+      const deliverInboundEvent = (parsed: ServerEvent): boolean => {
+        if (!shouldProcessInboundEvent(parsed)) return true;
+        acknowledgeClientCommand(parsed);
+        const handled = processInboundEvent(parsed);
+        if (
+          !handled
+          && (
+            parsed.type === "session.replay"
+            || shouldAdvanceReplayCursor(parsed)
+            || (
+              awaitingSessionRestore
+              && ["conversation.switched", "session.restored", "session.synced"].includes(parsed.type)
+            )
+          )
+        ) {
+          closeWebSocketForResync(ws, "event replay required");
+          return false;
+        }
+        if (handled) {
+          for (const sub of subscribers) sub(parsed);
+        }
+        return handled;
+      };
+
+      const refreshAfterSessionProjection = (switchWillRefreshCatalog: boolean): void => {
+        // These semantic events prove restore/sync has completed even if its
+        // transport ACK was delayed. Replaying the old restore can start a
+        // loop, while replaying a pre-restore command catalog request can
+        // project the previous conversation's executable scope.
+        discardBufferedCommandType("session.restore");
+        discardBufferedCommandType("conversation.list");
+        if (!switchWillRefreshCatalog) {
+          discardBufferedCommandType("commands.list");
+        }
+        replayPendingClientCommands();
+        flushOfflineQueue();
+        sendOrCoalesceCommand({ type: "conversation.list" });
+        if (!switchWillRefreshCatalog) {
+          sendOrCoalesceCommand({ type: "commands.list" });
+        }
+      };
+
+      const finishSessionRecovery = (): void => {
+        if (!awaitingSessionRestore) return;
+        awaitingSessionRestore = false;
+        recoveryReplayPending = false;
+        recoverySwitchPending = false;
+        // The resync succeeded, so the next disconnect starts a fresh budget.
+        resyncCloseSeen = false;
+
+        const buffered = bufferedRecoveryEvents;
+        bufferedRecoveryEvents = [];
+        for (const bufferedEvent of buffered) {
+          if (isSupersededCommandProjection(bufferedEvent)) continue;
+          if (!deliverInboundEvent(bufferedEvent)) return;
+        }
+
+        refreshAfterSessionProjection(recoverySwitchWillRefreshCatalog);
+        recoverySwitchWillRefreshCatalog = false;
+      };
+
       ws.addEventListener("message", (ev) => {
         if (!alive || ref.current !== ws) return;
         let parsed: ServerEvent | null;
         try {
-          parsed = normalizeInboundServerEvent(JSON.parse(ev.data));
+          const rawEvent = safeJsonParse<unknown>(ev.data, null);
+          parsed = normalizeInboundServerEvent(rawEvent);
+          const rawSeq = rawEvent && typeof rawEvent === "object"
+            ? (rawEvent as { seq?: unknown }).seq
+            : undefined;
+          if (!parsed && Number.isFinite(Number(rawSeq))) {
+            // A type this build does not declare is protocol drift, not stream
+            // desync. Resyncing replays it from the durable log forever, so
+            // drop it, move the cursor, and make the gap visible instead.
+            if (isUnknownServerEventType(rawEvent)) {
+              if (skipUndeliverableInboundEvent(rawEvent, Number(rawSeq))) return;
+            }
+            closeWebSocketForResync(ws, "protocol resync required");
+            return;
+          }
         } catch {
           return;
         }
         if (!parsed) return;
+        if (isSupersededCommandProjection(parsed)) return;
         if (parsed.type === "pong") {
           awaitingPong = false;
           if (pongTimeout !== null) {
@@ -531,16 +986,47 @@ export const useWebSocketConnection = () => {
             pongTimeout = null;
           }
         }
-        if (!shouldProcessInboundEvent(parsed)) return;
-        acknowledgeClientCommand(parsed);
-        const handled = processInboundEvent(parsed);
-        if (handled && (parsed.type === "session.restored" || parsed.type === "session.synced")) {
-          awaitingSessionRestore = false;
-          replayPendingClientCommands();
-          flushOfflineQueue();
+        if (awaitingSessionRestore && shouldAdvanceReplayCursor(parsed)) {
+          if (bufferedRecoveryEvents.length >= MAX_RECOVERY_BUFFERED_EVENTS) {
+              closeWebSocketForResync(ws, "session recovery buffer exceeded");
+            return;
+          }
+          bufferedRecoveryEvents.push(parsed);
+          return;
         }
-        if (handled) {
-          for (const sub of subscribers) sub(parsed);
+        const handled = deliverInboundEvent(parsed);
+        if (!handled) return;
+        if (parsed.type === "session.restored" || parsed.type === "session.synced") {
+          // Remove pre-snapshot catalog work before a following
+          // conversation.switched handler queues its owner-correct refresh.
+          discardBufferedCommandType("session.restore");
+          discardBufferedCommandType("conversation.list");
+          discardBufferedCommandType("commands.list");
+          recoveryReplayPending = Number(parsed.replayed_events || 0) > 0;
+          recoverySwitchPending = parsed.type === "session.restored"
+            && parsed.conversation_switched_follows === true;
+          recoverySwitchWillRefreshCatalog = recoverySwitchPending;
+          if (recoveryReplayPending || recoverySwitchPending) {
+            awaitingSessionRestore = true;
+          } else if (awaitingSessionRestore) {
+            finishSessionRecovery();
+          } else {
+            refreshAfterSessionProjection(false);
+          }
+          return;
+        }
+        if (awaitingSessionRestore && parsed.type === "conversation.switched") {
+          recoverySwitchPending = false;
+          if (!recoveryReplayPending) finishSessionRecovery();
+          return;
+        }
+        if (awaitingSessionRestore && parsed.type === "session.replay") {
+          if (!recoveryReplayPending) {
+            closeWebSocketForResync(ws, "unexpected session replay");
+            return;
+          }
+          recoveryReplayPending = false;
+          if (!recoverySwitchPending) finishSessionRecovery();
         }
       });
     };
@@ -551,7 +1037,12 @@ export const useWebSocketConnection = () => {
       send: (cmd) => {
         const ws = ref.current;
         if (ws && ws.readyState === WebSocket.OPEN) {
-          if (awaitingSessionRestore && cmd.type === "user_message") {
+          // The backend has not restored the active conversation, pending
+          // approval futures, or stream ownership yet. Defer every durable
+          // session-scoped action, not only user messages; otherwise an
+          // approval/answer sent in this window can be applied to an empty or
+          // stale session and leave the real tool call blocked forever.
+          if (awaitingSessionRestore && shouldDeferCommandUntilSessionRestore(cmd)) {
             return enqueueOfflineCommand(cmd);
           }
           return sendOrCoalesceCommand(cmd);
@@ -576,8 +1067,7 @@ export const useWebSocketConnection = () => {
       alive = false;
       if (timer !== null) window.clearTimeout(timer);
       heartbeatCleanup();
-      coalescedMicrotasks.clear();
-      coalescedCommands.clear();
+      clearUndeliverableCommands("连接已关闭，操作未完成");
       const ownedSocket = ref.current;
       ref.current = null;
       ownedSocket?.close();
@@ -587,12 +1077,13 @@ export const useWebSocketConnection = () => {
   }, []);
 };
 
-const textStreamBuffer = createStreamBuffer((buffered, conversationId, itemId, _metadata, messageId) => {
+const textStreamBuffer = createStreamBuffer((buffered, conversationId, itemId, metadata, messageId) => {
   useAppStore.getState().appendAgentMessageDelta(
     itemId || "agent-message",
     buffered,
     conversationId,
     messageId,
+    typeof metadata?.source === "string" ? metadata.source : undefined,
   );
 });
 
@@ -609,10 +1100,13 @@ const conversationIdFor = (e: ServerEvent): string | undefined => {
 const handleServerEvent = (e: ServerEvent): boolean => {
   if (e.type === "session.replay") {
     for (const replayed of eventsFromSessionReplay(e)) {
-      if (!shouldProcessInboundEvent(replayed)) continue;
-      if (processInboundEvent(replayed)) {
-        for (const sub of subscribers) sub(replayed);
+      if (isUndeliverableReplayEvent(replayed)) {
+        if (!skipUndeliverableInboundEvent(replayed, Number(replayed.seq))) return false;
+        continue;
       }
+      if (!shouldProcessInboundEvent(replayed)) continue;
+      if (!processInboundEvent(replayed)) return false;
+      for (const sub of subscribers) sub(replayed);
     }
     return true;
   }
@@ -627,6 +1121,7 @@ const handleServerEvent = (e: ServerEvent): boolean => {
   if (handlePeripheralEvent(e)) return true;
   if (handleCommandResultEvent(e)) return true;
   if (handlePreviewEvent(e)) return true;
+  if (handleControlPlaneProjectionEvent(e)) return true;
   if (handleNoticeEvent(e, cid)) return true;
   return handleDiffEvent(e);
 };
@@ -636,6 +1131,7 @@ const handleServerEvent = (e: ServerEvent): boolean => {
 // replayable after reconnect instead of being acknowledged by the cursor.
 const processInboundEvent = (event: ServerEvent): boolean => {
   try {
+    assertInboundReplayCursorContinuity(event);
     const handled = handleServerEvent(event);
     if (!handled) {
       console.warn("[ws] Known server event was not routed; leaving it replayable", event);
@@ -644,9 +1140,26 @@ const processInboundEvent = (event: ServerEvent): boolean => {
     commitProcessedInboundEvent(event);
     return handled;
   } catch (error) {
+    markInboundEventFailed(event);
+    // Do not stringify the complete event here: artifact_content may contain
+    // multi-megabyte base64 data and Chromium's console bridge turns nested
+    // objects into the unhelpful "[object Object]". Keep the durable event
+    // replayable while emitting enough structured context to identify the
+    // failing projection without leaking the payload itself.
+    const normalizedError = error instanceof Error
+      ? {
+          name: error.name,
+          message: error.message,
+          stack: error.stack,
+        }
+      : String(error);
     console.error("[ws] Failed to apply server event; leaving it replayable", {
-      event,
-      error,
+      type: event.type,
+      seq: event.seq,
+      eventId: event.event_id,
+      conversationId: conversationIdFor(event),
+      requestId: (event as ServerEvent & { request_id?: unknown }).request_id,
+      error: normalizedError,
     });
     return false;
   }

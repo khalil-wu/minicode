@@ -1,17 +1,29 @@
 import { fsListTree, isDesktop } from "../desktop/runtime";
-import { apiBase, authHeaders } from "../protocol/api";
+import { apiBase, authHeaders, fetchWithTimeout } from "../protocol/api";
 import { uploadAttachment } from "../protocol/api";
 import { listWorkspaceTree } from "../protocol/workspace";
 import type { MessageAttachmentRef, MessageContextRef } from "../stores/types";
+import { MAX_IMAGE_SOURCE_BYTES, prepareNativeImageFile } from "./imagePreparation";
+import { workspaceFilePathComparisonKey } from "../lib/workspace-path";
+import { mediaTypeForPath } from "../lib/media-types";
 
-const MAX_NATIVE_CONTEXT_ATTACHMENTS = 8;
-const MAX_NATIVE_IMAGE_BYTES = 20 * 1024 * 1024;
-const MAX_NATIVE_PDF_BYTES = 50 * 1024 * 1024;
+// Match MiniCode's provider-facing media envelope. Anthropic's 5 MiB
+// encoded-image cap leaves 3.75 MiB for raw bytes after base64 expansion; PDFs
+// stay below 20 MiB so the full request remains under 32 MiB. The API accepts
+// at most 100 combined images/PDFs per request.
+const MAX_NATIVE_CONTEXT_ATTACHMENTS = 100;
+const MAX_NATIVE_PDF_BYTES = 20 * 1024 * 1024;
 
 interface NativeContextAttachments {
   attachments: Record<string, unknown>[];
   attachmentRefs: MessageAttachmentRef[];
   notes: string;
+  /**
+   * The conversation that owns the uploaded native attachments.  A blank
+   * composer has no conversation yet; the first successful upload creates one
+   * and every subsequent upload in this batch must use it.
+   */
+  conversationId?: string;
 }
 
 export const buildContextPayload = async (refs: MessageContextRef[]): Promise<string> => {
@@ -23,43 +35,65 @@ export const buildContextPayload = async (refs: MessageContextRef[]): Promise<st
 export const buildContextNativeAttachments = async (
   refs: MessageContextRef[],
   sessionId?: string,
+  conversationId = "",
   workspaceRoot = "",
 ): Promise<NativeContextAttachments> => {
-  if (!sessionId) return emptyNativeContextAttachments();
+  const initialOwner = conversationId.trim();
+  if (!sessionId) return emptyNativeContextAttachments(initialOwner);
 
   const candidates = await collectNativeContextCandidates(refs, workspaceRoot);
-  if (candidates.length === 0) return emptyNativeContextAttachments();
+  if (candidates.length === 0) return emptyNativeContextAttachments(initialOwner);
 
   const attachments: Record<string, unknown>[] = [];
   const attachmentRefs: MessageAttachmentRef[] = [];
   const notes: string[] = [];
   const seen = new Set<string>();
+  let ownerConversationId = initialOwner;
 
   for (const candidate of candidates) {
     if (attachments.length >= MAX_NATIVE_CONTEXT_ATTACHMENTS) {
       notes.push(`Native context attachments capped at ${MAX_NATIVE_CONTEXT_ATTACHMENTS}; remaining files stay available through workspace tools.`);
       break;
     }
-    const key = normalizePathKey(candidate.path);
+    const key = normalizePathKey(candidate.path, workspaceRoot);
     if (seen.has(key)) continue;
     seen.add(key);
 
-    const limit = candidate.mediaType === "application/pdf" ? MAX_NATIVE_PDF_BYTES : MAX_NATIVE_IMAGE_BYTES;
-    if (candidate.sizeBytes != null && candidate.sizeBytes > limit) {
-      notes.push(`Native attachment skipped: ${candidate.path} is ${formatBytes(candidate.sizeBytes)}, above ${formatBytes(limit)}.`);
+    const sourceLimit = candidate.mediaType === "application/pdf"
+      ? MAX_NATIVE_PDF_BYTES
+      : MAX_IMAGE_SOURCE_BYTES;
+    if (candidate.sizeBytes != null && candidate.sizeBytes > sourceLimit) {
+      notes.push(`Native attachment skipped: ${candidate.path} is ${formatBytes(candidate.sizeBytes)}, above ${formatBytes(sourceLimit)}.`);
       continue;
     }
 
     try {
       const blob = await fetchWorkspaceBlob(candidate.path, workspaceRoot);
-      if (blob.size > limit) {
-        notes.push(`Native attachment skipped: ${candidate.path} is ${formatBytes(blob.size)}, above ${formatBytes(limit)}.`);
+      if (blob.size > sourceLimit) {
+        notes.push(`Native attachment skipped: ${candidate.path} is ${formatBytes(blob.size)}, above ${formatBytes(sourceLimit)}.`);
         continue;
       }
-      const file = new File([blob], candidate.name || basename(candidate.path), {
+      const originalFile = new File([blob], candidate.name || basename(candidate.path), {
         type: blob.type || candidate.mediaType,
       });
-      const result = await uploadAttachment(sessionId, file);
+      const file = candidate.mediaType.startsWith("image/")
+        ? await prepareNativeImageFile(originalFile)
+        : originalFile;
+      // The upload endpoint may create a conversation for the first native
+      // attachment. Pin that owner immediately and pass it explicitly for all
+      // later uploads; relying on server-side "current conversation" state is
+      // what caused pasted PDFs to land in a different turn after a switch.
+      const result = await uploadAttachment(sessionId, ownerConversationId, file);
+      const returnedOwner = String(result.conversation_id || "").trim();
+      if (!returnedOwner) {
+        throw new Error("附件上传没有返回所属会话。");
+      }
+      if (ownerConversationId && returnedOwner !== ownerConversationId) {
+        const mismatch = new Error("附件所属会话已变化，请切回原会话后重试。");
+        mismatch.name = "AttachmentConversationMismatch";
+        throw mismatch;
+      }
+      ownerConversationId = returnedOwner;
       attachments.push(result.attachment);
       attachmentRefs.push({
         id: String(result.attachment.id || result.artifact_id),
@@ -70,8 +104,17 @@ export const buildContextNativeAttachments = async (
         artifactId: String(result.attachment.artifact_id || result.artifact_id || ""),
         docId: String(result.attachment.doc_id || result.doc_id || ""),
       });
-    } catch {
-      notes.push(`Native attachment unavailable: ${candidate.path}`);
+    } catch (error) {
+      // An owner mismatch is a consistency/security failure, not a recoverable
+      // per-file parse warning. Abort the whole native batch so the composer
+      // cannot send a partially-bound request into the wrong conversation.
+      if (error instanceof Error && error.name === "AttachmentConversationMismatch") {
+        throw error;
+      }
+      const detail = error instanceof Error && error.message.trim()
+        ? ` (${error.message.trim()})`
+        : "";
+      notes.push(`Native attachment unavailable: ${candidate.path}${detail}`);
     }
   }
 
@@ -79,6 +122,7 @@ export const buildContextNativeAttachments = async (
     attachments,
     attachmentRefs,
     notes: notes.length ? `Native context notes:\n${notes.map((note) => `- ${note}`).join("\n")}` : "",
+    conversationId: ownerConversationId || undefined,
   };
 };
 
@@ -113,10 +157,11 @@ interface NativeContextCandidate {
   sizeBytes?: number | null;
 }
 
-const emptyNativeContextAttachments = (): NativeContextAttachments => ({
+const emptyNativeContextAttachments = (conversationId = ""): NativeContextAttachments => ({
   attachments: [],
   attachmentRefs: [],
   notes: "",
+  ...(conversationId.trim() ? { conversationId: conversationId.trim() } : {}),
 });
 
 const collectNativeContextCandidates = async (
@@ -172,7 +217,7 @@ const fetchWorkspaceBlob = async (path: string, workspaceRoot: string): Promise<
   const params = new URLSearchParams({ path });
   if (workspaceRoot.trim()) params.set("workspace_root", workspaceRoot.trim());
   const url = `${apiBase()}/api/workspace/raw?${params.toString()}`;
-  const response = await fetch(url, { headers: authHeaders() });
+  const response = await fetchWithTimeout(url, { headers: authHeaders() });
   if (!response.ok) {
     throw new Error(`Workspace raw request failed (${response.status}).`);
   }
@@ -184,22 +229,11 @@ const isNativeContextPath = (path: string): boolean => {
   return mediaType.startsWith("image/") || mediaType === "application/pdf";
 };
 
-const mediaTypeForPath = (path: string): string => {
-  const ext = path.split(".").pop()?.toLowerCase() ?? "";
-  if (ext === "pdf") return "application/pdf";
-  if (ext === "png") return "image/png";
-  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
-  if (ext === "gif") return "image/gif";
-  if (ext === "webp") return "image/webp";
-  if (ext === "bmp") return "image/bmp";
-  return "application/octet-stream";
-};
-
 const basename = (path: string): string =>
   path.split(/[/\\]/).filter(Boolean).pop() || path;
 
-const normalizePathKey = (path: string): string =>
-  path.replace(/\\/g, "/").replace(/\/+/g, "/").toLowerCase();
+const normalizePathKey = (path: string, workspaceRoot = ""): string =>
+  workspaceFilePathComparisonKey(path, workspaceRoot);
 
 const formatBytes = (bytes: number): string => {
   if (bytes < 1024) return `${bytes} B`;

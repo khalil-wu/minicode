@@ -1,7 +1,7 @@
-"""ApplyPatchTool — Codex-compatible multi-file patch tool.
+"""ApplyPatchTool — MiniCode multi-file patch tool.
 
-Applies an OpenAI Codex `apply_patch` envelope: one tool call can add, update,
-delete, and rename multiple files atomically-per-file. This is Codex's signature
+Applies multi-file patch envelope: one tool call can add, update,
+delete, and rename multiple files atomically-per-file. This is MiniCode's core
 editing primitive; models trained on its grammar emit patches in this exact
 format. See apply_patch_parser.py for the envelope spec.
 
@@ -11,27 +11,37 @@ stay consistent across all file-mutating tools.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
+from backend.atomic_io import canonical_path_mapping_key, file_mutation_locks
 from backend.permissions.context import ToolExecutionContext
-from backend.security.sensitive_files import is_protected_write_path, is_sensitive_file
+from backend.security.sensitive_files import is_protected_write_path
 from backend.tools.apply_patch_parser import (
     ApplyPatchError,
     ChangeKind,
     FileChange,
     apply_update_hunks,
     parse_patch,
+    patch_target_paths,
 )
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.path_resolution import PathTraversalError, _is_bypass_mode, _resolve_path
 from backend.workspace.file_state_cache import get_global_file_cache
 
-from backend.tools.file_tools_common import *  # shared helpers (diff/cache/atomic write/etc.)
+from backend.tools.file_tools_common import (
+    _atomic_write_text,
+    _emit_write_diff,
+    _generate_limited_unified_diff,
+    _workspace_display_path,
+    content_hash,
+    invalidate_workspace_file_caches,
+)
 
 
 class ApplyPatchTool(BaseTool):
-    """Apply a Codex-style patch envelope across one or more files."""
+    """Apply a MiniCode-style patch envelope across one or more files."""
 
     name = "apply_patch"
     mutates_workspace = True
@@ -40,7 +50,7 @@ class ApplyPatchTool(BaseTool):
     display_label = "Apply patch"
     search_hint = "patch diff apply_patch edit multi-file rename"
     description = (
-        "Apply a Codex patch envelope to add, update, delete, or rename files in one call. "
+        "Apply a MiniCode patch envelope to add, update, delete, or rename files in one call. "
         "Prefer for multi-file edits/renames; use edit_file for one targeted replacement and write_file for whole new files.\n\n"
         "patch must be one string starting with '*** Begin Patch' and ending with '*** End Patch'. "
         "Use hunks like '*** Add File:', '*** Update File:', optional '*** Move to:', and '*** Delete File:'. "
@@ -49,25 +59,21 @@ class ApplyPatchTool(BaseTool):
     )
     permission = PermissionLevel.DIFF_REVIEW
 
+    def is_capability_available(self, context=None) -> bool:
+        return context is None or context.mode != "plan"
+
     def get_workspace_paths(self, args: dict[str, Any] | None = None) -> list[str]:
         """Expose every add/update/delete/move path to the central checker."""
         patch = str((args or {}).get("patch") or "")
         if not patch.strip():
             return []
         try:
-            changes = parse_patch(patch)
+            return patch_target_paths(patch)
         except Exception:
             return []
-        paths: list[str] = []
-        for change in changes:
-            if getattr(change, "path", None):
-                paths.append(str(change.path))
-            if getattr(change, "move_to", None):
-                paths.append(str(change.move_to))
-        return paths
 
     def model_description(self) -> str:
-        return "Apply a Codex patch envelope for multi-file edits or renames."
+        return "Apply a MiniCode patch envelope for multi-file edits or renames."
 
     def model_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -146,13 +152,20 @@ class ApplyPatchTool(BaseTool):
         read_hashes = metadata.get("_read_file_hashes")
         if not isinstance(read_hashes, dict):
             read_hashes = {}
+        else:
+            # Migrate pre-canonical Windows keys before enforcing the explicit
+            # read contract. Keep the same dict object so later in-turn writes
+            # advance the session-owned hash state rather than a detached copy.
+            for plan in plans:
+                for path in filter(None, (plan.path, plan.move_to_path)):
+                    canonical_path_mapping_key(read_hashes, path)
         unread_existing = [
             plan.raw_path
             for plan in plans
             if any(
                 path is not None
                 and path.exists()
-                and str(path.resolve()) not in read_hashes
+                and _path_snapshot_key(path) not in read_hashes
                 for path in (plan.path, plan.move_to_path)
             )
         ]
@@ -182,25 +195,62 @@ class ApplyPatchTool(BaseTool):
         total_add = 0
         total_del = 0
         committed_paths: list[str] = []
+        mutation_paths = [
+            path
+            for plan in plans
+            for path in (plan.path, plan.move_to_path)
+            if path is not None
+        ]
         try:
-            for plan in plans:
-                adds, dels = self._commit_plan(plan, cache)
-                total_add += adds
-                total_del += dels
-                summary_lines.append(plan.summary(adds, dels))
-                committed_paths.append(plan.raw_path)
-                await self._emit_plan_diff(plan, context)
+            # Acquire every source/destination in canonical order, then repeat
+            # the review check and perform all synchronous per-file commits.
+            # This is MiniCode's same-file mutation queue generalized to a MiniCode
+            # multi-file patch; unrelated files remain parallel and overlapping
+            # patches cannot interleave or deadlock.
+            with file_mutation_locks(mutation_paths):
+                stale_error = self._review_snapshot_error(plans, expected_hashes)
+                if stale_error:
+                    return self._error_result(stale_error)
+                for plan in plans:
+                    adds, dels = self._commit_plan(plan, cache)
+                    total_add += adds
+                    total_del += dels
+                    summary_lines.append(plan.summary(adds, dels))
+                    committed_paths.append(plan.raw_path)
         except (PermissionError, OSError) as exc:
             reason = (
                 f"No permission to write: {exc}"
                 if isinstance(exc, PermissionError)
                 else f"I/O error while writing: {exc}"
             )
+            if committed_paths:
+                invalidate_workspace_file_caches(
+                    file_tree_changed=any(
+                        plan.kind in {ChangeKind.ADD, ChangeKind.DELETE} or plan.move_to_path is not None
+                        for plan in plans
+                    )
+                )
             return self._error_result(self._partial_apply_message(reason, committed_paths))
         except ApplyPatchError as exc:
+            if committed_paths:
+                invalidate_workspace_file_caches(
+                    file_tree_changed=any(
+                        plan.kind in {ChangeKind.ADD, ChangeKind.DELETE} or plan.move_to_path is not None
+                        for plan in plans
+                    )
+                )
             return self._error_result(self._partial_apply_message(str(exc), committed_paths))
 
-        clear_list_files_cache()
+        invalidate_workspace_file_caches(
+            file_tree_changed=any(
+                plan.kind in {ChangeKind.ADD, ChangeKind.DELETE} or plan.move_to_path is not None
+                for plan in plans
+            )
+        )
+        # Event publication can await and therefore belongs outside the file
+        # mutation critical section. All files are already durably committed.
+        for plan in plans:
+            await self._emit_plan_diff(plan, context)
         header = (
             f"Applied patch to {len(plans)} file(s): +{total_add} -{total_del}."
         )
@@ -245,7 +295,7 @@ class ApplyPatchTool(BaseTool):
         except PathTraversalError as exc:
             return str(exc)
 
-        guard = self._guard_path(change.path, path, bypass_mode)
+        guard = self._guard_path(change.path, path)
         if guard:
             return guard
 
@@ -298,7 +348,7 @@ class ApplyPatchTool(BaseTool):
                 dest_path = _resolve_path(change.move_to, context, allow_workspace_escape=bypass_mode)
             except PathTraversalError as exc:
                 return str(exc)
-            move_guard = self._guard_path(change.move_to, dest_path, bypass_mode)
+            move_guard = self._guard_path(change.move_to, dest_path)
             if move_guard:
                 return move_guard
             if dest_path != path and dest_path.exists():
@@ -321,8 +371,11 @@ class ApplyPatchTool(BaseTool):
             return ""
         for plan in plans:
             for path in filter(None, (plan.path, plan.move_to_path)):
-                expected = str(expected_hashes.get(str(path.resolve())) or "")
-                if expected and expected != _path_snapshot_hash(path):
+                key = _path_snapshot_key(path)
+                if key not in expected_hashes:
+                    return f"File review snapshot is missing for: {plan.raw_path}. Re-read and retry."
+                expected = str(expected_hashes.get(key) or "")
+                if expected != _path_snapshot_hash(path):
                     return f"File changed on disk after review: {plan.raw_path}. Re-read and retry."
         return ""
 
@@ -338,21 +391,24 @@ class ApplyPatchTool(BaseTool):
         hashes = read_time_hashes if isinstance(read_time_hashes, dict) else meta.get("_read_file_hashes")
         if not isinstance(hashes, dict):
             hashes = {}
+        else:
+            for plan in plans:
+                for path in filter(None, (plan.path, plan.move_to_path)):
+                    canonical_path_mapping_key(hashes, path)
         expected: dict[str, str] = {}
         for plan in plans:
             for path in filter(None, (plan.path, plan.move_to_path)):
-                key = str(path.resolve())
-                expected[key] = str(hashes.get(key) or "")
+                key = _path_snapshot_key(path)
+                expected[key] = (
+                    str(hashes.get(key) or "")
+                    if path.exists()
+                    else "missing"
+                )
         return expected
 
-    def _guard_path(self, raw_path: str, path: Path, bypass_mode: bool) -> str:
-        if bypass_mode:
-            return ""
-        if is_sensitive_file(path):
-            return (
-                f"Refusing to modify sensitive file: {raw_path}. "
-                "Edit credential files manually outside the agent."
-            )
+    def _guard_path(self, raw_path: str, path: Path) -> str:
+        # Protected paths stay guarded even in bypass mode, so this deliberately
+        # takes no bypass flag.
         if is_protected_write_path(path):
             return (
                 f"Refusing to modify protected path: {raw_path}. "
@@ -363,12 +419,19 @@ class ApplyPatchTool(BaseTool):
     # --- commit + projection ------------------------------------------------
 
     async def _emit_plan_diff(self, plan: "_ChangePlan", context: ToolExecutionContext | None) -> None:
+        old_content = None if plan.kind == ChangeKind.ADD else plan.old_content
+        new_content = None if plan.kind == ChangeKind.DELETE else plan.new_content
         await _emit_write_diff(
             context,
             file_path=plan.raw_path,
-            old_content=plan.old_content,
-            new_content=plan.new_content,
+            old_content=old_content,
+            new_content=new_content,
             display_path=plan.display_path,
+            old_display_path=_workspace_display_path(plan.path, plan.raw_path, context),
+            # Always None: _plan_change rejects an Add whose target exists and a
+            # Move whose destination exists, so no commit here can clobber
+            # content the turn tracker would need to keep as a baseline.
+            overwritten_new_content=plan.overwritten_move_content,
         )
 
     def _commit_plan(self, plan: "_ChangePlan", cache: Any) -> tuple[int, int]:
@@ -421,6 +484,7 @@ class _ChangePlan:
         "new_content",
         "display_path",
         "move_to_path",
+        "overwritten_move_content",
     )
 
     def __init__(
@@ -433,6 +497,7 @@ class _ChangePlan:
         new_content: str,
         display_path: str,
         move_to_path: Path | None = None,
+        overwritten_move_content: str | None = None,
     ) -> None:
         self.kind = kind
         self.raw_path = raw_path
@@ -441,6 +506,7 @@ class _ChangePlan:
         self.new_content = new_content
         self.display_path = display_path
         self.move_to_path = move_to_path
+        self.overwritten_move_content = overwritten_move_content
 
     def summary(self, adds: int, dels: int) -> str:
         if self.kind == ChangeKind.ADD:
@@ -522,3 +588,15 @@ def _path_snapshot_hash(path: Path) -> str:
         return content_hash(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError):
         return "unreadable"
+
+
+def _path_snapshot_key(path: Path) -> str:
+    """Stable lexical key for a path already resolved by the tool boundary.
+
+    Do not call ``resolve`` again here: a missing reviewed destination may be
+    replaced by a symlink before commit, which would otherwise change the map
+    key and erase the evidence that the path was reviewed as missing.
+    """
+    # The path was already resolved at the tool boundary. Keep the lexical leaf
+    # stable so a newly inserted symlink cannot change the reviewed map key.
+    return os.path.normcase(os.path.normpath(str(path.absolute())))

@@ -1,10 +1,10 @@
-"""Capability registry for tools plus command/skill metadata."""
+"""Capability registry for tools and command metadata."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-import inspect
 from collections import Counter
 from copy import deepcopy
 from typing import Any, TYPE_CHECKING
@@ -15,6 +15,11 @@ if TYPE_CHECKING:
     from backend.tools.toolsets import ToolsetPolicy
 
 from backend.permissions.context import ToolExecutionContext
+from backend.async_cleanup import (
+    CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+    cancel_and_drain,
+    cancel_and_drain_receipt,
+)
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, validate_tool_input
 
 logger = logging.getLogger(__name__)
@@ -26,23 +31,39 @@ class CapabilityRegistry:
         self._tools: dict[str, BaseTool] = {}
         self._commands: dict[str, Any] = {}
         self._skills: dict[str, dict[str, Any]] = {}
+        self._tool_owners: dict[str, str] = {}
         self._schema_cache: dict[str, list[dict[str, Any]]] = {}
+        self._validated_policies: set[tuple[str, int]] = set()
         self._version = 0
 
-    def register(self, tool: BaseTool) -> None:
+    def register(
+        self,
+        tool: BaseTool,
+        *,
+        replace: bool = False,
+        owner: str | None = None,
+    ) -> None:
         if tool.name in self._tools:
-            logger.warning(
-                "Tool name conflict detected for '%s'; overriding previous registration",
-                tool.name,
-            )
+            if not replace:
+                existing_owner = self._tool_owners.get(tool.name, "unknown")
+                raise ValueError(
+                    f"Tool name conflict for '{tool.name}' "
+                    f"(existing owner: {existing_owner})"
+                )
+            logger.warning("Replacing tool '%s' owned by %s", tool.name, self._tool_owners.get(tool.name, "unknown"))
         self._tools[tool.name] = tool
+        self._tool_owners[tool.name] = str(owner or getattr(tool, "owner", None) or "builtin")
         self._touch()
 
     def unregister(self, name: str) -> bool:
         removed = self._tools.pop(name, None) is not None
         if removed:
+            self._tool_owners.pop(name, None)
             self._touch()
         return removed
+
+    def get_tool_owner(self, name: str) -> str | None:
+        return self._tool_owners.get(name)
 
     def register_command(self, name: str, handler: Any) -> None:
         if name in self._commands:
@@ -65,27 +86,111 @@ class CapabilityRegistry:
     def get_commands(self) -> dict[str, Any]:
         return dict(self._commands)
 
-    def register_skill(self, name: str, definition: dict[str, Any]) -> None:
-        if name in self._skills:
-            logger.warning("Skill name conflict detected for '%s'; overriding previous registration", name)
-        self._skills[name] = dict(definition)
+    def register_skill(self, name: str, metadata: Any) -> None:
+        """Register a skill descriptor for the runtime capability catalog.
+
+        Skills are prompt/runtime capabilities, not model-callable tools. Keep
+        their metadata in the same versioned registry as commands so UI and
+        websocket capability snapshots describe one coherent session surface.
+        """
+
+        clean_name = str(name or "").strip()
+        if not clean_name:
+            raise ValueError("skill name is required")
+        payload = self._build_named_metadata(clean_name, metadata)
+        self._skills[clean_name] = payload
         self._touch()
 
     def unregister_skill(self, name: str) -> bool:
-        removed = self._skills.pop(name, None) is not None
+        removed = self._skills.pop(str(name or "").strip(), None) is not None
         if removed:
             self._touch()
         return removed
-
-    def get_skill(self, name: str) -> dict[str, Any] | None:
-        skill = self._skills.get(name)
-        return dict(skill) if skill is not None else None
 
     def list_skills(self) -> list[str]:
         return list(self._skills.keys())
 
     def get_skills(self) -> dict[str, dict[str, Any]]:
-        return {name: dict(definition) for name, definition in self._skills.items()}
+        return deepcopy(self._skills)
+
+    def fork(self) -> "CapabilityRegistry":
+        """Build an agent-run-local registry from the current base maps.
+
+        Reusing tool instances is intentional: canonical executors and their
+        control plane stay shared, while mutable registration maps and schema
+        projections must not leak between parent/child runs or conversations.
+        """
+
+        clone = CapabilityRegistry()
+        clone._tools = dict(self._tools)
+        clone._tool_owners = dict(self._tool_owners)
+        clone._commands = deepcopy(self._commands)
+        clone._skills = deepcopy(self._skills)
+        clone._schema_cache = deepcopy(self._schema_cache)
+        clone._validated_policies = set(self._validated_policies)
+        clone._version = self._version
+        return clone
+
+    def _resolve_toolset_policy(self, toolset_policy: 'ToolsetPolicy | None') -> Any:
+        """Return the active policy after checking it against this registry.
+
+        The registry owns the universe of tool and toolset names, so it is the
+        only place that can tell a deliberate whitelist from a selection whose
+        names no longer exist. An unresolvable allow-list is raised instead of
+        silently handing the model a shrunken (or empty) tool surface.
+
+        Materializing every ToolSpec is expensive, so the answer is memoized per
+        (policy, registry version) and skipped entirely for a policy that names
+        no group or tool to resolve.
+        """
+        from backend.tools.toolsets import ALL_TOOLSETS, ToolsetPolicy
+
+        policy = toolset_policy or ToolsetPolicy.default()
+        if not (policy.enabled_tools or (policy.enabled_toolsets - {ALL_TOOLSETS})):
+            return policy
+        cache_key = (policy.cache_key(), self._version)
+        if cache_key in self._validated_policies:
+            return policy
+        policy.validate_against(self.get_tool_spec(name) for name in self._tools)
+        self._validated_policies.add(cache_key)
+        return policy
+
+    @staticmethod
+    def _schema_permission_level(
+        permission_checker: 'PermissionChecker | None',
+        permission_context: 'PermissionContext | None',
+        name: str,
+        tool: BaseTool,
+    ) -> PermissionLevel:
+        if permission_context is None:
+            return tool.permission
+        if permission_checker is None:
+            return tool.capability_permission_level(permission_context)
+        from backend.permissions.checker import evaluate_permission_decision
+
+        return evaluate_permission_decision(
+            permission_checker,
+            name,
+            context=permission_context,
+            tool=tool,
+        ).permission_level
+
+    @staticmethod
+    def _schema_permission_decision(
+        permission_checker: 'PermissionChecker',
+        permission_context: 'PermissionContext',
+        name: str,
+        tool: BaseTool,
+    ):
+        from backend.permissions.checker import evaluate_permission_decision
+
+        return evaluate_permission_decision(
+            permission_checker,
+            name,
+            args={},
+            context=permission_context,
+            tool=tool,
+        )
 
     def build_schema_views(
         self,
@@ -100,11 +205,9 @@ class CapabilityRegistry:
         Single source of truth for exposure (direct/deferred/hidden) and the
         model-vs-runtime split. ``schema`` is populated only for direct tools
         when materialization is requested; deferred tools expose lightweight
-        catalog metadata and load full schema through tool_describe.
+        catalog metadata and load full schema after tool_search activates it.
         """
-        from backend.tools.toolsets import ToolsetPolicy
-
-        active_policy = toolset_policy or ToolsetPolicy.default()
+        active_policy = self._resolve_toolset_policy(toolset_policy)
         views: list[Any] = []
         for name, tool in self._tools.items():
             views.append(
@@ -132,12 +235,10 @@ class CapabilityRegistry:
         tool = self._tools.get(name)
         if tool is None:
             return None
-        from backend.tools.toolsets import ToolsetPolicy
-
         return self._build_schema_view_for_tool(
             name,
             tool,
-            active_policy=toolset_policy or ToolsetPolicy.default(),
+            active_policy=self._resolve_toolset_policy(toolset_policy),
             permission_checker=permission_checker,
             permission_context=permission_context,
             materialize_schema=materialize_schema,
@@ -161,12 +262,27 @@ class CapabilityRegistry:
         denied = False
         level = None
         if permission_checker and permission_context:
-            from backend.permissions.checker import check_permission_level
-
-            level = check_permission_level(
-                permission_checker, name, context=permission_context, tool=tool
-            )
-            denied = level == PermissionLevel.ALWAYS_DENY
+            capability_check = getattr(permission_checker, "capability_available", None)
+            if callable(capability_check):
+                allowed, _reason = capability_check(name, context=permission_context, tool=tool)
+                decision = self._schema_permission_decision(
+                    permission_checker,
+                    permission_context,
+                    name,
+                    tool,
+                )
+                denied = not allowed or decision.decision == "deny"
+                level = decision.permission_level
+            else:
+                from backend.permissions.checker import evaluate_permission_decision
+                decision = evaluate_permission_decision(
+                    permission_checker, name, context=permission_context, tool=tool
+                )
+                level = decision.permission_level
+                denied = not decision.capability_allowed
+        elif permission_context:
+            level = tool.capability_permission_level(permission_context)
+            denied = not tool.is_capability_available(permission_context)
         exposure = spec.exposure if spec else "core"
         if not policy_available:
             exposure = "hidden"
@@ -174,10 +290,24 @@ class CapabilityRegistry:
             exposure = "hidden"
         direct = direct and not denied
         schema_available = exposure != "hidden"
+        description_for_policy = getattr(
+            tool,
+            "model_description_for_policy",
+            None,
+        )
+        model_description = str(
+            description_for_policy(active_policy)
+            if callable(description_for_policy)
+            else tool.model_description() or ""
+        ).strip()
         schema = None
         if materialize_schema and direct and schema_available:
-            tool_schema = tool.model_schema() or tool.get_schema()
-            model_description = str(tool.model_description() or "").strip()
+            schema_for_policy = getattr(tool, "model_schema_for_policy", None)
+            tool_schema = (
+                schema_for_policy(active_policy)
+                if callable(schema_for_policy)
+                else tool.model_schema() or tool.get_schema()
+            )
             if model_description and model_description != str(tool_schema.description or "").strip():
                 tool_schema = tool_schema.with_description(model_description)
             schema = tool_schema.to_openai_tool()
@@ -192,7 +322,7 @@ class CapabilityRegistry:
             schema_available=schema_available,
             catalog_text=self._build_catalog_text(name, tool, spec),
             search_hint=getattr(tool, "search_hint", "") or "",
-            short_description=(tool.model_description() or "").strip(),
+            short_description=model_description,
             runtime_metadata=meta,
         )
 
@@ -211,19 +341,33 @@ class CapabilityRegistry:
         out: dict[str, dict[str, Any]] = {}
         for name, tool in self._tools.items():
             meta = tool.to_runtime_metadata()
-            if permission_checker and permission_context:
-                from backend.permissions.checker import check_permission_level
-
-                level = check_permission_level(
-                    permission_checker, name, context=permission_context, tool=tool
-                )
+            if permission_context:
+                if permission_checker:
+                    capability_check = getattr(permission_checker, "capability_available", None)
+                    if callable(capability_check):
+                        allowed, _reason = capability_check(name, context=permission_context, tool=tool)
+                        decision = self._schema_permission_decision(
+                            permission_checker,
+                            permission_context,
+                            name,
+                            tool,
+                        )
+                        level = decision.permission_level
+                        if not allowed or decision.decision == "deny":
+                            level = PermissionLevel.ALWAYS_DENY
+                    else:
+                        from backend.permissions.checker import check_permission_level
+                        level = check_permission_level(
+                            permission_checker, name, context=permission_context, tool=tool
+                        )
+                else:
+                    level = tool.capability_permission_level(permission_context)
                 meta = {**meta, "permission": level.value}
             out[name] = meta
         return out
 
     def build_snapshot(
         self,
-        budget: int = 6000,
         *,
         toolset_policy: 'ToolsetPolicy | None' = None,
         permission_checker: 'PermissionChecker | None' = None,
@@ -240,7 +384,6 @@ class CapabilityRegistry:
             "version": self._version,
             "tools": deepcopy(
                 self.get_schemas(
-                    budget,
                     permission_checker=permission_checker,
                     permission_context=permission_context,
                     toolset_policy=toolset_policy,
@@ -260,8 +403,8 @@ class CapabilityRegistry:
                 for name, metadata in sorted(self._commands.items())
             ],
             "skills": [
-                self._build_named_metadata(name, definition)
-                for name, definition in sorted(self._skills.items())
+                deepcopy(metadata)
+                for _name, metadata in sorted(self._skills.items())
             ],
             "summary": self._build_capability_summary(views),
         }
@@ -326,12 +469,23 @@ class CapabilityRegistry:
             direct = active_policy.is_directly_visible(spec)
             exposure = spec.exposure if spec else "core"
             if permission_checker and permission_context:
-                from backend.permissions.checker import check_permission_level
-
-                level = check_permission_level(
-                    permission_checker, name, context=permission_context, tool=tool
-                )
-                if level == PermissionLevel.ALWAYS_DENY:
+                capability_check = getattr(permission_checker, "capability_available", None)
+                if callable(capability_check):
+                    allowed, _reason = capability_check(name, context=permission_context, tool=tool)
+                    decision = self._schema_permission_decision(
+                        permission_checker,
+                        permission_context,
+                        name,
+                        tool,
+                    )
+                    if decision.decision == "deny":
+                        allowed = False
+                else:
+                    from backend.permissions.checker import evaluate_permission_decision
+                    allowed = evaluate_permission_decision(
+                        permission_checker, name, context=permission_context, tool=tool
+                    ).capability_allowed
+                if not allowed:
                     direct = False
                     exposure = "hidden"
             if not direct or exposure == "hidden":
@@ -360,9 +514,12 @@ class CapabilityRegistry:
     ) -> dict[str, Any] | None:
         """Materialize one tool schema on demand.
 
-        Used by tool_describe for deferred tools. This is intentionally separate
-        from build_schema_views so catalog/search paths can stay schema-lazy.
+        Used when tool_search activates deferred tools. This is intentionally
+        separate from build_schema_views so catalog/search paths can stay
+        schema-lazy.
         """
+        from backend.tools.toolsets import ToolsetPolicy
+
         tool = self._tools.get(name)
         if tool is None:
             return None
@@ -377,15 +534,28 @@ class CapabilityRegistry:
             return None
         if require_deferred and (view.exposure != "deferred" or bool(view.direct)):
             return None
-        tool_schema = tool.model_schema() or tool.get_schema()
-        model_description = str(tool.model_description() or "").strip()
+        schema_for_policy = getattr(tool, "model_schema_for_policy", None)
+        tool_schema = (
+            schema_for_policy(toolset_policy or ToolsetPolicy.default())
+            if callable(schema_for_policy)
+            else tool.model_schema() or tool.get_schema()
+        )
+        description_for_policy = getattr(
+            tool,
+            "model_description_for_policy",
+            None,
+        )
+        model_description = str(
+            description_for_policy(toolset_policy or ToolsetPolicy.default())
+            if callable(description_for_policy)
+            else tool.model_description() or ""
+        ).strip()
         if model_description and model_description != str(tool_schema.description or "").strip():
             tool_schema = tool_schema.with_description(model_description)
         return tool_schema.to_openai_tool()
 
     def get_schemas(
         self,
-        budget: int = 6000,
         permission_checker: 'PermissionChecker | None' = None,
         permission_context: 'PermissionContext | None' = None,
         toolset_policy: 'ToolsetPolicy | None' = None,
@@ -393,7 +563,7 @@ class CapabilityRegistry:
     ) -> list[dict[str, Any]]:
         from backend.tools.toolsets import ToolsetPolicy
 
-        active_policy = toolset_policy or ToolsetPolicy.default()
+        active_policy = self._resolve_toolset_policy(toolset_policy)
         # mcp_registry_version is intentionally ignored for the default direct
         # schema payload: deferred/MCP catalog churn must not perturb the model's
         # tools array. Direct visibility changes still affect the fingerprint.
@@ -402,11 +572,12 @@ class CapabilityRegistry:
             permission_checker=permission_checker,
             permission_context=permission_context,
         )
-        cache_key = f"{budget}_{active_policy.cache_key()}_{direct_fingerprint}"
+        cache_key = f"{active_policy.cache_key()}_{direct_fingerprint}"
         if permission_checker and permission_context:
             overrides_hash = hash(frozenset(permission_context.session_overrides.items())) if permission_context.session_overrides else 0
             cache_key = (
-                f"{budget}_{permission_context.mode}"
+                f"{permission_context.mode}"
+                f"_{permission_context.approval_policy}"
                 f"_{hash(frozenset(permission_context.tool_deny_rules))}"
                 f"_{overrides_hash}"
                 f"_{active_policy.cache_key()}_{direct_fingerprint}"
@@ -419,6 +590,7 @@ class CapabilityRegistry:
         # Single source of truth: derive direct schemas from ToolSchemaView.
         # A view has a non-None schema iff it is directly visible and not denied.
         from backend.tools.schema import postprocess_tool_schema
+        from backend.tools.catalog import canonicalize_tool_schemas
 
         views = self.build_schema_views(
             toolset_policy=active_policy,
@@ -439,6 +611,7 @@ class CapabilityRegistry:
             postprocess_tool_schema(dict(v.schema), visible_tool_names=visible_names)
             for v in direct_views
         ]
+        schemas = canonicalize_tool_schemas(schemas, tool_registry=self)
 
         self._schema_cache[cache_key] = schemas
         return schemas
@@ -472,11 +645,46 @@ class CapabilityRegistry:
                 ),
             )
 
+        cancel_event = getattr(context, "cancel_event", None) if context is not None else None
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError
+
+        execution_task = asyncio.ensure_future(
+            tool.execute(args, context=context)
+        )
+        cancel_wait_task = (
+            asyncio.create_task(cancel_event.wait())
+            if cancel_event is not None
+            else None
+        )
         try:
-            if self._tool_accepts_context(tool):
-                result = await tool.execute(args, context=context)
+            if cancel_wait_task is None:
+                result = await execution_task
             else:
-                result = await tool.execute(args)
+                done, _ = await asyncio.wait(
+                    {execution_task, cancel_wait_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if execution_task in done:
+                    result = execution_task.result()
+                else:
+                    receipt = await cancel_and_drain_receipt(
+                        [execution_task],
+                        timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                        label=f"interrupted registry tool {name}",
+                        owner=getattr(context, "pending_cleanup_tasks", None),
+                    )
+                    _publish_registry_cleanup_receipt(context, name, receipt, reason="interrupted")
+                    raise asyncio.CancelledError
+        except asyncio.CancelledError:
+            receipt = await cancel_and_drain_receipt(
+                [execution_task],
+                timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                label=f"cancelled registry tool {name}",
+                owner=getattr(context, "pending_cleanup_tasks", None),
+            )
+            _publish_registry_cleanup_receipt(context, name, receipt, reason="cancelled")
+            raise
         except Exception as exc:
             return ToolResult(
                 content=(
@@ -486,7 +694,16 @@ class CapabilityRegistry:
                 is_error=True,
                 developer_detail=str(exc),
             )
+        finally:
+            if cancel_wait_task is not None and not cancel_wait_task.done():
+                cancel_wait_task.cancel()
+                await cancel_and_drain(
+                    [cancel_wait_task],
+                    timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                    label=f"registry cancellation waiter {name}",
+                )
         return result
+
 
     def list_tools(self) -> list[str]:
         return list(self._tools.keys())
@@ -498,46 +715,6 @@ class CapabilityRegistry:
     @property
     def version(self) -> int:
         return self._version
-
-    def _tool_accepts_context(self, tool: BaseTool) -> bool:
-        try:
-            return "context" in inspect.signature(tool.execute).parameters
-        except (TypeError, ValueError):
-            return False
-
-    def _annotate_schema_permission(
-        self,
-        schema: dict[str, Any],
-        level: PermissionLevel | None,
-    ) -> dict[str, Any]:
-        if level is None:
-            return schema
-        function = schema.get("function")
-        if not isinstance(function, dict):
-            return schema
-        function["description"] = self._description_with_permission(
-            str(function.get("description") or ""),
-            level,
-        )
-        return schema
-
-    def _description_with_permission(
-        self,
-        description: str,
-        level: PermissionLevel | None,
-    ) -> str:
-        if level is None:
-            return description
-        label = {
-            PermissionLevel.AUTO: "auto",
-            PermissionLevel.CONFIRM: "requires confirmation",
-            PermissionLevel.DIFF_REVIEW: "diff review",
-            PermissionLevel.ALWAYS_DENY: "denied",
-        }[level]
-        marker = f"Permission: {label}."
-        if marker in description:
-            return description
-        return f"{description.rstrip()} {marker}".strip()
 
     def _build_named_metadata(self, name: str, metadata: Any) -> dict[str, Any]:
         if isinstance(metadata, dict):
@@ -578,7 +755,7 @@ class CapabilityRegistry:
             "list_mcp_resource_notifications",
         } <= tool_names
         mcp_prompt_bridge = {"list_mcp_prompts", "get_mcp_prompt"} <= tool_names
-        deferred_bridge = {"tool_search", "tool_describe", "tool_call"} <= tool_names
+        deferred_bridge = "tool_search" in tool_names
         return {
             "tools_total": len(views),
             "direct_tools": sum(
@@ -603,8 +780,37 @@ class CapabilityRegistry:
     def _touch(self) -> None:
         self._version += 1
         # Schema cache entries are keyed by the direct tool fingerprint. Deferred
-        # tool, command, skill, and MCP catalog churn should not evict the stable
+        # tool, command, and MCP catalog churn should not evict the stable
         # direct tools payload; direct tool changes naturally use a new key.
 
 
 ToolRegistry = CapabilityRegistry
+
+
+def _publish_registry_cleanup_receipt(
+    context: ToolExecutionContext | None,
+    tool_name: str,
+    receipt: Any,
+    *,
+    reason: str,
+) -> None:
+    """Expose nested tool-task cleanup through the canonical call context."""
+
+    if context is None:
+        return
+    evidence = receipt.to_evidence(
+        resource_kind="tool",
+        resource_id=str(
+            getattr(context, "metadata", {}).get("_active_tool_call_id") or tool_name
+        ),
+        reason=reason,
+    )
+    metadata = getattr(context, "metadata", None)
+    if isinstance(metadata, dict):
+        metadata["_registry_cleanup_receipt"] = evidence
+    call_id = str(
+        getattr(context, "metadata", {}).get("_active_tool_call_id") or ""
+    ).strip()
+    receipts = getattr(context, "cleanup_receipts", None)
+    if call_id and isinstance(receipts, dict):
+        receipts[call_id] = evidence

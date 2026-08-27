@@ -11,6 +11,7 @@ AgentState 是 Agent Loop 的运行时状态载体，包含：
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -48,9 +49,11 @@ class ToolCallRecord:
     recoverable: bool = True
     projection: str | None = None
     model_observation: str | None = None
-    turn_id: str | None = None  # Codex-style: correlates tool calls with conversation turns
+    turn_id: str | None = None  # Correlates tool calls with conversation turns
     iteration_id: str = ""  # Agent loop iteration that produced this call
     status: ToolCallStatus = "success"
+    request_digest: str = ""
+    cleanup_receipt: dict[str, Any] = field(default_factory=dict)
 
 
 # Terminal-reason vocabulary for run termination.
@@ -64,6 +67,7 @@ TerminalReason = Literal[
     "max_turn_tokens",
     "max_turn_cost_usd",
     "max_output",
+    "context_window",
     "partial_stream_error",
     "stream_error",
     "partial_timeout",
@@ -74,9 +78,12 @@ TerminalReason = Literal[
     "auth",
     "blocked",
     "provider_capability",
+    "provider_protocol",
+    "provider_continuation",
     "incomplete_tool_stream",
     "tool_error",
     "empty_reply",
+    "missing_final_answer",
     "refusal",
     "max_retries",
     "invalid_model_action",
@@ -102,8 +109,8 @@ class AgentState:
 
     # ── 执行状态 ──
     iterations: int = 0
-    # Provider requests spent on recovery rather than on new work: empty-reply
-    # nudges, stop-hook feedback, and steering. They
+    # Provider requests spent on recovery rather than on new work: stop-hook
+    # feedback and steering. They
     # are already bounded by ``total_retries``
     # (agent.turn_error_budget), so charging them to the work budget as well
     # would end a turn early precisely when it is repairing itself.
@@ -144,16 +151,34 @@ class AgentState:
     reactive_compaction_attempted: bool = False
     max_output_recovery_count: int = 0
     max_output_partial_text: str = ""
+    max_output_no_progress_count: int = 0
+    max_output_last_partial_text: str = ""
+    provider_continuation_recovery_count: int = 0
     stop_hook_feedback_count: int = 0
+    # Consecutive auto-compaction failures. Once this reaches
+    # MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES the loop stops attempting doomed
+    # compactions instead of hammering the API every turn. Reset on success.
+    consecutive_autocompact_failures: int = 0
+    # Whether the approaching-compaction notice was already sent, so the
+    # boundary announces once per band instead of on every turn.
+    budget_warning_emitted: bool = False
     # Last loop transition reason, for observability/debugging. Not load-bearing.
     transition: str = ""
     transition_details: dict[str, Any] = field(default_factory=dict)
     transition_history: list[dict[str, Any]] = field(default_factory=list)
     disabled_tools: set[str] = field(default_factory=set)
+    # Deferred tools selected through tool_search become ordinary direct tools
+    # on the following model iteration. Tool selection is kept in state so the
+    # model should call the selected tool itself, not a MiniCode-only
+    # tool_describe -> tool_call wrapper protocol.
+    loaded_deferred_tools: set[str] = field(default_factory=set)
     tool_runtime_guidance: str = ""
     # UI projection bookkeeping belongs to the turn state schema as well;
     # declaring it prevents an eventual slots migration from breaking tools.
     ui_tool_started_at: dict[str, float] = field(default_factory=dict)
+    # The rewind manager for write tools. ``snapshot_before_write`` refuses
+    # every write tool when this is None, so the turn bootstrap defaults it.
+    checkpoint_manager: Any | None = None
 
     def clear_transition(self) -> None:
         self.transition = ""
@@ -243,6 +268,8 @@ class AgentState:
         model_observation: str | None = None,
         turn_id: str | None = None,
         iteration_id: str = "",
+        request_digest: str = "",
+        cleanup_receipt: dict[str, Any] | None = None,
     ) -> None:
         """记录一次工具调用。"""
         resolved_status: ToolCallStatus
@@ -254,7 +281,7 @@ class AgentState:
         self.tool_calls.append(
             ToolCallRecord(
                 tool_name=name,
-                tool_input=args,
+                tool_input=deepcopy(args),
                 tool_output=output,
                 artifact_id=artifact_id,
                 source_url=source_url,
@@ -272,6 +299,8 @@ class AgentState:
                 turn_id=turn_id,
                 iteration_id=iteration_id,
                 status=resolved_status,
+                request_digest=str(request_digest or "").strip(),
+                cleanup_receipt=deepcopy(cleanup_receipt or {}),
             )
         )
         if artifact_id:

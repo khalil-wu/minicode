@@ -2,25 +2,49 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+from uuid import uuid4
 from typing import Any
 
-from backend.agent.runtime import AgentRuntime, SwarmTaskStatus, default_runtime
+from backend.agent.runtime import AgentRuntime, SwarmTaskStatus
 from backend.permissions.context import ToolExecutionContext
+from backend.tools.agent_control_plane import AgentControlPlane
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
-from backend.tools.subagent_runtime import runtime_from_context
+from backend.tools.subagent_runtime import require_runtime_from_context
 
 TASK_STATUSES = ("pending", "in_progress", "blocked", "completed", "cancelled")
 
 # Subagent statuses with no live task loop: mail sent to these recipients is
-# persisted but never consumed unless the agent is resumed (cc SendMessageTool
-# auto-resumes stopped agents from their transcript).
+# persisted but never consumed unless the agent is resumed.
 _ENDED_SUBAGENT_STATUSES = frozenset(
     {"completed", "partial", "failed", "cancelled", "interrupted"}
 )
 
 
 def _runtime(context: ToolExecutionContext | None) -> AgentRuntime:
-    return runtime_from_context(context) or default_runtime()
+    return require_runtime_from_context(context)
+
+
+async def _runtime_call(
+    runtime: AgentRuntime,
+    method_name: str,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Run synchronous swarm-store work off the shared asyncio loop.
+
+    AgentRuntime intentionally keeps the durable coordination API synchronous.
+    The tools are
+    async entry points, however, so SQLite busy waits, JSON serialization and
+    filesystem-backed transcript reads must not execute inline and pause every
+    websocket conversation in the process.
+    """
+
+    method = getattr(runtime, method_name, None)
+    if not callable(method):
+        raise AttributeError(f"Swarm runtime method is unavailable: {method_name}")
+    return await asyncio.to_thread(method, *args, **kwargs)
 
 
 def _actor_id(context: ToolExecutionContext | None, explicit: Any = None) -> str:
@@ -48,47 +72,6 @@ def _actor_mailbox_epoch(context: ToolExecutionContext | None) -> int | None:
         return max(0, int(raw))
     except (TypeError, ValueError):
         return None
-
-
-def _message_recipient_allowed(
-    runtime: AgentRuntime,
-    *,
-    sender: str,
-    recipient: str,
-    conversation_id: str,
-) -> bool:
-    if recipient == "parent":
-        return sender != "main"
-    target = runtime.get_subagent(recipient)
-    if target is None:
-        # Persist coordinator mail even if the worker start event has not been
-        # committed yet; the worker can consume it after registration.
-        parent_run = runtime.get_run(sender)
-        return recipient.startswith("subagent-") and sender != "main" and (
-            parent_run is None
-            or not conversation_id
-            or parent_run.conversation_id == conversation_id
-        )
-    sender_record = runtime.get_subagent(sender)
-    if sender_record is not None:
-        return bool(sender_record.parent_run_id) and sender_record.parent_run_id == target.parent_run_id
-    parent_run = runtime.get_run(sender)
-    target_parent_run = runtime.get_run(str(target.parent_run_id or ""))
-    same_conversation_handoff = bool(
-        parent_run is not None
-        and target_parent_run is not None
-        and parent_run.conversation_id
-        and parent_run.conversation_id == target_parent_run.conversation_id
-        and (target.background or target.detach_from_parent)
-    )
-    return bool(
-        (target.parent_run_id == sender or same_conversation_handoff)
-        and (
-            parent_run is None
-            or not conversation_id
-            or parent_run.conversation_id == conversation_id
-        )
-    )
 
 
 async def _emit_swarm_event(
@@ -151,7 +134,21 @@ def _team_lines(teams: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-class SendMessageTool(BaseTool):
+class _AgentCoordinationTool(BaseTool):
+    def get_spec(self):
+        from backend.tools.contracts import ToolSpec
+
+        required = self.get_schema().parameters.get("required", [])
+        return ToolSpec(
+            name=self.name,
+            capability="agent.coordinate",
+            toolset="agent",
+            exposure="core",
+            required_args=tuple(str(item) for item in required),
+        )
+
+
+class SendMessageTool(_AgentCoordinationTool):
     """Send a coordination message between agents."""
 
     name = "send_message"
@@ -197,26 +194,53 @@ class SendMessageTool(BaseTool):
                     },
                 },
                 "required": ["recipient", "message"],
+                "additionalProperties": False,
             },
         )
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
+        metadata = (
+            context.metadata
+            if context is not None and isinstance(context.metadata, dict)
+            else {}
+        )
         recipient = str(args.get("recipient") or "").strip()
         message = str(args.get("message") or "").strip()
         if not recipient:
             return self._error_result("Missing recipient argument")
-        if not message:
+        if not message.strip():
             return self._error_result("Missing message argument")
 
         runtime = _runtime(context)
-        # Resolve by-name addressing before authorization: a recipient that is
-        # not a live subagent id and not "parent" may be a teammate name /
-        # agent_type label (latest-wins registry, cc-style).
-        if recipient != "parent" and runtime.get_subagent(recipient) is None:
-            resolve = getattr(runtime, "resolve_subagent_name", None)
-            resolved = resolve(recipient) if callable(resolve) else ""
-            if resolved:
-                recipient = resolved
+        control = AgentControlPlane(context, runtime=runtime)
+        if recipient == "parent":
+            if not control.can_message_parent():
+                return self._error_result("Parent mailbox is not available to the current task")
+        else:
+            resolved_target = control.resolve_message_target(
+                recipient,
+                scope="message",
+            )
+            if resolved_target is None:
+                resolved_target = control.resolve_persisted_message_target(recipient)
+            if resolved_target is not None:
+                recipient = resolved_target.subagent_id
+            else:
+                # A known-but-out-of-scope record must never be reclassified as
+                # an unknown pre-registration id.  That would turn a failed
+                # ownership check into cross-tree mailbox access.
+                known_record = runtime.get_subagent(recipient)
+                if known_record is None:
+                    load_persisted = getattr(runtime, "load_persisted_subagent", None)
+                    known_record = (
+                        load_persisted(recipient) if callable(load_persisted) else None
+                    )
+                resolve = getattr(runtime, "resolve_subagent_name", None)
+                known_name = str(resolve(recipient) if callable(resolve) else "").strip()
+                if known_record is not None or known_name:
+                    return self._error_result("Recipient is not part of the current task tree")
+                if not control.can_queue_unknown_message_target(recipient):
+                    return self._error_result("Recipient is not part of the current task tree")
         derived_sender = _actor_id(context)
         explicit_sender = str(args.get("sender") or "").strip()
         sender = _actor_id(context, explicit_sender)
@@ -224,27 +248,55 @@ class SendMessageTool(BaseTool):
         summary = str(args.get("summary") or "").strip()
         if explicit_sender and explicit_sender != derived_sender:
             return self._error_result("Sender must match the current task identity")
-        if not _message_recipient_allowed(
-            runtime,
-            sender=sender,
-            recipient=recipient,
-            conversation_id=conversation_id,
-        ):
-            return self._error_result("Recipient is not part of the current task tree")
         recipient_record = runtime.get_subagent(recipient)
+        if recipient_record is None:
+            load_persisted = getattr(runtime, "load_persisted_subagent", None)
+            recipient_record = (
+                load_persisted(recipient) if callable(load_persisted) else None
+            )
         recipient_ended = bool(
             recipient_record is not None
             and str(recipient_record.status or "") in _ENDED_SUBAGENT_STATUSES
         )
+        if recipient_ended:
+            registry = metadata.get("_tool_registry")
+            task_tool = registry.get_tool("task") if registry is not None and hasattr(registry, "get_tool") else None
+            resume = getattr(task_tool, "resume_background_subtask", None)
+            if not callable(resume):
+                return self._error_result(
+                    f"Recipient {recipient} is stopped and its TaskTool resume runtime is unavailable."
+                )
+            try:
+                await resume(subagent_id=recipient, prompt=message, context=context)
+            except Exception as exc:
+                return self._error_result(
+                    f"Recipient {recipient} could not be resumed: {exc}"
+                )
+            prior_status = recipient_record.status if recipient_record is not None else "unknown"
+            return ToolResult(
+                content=(
+                    f"Agent {recipient} was stopped ({prior_status}); "
+                    "resumed it in the background with the message and preserved transcript."
+                ),
+                display_summary=summary or f"Resumed {recipient}",
+                result_kind="subagent",
+                status="running",
+                runtime_metadata={
+                    "delivery": "resumed",
+                    "sender": sender,
+                    "recipient": recipient,
+                    "prior_status": str(prior_status or ""),
+                },
+            )
         recipient_epoch = (
-            None
-            if recipient_ended
-            else int(recipient_record.mailbox_epoch or 0)
-            if recipient_record is not None
+            int(recipient_record.mailbox_epoch or 0)
+            if recipient_record is not None and not recipient_ended
             else None
         )
         try:
-            record = runtime.send_swarm_message(
+            record = await _runtime_call(
+                runtime,
+                "send_swarm_message",
                 sender_id=sender,
                 recipient_id=recipient,
                 content=message,
@@ -256,7 +308,7 @@ class SendMessageTool(BaseTool):
             )
         except ValueError as exc:
             return self._error_result(str(exc))
-        payload = record.to_dict()
+        payload = record.public_dict()
         if summary:
             payload["summary"] = summary
         await _emit_swarm_event(
@@ -265,24 +317,31 @@ class SendMessageTool(BaseTool):
             event={"type": "message", "message": payload},
         )
 
-        if recipient_ended:
-            return ToolResult(
-                content=(
-                    f"Message {record.message_id} sent from {sender} to {recipient}. "
-                    f"Recipient has already ended ({recipient_record.status}); "
-                    "the message was stored but was not delivered to a running agent."
-                ),
-                display_summary=summary or f"Message to {recipient}",
-                result_kind="subagent",
-            )
-
+        if recipient == "parent":
+            delivery = "parent"
+        elif recipient_record is not None and (
+            str(getattr(recipient_record, "teammate_name", "") or "").strip()
+            or str(getattr(recipient_record, "team_name", "") or "").strip()
+        ):
+            delivery = "inbox"
+        else:
+            delivery = "queued"
         return ToolResult(
             content=f"Message {record.message_id} sent from {sender} to {recipient}.",
             display_summary=summary or f"Message to {recipient}",
             result_kind="subagent",
+            runtime_metadata={
+                "delivery": delivery,
+                "message_id": str(record.message_id or ""),
+                "sender": sender,
+                "recipient": recipient,
+                "recipient_status": str(
+                    getattr(recipient_record, "status", "") or ""
+                ),
+            },
         )
 
-class MessageListTool(BaseTool):
+class MessageListTool(_AgentCoordinationTool):
     """Read the shared swarm mailbox for an agent or team participant."""
 
     name = "message_list"
@@ -341,7 +400,9 @@ class MessageListTool(BaseTool):
             if participant_record is not None
             else None
         )
-        messages = runtime.list_swarm_messages(
+        messages = await _runtime_call(
+            runtime,
+            "list_swarm_messages",
             participant_id=participant_id,
             conversation_id=_conversation_id(context),
             since_seq=since_seq,
@@ -360,9 +421,9 @@ class MessageListTool(BaseTool):
         return ToolResult(content="\n".join(lines), result_kind="subagent")
 
 
-class TeamCreateTool(BaseTool):
+class TeamCreateTool(_AgentCoordinationTool):
     name = "team_create"
-    description = "Create or replace a named swarm team with member roles and preferred subagent types."
+    description = "Create a new team for coordinating multiple agents."
     permission = PermissionLevel.AUTO
     result_kind = "subagent"
     activity_kind = "genericTool"
@@ -374,55 +435,92 @@ class TeamCreateTool(BaseTool):
             parameters={
                 "type": "object",
                 "properties": {
-                    "team_name": {"type": "string", "description": "Stable team name."},
+                    "team_name": {"type": "string", "description": "Name for the new team to create."},
                     "description": {"type": "string", "description": "Team purpose or coordination notes."},
-                    "members": {
-                        "type": "array",
-                        "description": "Team members with role and preferred agent type.",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": {"type": "string", "description": "Stable member id or role id."},
-                                "role": {"type": "string", "description": "Human-readable responsibility."},
-                                "agent_type": {"type": "string", "description": "Preferred subagent type."},
-                                "description": {"type": "string", "description": "Extra member instructions."},
-                            },
-                            "required": ["id"],
-                        },
+                    "agent_type": {
+                        "type": "string",
+                        "description": "Optional type/role of the team lead.",
                     },
                 },
-                "required": ["team_name", "members"],
+                "required": ["team_name"],
+                "additionalProperties": False,
             },
         )
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
         team_name = str(args.get("team_name") or "").strip()
-        members = args.get("members")
         if not team_name:
             return self._error_result("Missing team_name argument")
-        if not isinstance(members, list) or not members:
-            return self._error_result("Missing members argument")
-        team = _runtime(context).create_swarm_team(
-            team_name=team_name,
+        runtime = _runtime(context)
+        conversation_id = _conversation_id(context)
+        leader_id = _actor_id(context)
+        led_teams = await _runtime_call(
+            runtime,
+            "list_swarm_teams",
+            conversation_id=conversation_id,
+            limit=100,
+        )
+        existing_led = next(
+            (
+                team for team in led_teams
+                if str(team.created_by or "") == leader_id
+            ),
+            None,
+        )
+        if existing_led is not None:
+            return self._error_result(
+                f'Already leading team "{existing_led.team_name}". A leader can only manage one team at a time. '
+                "Use TeamDelete to end the current team before creating a new one."
+            )
+        final_team_name = team_name
+        existing_names = {str(team.team_name or "").casefold() for team in led_teams}
+        if final_team_name.casefold() in existing_names:
+            # Use a compact durable slug instead of overwriting the existing
+            # team.
+            final_team_name = f"team-{uuid4().hex[:8]}"
+            while final_team_name.casefold() in existing_names:
+                final_team_name = f"team-{uuid4().hex[:8]}"
+        lead_agent_id = f"team-lead@{final_team_name}"
+        lead_agent_type = str(args.get("agent_type") or "team-lead").strip() or "team-lead"
+        team = await _runtime_call(
+            runtime,
+            "create_swarm_team",
+            team_name=final_team_name,
             description=str(args.get("description") or "").strip(),
-            members=[member for member in members if isinstance(member, dict)],
-            conversation_id=_conversation_id(context),
-            created_by=_actor_id(context),
+            members=[{
+                "id": lead_agent_id,
+                "role": "team-lead",
+                "agent_type": lead_agent_type,
+                "description": "Team lead",
+            }],
+            conversation_id=conversation_id,
+            created_by=leader_id,
         )
         payload = team.to_dict()
+        payload.update({
+            "team_file_path": team.team_file_path,
+            "lead_agent_id": lead_agent_id,
+        })
         await _emit_swarm_event(
             context,
             subagent_id=f"team:{team.team_name}",
             event={"type": "team_created", "team": payload},
         )
         return ToolResult(
-            content=f"Created swarm team {team.team_name} with {len(team.members)} member(s).",
+            content=json.dumps(
+                {
+                    "team_name": team.team_name,
+                    "team_file_path": team.team_file_path,
+                    "lead_agent_id": lead_agent_id,
+                },
+                ensure_ascii=False,
+            ),
             display_summary=f"Team created: {team.team_name}",
             result_kind="subagent",
         )
 
 
-class TeamListTool(BaseTool):
+class TeamListTool(_AgentCoordinationTool):
     name = "team_list"
     description = "List named swarm teams and their member role assignments."
     permission = PermissionLevel.AUTO
@@ -447,7 +545,9 @@ class TeamListTool(BaseTool):
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
         teams = [
             team.to_dict()
-            for team in _runtime(context).list_swarm_teams(
+            for team in await _runtime_call(
+                _runtime(context),
+                "list_swarm_teams",
                 conversation_id=_conversation_id(context),
                 team_name=str(args.get("team_name") or "").strip(),
                 since_seq=int(args.get("since_seq") or 0),
@@ -457,7 +557,7 @@ class TeamListTool(BaseTool):
         return ToolResult(content=_team_lines(teams), result_kind="subagent")
 
 
-class TeamDeleteTool(BaseTool):
+class TeamDeleteTool(_AgentCoordinationTool):
     name = "team_delete"
     description = "Delete a named swarm team. Existing shared tasks and messages remain for audit/history."
     permission = PermissionLevel.AUTO
@@ -481,7 +581,9 @@ class TeamDeleteTool(BaseTool):
         team_name = str(args.get("team_name") or "").strip()
         if not team_name:
             return self._error_result("Missing team_name argument")
-        team = _runtime(context).delete_swarm_team(
+        team = await _runtime_call(
+            _runtime(context),
+            "delete_swarm_team",
             conversation_id=_conversation_id(context),
             team_name=team_name,
         )
@@ -500,7 +602,7 @@ class TeamDeleteTool(BaseTool):
         )
 
 
-class TaskCreateTool(BaseTool):
+class TaskCreateTool(_AgentCoordinationTool):
     name = "task_create"
     description = "Create a shared swarm task that multiple agents can list, claim, update, and attach outputs to."
     permission = PermissionLevel.AUTO
@@ -539,9 +641,16 @@ class TaskCreateTool(BaseTool):
         title = str(args.get("title") or "").strip()
         if not title:
             return self._error_result("Missing title argument")
+        derived_actor = _actor_id(context)
+        explicit_actor = str(args.get("created_by") or "").strip()
+        if explicit_actor and explicit_actor != derived_actor:
+            return self._error_result("created_by must match the current task identity")
         raw_status = str(args.get("status") or "pending").strip()
         status: SwarmTaskStatus = raw_status if raw_status in TASK_STATUSES else "pending"  # type: ignore[assignment]
-        task = _runtime(context).create_swarm_task(
+        runtime = _runtime(context)
+        task = await _runtime_call(
+            runtime,
+            "create_swarm_task",
             title=title,
             description=str(args.get("description") or "").strip(),
             assignee=str(args.get("assignee") or "").strip(),
@@ -549,7 +658,7 @@ class TaskCreateTool(BaseTool):
             status=status,
             priority=str(args.get("priority") or "normal").strip() or "normal",
             team_name=str(args.get("team_name") or "").strip(),
-            created_by=_actor_id(context, args.get("created_by")),
+            created_by=derived_actor,
             blocks=[str(item).strip() for item in args.get("blocks", []) if str(item).strip()] if isinstance(args.get("blocks"), list) else None,
             blocked_by=[str(item).strip() for item in args.get("blocked_by", []) if str(item).strip()] if isinstance(args.get("blocked_by"), list) else None,
         )
@@ -566,7 +675,7 @@ class TaskCreateTool(BaseTool):
         )
 
 
-class TaskListTool(BaseTool):
+class TaskListTool(_AgentCoordinationTool):
     name = "task_list"
     description = "List shared swarm tasks, optionally filtered by assignee, status, or team."
     permission = PermissionLevel.AUTO
@@ -596,7 +705,9 @@ class TaskListTool(BaseTool):
         limit = int(args.get("limit") or 50)
         tasks = [
             task.to_dict()
-            for task in _runtime(context).list_swarm_tasks(
+            for task in await _runtime_call(
+                _runtime(context),
+                "list_swarm_tasks",
                 assignee=str(args.get("assignee") or "").strip(),
                 status=str(args.get("status") or "").strip(),
                 team_name=str(args.get("team_name") or "").strip(),
@@ -611,7 +722,7 @@ class TaskListTool(BaseTool):
         )
 
 
-class TaskGetTool(BaseTool):
+class TaskGetTool(_AgentCoordinationTool):
     name = "task_get"
     description = "Read one shared swarm task, including any attached outputs."
     permission = PermissionLevel.AUTO
@@ -635,7 +746,12 @@ class TaskGetTool(BaseTool):
         task_id = str(args.get("task_id") or "").strip()
         if not task_id:
             return self._error_result("Missing task_id argument")
-        task = _runtime(context).get_swarm_task(task_id)
+        task = await _runtime_call(
+            _runtime(context),
+            "get_swarm_task",
+            task_id,
+            conversation_id=_conversation_id(context),
+        )
         if task is None:
             return self._error_result(f"Shared swarm task not found: {task_id}")
         data = task.to_dict()
@@ -659,7 +775,7 @@ class TaskGetTool(BaseTool):
         return ToolResult(content="\n".join(lines), result_kind="subagent")
 
 
-class TaskUpdateTool(BaseTool):
+class TaskUpdateTool(_AgentCoordinationTool):
     name = "task_update"
     description = "Update a shared swarm task's status, assignee, priority, title, or description."
     permission = PermissionLevel.AUTO
@@ -705,7 +821,13 @@ class TaskUpdateTool(BaseTool):
         }
         if not patch:
             return self._error_result("No task fields provided to update")
-        task = _runtime(context).update_swarm_task(task_id, patch)
+        task = await _runtime_call(
+            _runtime(context),
+            "update_swarm_task",
+            task_id,
+            patch,
+            conversation_id=_conversation_id(context),
+        )
         if task is None:
             return self._error_result(f"Shared swarm task not found: {task_id}")
         payload = task.to_dict()
@@ -721,7 +843,7 @@ class TaskUpdateTool(BaseTool):
         )
 
 
-class TaskOutputTool(BaseTool):
+class TaskOutputTool(_AgentCoordinationTool):
     name = "task_output"
     description = "Attach an output, finding, or handoff note to a shared swarm task."
     permission = PermissionLevel.AUTO
@@ -754,17 +876,33 @@ class TaskOutputTool(BaseTool):
             return self._error_result("Missing task_id argument")
         if not content:
             return self._error_result("Missing content argument")
+        derived_actor = _actor_id(context)
+        explicit_actor = str(args.get("author") or "").strip()
+        if explicit_actor and explicit_actor != derived_actor:
+            return self._error_result("author must match the current task identity")
         runtime = _runtime(context)
-        task = runtime.append_swarm_task_output(
+        task = await _runtime_call(
+            runtime,
+            "append_swarm_task_output",
             task_id,
-            author_id=_actor_id(context, args.get("author")),
+            author_id=derived_actor,
             content=content,
+            conversation_id=_conversation_id(context),
         )
         if task is None:
             return self._error_result(f"Shared swarm task not found: {task_id}")
         raw_status = str(args.get("status") or "").strip()
         if raw_status:
-            task = runtime.update_swarm_task(task_id, {"status": raw_status}) or task
+            task = (
+                await _runtime_call(
+                    runtime,
+                    "update_swarm_task",
+                    task_id,
+                    {"status": raw_status},
+                    conversation_id=_conversation_id(context),
+                )
+                or task
+            )
         payload = task.to_dict()
         await _emit_swarm_event(
             context,

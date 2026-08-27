@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from backend.agent.message import AgentEvent
+from backend.config import get_config_requirements
+from backend.config_requirements import RequirementViolation
 from backend.ws.utils import normalize_permission_mode
 
 
@@ -32,7 +34,22 @@ def plan_permission_mode_update(
             conversation_id="",
             session_only=False,
             error_event=AgentEvent.error(
-                "Invalid permission mode. Use confirm|auto|bypass. Legacy modes still accepted: default|plan|accept_edits",
+                "Invalid permission mode. Use one of: plan, confirm, auto, bypass.",
+                recoverable=True,
+                error_type="tool",
+            ),
+        )
+
+    try:
+        get_config_requirements().ensure_permission_mode(requested)
+    except RequirementViolation as exc:
+        return PermissionModePlan(
+            requested=requested,
+            source=source,
+            conversation_id="",
+            session_only=False,
+            error_event=AgentEvent.error(
+                str(exc),
                 recoverable=True,
                 error_type="tool",
             ),

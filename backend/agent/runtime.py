@@ -9,18 +9,29 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Iterable, Literal
 from uuid import uuid4
 
+from backend.async_cleanup import (
+    CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+    cancel_and_drain,
+    cancel_and_drain_to_completion,
+)
 from backend.config import DATA_ROOT, TokenBudget
-from backend.agent.execution_journal import ExecutionJournal, load_agent_transcript
+from backend.agent.execution_journal import (
+    ExecutionJournal,
+    delete_agent_journal,
+    load_agent_transcript,
+)
 from backend.agent.parent_notification_outbox import (
     ParentNotification,
     ParentNotificationOutbox,
@@ -29,11 +40,51 @@ from backend.agent.parent_notification_outbox import (
 )
 from backend.agent.agent_identity import AgentPath, MailboxEpoch
 from backend.agent.agent_registry import AgentRegistry
-from backend.agent.swarm_store import FileSwarmStore
+from backend.agent.public_projection import (
+    project_public_agent_run,
+    project_public_metric_payload,
+    project_public_subagent_result,
+    project_public_subagent_run,
+    project_public_swarm_message,
+    project_public_swarm_task,
+    project_public_swarm_task_output,
+    project_public_swarm_team,
+    project_public_swarm_team_member,
+    project_public_usage,
+)
+from backend.agent.swarm_store import FileSwarmStore, MAILBOX_MESSAGE_LEASE_MS
+from backend.runtime_paths import agent_runtime_root
+
+logger = logging.getLogger(__name__)
+
+# Metrics are an observational JSONL feed. Durable run/subagent authority is
+# committed in the swarm SQLite store before these rows are emitted, so the
+# telemetry path must not put a synchronous fsync on every lifecycle callback.
+# The process-local lock removes duplicate work inside one runtime. The
+# complete batch is emitted with one O_APPEND write, so a late callback from an
+# expired owner cannot splice half a JSONL record into the replacement runtime's
+# observation stream. A lost metric never changes run authority and is reported
+# through ``metric_persistence`` when it is observable.
+_METRIC_APPEND_LOCK = threading.RLock()
 
 AgentRunStatus = Literal["running", "completed", "partial", "failed", "cancelled", "interrupted"]
 AgentRunPhase = Literal["plan", "execute", "recover", "final"]
 SwarmTaskStatus = Literal["pending", "in_progress", "blocked", "completed", "cancelled"]
+
+
+class TerminalCommitError(RuntimeError):
+    """Raised when a run terminal cannot be durably committed.
+
+    A terminal candidate is never authoritative until the owner/lease fence and
+    the durable CAS both accept it.  Keeping this error distinct from ordinary
+    provider/runtime failures lets the canonical lifecycle surface an explicit
+    ``terminal_commit_failed`` fact instead of emitting a false success.
+    """
+
+    def __init__(self, run_id: str, failure_kind: str, message: str) -> None:
+        self.run_id = str(run_id or "")
+        self.failure_kind = str(failure_kind or "persistence_failed")
+        super().__init__(message)
 
 # ---------------------------------------------------------------------------
 # Explicit four-type Agent taxonomy (plan §11.2)
@@ -43,8 +94,8 @@ AgentRole = Literal["primary", "subagent", "side_query", "background"]
 
 AGENT_ROLES: frozenset[str] = frozenset({"primary", "subagent", "side_query", "background"})
 
-# Pi's reference subagent extension executes four independent workers in
-# parallel. Lifetime is governed by the persisted run and cancellation records;
+# MiniCode executes up to four independent bounded workers in parallel.
+# Lifetime is governed by persisted run and cancellation records;
 # there is no cumulative per-session delegation quota.
 MAX_CONCURRENT_SUBAGENTS = 4
 
@@ -181,15 +232,24 @@ class AgentRunRecord:
     task_id: str = ""
     session_id: str = ""
     summary: str = ""
+    terminal_reason: str = ""
     error: str = ""
     runtime_instance_id: str = ""
     runtime_process_id: int = 0
     runtime_process_start_identity: str = ""
     runtime_owner_token: str = ""
     agent_path: str = ""
+    mailbox_epoch: int = 0
+    cleanup_pending: bool = False
+    cleanup_reason: str = ""
+    cleanup_requested_at: int | None = None
+    cleanup_completed_at: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def public_dict(self) -> dict[str, Any]:
+        return project_public_agent_run(asdict(self))
 
     def with_phase(self, phase: AgentRunPhase, *, summary: str = "") -> "AgentRunRecord":
         self.phase = phase
@@ -197,12 +257,21 @@ class AgentRunRecord:
             self.summary = summary
         return self
 
-    def complete(self, status: AgentRunStatus = "completed", *, summary: str = "", error: str = "") -> "AgentRunRecord":
+    def complete(
+        self,
+        status: AgentRunStatus = "completed",
+        *,
+        summary: str = "",
+        terminal_reason: str = "",
+        error: str = "",
+    ) -> "AgentRunRecord":
         self.status = status
         self.phase = "final"
         self.completed_at = epoch_ms()
         if summary:
             self.summary = summary
+        if terminal_reason:
+            self.terminal_reason = terminal_reason
         if error:
             self.error = error
         return self
@@ -218,6 +287,7 @@ class SubagentRunRecord:
     prompt_summary: str = ""
     background: bool = False
     task_id: str = ""
+    session_id: str = ""
     objective: str = ""
     depends_on: list[str] = field(default_factory=list)
     blocked_by: list[str] = field(default_factory=list)
@@ -225,6 +295,7 @@ class SubagentRunRecord:
     detach_from_parent: bool = False
     read_only: bool = False
     write_scope: list[str] = field(default_factory=list)
+    resume_config: dict[str, Any] = field(default_factory=dict)
     current_activity: str = ""
     status: AgentRunStatus = "running"
     tool_count: int = 0
@@ -232,15 +303,33 @@ class SubagentRunRecord:
     checkpoint_id: str = ""
     started_at: int = field(default_factory=epoch_ms)
     completed_at: int | None = None
+    cleanup_pending: bool = False
+    cleanup_reason: str = ""
+    cleanup_requested_at: int | None = None
+    cleanup_completed_at: int | None = None
+    cleanup_resources: list[dict[str, Any]] = field(default_factory=list)
     runtime_instance_id: str = ""
     runtime_process_id: int = 0
     runtime_process_start_identity: str = ""
     runtime_owner_token: str = ""
     agent_path: str = ""
     mailbox_epoch: int = 0
+    # Named teammate identity/lifecycle fields. Ordinary bounded subagents leave
+    # these empty/false; named teammates persist them with the same
+    # durable incarnation record used for mailbox fencing.
+    teammate_name: str = ""
+    team_name: str = ""
+    permission_mode: str = "confirm"
+    plan_mode_required: bool = False
+    awaiting_plan_approval: bool = False
+    active_plan_request_id: str = ""
+    is_idle: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def public_dict(self) -> dict[str, Any]:
+        return project_public_subagent_run(asdict(self))
 
     def complete(self, status: AgentRunStatus = "completed", *, summary: str = "", tool_count: int = 0) -> "SubagentRunRecord":
         self.status = status
@@ -269,6 +358,11 @@ class SubagentResultRecord:
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
+    # Preserve the provider-neutral usage envelope for dialect result codecs.
+    # The scalar totals above remain the durable/query-friendly compatibility
+    # fields; this mapping carries cache, server-tool, service-tier and other
+    # public usage details without forcing every provider into one schema.
+    usage: dict[str, Any] = field(default_factory=dict)
     artifact_id: str = ""
     agent_path: str = ""
     mailbox_epoch: int = 0
@@ -277,6 +371,12 @@ class SubagentResultRecord:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def public_dict(self, *, content_override: Any | None = None) -> dict[str, Any]:
+        return project_public_subagent_result(
+            asdict(self),
+            content_override=content_override,
+        )
 
 
 @dataclass
@@ -296,6 +396,9 @@ class SwarmMessageRecord:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def public_dict(self) -> dict[str, Any]:
+        return project_public_swarm_message(asdict(self))
 
 
 @dataclass(frozen=True)
@@ -326,6 +429,9 @@ class SwarmTaskOutputRecord:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    def public_dict(self) -> dict[str, Any]:
+        return project_public_swarm_task_output(asdict(self))
+
 
 @dataclass
 class SwarmTaskRecord:
@@ -355,6 +461,11 @@ class SwarmTaskRecord:
         data = asdict(self)
         data["outputs"] = [output.to_dict() for output in self.outputs]
         return data
+
+    def public_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["outputs"] = [output.public_dict() for output in self.outputs]
+        return project_public_swarm_task(data)
 
     def update(self, patch: dict[str, Any]) -> None:
         for key in (
@@ -391,6 +502,9 @@ class SwarmTeamMemberRecord:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    def public_dict(self) -> dict[str, Any]:
+        return project_public_swarm_team_member(asdict(self))
+
 
 @dataclass
 class SwarmTeamRecord:
@@ -406,10 +520,26 @@ class SwarmTeamRecord:
     deleted_at: int | None = None
     deleted_seq: int = 0
 
+    @property
+    def lead_agent_id(self) -> str:
+        return f"team-lead@{self.team_name}"
+
+    @property
+    def team_file_path(self) -> str:
+        # MiniCode's durable team store is the swarm SQLite database, so report
+        # that real path
+        # instead of an invented swarm:// URI.
+        return str(SWARM_DIR / "swarm.sqlite3")
+
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["members"] = [member.to_dict() for member in self.members]
         return data
+
+    def public_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["members"] = [member.public_dict() for member in self.members]
+        return project_public_swarm_team(data)
 
 
 @dataclass
@@ -522,6 +652,7 @@ def _subagent_from_dict(data: dict[str, Any]) -> SubagentRunRecord:
         prompt_summary=str(data.get("prompt_summary") or ""),
         background=bool(data.get("background", False)),
         task_id=str(data.get("task_id") or ""),
+        session_id=str(data.get("session_id") or ""),
         objective=str(data.get("objective") or ""),
         depends_on=_string_list(data.get("depends_on")),
         blocked_by=_string_list(data.get("blocked_by")),
@@ -534,6 +665,18 @@ def _subagent_from_dict(data: dict[str, Any]) -> SubagentRunRecord:
         detach_from_parent=bool(data.get("detach_from_parent", False)),
         read_only=bool(data.get("read_only", False)),
         write_scope=_string_list(data.get("write_scope")),
+        resume_config=(
+            dict(data.get("resume_config") or {})
+            if isinstance(data.get("resume_config"), dict)
+            else {}
+        ),
+        # Durable round-trips must retain teammate and permission lifecycle fields.
+        teammate_name=str(data.get("teammate_name") or ""),
+        team_name=str(data.get("team_name") or ""),
+        permission_mode=str(data.get("permission_mode") or ""),
+        plan_mode_required=bool(data.get("plan_mode_required", False)),
+        awaiting_plan_approval=bool(data.get("awaiting_plan_approval", False)),
+        active_plan_request_id=str(data.get("active_plan_request_id") or ""),
         current_activity=str(data.get("current_activity") or ""),
         status=str(data.get("status") or "running"),  # type: ignore[arg-type]
         tool_count=int(data.get("tool_count") or 0),
@@ -541,6 +684,23 @@ def _subagent_from_dict(data: dict[str, Any]) -> SubagentRunRecord:
         checkpoint_id=str(data.get("checkpoint_id") or ""),
         started_at=int(data.get("started_at") or epoch_ms()),
         completed_at=data.get("completed_at") if isinstance(data.get("completed_at"), int) else None,
+        cleanup_pending=bool(data.get("cleanup_pending", False)),
+        cleanup_reason=str(data.get("cleanup_reason") or ""),
+        cleanup_requested_at=(
+            data.get("cleanup_requested_at")
+            if isinstance(data.get("cleanup_requested_at"), int)
+            else None
+        ),
+        cleanup_completed_at=(
+            data.get("cleanup_completed_at")
+            if isinstance(data.get("cleanup_completed_at"), int)
+            else None
+        ),
+        cleanup_resources=[
+            dict(item)
+            for item in data.get("cleanup_resources", [])
+            if isinstance(item, dict)
+        ],
         runtime_instance_id=str(data.get("runtime_instance_id") or ""),
         runtime_process_id=int(data.get("runtime_process_id") or 0),
         runtime_process_start_identity=str(data.get("runtime_process_start_identity") or ""),
@@ -551,14 +711,38 @@ def _subagent_from_dict(data: dict[str, Any]) -> SubagentRunRecord:
 
 
 def _agent_run_from_dict(data: dict[str, Any]) -> AgentRunRecord:
-    phase = str(data.get("phase") or "plan")
+    raw_phase = data.get("phase")
+    phase = str(raw_phase or "plan")
+    invalid_phase = False
     if phase == "verify":
         phase = "execute"
     elif phase not in {"plan", "execute", "recover", "final"}:
-        phase = "plan"
-    status = str(data.get("status") or "running")
-    if status not in {"running", "completed", "partial", "failed", "cancelled", "interrupted"}:
-        status = "running"
+        invalid_phase = raw_phase is not None
+        phase = "final" if invalid_phase else "plan"
+    raw_status = data.get("status")
+    status = str(raw_status or "running")
+    invalid_status = raw_status is not None and status not in {
+        "running", "completed", "partial", "failed", "cancelled", "interrupted"
+    }
+    if invalid_status or invalid_phase:
+        # A present-but-invalid durable status is corruption, not evidence of
+        # a live task. Fail closed so restore cannot resurrect malformed data.
+        status = "interrupted"
+        phase = "final"
+    completed_at = data.get("completed_at") if isinstance(data.get("completed_at"), int) else None
+    if invalid_status and completed_at is None:
+        completed_at = epoch_ms()
+    terminal_reason = str(data.get("terminal_reason") or "")
+    error = str(data.get("error") or "")
+    if invalid_status or invalid_phase:
+        terminal_reason = terminal_reason or (
+            "invalid_persisted_status" if invalid_status else "invalid_persisted_phase"
+        )
+        error = error or (
+            f"invalid persisted run status: {raw_status!r}"
+            if invalid_status
+            else f"invalid persisted run phase: {raw_phase!r}"
+        )
     return AgentRunRecord(
         run_id=str(data.get("run_id") or ""),
         conversation_id=str(data.get("conversation_id") or ""),
@@ -568,16 +752,30 @@ def _agent_run_from_dict(data: dict[str, Any]) -> AgentRunRecord:
         status=status,  # type: ignore[arg-type]
         budget=dict(data.get("budget") or {}),
         started_at=int(data.get("started_at") or epoch_ms()),
-        completed_at=data.get("completed_at") if isinstance(data.get("completed_at"), int) else None,
+        completed_at=completed_at,
         task_id=str(data.get("task_id") or ""),
         session_id=str(data.get("session_id") or ""),
         summary=str(data.get("summary") or ""),
-        error=str(data.get("error") or ""),
+        terminal_reason=terminal_reason,
+        error=error,
         runtime_instance_id=str(data.get("runtime_instance_id") or ""),
         runtime_process_id=int(data.get("runtime_process_id") or 0),
         runtime_process_start_identity=str(data.get("runtime_process_start_identity") or ""),
         runtime_owner_token=str(data.get("runtime_owner_token") or ""),
         agent_path=str(data.get("agent_path") or ""),
+        mailbox_epoch=int(data.get("mailbox_epoch") or 0),
+        cleanup_pending=bool(data.get("cleanup_pending", False)),
+        cleanup_reason=str(data.get("cleanup_reason") or ""),
+        cleanup_requested_at=(
+            data.get("cleanup_requested_at")
+            if isinstance(data.get("cleanup_requested_at"), int)
+            else None
+        ),
+        cleanup_completed_at=(
+            data.get("cleanup_completed_at")
+            if isinstance(data.get("cleanup_completed_at"), int)
+            else None
+        ),
     )
 
 
@@ -598,6 +796,11 @@ def _subagent_result_from_dict(data: dict[str, Any]) -> SubagentResultRecord:
         input_tokens=int(data.get("input_tokens") or 0),
         output_tokens=int(data.get("output_tokens") or 0),
         total_tokens=int(data.get("total_tokens") or 0),
+        usage=(
+            dict(data.get("usage") or {})
+            if isinstance(data.get("usage"), dict)
+            else {}
+        ),
         artifact_id=str(data.get("artifact_id") or ""),
         agent_path=str(data.get("agent_path") or ""),
         mailbox_epoch=max(0, int(data.get("mailbox_epoch") or 0)),
@@ -652,6 +855,13 @@ class AgentRuntime:
         enable_lease_heartbeat: bool | None = None,
     ) -> None:
         self._metrics_file = metrics_file or METRICS_FILE
+        self._metric_write_failures: deque[dict[str, Any]] = deque(maxlen=64)
+        # Metric appends are one locked O_APPEND write each. Reconciliation can
+        # emit a thousand of them in a burst, so batching collapses that into a
+        # single append instead of paying lock/open/write/close per record.
+        self._metric_batch: list[dict[str, Any]] | None = None
+        self._metric_batch_depth = 0
+        self._metric_batch_guard = threading.Lock()
         self._runtime_instance_id = runtime_instance_id or _RUNTIME_INSTANCE_ID
         self._runtime_process_id = runtime_process_id or os.getpid()
         self._runtime_process_start_identity = (
@@ -665,6 +875,11 @@ class AgentRuntime:
         self._lease_thread: threading.Thread | None = None
         store_dir = swarm_store_dir or ((metrics_file.parent / "swarm") if metrics_file is not None else SWARM_DIR)
         self._swarm_store = FileSwarmStore(store_dir)
+        self._runtime_state_root = (
+            store_dir.parent
+            if metrics_file is not None or swarm_store_dir is not None
+            else agent_runtime_root()
+        )
         lease = self._swarm_store.claim_runtime_lease(
             runtime_instance_id=self._runtime_instance_id,
             requested_owner_token=runtime_owner_token or uuid4().hex,
@@ -684,6 +899,8 @@ class AgentRuntime:
         # isolated runtime fixtures and production share the same root layout.
         self._journal_root = store_dir.parent / "sidechains"
         self._outbox_root = store_dir.parent / "parent_notifications"
+        self._execution_journal_lock = threading.Lock()
+        self._execution_journals: dict[str, ExecutionJournal] = {}
         self._runs: dict[str, AgentRunRecord] = {}
         self._subagents: dict[str, SubagentRunRecord] = {}
         self._registry = AgentRegistry()
@@ -693,6 +910,16 @@ class AgentRuntime:
         self._subagent_capacity_waiters: set[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = set()
         self._subagent_cancel_events: dict[str, asyncio.Event] = {}
         self._subagent_completion_events: dict[str, asyncio.Event] = {}
+        # One provider-neutral activity feed powers every wait and lifecycle
+        # projection. Waiters receive only bounded
+        # metadata (kind/ids/sequence), never mailbox contents or provider raw
+        # payloads.
+        self._agent_activity_lock = threading.Lock()
+        self._agent_activity_seq = 0
+        self._agent_activity_log: deque[dict[str, Any]] = deque(maxlen=2048)
+        self._agent_activity_waiters: set[
+            tuple[asyncio.AbstractEventLoop, asyncio.Event]
+        ] = set()
         self._subagent_parent_run_ids: dict[str, str] = {}
         # A task/session ownership fence is retained even when an embedder did
         # not provide a parent run id. Explicit user cancellation and session
@@ -700,8 +927,7 @@ class AgentRuntime:
         self._subagent_owner_task_ids: dict[str, str] = {}
         self._subagent_session_ids: dict[str, str] = {}
         self._subagent_results: dict[str, SubagentResultRecord] = {}
-        # name -> subagent_id registry for by-name addressing (SendMessage).
-        # Latest-wins, mirroring cc's agentNameRegistry.
+        # name -> subagent_id registry for by-name addressing. Latest wins.
         self._subagent_name_registry: dict[str, str] = {}
         self._swarm_messages: dict[str, SwarmMessageRecord] = {}
         self._swarm_tasks: dict[str, SwarmTaskRecord] = {}
@@ -765,6 +991,7 @@ class AgentRuntime:
                     agent_path=record.agent_path,
                     mailbox_epoch=record.mailbox_epoch,
                 )
+        self._reconcile_recovered_cleanup(active_owner_tokens=active_owner_tokens)
         heartbeat_enabled = (
             metrics_file is None and swarm_store_dir is None
             if enable_lease_heartbeat is None
@@ -772,6 +999,64 @@ class AgentRuntime:
         )
         if heartbeat_enabled:
             self._start_lease_heartbeat()
+
+    def _reconcile_recovered_cleanup(
+        self,
+        *,
+        active_owner_tokens: set[str],
+    ) -> None:
+        """Take over dead-owner cleanup intents, then reconcile resources."""
+
+        with self.batched_metrics():
+            self._reconcile_recovered_cleanup_locked(
+                active_owner_tokens=active_owner_tokens
+            )
+
+    def _reconcile_recovered_cleanup_locked(
+        self,
+        *,
+        active_owner_tokens: set[str],
+    ) -> None:
+        active_owners = {
+            str(owner or "").strip() for owner in active_owner_tokens if str(owner or "").strip()
+        }
+
+        def may_reconcile(owner_token: str) -> bool:
+            owner = str(owner_token or "").strip()
+            return owner == self._runtime_owner_token or owner not in active_owners
+
+        for kind, records in (("run", self._runs), ("subagent", self._subagents)):
+            for record_id, record in list(records.items()):
+                if not record.cleanup_pending or not may_reconcile(record.runtime_owner_token):
+                    continue
+                previous_owner = str(record.runtime_owner_token or "").strip()
+                if previous_owner == self._runtime_owner_token:
+                    continue
+                candidate = replace(
+                    record,
+                    runtime_instance_id=self._runtime_instance_id,
+                    runtime_process_id=self._runtime_process_id,
+                    runtime_process_start_identity=self._runtime_process_start_identity,
+                    runtime_owner_token=self._runtime_owner_token,
+                )
+                if kind == "run":
+                    persisted = self._swarm_store.upsert_agent_run(
+                        candidate.to_dict(),
+                        expected_owner_token=previous_owner,
+                        allow_takeover_terminal=True,
+                    )
+                else:
+                    persisted = self._swarm_store.upsert_subagent(
+                        candidate.to_dict(),
+                        expected_owner_token=previous_owner,
+                        allow_takeover_terminal=True,
+                    )
+                if persisted is None:
+                    logger.warning("Cleanup ownership takeover lost the %s fence for %s", kind, record_id)
+                    continue
+                records[record_id] = candidate
+
+        self._reconcile_recovered_cleanup_resources()
 
     def _refresh_runtime_lease(self) -> bool:
         if self._lease_lost:
@@ -810,6 +1095,7 @@ class AgentRuntime:
                     # A transient SQLite error must not terminate the loop. If
                     # the lease truly expires, a later owner claim changes the
                     # token and the next successful heartbeat is fenced out.
+                    logger.warning("Agent runtime lease heartbeat failed", exc_info=True)
                     continue
 
         self._lease_thread = threading.Thread(
@@ -852,6 +1138,36 @@ class AgentRuntime:
             and record.runtime_owner_token == self._runtime_owner_token
         )
 
+    def _parent_agent_path(self, parent_run_id: str) -> AgentPath:
+        clean_parent_id = str(parent_run_id or "").strip()
+        parent_record = (
+            self._runs.get(clean_parent_id)
+            or self._subagents.get(clean_parent_id)
+        )
+        if parent_record is not None and parent_record.agent_path:
+            return AgentPath.parse(parent_record.agent_path)
+        return AgentPath.main(clean_parent_id or "main")
+
+    def _agent_path_owner(
+        self,
+        agent_path: str,
+        *,
+        excluding_subagent_id: str = "",
+    ) -> str:
+        candidate = str(agent_path or "").strip()
+        excluded = str(excluding_subagent_id or "").strip()
+        if not candidate:
+            return ""
+        for record in self._subagents.values():
+            if record.subagent_id != excluded and str(record.agent_path or "") == candidate:
+                return record.subagent_id
+        for subagent_id, metadata in self._subagent_task_metadata.items():
+            if subagent_id == excluded or not isinstance(metadata, dict):
+                continue
+            if str(metadata.get("agent_path") or "") == candidate:
+                return subagent_id
+        return ""
+
     def start_run(
         self,
         *,
@@ -862,10 +1178,26 @@ class AgentRuntime:
         session_id: str = "",
         budget: TokenBudget | None = None,
         run_id: str | None = None,
+        mailbox_epoch: int = 0,
     ) -> AgentRunRecord:
         if not self._refresh_runtime_lease():
             raise RuntimeError("Agent runtime lease was lost; refusing to start a new run.")
         resolved_run_id = run_id or new_run_id()
+        existing = self._runs.get(resolved_run_id)
+        if existing is not None and existing.status == "running":
+            if (
+                existing.runtime_owner_token == self._runtime_owner_token
+                and str(existing.parent_run_id or "") == str(parent_run_id or "")
+                and str(existing.role or "") == str(role or "")
+                and str(existing.task_id or "") == str(task_id or "")
+                and str(existing.session_id or "") == str(session_id or "")
+                and int(existing.mailbox_epoch or 0) == max(0, int(mailbox_epoch or 0))
+            ):
+                # Admission may create the durable record before provider and
+                # extension setup. QueryEngine reuses that exact owner instead
+                # of creating a competing run for the same scheduled turn.
+                return existing
+            raise RuntimeError(f"Agent run {resolved_run_id} is already running.")
         parent = self._runs.get(str(parent_run_id or "").strip())
         parent_path = AgentPath.parse(parent.agent_path) if parent and parent.agent_path else None
         record = AgentRunRecord(
@@ -885,6 +1217,7 @@ class AgentRuntime:
                 if parent_path and role != "main"
                 else AgentPath.main(resolved_run_id).value
             ),
+            mailbox_epoch=max(0, int(mailbox_epoch or 0)),
         )
         persisted = self._swarm_store.upsert_agent_run(
             record.to_dict(),
@@ -921,26 +1254,118 @@ class AgentRuntime:
         self.write_metric("phase_updated", candidate.to_dict())
         return candidate
 
-    def complete_run(self, run_id: str, status: AgentRunStatus = "completed", *, summary: str = "", error: str = "") -> AgentRunRecord | None:
+    def complete_run(
+        self,
+        run_id: str,
+        status: AgentRunStatus = "completed",
+        *,
+        summary: str = "",
+        terminal_reason: str = "",
+        error: str = "",
+    ) -> AgentRunRecord | None:
+        try:
+            return self.commit_terminal(
+                run_id,
+                status,
+                summary=summary,
+                terminal_reason=terminal_reason,
+                error=error,
+            )
+        except TerminalCommitError as exc:
+            # A failed terminal commit is durable evidence, never a silent
+            # None: callers must be able to tell "already sealed" from
+            # "persistence rejected the commit".
+            logger.error(
+                "complete_run(%s, %s) failed: %s",
+                run_id,
+                status,
+                exc,
+            )
+            self.write_metric(
+                "terminal_commit_failed",
+                {
+                    "run_id": run_id,
+                    "status": status,
+                    "reason": getattr(exc, "reason", "") or "terminal_commit_error",
+                    "detail": str(exc),
+                },
+            )
+            return None
+
+    def commit_terminal(
+        self,
+        run_id: str,
+        status: AgentRunStatus = "completed",
+        *,
+        summary: str = "",
+        terminal_reason: str = "",
+        error: str = "",
+    ) -> AgentRunRecord:
+        """Commit a terminal record or raise without mutating local state.
+
+        This is the canonical terminal boundary.  ``complete_run`` remains a
+        compatibility method for callers that historically accepted ``None``;
+        lifecycle owners must use this strict API so a lost lease/CAS cannot be
+        mistaken for a durable completion.
+        """
         record = self._runs.get(run_id)
         if record is None:
-            return None
+            raise TerminalCommitError(
+                run_id,
+                "missing_run",
+                f"Cannot commit terminal for unknown run {run_id!r}",
+            )
         registration = self._registry.get(run_id, kind="run")
         if registration is not None and registration.sealed:
-            return record
-        candidate = replace(record).complete(status, summary=summary, error=error)
-        if not self._owns_record(record) or not self._refresh_runtime_lease():
-            self._runs[run_id] = candidate
-            self._registry.seal(run_id, kind="run")
-            return candidate
-        if self._swarm_store.upsert_agent_run(
-            candidate.to_dict(),
-            expected_owner_token=self._runtime_owner_token,
-        ) is None:
+            if record.status != "running":
+                return record
+            raise TerminalCommitError(
+                run_id,
+                "already_sealed",
+                f"Run {run_id!r} is sealed before terminal commit",
+            )
+        try:
+            owns_record = self._owns_record(record)
+            lease_ok = self._refresh_runtime_lease()
+        except Exception as exc:
             self._lease_lost = True
-            self._runs[run_id] = candidate
-            self._registry.seal(run_id, kind="run")
-            return candidate
+            raise TerminalCommitError(
+                run_id,
+                "lease_check_failed",
+                f"Could not verify runtime lease for {run_id!r}",
+            ) from exc
+        if not owns_record or not lease_ok:
+            self._lease_lost = True
+            raise TerminalCommitError(
+                run_id,
+                "lease_lost",
+                f"Runtime lease lost while committing terminal for {run_id!r}",
+            )
+        candidate = replace(record).complete(
+            status,
+            summary=summary,
+            terminal_reason=terminal_reason,
+            error=error,
+        )
+        try:
+            persisted = self._swarm_store.upsert_agent_run(
+                candidate.to_dict(),
+                expected_owner_token=self._runtime_owner_token,
+            )
+        except Exception as exc:
+            self._lease_lost = True
+            raise TerminalCommitError(
+                run_id,
+                "persistence_error",
+                f"Durable terminal write failed for {run_id!r}",
+            ) from exc
+        if persisted is None:
+            self._lease_lost = True
+            raise TerminalCommitError(
+                run_id,
+                "cas_rejected",
+                f"Durable terminal CAS rejected for {run_id!r}",
+            )
         self._runs[run_id] = candidate
         self._registry.seal(run_id, kind="run")
         self.write_metric("run_completed", candidate.to_dict())
@@ -955,6 +1380,7 @@ class AgentRuntime:
         prompt_summary: str = "",
         background: bool = False,
         task_id: str = "",
+        session_id: str = "",
         objective: str = "",
         depends_on: list[str] | None = None,
         blocked_by: list[str] | None = None,
@@ -962,21 +1388,43 @@ class AgentRuntime:
         detach_from_parent: bool | None = None,
         read_only: bool = False,
         write_scope: list[str] | None = None,
+        resume_config: dict[str, Any] | None = None,
         current_activity: str = "",
+        teammate_name: str = "",
+        team_name: str = "",
+        permission_mode: str = "confirm",
+        plan_mode_required: bool = False,
+        agent_path_segment: str = "",
     ) -> SubagentRunRecord:
         if not self._refresh_runtime_lease():
             raise RuntimeError("Agent runtime lease was lost; refusing to start a subagent.")
         existing = self._subagents.get(subagent_id)
+        if existing is None:
+            persisted_existing = self._swarm_store.get_subagent(subagent_id)
+            if persisted_existing is not None:
+                existing = _subagent_from_dict(persisted_existing)
         if existing is not None and existing.status == "running":
             raise RuntimeError(f"Subagent {subagent_id} is already running.")
         if subagent_id in self._subagent_slot_reservations:
             self._subagent_slot_reservations.discard(subagent_id)
         elif existing is None or existing.status != "running":
-            active = sum(1 for item in self._subagents.values() if item.status == "running")
-            if active + len(self._subagent_slot_reservations) >= MAX_CONCURRENT_SUBAGENTS:
-                raise RuntimeError(
-                    f"Maximum concurrent subagents reached ({MAX_CONCURRENT_SUBAGENTS})."
+            if not teammate_name:
+                # Bounded workers share the global capacity; named teammates
+                # have a separate lifecycle and no bounded-worker ceiling.
+                active = sum(
+                    1
+                    for item in self._subagents.values()
+                    if item.status == "running" and not item.teammate_name
                 )
+                reserved = sum(
+                    1
+                    for subagent_id in self._subagent_slot_reservations
+                    if not (self._subagents.get(subagent_id) and self._subagents[subagent_id].teammate_name)
+                )
+                if active + reserved >= MAX_CONCURRENT_SUBAGENTS:
+                    raise RuntimeError(
+                        f"Maximum concurrent subagents reached ({MAX_CONCURRENT_SUBAGENTS})."
+                    )
         # Explicit background workers use an unlinked cancellation owner by
         # default. Foreground workers remain linked to the parent.
         if detach_from_parent is None and cancel_with_parent is None:
@@ -994,9 +1442,24 @@ class AgentRuntime:
             detach = not cancel_linked
         if detach:
             cancel_linked = False
-        parent_record = self._runs.get(str(parent_run_id or "").strip())
-        parent_path = AgentPath.parse(parent_record.agent_path) if parent_record and parent_record.agent_path else AgentPath.main(parent_run_id or "main")
+        clean_parent_run_id = str(parent_run_id or "").strip()
+        # A hierarchical child can itself be the parent of another child. Run
+        # and subagent records share this one canonical path resolver.
+        parent_path = self._parent_agent_path(clean_parent_run_id)
         previous_epoch = int(existing.mailbox_epoch) if existing is not None else 0
+        candidate_agent_path = (
+            existing.agent_path
+            if existing and existing.agent_path
+            else parent_path.child(agent_path_segment or subagent_id).value
+        )
+        path_owner = self._agent_path_owner(
+            candidate_agent_path,
+            excluding_subagent_id=subagent_id,
+        )
+        if path_owner:
+            raise RuntimeError(
+                f"Agent path {candidate_agent_path!r} is already owned by {path_owner}."
+            )
         record = SubagentRunRecord(
             subagent_id=subagent_id,
             parent_run_id=parent_run_id,
@@ -1004,6 +1467,7 @@ class AgentRuntime:
             prompt_summary=prompt_summary,
             background=background,
             task_id=task_id,
+            session_id=str(session_id or "").strip(),
             objective=objective,
             depends_on=depends_on or [],
             blocked_by=blocked_by or [],
@@ -1011,6 +1475,7 @@ class AgentRuntime:
             detach_from_parent=detach,
             read_only=read_only,
             write_scope=write_scope or [],
+            resume_config=dict(resume_config or {}),
             current_activity=current_activity,
             runtime_instance_id=self._runtime_instance_id,
             runtime_process_id=self._runtime_process_id,
@@ -1019,8 +1484,15 @@ class AgentRuntime:
             # Resuming/handoff may happen from a later parent turn. Keep the
             # original immutable path while allowing parent_run_id ownership to
             # move to the new active coordinator.
-            agent_path=(existing.agent_path if existing and existing.agent_path else parent_path.child(subagent_id).value),
+            agent_path=candidate_agent_path,
             mailbox_epoch=MailboxEpoch(previous_epoch).next().value,
+            teammate_name=str(teammate_name or "").strip(),
+            team_name=str(team_name or "").strip(),
+            permission_mode=str(permission_mode or "confirm").strip(),
+            plan_mode_required=bool(plan_mode_required),
+            awaiting_plan_approval=False,
+            active_plan_request_id="",
+            is_idle=False,
         )
         persisted = self._swarm_store.upsert_subagent(
             record.to_dict(),
@@ -1040,21 +1512,45 @@ class AgentRuntime:
             self._subagent_completion_events[subagent_id] = asyncio.Event()
         self._subagents[subagent_id] = record
         self._registry.register(record, kind="subagent")
-        self._register_subagent_names(subagent_id, agent_type=agent_type, objective=objective, prompt_summary=prompt_summary)
-        self._subagent_completion_events.setdefault(subagent_id, asyncio.Event())
+        self._register_subagent_names(
+            subagent_id,
+            teammate_name=record.teammate_name,
+            task_name=record.task_id,
+        )
+        if subagent_id not in self._subagent_completion_events:
+            self._subagent_completion_events[subagent_id] = asyncio.Event()
         self.write_metric("subagent_started", record.to_dict())
+        self._record_agent_activity(
+            "started",
+            agent_ids=(subagent_id,),
+            conversation_id=self._conversation_id_for_agent(subagent_id),
+            status=record.status,
+        )
         return record
 
     def try_reserve_subagent_slots(self, subagent_ids: list[str]) -> bool:
         clean_ids = list(dict.fromkeys(str(value or "").strip() for value in subagent_ids if str(value or "").strip()))
-        active = sum(1 for item in self._subagents.values() if item.status == "running")
+        teammate_ids = {
+            subagent_id
+            for subagent_id, item in self._subagents.items()
+            if item.teammate_name
+        }
+        active = sum(
+            1
+            for item in self._subagents.values()
+            if item.status == "running" and not item.teammate_name
+        )
         needed = sum(
             1
             for subagent_id in clean_ids
-            if subagent_id not in self._subagent_slot_reservations
+            if subagent_id not in teammate_ids
+            and subagent_id not in self._subagent_slot_reservations
             and not (self._subagents.get(subagent_id) and self._subagents[subagent_id].status == "running")
         )
-        if active + len(self._subagent_slot_reservations) + needed > MAX_CONCURRENT_SUBAGENTS:
+        reserved = sum(
+            1 for subagent_id in self._subagent_slot_reservations if subagent_id not in teammate_ids
+        )
+        if active + reserved + needed > MAX_CONCURRENT_SUBAGENTS:
             return False
         self._subagent_slot_reservations.update(clean_ids)
         return True
@@ -1065,7 +1561,7 @@ class AgentRuntime:
         *,
         cancel_event: asyncio.Event | None = None,
     ) -> bool:
-        """Wait until one of Pi's four worker slots can be reserved.
+        """Wait until one of MiniCode's bounded worker slots can be reserved.
 
         Parallel task batches may contain up to eight jobs.  Jobs beyond the
         active four wait here instead of being rejected or silently dropped.
@@ -1169,6 +1665,12 @@ class AgentRuntime:
         self._subagents[subagent_id] = candidate
         self._registry.seal(subagent_id, kind="subagent")
         self.write_metric("subagent_completed", candidate.to_dict())
+        self._record_agent_activity(
+            "completed",
+            agent_ids=(subagent_id,),
+            conversation_id=self._conversation_id_for_agent(subagent_id),
+            status=candidate.status,
+        )
         return candidate
 
     def register_subagent_task(
@@ -1184,12 +1686,25 @@ class AgentRuntime:
         prompt_summary: str = "",
         background: bool = False,
         pending: bool = False,
+        canonical_task_name: str = "",
+        agent_path_segment: str = "",
     ) -> None:
+        candidate_agent_path = self.validate_subagent_task_registration(
+            subagent_id,
+            parent_run_id=parent_run_id,
+            canonical_task_name=canonical_task_name,
+            agent_path_segment=agent_path_segment,
+        )
+        clean_subagent_id = str(subagent_id or "").strip()
+        clean_parent_run_id = str(parent_run_id or "").strip()
+        clean_task_name = str(canonical_task_name or "").strip()
         self._subagent_tasks[subagent_id] = task
         self._subagent_task_metadata[subagent_id] = {
             "subagent_id": subagent_id,
-            "parent_run_id": str(parent_run_id or "").strip(),
+            "parent_run_id": clean_parent_run_id,
             "task_id": str(owner_task_id or "").strip(),
+            "task_name": clean_task_name,
+            "agent_path": candidate_agent_path,
             "session_id": str(session_id or "").strip(),
             "agent_type": str(agent_type or "").strip(),
             "prompt_summary": str(prompt_summary or "").strip(),
@@ -1197,7 +1712,13 @@ class AgentRuntime:
             "background": bool(background),
             "status": "pending" if pending else "running",
         }
-        self._subagent_completion_events.setdefault(subagent_id, asyncio.Event())
+        if clean_task_name:
+            self._register_subagent_names(
+                clean_subagent_id,
+                task_name=clean_task_name,
+            )
+        if subagent_id not in self._subagent_completion_events:
+            self._subagent_completion_events[subagent_id] = asyncio.Event()
         if cancel_event is not None:
             self._subagent_cancel_events[subagent_id] = cancel_event
         parent = str(parent_run_id or "").strip()
@@ -1215,11 +1736,61 @@ class AgentRuntime:
                 {"subagent_id": subagent_id},
             )
         self.write_metric("subagent_task_registered", {"subagent_id": subagent_id})
+        self._record_agent_activity(
+            "queued" if pending else "task_registered",
+            agent_ids=(clean_subagent_id,),
+            conversation_id=self._conversation_id_for_agent(clean_parent_run_id),
+            status="pending" if pending else "running",
+        )
+
+    def validate_subagent_task_registration(
+        self,
+        subagent_id: str,
+        *,
+        parent_run_id: str = "",
+        canonical_task_name: str = "",
+        agent_path_segment: str = "",
+    ) -> str:
+        """Return the canonical child path or reject an occupied registration.
+
+        Batch spawn callers use this before creating any worker. Registration
+        calls the same check again as the final ownership fence, so validation
+        and publication cannot drift into different path semantics.
+        """
+
+        clean_subagent_id = str(subagent_id or "").strip()
+        if not clean_subagent_id:
+            raise ValueError("subagent_id is required")
+        clean_parent_run_id = str(parent_run_id or "").strip()
+        clean_task_name = str(canonical_task_name or "").strip()
+        existing = self._subagents.get(clean_subagent_id)
+        candidate_agent_path = (
+            str(existing.agent_path or "")
+            if existing is not None and existing.agent_path
+            else self._parent_agent_path(clean_parent_run_id)
+            .child(agent_path_segment or clean_task_name or clean_subagent_id)
+            .value
+        )
+        path_owner = self._agent_path_owner(
+            candidate_agent_path,
+            excluding_subagent_id=clean_subagent_id,
+        )
+        if path_owner:
+            raise RuntimeError(
+                f"Agent path {candidate_agent_path!r} is already owned by {path_owner}."
+            )
+        return candidate_agent_path
 
     def mark_subagent_task_running(self, subagent_id: str) -> None:
         metadata = self._subagent_task_metadata.get(str(subagent_id or "").strip())
         if isinstance(metadata, dict):
             metadata["status"] = "running"
+            self._record_agent_activity(
+                "running",
+                agent_ids=(subagent_id,),
+                conversation_id=self._conversation_id_for_agent(subagent_id),
+                status="running",
+            )
 
     def release_subagent_task(
         self,
@@ -1240,11 +1811,182 @@ class AgentRuntime:
         self._subagent_parent_run_ids.pop(subagent_id, None)
         self._subagent_owner_task_ids.pop(subagent_id, None)
         self._subagent_session_ids.pop(subagent_id, None)
+        if subagent_id not in self._subagents:
+            self._subagent_name_registry = {
+                name: registered_id
+                for name, registered_id in self._subagent_name_registry.items()
+                if registered_id != subagent_id
+            }
         return True
 
     def get_subagent_task_metadata(self, subagent_id: str) -> dict[str, Any] | None:
         metadata = self._subagent_task_metadata.get(str(subagent_id or "").strip())
         return dict(metadata) if isinstance(metadata, dict) else None
+
+    def _conversation_id_for_agent(self, agent_id: str) -> str:
+        """Resolve conversation ownership through run/subagent parent edges."""
+
+        current = str(agent_id or "").strip()
+        visited: set[str] = set()
+        while current and current not in visited and len(visited) < 128:
+            visited.add(current)
+            run = self._runs.get(current)
+            if run is not None:
+                return str(run.conversation_id or "").strip()
+            subagent = self._subagents.get(current)
+            if subagent is not None:
+                current = str(subagent.parent_run_id or "").strip()
+                continue
+            metadata = self._subagent_task_metadata.get(current)
+            if isinstance(metadata, dict):
+                current = str(metadata.get("parent_run_id") or "").strip()
+                continue
+            break
+        return ""
+
+    def _record_agent_activity(
+        self,
+        kind: str,
+        *,
+        agent_ids: list[str] | tuple[str, ...] = (),
+        conversation_id: str = "",
+        status: str = "",
+    ) -> int:
+        clean_ids = tuple(
+            dict.fromkeys(
+                str(value or "").strip()
+                for value in agent_ids
+                if str(value or "").strip()
+            )
+        )
+        owner = str(conversation_id or "").strip()
+        if not owner:
+            for candidate in clean_ids:
+                owner = self._conversation_id_for_agent(candidate)
+                if owner:
+                    break
+        with self._agent_activity_lock:
+            self._agent_activity_seq += 1
+            sequence = self._agent_activity_seq
+            self._agent_activity_log.append(
+                {
+                    "seq": sequence,
+                    "kind": str(kind or "activity").strip() or "activity",
+                    "agent_ids": clean_ids,
+                    "conversation_id": owner,
+                    "status": str(status or "").strip(),
+                    "timestamp": epoch_ms(),
+                }
+            )
+            waiters = tuple(self._agent_activity_waiters)
+        for loop, event in waiters:
+            if loop.is_closed():
+                continue
+            try:
+                loop.call_soon_threadsafe(event.set)
+            except RuntimeError:
+                continue
+        return sequence
+
+    def agent_activity_cursor(self) -> int:
+        with self._agent_activity_lock:
+            return int(self._agent_activity_seq)
+
+    def _matching_agent_activity_locked(
+        self,
+        *,
+        after_seq: int,
+        agent_ids: frozenset[str],
+        conversation_id: str,
+        kinds: frozenset[str],
+    ) -> dict[str, Any] | None:
+        for item in self._agent_activity_log:
+            if int(item.get("seq") or 0) <= after_seq:
+                continue
+            if conversation_id and str(item.get("conversation_id") or "") != conversation_id:
+                continue
+            if kinds and str(item.get("kind") or "") not in kinds:
+                continue
+            item_ids = list(
+                dict.fromkeys(
+                    str(value or "").strip()
+                    for value in item.get("agent_ids", ())
+                    if str(value or "").strip()
+                )
+            )
+            if agent_ids and agent_ids.isdisjoint(item_ids):
+                continue
+            return {
+                **item,
+                # Preserve the producer's stable sender/recipient order.  A
+                # set is useful for matching but is not a public projection:
+                # converting through one made otherwise identical wait
+                # responses nondeterministic across processes.
+                "agent_ids": item_ids,
+            }
+        return None
+
+    async def wait_for_agent_activity(
+        self,
+        agent_ids: list[str],
+        *,
+        conversation_id: str = "",
+        after_seq: int | None = None,
+        timeout: float,
+        kinds: Iterable[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Wait for bounded lifecycle or mailbox metadata without polling."""
+
+        clean_ids = frozenset(
+            str(value or "").strip()
+            for value in agent_ids
+            if str(value or "").strip()
+        )
+        owner = str(conversation_id or "").strip()
+        allowed_kinds = frozenset(
+            str(value or "").strip()
+            for value in (kinds or ())
+            if str(value or "").strip()
+        )
+        cursor = max(0, int(after_seq if after_seq is not None else self.agent_activity_cursor()))
+        bounded_timeout = max(0.0, float(timeout))
+        loop = asyncio.get_running_loop()
+        event = asyncio.Event()
+        waiter = (loop, event)
+        with self._agent_activity_lock:
+            existing = self._matching_agent_activity_locked(
+                after_seq=cursor,
+                agent_ids=clean_ids,
+                conversation_id=owner,
+                kinds=allowed_kinds,
+            )
+            if existing is not None or bounded_timeout <= 0:
+                return existing
+            self._agent_activity_waiters.add(waiter)
+
+        deadline = loop.time() + bounded_timeout
+        try:
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return None
+                try:
+                    await asyncio.wait_for(event.wait(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    return None
+                event.clear()
+                with self._agent_activity_lock:
+                    activity = self._matching_agent_activity_locked(
+                        after_seq=cursor,
+                        agent_ids=clean_ids,
+                        conversation_id=owner,
+                        kinds=allowed_kinds,
+                    )
+                if activity is not None:
+                    return activity
+        finally:
+            with self._agent_activity_lock:
+                self._agent_activity_waiters.discard(waiter)
 
     async def wait_for_subagent(self, subagent_id: str, timeout: float) -> bool:
         """Wait for a result notification without polling runtime snapshots."""
@@ -1267,8 +2009,8 @@ class AgentRuntime:
         """Wait until any selected subagent publishes a durable result.
 
         A batch waiter should wake on useful mailbox activity instead of always
-        waiting for the slowest child or the full timeout. This mirrors Codex's
-        mailbox-style wait semantics and lets the coordinator react, steer, or
+        waiting for the slowest child or the full timeout. Mailbox-style wakeups
+        let the coordinator react, steer, or
         collect completed work sooner.
         """
 
@@ -1306,10 +2048,18 @@ class AgentRuntime:
                 return subagent_id
         return None
 
-    def cancel_subagent_task(self, subagent_id: str) -> Literal["cancelled", "done", "not_found"]:
+    def cancel_subagent_task(
+        self,
+        subagent_id: str,
+        *,
+        reason: str = "cancelled",
+    ) -> Literal["cancelled", "done", "not_found"]:
         task = self._subagent_tasks.get(subagent_id)
         if task is None:
             return "not_found"
+        metadata = self._subagent_task_metadata.get(subagent_id)
+        if isinstance(metadata, dict):
+            metadata["cancel_reason"] = str(reason or "cancelled")[:128]
         cancel_event = self._subagent_cancel_events.get(subagent_id)
         if cancel_event is not None:
             cancel_event.set()
@@ -1318,6 +2068,12 @@ class AgentRuntime:
             return "done"
         task.cancel()
         self.write_metric("subagent_task_cancel_requested", {"subagent_id": subagent_id})
+        self._record_agent_activity(
+            "cancel_requested",
+            agent_ids=(subagent_id,),
+            conversation_id=self._conversation_id_for_agent(subagent_id),
+            status="cancelled",
+        )
         return "cancelled"
 
     def cancel_child_subagent_tasks(
@@ -1340,7 +2096,7 @@ class AgentRuntime:
                     continue
                 if not force and not bool(getattr(record, "cancel_with_parent", True)):
                     continue
-            status = self.cancel_subagent_task(subagent_id)
+            status = self.cancel_subagent_task(subagent_id, reason=reason)
             if status in {"cancelled", "done"}:
                 cancelled.append(subagent_id)
         if cancelled:
@@ -1349,6 +2105,391 @@ class AgentRuntime:
                 {"parent_run_id": parent, "subagent_ids": cancelled, "reason": reason},
             )
         return cancelled
+
+    def register_subagent_cleanup_resource(
+        self,
+        subagent_id: str,
+        *,
+        resource_kind: str,
+        resource_id: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """Durably attach an owned resource before the child can use it."""
+
+        clean_id = str(subagent_id or "").strip()
+        kind = str(resource_kind or "").strip()
+        owned_id = str(resource_id or "").strip()
+        record = self._subagents.get(clean_id)
+        if record is None or not kind or not owned_id or not self._owns_record(record):
+            return False
+        resources = [dict(item) for item in record.cleanup_resources]
+        registered_at = epoch_ms()
+        resource = {
+            "resource_kind": kind,
+            "resource_id": owned_id,
+            "state": "active",
+            "registered_at": registered_at,
+            "metadata": dict(metadata or {}),
+        }
+        resources = [
+            item
+            for item in resources
+            if not (
+                str(item.get("resource_kind") or "") == kind
+                and str(item.get("resource_id") or "") == owned_id
+            )
+        ]
+        resources.append(resource)
+        candidate = replace(record, cleanup_resources=resources)
+        if self._swarm_store.upsert_subagent(
+            candidate.to_dict(), expected_owner_token=self._runtime_owner_token
+        ) is None:
+            self._lease_lost = True
+            return False
+        self._subagents[clean_id] = candidate
+        self.execution_journal(clean_id).append_cleanup(
+            {
+                **resource,
+                "registered": True,
+                "completed": False,
+                "pending": False,
+            }
+        )
+        return True
+
+    def settle_subagent_cleanup_resource(
+        self,
+        subagent_id: str,
+        *,
+        resource_kind: str,
+        resource_id: str,
+        state: str,
+        receipt: str,
+    ) -> bool:
+        """Persist a terminal cleanup receipt for one exact owned resource."""
+
+        clean_id = str(subagent_id or "").strip()
+        record = self._subagents.get(clean_id)
+        if record is None or not self._owns_record(record):
+            return False
+        resources: list[dict[str, Any]] = []
+        matched = False
+        settled_at = epoch_ms()
+        for raw in record.cleanup_resources:
+            item = dict(raw)
+            if (
+                str(item.get("resource_kind") or "") == str(resource_kind or "")
+                and str(item.get("resource_id") or "") == str(resource_id or "")
+            ):
+                item.update(
+                    {
+                        "state": str(state or "released"),
+                        "receipt": str(receipt or "reconciled"),
+                        "settled_at": settled_at,
+                    }
+                )
+                matched = True
+            resources.append(item)
+        if not matched:
+            return False
+        candidate = replace(record, cleanup_resources=resources)
+        if self._swarm_store.upsert_subagent(
+            candidate.to_dict(), expected_owner_token=self._runtime_owner_token
+        ) is None:
+            self._lease_lost = True
+            return False
+        self._subagents[clean_id] = candidate
+        self.execution_journal(clean_id).append_cleanup(
+            {
+                "resource_kind": str(resource_kind or ""),
+                "resource_id": str(resource_id or ""),
+                "state": str(state or "released"),
+                "receipt": str(receipt or "reconciled"),
+                "completed": True,
+                "pending": False,
+                "completed_at": settled_at,
+            }
+        )
+        return True
+
+    def _reconcile_subagent_worktrees(self, record: SubagentRunRecord) -> bool:
+        record = self._subagents.get(record.subagent_id) or record
+        completed = True
+        for resource in record.cleanup_resources:
+            if str(resource.get("state") or "active") != "active":
+                continue
+            if str(resource.get("resource_kind") or "") != "worktree":
+                completed = False
+                continue
+            path_text = str(resource.get("resource_id") or "").strip()
+            metadata = resource.get("metadata") if isinstance(resource.get("metadata"), dict) else {}
+            git_root = str(metadata.get("git_root") or "").strip()
+            if not path_text or not git_root:
+                completed = False
+                continue
+            path = Path(path_text)
+            if not path.exists():
+                completed = self.settle_subagent_cleanup_resource(
+                    record.subagent_id,
+                    resource_kind="worktree",
+                    resource_id=path_text,
+                    state="released",
+                    receipt="already_absent",
+                ) and completed
+                continue
+            try:
+                from backend.agent.worktree import (
+                    cleanup_agent_worktree,
+                    has_worktree_changes,
+                    resume_agent_worktree,
+                )
+
+                worktree = resume_agent_worktree(
+                    path,
+                    expected_repo_root=git_root,
+                    expected_subagent_id=record.subagent_id,
+                )
+                if worktree is None:
+                    completed = False
+                    continue
+                had_changes = has_worktree_changes(worktree)
+                kept, _kept_path = cleanup_agent_worktree(worktree)
+                if kept and not had_changes:
+                    completed = False
+                    continue
+                completed = self.settle_subagent_cleanup_resource(
+                    record.subagent_id,
+                    resource_kind="worktree",
+                    resource_id=path_text,
+                    state="retained" if kept else "released",
+                    receipt="retained_user_changes" if kept else "removed_clean_worktree",
+                ) and completed
+            except Exception:
+                logger.warning(
+                    "Failed reconciling worktree for subagent %s",
+                    record.subagent_id,
+                    exc_info=True,
+                )
+                completed = False
+        return completed
+
+    def _reconcile_recovered_cleanup_resources(self) -> None:
+        """Reconcile dead-runtime resources before clearing durable intent."""
+
+        from backend.terminal.task_persistence import reconcile_owned_tasks
+
+        for original in list(self._subagents.values()):
+            if not original.cleanup_pending:
+                continue
+            worktrees_completed = self._reconcile_subagent_worktrees(original)
+            record = self._subagents.get(original.subagent_id) or original
+            task_report = (
+                reconcile_owned_tasks(
+                    record.session_id,
+                    owner_task_ids={record.subagent_id},
+                    parent_run_ids={record.subagent_id},
+                    base_dir=self._runtime_state_root,
+                )
+                if record.session_id
+                else None
+            )
+            # A legacy subagent with no session and no registered external
+            # resources has nothing durable left to reconcile.  Once a task
+            # or resource receipt exists, missing session identity is
+            # uncertain and must remain pending.
+            tasks_completed = (
+                task_report.completed
+                if task_report is not None
+                else not bool(record.cleanup_resources)
+            )
+            if worktrees_completed and tasks_completed:
+                self._mark_subagent_cleanup_complete(record.subagent_id)
+            else:
+                self.write_metric(
+                    "subagent_cleanup_reconcile_pending",
+                    {
+                        "subagent_id": record.subagent_id,
+                        "worktrees_completed": worktrees_completed,
+                        "pending_task_ids": list(task_report.pending_task_ids) if task_report else [],
+                        "errors": list(task_report.errors) if task_report else [],
+                    },
+                )
+
+        for record in list(self._runs.values()):
+            if not record.cleanup_pending:
+                continue
+            children_completed = all(
+                not child.cleanup_pending
+                for child in self._subagents.values()
+                if child.parent_run_id == record.run_id
+            )
+            task_report = (
+                reconcile_owned_tasks(
+                    record.session_id,
+                    owner_task_ids={record.run_id, record.task_id},
+                    parent_run_ids={record.run_id},
+                    base_dir=self._runtime_state_root,
+                )
+                if record.session_id
+                else None
+            )
+            if children_completed and task_report is not None and task_report.completed:
+                self._mark_run_cleanup_complete(record.run_id)
+            else:
+                # A run with no session identity yields no task report, so its
+                # cleanup stays pending forever. Record why instead of leaving an
+                # unexplained pending run behind.
+                self.write_metric(
+                    "run_cleanup_reconcile_pending",
+                    {
+                        "run_id": record.run_id,
+                        "children_completed": children_completed,
+                        "session_id_present": bool(record.session_id),
+                        "pending_task_ids": list(task_report.pending_task_ids) if task_report else [],
+                        "errors": list(task_report.errors) if task_report else [],
+                    },
+                )
+
+    def _reconcile_terminal_subagent_cleanup(self, subagent_id: str) -> bool:
+        """Settle every owned resource before clearing durable cleanup intent."""
+
+        from backend.terminal.task_persistence import reconcile_owned_tasks
+
+        clean_id = str(subagent_id or "").strip()
+        record = self._subagents.get(clean_id)
+        if record is None or not record.cleanup_pending:
+            return record is not None
+        worktrees_completed = self._reconcile_subagent_worktrees(record)
+        record = self._subagents.get(clean_id) or record
+        task_report = (
+            reconcile_owned_tasks(
+                record.session_id,
+                owner_task_ids={record.subagent_id},
+                parent_run_ids={record.subagent_id},
+                base_dir=self._runtime_state_root,
+                owner_terminal=True,
+            )
+            if record.session_id
+            else None
+        )
+        tasks_completed = (
+            task_report.completed
+            if task_report is not None
+            else not bool(record.cleanup_resources)
+        )
+        if worktrees_completed and tasks_completed:
+            return self._mark_subagent_cleanup_complete(clean_id) is not None
+        self.write_metric(
+            "subagent_cleanup_reconcile_pending",
+            {
+                "subagent_id": clean_id,
+                "worktrees_completed": worktrees_completed,
+                "session_id_present": bool(record.session_id),
+                "pending_task_ids": list(task_report.pending_task_ids) if task_report else [],
+                "errors": list(task_report.errors)
+                if task_report
+                else (["missing_session_id"] if record.cleanup_resources else []),
+            },
+        )
+        return False
+
+    def _mark_run_cleanup_complete(self, run_id: str) -> AgentRunRecord | None:
+        record = self._runs.get(str(run_id or "").strip())
+        if record is None or not record.cleanup_pending:
+            return record
+        candidate = replace(record, cleanup_pending=False, cleanup_completed_at=epoch_ms())
+        if self._swarm_store.upsert_agent_run(
+            candidate.to_dict(), expected_owner_token=self._runtime_owner_token
+        ) is None:
+            self._lease_lost = True
+            return None
+        self._runs[run_id] = candidate
+        self.write_metric("run_cleanup_completed", {"run_id": run_id})
+        return candidate
+
+    def _mark_subagent_cleanup(self, subagent_id: str, *, reason: str) -> SubagentRunRecord | None:
+        """Persist cancellation intent before a bounded cleanup attempt."""
+        record = self._subagents.get(str(subagent_id or "").strip())
+        if record is None:
+            return None
+        now = epoch_ms()
+        candidate = replace(
+            record,
+            cleanup_pending=True,
+            cleanup_reason=str(reason or "cancelled"),
+            cleanup_requested_at=now,
+            cleanup_completed_at=None,
+        )
+        if self._swarm_store.upsert_subagent(
+            candidate.to_dict(), expected_owner_token=self._runtime_owner_token
+        ) is None:
+            self._lease_lost = True
+            return None
+        self._subagents[subagent_id] = candidate
+        self.write_metric(
+            "subagent_cleanup_requested",
+            {"subagent_id": subagent_id, "reason": reason},
+        )
+        self.execution_journal(subagent_id).append_cleanup(
+            {
+                "resource_kind": "subagent",
+                "resource_id": subagent_id,
+                "reason": str(reason or "cancelled"),
+                "requested": True,
+                "completed": False,
+                "pending": True,
+                "requested_at": now,
+            }
+        )
+        return candidate
+
+    def _mark_subagent_cleanup_complete(self, subagent_id: str) -> SubagentRunRecord | None:
+        record = self._subagents.get(str(subagent_id or "").strip())
+        if record is None or not record.cleanup_pending:
+            return record
+        candidate = replace(
+            record,
+            cleanup_pending=False,
+            cleanup_completed_at=epoch_ms(),
+        )
+        if self._swarm_store.upsert_subagent(
+            candidate.to_dict(), expected_owner_token=self._runtime_owner_token
+        ) is None:
+            self._lease_lost = True
+            return None
+        self._subagents[subagent_id] = candidate
+        self.write_metric("subagent_cleanup_completed", {"subagent_id": subagent_id})
+        self.execution_journal(subagent_id).append_cleanup(
+            {
+                "resource_kind": "subagent",
+                "resource_id": subagent_id,
+                "reason": candidate.cleanup_reason,
+                "requested": True,
+                "completed": True,
+                "pending": False,
+                "requested_at": candidate.cleanup_requested_at,
+                "completed_at": candidate.cleanup_completed_at,
+            }
+        )
+        return candidate
+
+    def _retain_subagent_cleanup_owner(
+        self,
+        subagent_id: str,
+        task: asyncio.Task[Any],
+    ) -> None:
+        """Reconcile resources after the owned task exits, then clear intent."""
+        def settled(_completed: asyncio.Task[Any]) -> None:
+            try:
+                self._reconcile_terminal_subagent_cleanup(subagent_id)
+            except Exception:
+                logger.warning(
+                    "Failed to persist completed cleanup for subagent %s",
+                    subagent_id,
+                    exc_info=True,
+                )
+
+        task.add_done_callback(settled)
 
     def cancel_child_subagent_tasks_for_task(
         self,
@@ -1367,7 +2508,10 @@ class AgentRuntime:
         cancelled: list[str] = []
         seen: set[str] = set()
         for parent_run_id in parent_run_ids:
-            for subagent_id in self.cancel_child_subagent_tasks(parent_run_id, reason=reason, force=True):
+            # Ordinary parent/task cancellation must preserve explicitly
+            # detached children. Session shutdown and conversation deletion use
+            # their dedicated force-cleanup paths instead.
+            for subagent_id in self.cancel_child_subagent_tasks(parent_run_id, reason=reason, force=False):
                 if subagent_id in seen:
                     continue
                 seen.add(subagent_id)
@@ -1377,42 +2521,245 @@ class AgentRuntime:
         for subagent_id, owner_task_id in list(self._subagent_owner_task_ids.items()):
             if owner_task_id != task or subagent_id in seen:
                 continue
-            status = self.cancel_subagent_task(subagent_id)
+            record = self._subagents.get(subagent_id)
+            if record is not None and (
+                bool(getattr(record, "detach_from_parent", False))
+                or not bool(getattr(record, "cancel_with_parent", True))
+            ):
+                continue
+            status = self.cancel_subagent_task(subagent_id, reason=reason)
             if status in {"cancelled", "done"}:
                 seen.add(subagent_id)
                 cancelled.append(subagent_id)
         return cancelled
 
-    def cancel_subagent_tasks_for_session(
+    async def stop_subagent_tasks_for_task(
+        self,
+        task_id: str,
+        *,
+        reason: str = "parent_cancelled",
+    ) -> bool:
+        """Request child cancellation and retain ownership until they drain."""
+
+        subagent_ids = self.cancel_child_subagent_tasks_for_task(
+            task_id,
+            reason=reason,
+        )
+        for subagent_id in subagent_ids:
+            self._mark_subagent_cleanup(subagent_id, reason=reason)
+        owned = [
+            (subagent_id, task)
+            for subagent_id in subagent_ids
+            if (task := self._subagent_tasks.get(subagent_id)) is not None
+            and not task.done()
+        ]
+        initially_timed_out = await cancel_and_drain_to_completion(
+            (task for _subagent_id, task in owned),
+            timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+            label=f"task {task_id} subagents",
+        )
+        if initially_timed_out:
+            self.write_metric(
+                "subagent_task_cancel_timeout",
+                {
+                    "task_id": str(task_id or ""),
+                    "subagent_ids": [
+                        subagent_id
+                        for subagent_id, task in owned
+                        if task in initially_timed_out
+                    ],
+                    "reason": reason,
+                    "drained_to_completion": True,
+                },
+            )
+            for subagent_id, task in owned:
+                if task in initially_timed_out:
+                    self._retain_subagent_cleanup_owner(subagent_id, task)
+        for subagent_id, task in owned:
+            if task not in initially_timed_out and task.done():
+                self._reconcile_terminal_subagent_cleanup(subagent_id)
+        return True
+
+
+    async def stop_subagent_tasks_for_session(
         self,
         session_id: str,
         *,
         reason: str = "session_shutdown",
-    ) -> list[str]:
-        """Force-cancel every child task owned by a closing client session."""
+    ) -> bool:
+        """Cancel and drain every child task owned by one client session."""
+
         session = str(session_id or "").strip()
         if not session:
-            return []
-        cancelled: list[str] = []
-        for subagent_id, owner_session in list(self._subagent_session_ids.items()):
-            if owner_session != session:
-                continue
-            status = self.cancel_subagent_task(subagent_id)
-            if status in {"cancelled", "done"}:
-                cancelled.append(subagent_id)
-        if cancelled:
+            return True
+        owned = [
+            (subagent_id, task)
+            for subagent_id, task in self._subagent_tasks.items()
+            if self._subagent_session_ids.get(subagent_id) == session
+            and not task.done()
+        ]
+        for subagent_id, _task in owned:
+            self.cancel_subagent_task(subagent_id, reason=reason)
+            self._mark_subagent_cleanup(subagent_id, reason=reason)
+        initially_timed_out = await cancel_and_drain_to_completion(
+            (task for _subagent_id, task in owned),
+            timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+            label=f"session {session} subagents",
+        )
+        if initially_timed_out:
             self.write_metric(
-                "subagent_session_cancel_requested",
+                "subagent_session_cancel_timeout",
                 {
                     "session_id": session,
-                    "subagent_ids": cancelled,
+                    "subagent_ids": [
+                        subagent_id
+                        for subagent_id, task in owned
+                        if task in initially_timed_out
+                    ],
                     "reason": reason,
+                    "drained_to_completion": True,
                 },
             )
-        return cancelled
+            for subagent_id, task in owned:
+                if task in initially_timed_out:
+                    self._retain_subagent_cleanup_owner(subagent_id, task)
+        for subagent_id, task in owned:
+            if task not in initially_timed_out and task.done():
+                self._reconcile_terminal_subagent_cleanup(subagent_id)
+        return True
+
+    async def stop_subagent_tasks_for_conversation(
+        self,
+        conversation_id: str,
+        *,
+        reason: str = "conversation_deleted",
+    ) -> bool:
+        """Cancel and drain every child runtime owned by one conversation."""
+        owner = str(conversation_id or "").strip()
+        if not owner:
+            return True
+        parent_run_ids = {
+            run_id
+            for run_id, record in self._runs.items()
+            if str(record.conversation_id or "").strip() == owner
+        }
+        durable_ids = self._swarm_store.conversation_agent_ids(owner)
+        parent_run_ids.update(str(value) for value in durable_ids.get("run_ids", []))
+        owner_task_ids = {str(value) for value in durable_ids.get("task_ids", [])}
+        owner_task_ids.update(
+            task_id
+            for task_id, record in self._swarm_tasks.items()
+            if str(record.conversation_id or "").strip() == owner
+        )
+        subagent_ids = {
+            subagent_id
+            for subagent_id, record in self._subagents.items()
+            if str(record.parent_run_id or "").strip() in parent_run_ids
+        }
+        subagent_ids.update(str(value) for value in durable_ids.get("subagent_ids", []))
+        subagent_ids.update(
+            subagent_id
+            for subagent_id, metadata in self._subagent_task_metadata.items()
+            if isinstance(metadata, dict)
+            and (
+                str(metadata.get("parent_run_id") or "").strip() in parent_run_ids
+                or str(metadata.get("task_id") or "").strip() in owner_task_ids
+            )
+        )
+        while True:
+            descendants = {
+                subagent_id
+                for subagent_id, record in self._subagents.items()
+                if str(record.parent_run_id or "").strip() in subagent_ids
+            }
+            descendants.update(
+                subagent_id
+                for subagent_id, metadata in self._subagent_task_metadata.items()
+                if isinstance(metadata, dict)
+                and str(metadata.get("parent_run_id") or "").strip() in subagent_ids
+            )
+            next_ids = subagent_ids | descendants
+            if len(next_ids) == len(subagent_ids):
+                break
+            subagent_ids = next_ids
+        owned_tasks: list[tuple[str, asyncio.Task[Any]]] = []
+        for subagent_id in subagent_ids:
+            task = self._subagent_tasks.get(subagent_id)
+            if task is not None and not task.done():
+                owned_tasks.append((subagent_id, task))
+            self.cancel_subagent_task(subagent_id, reason=reason)
+            self._mark_subagent_cleanup(subagent_id, reason=reason)
+        initially_timed_out = await cancel_and_drain_to_completion(
+            (task for _subagent_id, task in owned_tasks),
+            timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+            label=f"conversation {owner} subagents",
+        )
+        if initially_timed_out:
+            self.write_metric(
+                "subagent_conversation_cancel_timeout",
+                {
+                    "conversation_id": owner,
+                    "subagent_ids": [
+                        subagent_id
+                        for subagent_id, task in owned_tasks
+                        if task in initially_timed_out
+                    ],
+                    "reason": reason,
+                    "drained_to_completion": True,
+                },
+            )
+            for subagent_id, task in owned_tasks:
+                if task in initially_timed_out:
+                    self._retain_subagent_cleanup_owner(subagent_id, task)
+        for subagent_id, task in owned_tasks:
+            if task not in initially_timed_out and task.done():
+                self._reconcile_terminal_subagent_cleanup(subagent_id)
+        return True
 
     def get_subagent(self, subagent_id: str) -> SubagentRunRecord | None:
         return self._subagents.get(subagent_id)
+
+    def load_persisted_subagent(self, subagent_id: str) -> SubagentRunRecord | None:
+        """Read one durable subagent record without publishing it as live."""
+
+        clean_id = str(subagent_id or "").strip()
+        if not clean_id:
+            return None
+        payload = self._swarm_store.get_subagent(clean_id)
+        return _subagent_from_dict(payload) if isinstance(payload, dict) else None
+
+    def update_subagent_resume_config(
+        self,
+        subagent_id: str,
+        resume_config: dict[str, Any],
+        *,
+        agent_path: str,
+        mailbox_epoch: int,
+    ) -> SubagentRunRecord | None:
+        """Persist canonical configuration required to resume this incarnation."""
+
+        clean_id = str(subagent_id or "").strip()
+        record = self._subagents.get(clean_id)
+        if record is None or record.status != "running":
+            return None
+        if not self._accepts_subagent_update(
+            record,
+            agent_path=agent_path,
+            mailbox_epoch=mailbox_epoch,
+        ):
+            return None
+        if not self._owns_record(record) or not self._refresh_runtime_lease():
+            return None
+        candidate = replace(record, resume_config=dict(resume_config))
+        persisted = self._swarm_store.upsert_subagent(
+            candidate.to_dict(),
+            expected_owner_token=self._runtime_owner_token,
+        )
+        if persisted is None:
+            self._lease_lost = True
+            return None
+        self._subagents[clean_id] = candidate
+        return candidate
 
     def accepts_parent_notification(
         self,
@@ -1455,18 +2802,12 @@ class AgentRuntime:
         self,
         subagent_id: str,
         *,
-        agent_type: str = "",
-        objective: str = "",
-        prompt_summary: str = "",
+        teammate_name: str = "",
+        task_name: str = "",
     ) -> None:
-        """Map human-friendly labels to a subagent id (latest-wins).
-
-        MiniCode subagents have no explicit spawn ``name`` like cc, so we make
-        them addressable by the closest stable labels: agent_type, objective,
-        and prompt summary. Latest spawn wins a shared label.
-        """
-        for label in (agent_type, objective, prompt_summary):
-            key = str(label or "").strip().casefold()
+        """Register human-facing teammate and task names for targeting."""
+        for raw_name in (teammate_name, task_name):
+            key = str(raw_name or "").strip().casefold()
             if key:
                 self._subagent_name_registry[key] = subagent_id
 
@@ -1478,6 +2819,104 @@ class AgentRuntime:
         """
         key = str(name or "").strip().casefold()
         return self._subagent_name_registry.get(key, "")
+
+    def update_subagent_lifecycle(
+        self,
+        subagent_id: str,
+        *,
+        agent_path: str,
+        mailbox_epoch: int,
+        current_activity: str | None = None,
+        permission_mode: str | None = None,
+        awaiting_plan_approval: bool | None = None,
+        active_plan_request_id: str | None = None,
+        is_idle: bool | None = None,
+    ) -> SubagentRunRecord | None:
+        record = self._subagents.get(str(subagent_id or "").strip())
+        if record is None or record.status != "running":
+            return None
+        if (
+            str(record.agent_path or "") != str(agent_path or "")
+            or int(record.mailbox_epoch or 0) != int(mailbox_epoch or 0)
+        ):
+            return None
+        candidate = replace(record)
+        if current_activity is not None:
+            candidate.current_activity = str(current_activity or "")
+        if permission_mode is not None:
+            candidate.permission_mode = str(permission_mode or "confirm")
+        if awaiting_plan_approval is not None:
+            candidate.awaiting_plan_approval = bool(awaiting_plan_approval)
+        if active_plan_request_id is not None:
+            candidate.active_plan_request_id = str(active_plan_request_id or "")
+        if is_idle is not None:
+            candidate.is_idle = bool(is_idle)
+        persisted = self._swarm_store.upsert_subagent(
+            candidate.to_dict(),
+            expected_owner_token=self._runtime_owner_token,
+        )
+        if persisted is None:
+            return None
+        self._subagents[subagent_id] = candidate
+        activity_kind = (
+            "plan_approval"
+            if awaiting_plan_approval is not None
+            else "idle" if is_idle is True
+            else "active" if is_idle is False
+            else "permission_changed" if permission_mode is not None
+            else "progress"
+        )
+        self._record_agent_activity(
+            activity_kind,
+            agent_ids=(subagent_id,),
+            conversation_id=self._conversation_id_for_agent(subagent_id),
+            status=candidate.status,
+        )
+        return candidate
+
+    def update_running_run_parent(
+        self,
+        run_id: str,
+        *,
+        parent_run_id: str,
+    ) -> AgentRunRecord | None:
+        """Move one live coordinator run to the current teammate owner."""
+
+        clean_id = str(run_id or "").strip()
+        record = self._runs.get(clean_id)
+        if record is None or record.status != "running":
+            return None
+        if not self._owns_record(record) or not self._refresh_runtime_lease():
+            return None
+        candidate = replace(record, parent_run_id=str(parent_run_id or "").strip())
+        if self._swarm_store.upsert_agent_run(
+            candidate.to_dict(),
+            expected_owner_token=self._runtime_owner_token,
+        ) is None:
+            self._lease_lost = True
+            return None
+        self._runs[clean_id] = candidate
+        self._registry.discard(clean_id, kind="run")
+        self._registry.register(candidate, kind="run")
+        return candidate
+
+    def add_swarm_team_member(
+        self,
+        *,
+        conversation_id: str,
+        team_name: str,
+        member: dict[str, Any],
+    ) -> SwarmTeamRecord | None:
+        payload = self._swarm_store.add_team_member(
+            conversation_id=conversation_id,
+            team_name=team_name,
+            member=member,
+        )
+        if payload is None:
+            return None
+        team = _swarm_team_from_dict(payload)
+        self._swarm_teams[team.team_name] = team
+        return team
 
     def store_subagent_result(
         self,
@@ -1526,12 +2965,12 @@ class AgentRuntime:
                 mailbox_epoch=mailbox_epoch,
             )
             return None
-        input_tokens = int((usage or {}).get("input_tokens") or 0)
-        output_tokens = int((usage or {}).get("output_tokens") or 0)
-        # Reasoning tokens are billed output; roll them into the total so the
-        # coordinator sees true delegation cost.
-        reasoning_tokens = int((usage or {}).get("reasoning_output_tokens") or 0)
-        total_tokens = input_tokens + output_tokens + reasoning_tokens
+        public_usage = project_public_usage(usage)
+        input_tokens = int(public_usage.get("input_tokens") or 0)
+        output_tokens = int(public_usage.get("output_tokens") or 0)
+        # Provider usage contracts count reasoning/thinking inside output
+        # tokens.  Keep the detail field, but never add it a second time.
+        total_tokens = input_tokens + output_tokens
         record = SubagentResultRecord(
             subagent_id=subagent_id,
             status=status,
@@ -1545,6 +2984,7 @@ class AgentRuntime:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             total_tokens=total_tokens,
+            usage=public_usage,
             artifact_id=str(artifact_id or ""),
             agent_path=run_record.agent_path,
             mailbox_epoch=run_record.mailbox_epoch,
@@ -1591,6 +3031,12 @@ class AgentRuntime:
             metric_payload["notification_id"] = notification.notification_id
             metric_payload["notification_status"] = notification.status
         self.write_metric("subagent_result_stored", metric_payload)
+        self._record_agent_activity(
+            "result",
+            agent_ids=(subagent_id,),
+            conversation_id=self._conversation_id_for_agent(subagent_id),
+            status=status,
+        )
         return record
 
     @staticmethod
@@ -1686,18 +3132,20 @@ class AgentRuntime:
         # instead of surfacing as "No retained result".
         result_dict: dict[str, Any] | None = None
         if result is not None:
-            result_dict = result.to_dict()
+            result_dict = result.public_dict()
         else:
             stored = self._swarm_store.get_subagent_result(subagent_id)
             if isinstance(stored, dict):
-                result_dict = stored
+                result_dict = project_public_subagent_result(stored)
         if record is None and result_dict is None and task is None:
             return None
         task_metadata = self._subagent_task_metadata.get(subagent_id, {})
         payload: dict[str, Any] = (
-            record.to_dict()
+            record.public_dict()
             if record is not None
-            else {"subagent_id": subagent_id, **task_metadata}
+            else project_public_subagent_run(
+                {"subagent_id": subagent_id, **task_metadata}
+            )
         )
         if task is not None:
             task_status = str(task_metadata.get("status") or "running")
@@ -1728,7 +3176,7 @@ class AgentRuntime:
         if not parent:
             return []
         return [
-            result.to_dict()
+            result.public_dict()
             for subagent_id, result in self._subagent_results.items()
             if str(getattr(self._subagents.get(subagent_id), "parent_run_id", "") or "") == parent
         ]
@@ -1754,7 +3202,12 @@ class AgentRuntime:
         return removed
 
     def execution_journal(self, agent_id: str) -> ExecutionJournal:
-        return ExecutionJournal(agent_id, base_dir=self._journal_root)
+        with self._execution_journal_lock:
+            journal = self._execution_journals.get(agent_id)
+            if journal is None:
+                journal = ExecutionJournal(agent_id, base_dir=self._journal_root)
+                self._execution_journals[agent_id] = journal
+            return journal
 
     def load_agent_transcript(self, agent_id: str) -> dict[str, Any]:
         return load_agent_transcript(agent_id, base_dir=self._journal_root)
@@ -1779,15 +3232,16 @@ class AgentRuntime:
         record = self._subagents.get(subagent_id)
         parent_run_id = str(getattr(record, "parent_run_id", "") or "").strip()
         conversation_id = ""
+        session_id = ""
         if parent_run_id:
             parent_run = self._runs.get(parent_run_id)
             if parent_run is not None:
                 conversation_id = str(getattr(parent_run, "conversation_id", "") or "").strip()
+                session_id = str(getattr(parent_run, "session_id", "") or "").strip()
         if not parent_run_id and not conversation_id:
             return None
         # Synchronous TaskTool results already return to the parent as tool_result.
-        # Only background / detach completions need outbox -> next-turn injection
-        # (Claude Code enqueueAgentNotification is for async agents).
+        # Only background or detached completions need next-turn outbox injection.
         is_background = bool(getattr(record, "background", False)) if record else False
         is_detach = bool(getattr(record, "detach_from_parent", False)) if record else False
         if not (is_background or is_detach):
@@ -1810,6 +3264,7 @@ class AgentRuntime:
         notification = enqueue_parent_notification(
             parent_run_id=parent_run_id,
             conversation_id=conversation_id,
+            session_id=session_id,
             subagent_id=subagent_id,
             payload=payload,
             kind="subagent_completed",
@@ -1908,7 +3363,40 @@ class AgentRuntime:
     ) -> SwarmMessageRecord:
         sender_record = self.get_subagent(sender_id)
         sender_run = self.get_run(sender_id)
-        recipient_record = self.get_subagent(recipient_id)
+        # The mailbox protocol has a stable virtual leader participant. Keep that
+        # literal on disk: rewriting it to a transient parent run id
+        # makes the leader poller and the UI lose child->leader messages.
+        effective_recipient_id = str(recipient_id or "").strip()
+        virtual_parent_run_id = ""
+        if effective_recipient_id == "parent" and sender_record is not None:
+            parent_owner_id = str(sender_record.parent_run_id or "").strip()
+            if not parent_owner_id:
+                raise ValueError(f"subagent {sender_id} has no parent run mailbox")
+            visited: set[str] = set()
+            parent_run = None
+            while (
+                parent_owner_id
+                and parent_owner_id not in visited
+                and len(visited) < 128
+            ):
+                visited.add(parent_owner_id)
+                parent_run = self.get_run(parent_owner_id)
+                if parent_run is not None:
+                    virtual_parent_run_id = parent_owner_id
+                    break
+                parent_agent = self.get_subagent(parent_owner_id)
+                if parent_agent is None:
+                    break
+                parent_owner_id = str(parent_agent.parent_run_id or "").strip()
+            if parent_run is None:
+                raise ValueError(f"subagent {sender_id} has no valid parent ownership")
+            if conversation_id and str(parent_run.conversation_id or "") != str(conversation_id):
+                raise ValueError("parent mailbox conversation ownership mismatch")
+            if team_name:
+                sender_team = str(getattr(sender_record, "team_name", "") or "")
+                if sender_team and sender_team != str(team_name):
+                    raise ValueError("parent mailbox team ownership mismatch")
+        recipient_record = self.get_subagent(effective_recipient_id)
         if sender_record is not None and str(sender_record.status or "") not in {"running"}:
             raise ValueError(
                 f"cannot send mailbox messages from sealed subagent {sender_id} "
@@ -1948,7 +3436,7 @@ class AgentRuntime:
                 f"received epoch {resolved_recipient_epoch}, expected epoch {expected_recipient_epoch}"
             )
         broadcast_epochs: dict[str, int] = {}
-        if recipient_id in {"all", "*"}:
+        if effective_recipient_id in {"all", "*"}:
             for participant_id, participant in self._subagents.items():
                 parent = self._runs.get(str(participant.parent_run_id or "").strip())
                 participant_conversation = str(getattr(parent, "conversation_id", "") or "")
@@ -1958,7 +3446,7 @@ class AgentRuntime:
         record = _swarm_message_from_dict(
             self._swarm_store.append_message({
                 "sender_id": sender_id,
-                "recipient_id": recipient_id,
+                "recipient_id": effective_recipient_id,
                 "content": content,
                 "conversation_id": conversation_id,
                 "team_name": team_name,
@@ -1971,7 +3459,51 @@ class AgentRuntime:
         )
         self._swarm_messages[record.message_id] = record
         self.write_metric("swarm_message_sent", record.to_dict())
+        activity_ids = [sender_id]
+        if effective_recipient_id == "parent" and virtual_parent_run_id:
+            activity_ids.append(virtual_parent_run_id)
+        elif effective_recipient_id not in {"", "all", "*"}:
+            activity_ids.append(effective_recipient_id)
+        self._record_agent_activity(
+            "message",
+            agent_ids=activity_ids,
+            conversation_id=conversation_id,
+        )
         return record
+
+    def reserve_lifecycle_response(
+        self,
+        *,
+        response_kind: str,
+        participant_id: str,
+        mailbox_epoch: int,
+        request_id: str,
+        target_id: str = "",
+        expected_active_plan_request_id: str | None = None,
+    ) -> str:
+        """Reserve one lifecycle reply under the shared durable control plane."""
+
+        record = self.get_subagent(participant_id)
+        if (
+            record is None
+            or str(record.status or "") != "running"
+            or int(record.mailbox_epoch or 0) != int(mailbox_epoch or 0)
+        ):
+            return ""
+        return self._swarm_store.reserve_lifecycle_response(
+            response_kind=response_kind,
+            participant_id=participant_id,
+            mailbox_epoch=mailbox_epoch,
+            request_id=request_id,
+            target_id=target_id,
+            expected_active_plan_request_id=expected_active_plan_request_id,
+        )
+
+    def commit_lifecycle_response(self, **kwargs: Any) -> bool:
+        return self._swarm_store.commit_lifecycle_response(**kwargs)
+
+    def release_lifecycle_response(self, **kwargs: Any) -> bool:
+        return self._swarm_store.release_lifecycle_response(**kwargs)
 
     def list_swarm_messages(
         self,
@@ -1981,6 +3513,8 @@ class AgentRuntime:
         since_seq: int = 0,
         limit: int = 20,
         mailbox_epoch: int | None = None,
+        message_kind: str = "",
+        correlation_id: str = "",
     ) -> list[SwarmMessageRecord]:
         bounded_limit = max(1, min(int(limit or 20), 100))
         records = [
@@ -1989,7 +3523,15 @@ class AgentRuntime:
                 participant_id=participant_id,
                 conversation_id=conversation_id,
                 since_seq=since_seq,
-                limit=100 if mailbox_epoch is not None and participant_id else bounded_limit,
+                limit=(
+                    bounded_limit
+                    if message_kind
+                    else 100
+                    if mailbox_epoch is not None and participant_id
+                    else bounded_limit
+                ),
+                message_kind=message_kind,
+                correlation_id=correlation_id,
             )
         ]
         if mailbox_epoch is not None and participant_id:
@@ -2028,7 +3570,7 @@ class AgentRuntime:
         conversation_id: str = "",
         since_seq: int = 0,
         limit: int = 100,
-        lease_ms: int = 30_000,
+        lease_ms: int = MAILBOX_MESSAGE_LEASE_MS,
     ) -> list[MailboxMessageClaim]:
         if not self._refresh_runtime_lease():
             raise RuntimeError("runtime lease was lost before mailbox claim")
@@ -2058,6 +3600,20 @@ class AgentRuntime:
         return self._swarm_store.ack_message_claims(
             [claim.claim_ref() for claim in claims],
             claim_owner=self._runtime_owner_token,
+        )
+
+    def renew_swarm_message_claims(
+        self,
+        claims: list[MailboxMessageClaim],
+        *,
+        lease_ms: int = MAILBOX_MESSAGE_LEASE_MS,
+    ) -> int:
+        if not self._refresh_runtime_lease():
+            return 0
+        return self._swarm_store.renew_message_claims(
+            [claim.claim_ref() for claim in claims],
+            claim_owner=self._runtime_owner_token,
+            lease_ms=lease_ms,
         )
 
     def release_swarm_message_claims(self, claims: list[MailboxMessageClaim]) -> int:
@@ -2108,10 +3664,24 @@ class AgentRuntime:
         self.write_metric("swarm_task_created", task.to_dict())
         return task
 
-    def get_swarm_task(self, task_id: str) -> SwarmTaskRecord | None:
-        payload = self._swarm_store.get_task(task_id)
+    def get_swarm_task(
+        self,
+        task_id: str,
+        *,
+        conversation_id: str = "",
+    ) -> SwarmTaskRecord | None:
+        payload = self._swarm_store.get_task(
+            task_id,
+            conversation_id=conversation_id,
+        )
         if payload is None:
-            return self._swarm_tasks.get(task_id)
+            cached = self._swarm_tasks.get(task_id)
+            if cached is None:
+                return None
+            owner = str(conversation_id or "").strip()
+            if owner and str(cached.conversation_id or "").strip() != owner:
+                return None
+            return cached
         task = _swarm_task_from_dict(payload)
         self._swarm_tasks[task.task_id] = task
         return task
@@ -2141,8 +3711,18 @@ class AgentRuntime:
             self._swarm_tasks[record.task_id] = record
         return records
 
-    def update_swarm_task(self, task_id: str, patch: dict[str, Any]) -> SwarmTaskRecord | None:
-        payload = self._swarm_store.update_task(task_id, patch)
+    def update_swarm_task(
+        self,
+        task_id: str,
+        patch: dict[str, Any],
+        *,
+        conversation_id: str = "",
+    ) -> SwarmTaskRecord | None:
+        payload = self._swarm_store.update_task(
+            task_id,
+            patch,
+            conversation_id=conversation_id,
+        )
         if payload is None:
             return None
         task = _swarm_task_from_dict(payload)
@@ -2156,8 +3736,13 @@ class AgentRuntime:
         *,
         author_id: str,
         content: str,
+        conversation_id: str = "",
     ) -> SwarmTaskRecord | None:
-        payload = self._swarm_store.append_output(task_id, {"author_id": author_id, "content": content})
+        payload = self._swarm_store.append_output(
+            task_id,
+            {"author_id": author_id, "content": content},
+            conversation_id=conversation_id,
+        )
         if payload is None:
             return None
         task = _swarm_task_from_dict(payload)
@@ -2222,29 +3807,326 @@ class AgentRuntime:
         self.write_metric("swarm_team_deleted", team.to_dict())
         return team
 
+    def purge_conversation(self, conversation_id: str) -> dict[str, Any]:
+        """Forget all durable and process-local agent state for a deleted chat."""
+        owner = str(conversation_id or "").strip()
+        if not owner:
+            return {}
+        if not self._refresh_runtime_lease():
+            raise RuntimeError("runtime lease was lost before conversation purge")
+
+        memory_run_ids = {
+            run_id
+            for run_id, record in self._runs.items()
+            if str(record.conversation_id or "").strip() == owner
+        }
+        memory_task_ids = {
+            task_id
+            for task_id, record in self._swarm_tasks.items()
+            if str(record.conversation_id or "").strip() == owner
+        }
+        memory_subagent_ids = {
+            subagent_id
+            for subagent_id, record in self._subagents.items()
+            if str(record.parent_run_id or "").strip() in memory_run_ids
+            or str(getattr(record, "task_id", "") or "").strip() in memory_task_ids
+        }
+        memory_subagent_ids.update(
+            subagent_id
+            for subagent_id, metadata in self._subagent_task_metadata.items()
+            if isinstance(metadata, dict)
+            and (
+                str(metadata.get("parent_run_id") or "").strip() in memory_run_ids
+                or str(metadata.get("task_id") or "").strip() in memory_task_ids
+            )
+        )
+        while True:
+            descendants = {
+                subagent_id
+                for subagent_id, record in self._subagents.items()
+                if str(record.parent_run_id or "").strip() in memory_subagent_ids
+            }
+            descendants.update(
+                subagent_id
+                for subagent_id, metadata in self._subagent_task_metadata.items()
+                if isinstance(metadata, dict)
+                and str(metadata.get("parent_run_id") or "").strip() in memory_subagent_ids
+            )
+            next_ids = memory_subagent_ids | descendants
+            if len(next_ids) == len(memory_subagent_ids):
+                break
+            memory_subagent_ids = next_ids
+        memory_message_ids = {
+            message_id
+            for message_id, record in self._swarm_messages.items()
+            if str(record.conversation_id or "").strip() == owner
+        }
+        memory_team_ids = {
+            str(record.team_id or "")
+            for record in self._swarm_teams.values()
+            if str(record.conversation_id or "").strip() == owner
+        }
+
+        removed = self._swarm_store.purge_conversation(
+            owner,
+            allowed_active_owner_tokens={self._runtime_owner_token},
+        )
+        run_ids = memory_run_ids | {str(value) for value in removed.get("run_ids", [])}
+        subagent_ids = memory_subagent_ids | {str(value) for value in removed.get("subagent_ids", [])}
+        task_ids = memory_task_ids | {str(value) for value in removed.get("task_ids", [])}
+        message_ids = memory_message_ids | {str(value) for value in removed.get("message_ids", [])}
+        team_ids = memory_team_ids | {str(value) for value in removed.get("team_ids", [])}
+        removed.update({
+            "run_ids": sorted(run_ids),
+            "subagent_ids": sorted(subagent_ids),
+            "task_ids": sorted(task_ids),
+            "message_ids": sorted(message_ids),
+            "team_ids": sorted(team_ids),
+        })
+        cleanup_errors: list[dict[str, str]] = []
+
+        for run_id in run_ids:
+            self._runs.pop(run_id, None)
+            self._registry.discard(run_id, kind="run")
+        for subagent_id in subagent_ids:
+            self._subagents.pop(subagent_id, None)
+            self._subagent_results.pop(subagent_id, None)
+            self._subagent_tasks.pop(subagent_id, None)
+            self._subagent_task_metadata.pop(subagent_id, None)
+            self._subagent_cancel_events.pop(subagent_id, None)
+            self._subagent_completion_events.pop(subagent_id, None)
+            self._subagent_parent_run_ids.pop(subagent_id, None)
+            self._subagent_owner_task_ids.pop(subagent_id, None)
+            self._subagent_session_ids.pop(subagent_id, None)
+            self._subagent_slot_reservations.discard(subagent_id)
+            self._registry.discard(subagent_id, kind="subagent")
+        self._subagent_name_registry = {
+            name: subagent_id
+            for name, subagent_id in self._subagent_name_registry.items()
+            if subagent_id not in subagent_ids
+        }
+        for task_id in task_ids:
+            self._swarm_tasks.pop(task_id, None)
+        for message_id in message_ids:
+            self._swarm_messages.pop(message_id, None)
+        self._swarm_teams = {
+            name: team
+            for name, team in self._swarm_teams.items()
+            if str(team.team_id or "") not in team_ids
+        }
+
+        for agent_id in sorted(run_ids | subagent_ids):
+            with self._execution_journal_lock:
+                self._execution_journals.pop(agent_id, None)
+            try:
+                delete_agent_journal(agent_id, base_dir=self._journal_root)
+            except Exception as exc:
+                cleanup_errors.append(
+                    {
+                        "resource": "agent_journal",
+                        "resource_id": agent_id,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc)[:500],
+                    }
+                )
+            try:
+                ParentNotificationOutbox(
+                    parent_run_id=agent_id,
+                    base_dir=self._outbox_root,
+                ).delete()
+            except Exception as exc:
+                cleanup_errors.append(
+                    {
+                        "resource": "parent_outbox",
+                        "resource_id": agent_id,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc)[:500],
+                    }
+                )
+        try:
+            ParentNotificationOutbox(
+                conversation_id=owner,
+                base_dir=self._outbox_root,
+            ).delete()
+        except Exception as exc:
+            cleanup_errors.append(
+                {
+                    "resource": "conversation_outbox",
+                    "resource_id": owner,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc)[:500],
+                }
+            )
+        if cleanup_errors:
+            removed["cleanup_errors"] = cleanup_errors
+            removed["cleanup_pending"] = True
+            self.write_metric(
+                "conversation_runtime_purge_cleanup_failed",
+                {"conversation_id": owner, "cleanup_errors": cleanup_errors},
+            )
+        self.write_metric(
+            "conversation_runtime_purged",
+            {
+                "conversation_id": owner,
+                "run_count": len(run_ids),
+                "subagent_count": len(subagent_ids),
+                "task_count": len(task_ids),
+                "message_count": len(message_ids),
+                "team_count": len(team_ids),
+            },
+        )
+        return removed
+
+    def batched_metrics(self) -> Any:
+        """Collapse a burst of metric appends into one atomic append.
+
+        Runtime metrics are observational rather than authoritative.  A normal
+        lifecycle event appends immediately; reconciliation and stress paths
+        may collect a bounded burst and publish it with one O_APPEND write.
+        """
+
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _batch() -> Any:
+            with self._metric_batch_guard:
+                if self._metric_batch is None:
+                    self._metric_batch = []
+                self._metric_batch_depth += 1
+            try:
+                yield
+            finally:
+                with self._metric_batch_guard:
+                    self._metric_batch_depth -= 1
+                    pending = (
+                        self._metric_batch if self._metric_batch_depth <= 0 else None
+                    )
+                    if pending is not None:
+                        self._metric_batch = None
+                if pending:
+                    self._append_metrics(pending)
+
+        return _batch()
+
+    def _append_metrics(self, metrics: list[dict[str, Any]]) -> None:
+        if not metrics:
+            return
+        try:
+            encoded = (
+                "".join(
+                    json.dumps(metric, ensure_ascii=False, default=str) + "\n"
+                    for metric in metrics
+                )
+            ).encode("utf-8")
+            with _METRIC_APPEND_LOCK:
+                self._metrics_file.parent.mkdir(parents=True, exist_ok=True)
+                descriptor = os.open(
+                    os.fspath(self._metrics_file),
+                    os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                    0o644,
+                )
+                try:
+                    written = os.write(descriptor, encoded)
+                    if written != len(encoded):
+                        raise OSError(
+                            f"short metrics append: wrote {written} of {len(encoded)} bytes"
+                        )
+                finally:
+                    os.close(descriptor)
+        except Exception as exc:
+            # Metrics are observational and must not alter run authority, but
+            # a failed append is still runtime evidence. Keep a bounded
+            # process-local receipt so snapshots expose the degraded surface.
+            for metric in metrics:
+                self._metric_write_failures.append(
+                    {
+                        "event": str(metric.get("event") or "runtime_metric")[:128],
+                        "error_type": type(exc).__name__,
+                        "error": str(exc)[:500],
+                        "recorded_at": epoch_ms(),
+                    }
+                )
+            logger.error(
+                "Runtime metric append failed for %d metric(s): %s",
+                len(metrics),
+                exc,
+                exc_info=True,
+            )
+
     def write_metric(self, event: str, payload: dict[str, Any]) -> None:
         try:
-            self._metrics_file.parent.mkdir(parents=True, exist_ok=True)
-            metric = {"ts": epoch_ms(), "event": event, **payload}
-            with self._metrics_file.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(metric, ensure_ascii=False, default=str) + "\n")
-        except Exception:
-            # Metrics must never affect the agent run.
+            event_name = str(event or "").strip()[:128] or "runtime_metric"
+            metric = {
+                "ts": epoch_ms(),
+                "event": event_name,
+                **project_public_metric_payload(event_name, payload),
+            }
+        except Exception as exc:
+            self._metric_write_failures.append(
+                {
+                    "event": str(event or "runtime_metric")[:128],
+                    "error_type": type(exc).__name__,
+                    "error": str(exc)[:500],
+                    "recorded_at": epoch_ms(),
+                }
+            )
+            logger.error(
+                "Runtime metric projection failed for %s: %s", event, exc, exc_info=True
+            )
             return
+        with self._metric_batch_guard:
+            batch = self._metric_batch
+            if batch is not None:
+                batch.append(metric)
+                return
+        self._append_metrics([metric])
 
     def list_runs(self, *, conversation_id: str = "", include_subagents: bool = False) -> dict[str, Any]:
         """Return a lightweight runtime snapshot for UI/debug panels."""
         runs = [
-            record.to_dict()
+            record.public_dict()
             for record in self._runs.values()
             if not conversation_id or record.conversation_id == conversation_id
         ]
         payload: dict[str, Any] = {"runs": runs}
+        if self._metric_write_failures:
+            payload["metric_persistence"] = {
+                "status": "degraded",
+                "failures": [dict(item) for item in self._metric_write_failures],
+            }
         if include_subagents:
             parent_ids = {str(record.get("run_id") or "") for record in runs}
+            if conversation_id:
+                # Subagent records intentionally inherit conversation ownership
+                # through their parent instead of duplicating conversation_id.
+                # Resolve the full transitive tree; filtering only direct
+                # children makes grandchildren disappear from lifecycle and UI
+                # projections even though their canonical path is valid.
+                visible_records: list[SubagentRunRecord] = []
+                visible_owner_ids = set(parent_ids)
+                remaining_records = list(self._subagents.values())
+                while remaining_records:
+                    next_remaining: list[SubagentRunRecord] = []
+                    added = False
+                    for record in remaining_records:
+                        if record.parent_run_id in visible_owner_ids:
+                            visible_records.append(record)
+                            visible_owner_ids.add(record.subagent_id)
+                            added = True
+                        else:
+                            next_remaining.append(record)
+                    if not added:
+                        break
+                    remaining_records = next_remaining
+            else:
+                visible_records = list(self._subagents.values())
+                visible_owner_ids = {
+                    *parent_ids,
+                    *(record.subagent_id for record in visible_records),
+                }
             subagents = [
                 {
-                    **record.to_dict(),
+                    **record.public_dict(),
                     **({"background_task": "running"} if record.subagent_id in self._subagent_tasks else {}),
                     **({"result_available": True} if record.subagent_id in self._subagent_results else {}),
                     **(
@@ -2256,39 +4138,103 @@ class AgentRuntime:
                         else {}
                     ),
                 }
-                for record in self._subagents.values()
-                if not conversation_id or record.parent_run_id in parent_ids
+                for record in visible_records
             ]
             known_ids = {str(item.get("subagent_id") or "") for item in subagents}
             subagents.extend(
                 {
-                    **metadata,
+                    **project_public_subagent_run(metadata),
                     "background_task": "done" if task.done() else "queued",
                     "result_available": False,
                 }
                 for subagent_id, task in self._subagent_tasks.items()
                 if subagent_id not in known_ids
                 and isinstance((metadata := self._subagent_task_metadata.get(subagent_id)), dict)
-                and (not conversation_id or str(metadata.get("parent_run_id") or "") in parent_ids)
+                and (
+                    not conversation_id
+                    or str(metadata.get("parent_run_id") or "") in visible_owner_ids
+                )
             )
             payload["subagents"] = subagents
             payload["swarm_messages"] = [
-                record.to_dict()
+                record.public_dict()
                 for record in self.list_swarm_messages(conversation_id=conversation_id, limit=20)
             ]
             payload["swarm_tasks"] = [
-                record.to_dict()
+                record.public_dict()
                 for record in self.list_swarm_tasks(conversation_id=conversation_id, limit=50)
             ]
             payload["swarm_teams"] = [
-                record.to_dict()
+                record.public_dict()
                 for record in self.list_swarm_teams(conversation_id=conversation_id, limit=50)
             ]
         return payload
 
 
 _DEFAULT_RUNTIME_LOCK = threading.Lock()
-_DEFAULT_RUNTIME = AgentRuntime()
+_DEFAULT_RUNTIME: AgentRuntime | None = None
+
+
+def default_runtime_if_initialized() -> AgentRuntime | None:
+    """Return the live process runtime without triggering durable recovery.
+
+    Cleanup and notification probes are frequently no-ops in a process that
+    has not executed an agent turn yet.  Those paths must not synchronously
+    hydrate the entire durable runtime store just to discover that there is no
+    process-local work to stop.  Callers that need to create or execute agent
+    work must continue to use :func:`default_runtime`.
+    """
+
+    with _DEFAULT_RUNTIME_LOCK:
+        runtime = _DEFAULT_RUNTIME
+        if runtime is None or runtime._lease_lost:
+            return None
+        return runtime
+
+
+def purge_persisted_conversation_runtime(conversation_id: str) -> dict[str, Any]:
+    """Purge a deleted conversation without hydrating the process runtime.
+
+    A session with no agent turn has no process-local runtime tasks to update,
+    yet hard deletion still has to remove durable run, swarm, journal and
+    notification records.  Loading every historical run before that targeted
+    delete made the UI wait on an unbounded SQLite/JSON hydration.  This path
+    performs the indexed delete directly and refuses to cross a live runtime
+    lease owned by another process.
+    """
+
+    owner = str(conversation_id or "").strip()
+    if not owner:
+        return {}
+    if default_runtime_if_initialized() is not None:
+        raise RuntimeError(
+            "the live process runtime must own in-memory conversation cleanup"
+        )
+
+    store = FileSwarmStore(SWARM_DIR)
+    removed = store.purge_conversation(
+        owner,
+        allowed_active_owner_tokens=set(),
+    )
+    journal_root = SWARM_DIR.parent / "sidechains"
+    outbox_root = SWARM_DIR.parent / "parent_notifications"
+    agent_ids = {
+        str(value or "").strip()
+        for key in ("run_ids", "subagent_ids")
+        for value in removed.get(key, [])
+        if str(value or "").strip()
+    }
+    for agent_id in sorted(agent_ids):
+        delete_agent_journal(agent_id, base_dir=journal_root)
+        ParentNotificationOutbox(
+            parent_run_id=agent_id,
+            base_dir=outbox_root,
+        ).delete()
+    ParentNotificationOutbox(
+        conversation_id=owner,
+        base_dir=outbox_root,
+    ).delete()
+    return removed
 
 
 def default_runtime() -> AgentRuntime:
@@ -2301,9 +4247,7 @@ def default_runtime() -> AgentRuntime:
     """
 
     global _DEFAULT_RUNTIME
-    if not _DEFAULT_RUNTIME._lease_lost:
-        return _DEFAULT_RUNTIME
     with _DEFAULT_RUNTIME_LOCK:
-        if _DEFAULT_RUNTIME._lease_lost:
+        if _DEFAULT_RUNTIME is None or _DEFAULT_RUNTIME._lease_lost:
             _DEFAULT_RUNTIME = AgentRuntime()
         return _DEFAULT_RUNTIME

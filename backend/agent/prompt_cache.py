@@ -296,6 +296,10 @@ def prompt_cache_effective_prompt_tokens(
     cache_read_tokens: int = 0,
     cache_creation_tokens: int = 0,
     provider: str = "",
+    input_includes_cache_read: bool = True,
+    input_includes_cache_write: bool = True,
+    ordinary_input_tokens: int = 0,
+    prompt_cache_total_tokens: int = 0,
 ) -> int:
     """Return the prompt-token denominator used for cache hit-rate reporting.
 
@@ -306,10 +310,19 @@ def prompt_cache_effective_prompt_tokens(
     input_count = max(0, int(input_tokens or 0))
     read_count = max(0, int(cache_read_tokens or 0))
     write_count = max(0, int(cache_creation_tokens or 0))
-    provider_name = str(provider or "").strip().lower()
-    if "anthropic" in provider_name:
-        return input_count + read_count + write_count
-    return max(input_count, read_count) + write_count
+    del provider
+    authoritative_total = max(0, int(prompt_cache_total_tokens or 0))
+    if authoritative_total:
+        return authoritative_total
+    ordinary = max(0, int(ordinary_input_tokens or 0))
+    if not ordinary:
+        ordinary = input_count
+        if input_includes_cache_read:
+            ordinary -= min(read_count, ordinary)
+        if input_includes_cache_write:
+            ordinary -= min(write_count, ordinary)
+        ordinary = max(0, ordinary)
+    return ordinary + read_count + write_count
 
 
 def prompt_cache_hit_rate(
@@ -318,12 +331,20 @@ def prompt_cache_hit_rate(
     cache_read_tokens: int = 0,
     cache_creation_tokens: int = 0,
     provider: str = "",
+    input_includes_cache_read: bool = True,
+    input_includes_cache_write: bool = True,
+    ordinary_input_tokens: int = 0,
+    prompt_cache_total_tokens: int = 0,
 ) -> float:
     denominator = prompt_cache_effective_prompt_tokens(
         input_tokens=input_tokens,
         cache_read_tokens=cache_read_tokens,
         cache_creation_tokens=cache_creation_tokens,
         provider=provider,
+        input_includes_cache_read=input_includes_cache_read,
+        input_includes_cache_write=input_includes_cache_write,
+        ordinary_input_tokens=ordinary_input_tokens,
+        prompt_cache_total_tokens=prompt_cache_total_tokens,
     )
     if denominator <= 0 or cache_read_tokens <= 0:
         return 0.0
@@ -344,19 +365,47 @@ def prompt_cache_usage_stats(usage: Any, provider_raw: Any | None = None) -> dic
     cache_read = _int_attr(usage, "cache_read_input_tokens")
     cache_creation = _int_attr(usage, "cache_creation_input_tokens")
     cache_deleted = _int_attr(usage, "cache_deleted_input_tokens")
+    ordinary = _int_attr(usage, "ordinary_input_tokens")
+    authoritative_total = _int_attr(usage, "prompt_cache_total_tokens")
+    includes_read = bool(
+        usage.get("input_includes_cache_read", True)
+        if isinstance(usage, dict)
+        else getattr(usage, "input_includes_cache_read", True)
+    )
+    includes_write = bool(
+        usage.get("input_includes_cache_write", True)
+        if isinstance(usage, dict)
+        else getattr(usage, "input_includes_cache_write", True)
+    )
     total = prompt_cache_effective_prompt_tokens(
         input_tokens=input_tokens,
         cache_read_tokens=cache_read,
         cache_creation_tokens=cache_creation,
         provider=provider,
+        input_includes_cache_read=includes_read,
+        input_includes_cache_write=includes_write,
+        ordinary_input_tokens=ordinary,
+        prompt_cache_total_tokens=authoritative_total,
     )
     stats: dict[str, float | int] = {
         "prompt_cache_total_tokens": total,
+        "ordinary_input_tokens": (
+            ordinary
+            if ordinary
+            else max(
+                0,
+                total - cache_read - cache_creation,
+            )
+        ),
         "prompt_cache_hit_rate": prompt_cache_hit_rate(
             input_tokens=input_tokens,
             cache_read_tokens=cache_read,
             cache_creation_tokens=cache_creation,
             provider=provider,
+            input_includes_cache_read=includes_read,
+            input_includes_cache_write=includes_write,
+            ordinary_input_tokens=ordinary,
+            prompt_cache_total_tokens=authoritative_total,
         ),
     }
     if cache_deleted:
@@ -387,7 +436,6 @@ def _diff_request_summaries(
         ("wire_api", "wire API changed"),
         ("prompt_cache_key_hash", "prompt cache key changed"),
         ("instructions_hash", "system instructions changed"),
-        ("previous_response_id_hash", "previous response id changed"),
         ("turn_aborted_marker_present", "turn-aborted marker changed"),
     ):
         if previous.get(field) != current.get(field):

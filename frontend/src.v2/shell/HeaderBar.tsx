@@ -1,9 +1,10 @@
 import {
   Minus,
   Folder,
+  LoaderCircle,
+  Monitor,
   PanelLeft,
   PanelRight,
-  Plus,
   Search,
   Square,
   SquareTerminal,
@@ -12,11 +13,10 @@ import {
   X,
 } from "lucide-react";
 import type { ReactNode, Ref } from "react";
-import { desktop, isDesktop } from "../desktop/runtime";
+import { desktop, isDesktop, runtime } from "../desktop/runtime";
 import { useAppStore } from "../stores";
-import { ContextBudgetIndicator } from "../chat/components/ContextBudgetIndicator";
 import { BrandMark } from "../components/icons";
-import "../chat/components/context-budget.css";
+import { getConnectionPresentation } from "./connectionPresentation";
 
 interface HeaderBarProps {
   leftPanelControls?: string;
@@ -42,19 +42,18 @@ export const HeaderBar = ({
   onToggleRightPanel,
 }: HeaderBarProps) => {
   const isConnected = useAppStore((s) => s.isConnected);
-  const appMode = useAppStore((s) => s.appMode);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const toggleCommandPalette = useAppStore((s) => s.toggleCommandPalette);
-  const startNewConversation = useAppStore((s) => s.createConversation);
   const dockCollapsed = useAppStore((s) => s.dockCollapsed);
   const activeBottomTab = useAppStore((s) => s.activeBottomTab);
   const openBottomTab = useAppStore((s) => s.openBottomTab);
   const closeBottomDock = useAppStore((s) => s.closeBottomDock);
 
-  const createConversationInCurrentMode = () => {
-    startNewConversation({ appMode, bindWorkspace: Boolean(workingDirectory) });
-  };
-  const connectionLabel = isConnected ? "后端已连接" : "后端未连接";
+  const connection = getConnectionPresentation({
+    isConnected,
+    isDesktop: isDesktop(),
+    hasRuntimeToken: Boolean(runtime()?.runtimeToken?.trim()),
+  });
   const projectName = workingDirectory.split(/[\\/]/).filter(Boolean).pop() || "MiniCode";
 
   return (
@@ -71,9 +70,6 @@ export const HeaderBar = ({
             <PanelLeft />
           </IconButton>
         )}
-        <IconButton label="新建任务" onClick={createConversationInCurrentMode}>
-          <Plus />
-        </IconButton>
       </div>
 
       <div className="mc-header-center">
@@ -88,11 +84,6 @@ export const HeaderBar = ({
         <IconButton label="命令面板" onClick={() => toggleCommandPalette()} buttonRef={sideChatFallbackButtonRef}>
           <Search />
         </IconButton>
-        {appMode !== "code" && (
-          <div className="mc-header-budget">
-            <ContextBudgetIndicator />
-          </div>
-        )}
         {rightPanelAvailable && (
           <>
             <IconButton
@@ -119,13 +110,17 @@ export const HeaderBar = ({
         )}
         <span
           role="img"
-          aria-label={connectionLabel}
-          title={connectionLabel}
+          aria-label={connection.accessibleLabel}
+          title={connection.accessibleLabel}
           className="mc-connection-status"
           data-connected={isConnected ? "true" : "false"}
+          data-kind={connection.kind}
         >
-          {isConnected ? <Wifi aria-hidden="true" /> : <WifiOff aria-hidden="true" />}
-          {!isConnected && <span className="mc-connection-label">离线</span>}
+          {connection.kind === "connected" && <Wifi aria-hidden="true" />}
+          {connection.kind === "preview" && <Monitor aria-hidden="true" />}
+          {connection.kind === "connecting" && <LoaderCircle className="mc-connection-status-spinner" aria-hidden="true" />}
+          {connection.kind === "warning" && <WifiOff aria-hidden="true" />}
+          {connection.shortLabel && <span className="mc-connection-label">{connection.shortLabel}</span>}
         </span>
 
         {isDesktop() && (

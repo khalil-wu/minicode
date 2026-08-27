@@ -21,6 +21,9 @@ const wsBaseUrl =
 const runtimeToken =
   process.env.MINICODE_RUNTIME_TOKEN ||
   "";
+const updateActivityRendererInstanceId = globalThis.crypto?.randomUUID?.()
+  || `renderer-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+let updateActivityRevision = 0;
 
 const runtimeConfig = {
   apiBaseUrl,
@@ -42,7 +45,19 @@ const runtimeConfig = {
     updates: {
       check: () => ipcRenderer.invoke("minicode:update:check"),
       download: () => ipcRenderer.invoke("minicode:update:download"),
-      install: () => ipcRenderer.invoke("minicode:update:install"),
+      reportActivity: (payload, requestIds = []) => ipcRenderer.invoke("minicode:update:activity", {
+        ...payload,
+        revision: ++updateActivityRevision,
+        rendererInstanceId: updateActivityRendererInstanceId,
+        requestIds,
+      }),
+      onActivityRequest: (callback) => {
+        const handler = (_event, payload) => callback(payload);
+        ipcRenderer.on("minicode:update:activity:request", handler);
+        return () => ipcRenderer.removeListener("minicode:update:activity:request", handler);
+      },
+      preflight: () => ipcRenderer.invoke("minicode:update:preflight"),
+      install: (payload) => ipcRenderer.invoke("minicode:update:install", payload),
       getStatus: () => ipcRenderer.invoke("minicode:update:status:get"),
       onStatus: (callback) => {
         const handler = (_event, payload) => callback(payload);
@@ -77,14 +92,14 @@ const runtimeConfig = {
     },
     pty: {
       spawn: (cwd, conversationId) => ipcRenderer.invoke("minicode:pty:spawn", cwd, conversationId),
-      spawnOwned: (cwd, conversationId) => ipcRenderer.invoke("minicode:pty:spawn", cwd, conversationId),
       write: (sessionId, data, conversationId) => ipcRenderer.invoke("minicode:pty:write", sessionId, data, conversationId),
       resize: (sessionId, cols, rows, conversationId) => ipcRenderer.invoke("minicode:pty:resize", sessionId, cols, rows, conversationId),
       kill: (sessionId, conversationId) => ipcRenderer.invoke("minicode:pty:kill", sessionId, conversationId),
+      restart: (sessionId, conversationId) => ipcRenderer.invoke("minicode:pty:restart", sessionId, conversationId),
       killConversation: (conversationId) => ipcRenderer.invoke("minicode:pty:killConversation", conversationId),
       list: (conversationId) => ipcRenderer.invoke("minicode:pty:list", conversationId),
-      listOwned: (conversationId) => ipcRenderer.invoke("minicode:pty:list", conversationId),
       snapshot: (sessionId, maxChars, conversationId) => ipcRenderer.invoke("minicode:pty:snapshot", sessionId, maxChars, conversationId),
+      clear: (sessionId, conversationId) => ipcRenderer.invoke("minicode:pty:clear", sessionId, conversationId),
       ackExit: (sessionId, conversationId) => ipcRenderer.invoke("minicode:pty:ackExit", sessionId, conversationId),
       onData: (callback) => {
         const handler = (_event, payload) => callback(payload);
@@ -109,16 +124,17 @@ const runtimeConfig = {
     },
     embeddedBrowser: {
       create: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:create", payload),
-      list: () => ipcRenderer.invoke("minicode:embeddedBrowser:list"),
-      activate: (id) => ipcRenderer.invoke("minicode:embeddedBrowser:activate", id),
+      list: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:list", payload),
+      activate: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:activate", payload),
       setBounds: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:setBounds", payload),
       navigate: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:navigate", payload),
       runAction: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:runAction", payload),
       inspect: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:inspect", payload),
       getSettings: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:getSettings", payload),
       setSettings: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:setSettings", payload),
-      clearSiteData: (id) => ipcRenderer.invoke("minicode:embeddedBrowser:clearSiteData", id),
-      close: (id) => ipcRenderer.invoke("minicode:embeddedBrowser:close", id),
+      clearSiteData: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:clearSiteData", payload),
+      close: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:close", payload),
+      closeConversation: (conversationId) => ipcRenderer.invoke("minicode:embeddedBrowser:closeConversation", conversationId),
       onEvent: (callback) => {
         const handler = (_event, payload) => callback(payload);
         ipcRenderer.on("minicode:embeddedBrowser:event", handler);

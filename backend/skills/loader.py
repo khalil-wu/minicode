@@ -1,4 +1,4 @@
-"""Codex-compatible progressive-disclosure Skill loader.
+"""MiniCode progressive-disclosure Skill loader.
 
 SKILL.md owns the agent-visible name, description, and instructions.
 Product metadata and MCP dependencies come from agents/openai.yaml.
@@ -15,7 +15,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from backend.config import PROJECT_ROOT
+from backend.agent.instruction_discovery import _get_managed_minicode_dir
+from backend.agent.markdown_scopes import get_minicode_config_home_dir
+from backend.config import PROJECT_ROOT, STATE_ROOT
 from backend.feature_flags import feature_enabled
 
 logger = logging.getLogger(__name__)
@@ -33,12 +35,13 @@ class SkillMeta:
     brand_color: str = ""
     mcp_dependencies: list[str] = field(default_factory=list)
     allow_implicit_invocation: bool = True
+    user_invocable: bool = True
     default_prompt: str = ""
     source_path: Path = field(default_factory=lambda: Path("."))
-    source_level: str = "builtin"  # project / global / builtin
+    source_level: str = "builtin"  # managed / plugin / user / workspace / builtin
 
     def to_layer1_summary(self) -> str:
-        """Render the Codex absolute-path catalog line."""
+        """Render MiniCode's absolute-path catalog line."""
         title = f"{self.name} ({self.display_name})" if self.display_name else self.name
         policy = "" if self.allow_implicit_invocation else " [explicit only]"
         path = str(self.source_path).replace("\\", "/")
@@ -50,7 +53,7 @@ class SkillFull:
     """完整 Skill 数据（Layer 1 + Layer 2）。"""
     meta: SkillMeta
     content: str  # Layer 2: SKILL.md 正文（去掉 frontmatter）
-    raw_content: str = ""  # 完整 SKILL.md；显式调用时按 Codex 方式注入
+    raw_content: str = ""  # 完整 SKILL.md；显式调用时原样注入
 
     @property
     def token_estimate(self) -> int:
@@ -98,15 +101,25 @@ class SkillLoader:
 
     def _search_dirs(self) -> list[tuple[str, Path]]:
         dirs: list[tuple[str, Path]] = []
-        dirs.extend(("workspace", path / ".agents" / "skills") for path in self._workspace_ancestors())
-        if self._project_root is not None:
-            dirs.append(("project-legacy", self._project_root / ".codex" / "skills"))
+        plugin_only = self._plugin_only_customization()
+        workspace_ancestors = self._workspace_ancestors()
+        dirs.append(("managed", _get_managed_minicode_dir() / "skills"))
         dirs.extend(self._plugin_search_dirs())
-        dirs.append(("user", Path.home() / ".agents" / "skills"))
-        codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")).expanduser()
-        dirs.append(("user-legacy", codex_home / "skills"))
+        dirs.append(("user", get_minicode_config_home_dir() / "skills"))
+        dirs.extend(("workspace", path / ".minicode" / "skills") for path in workspace_ancestors)
         dirs.append(("builtin", PROJECT_ROOT / "skills"))
 
+        if plugin_only:
+            dirs = [
+                (level, path)
+                for level, path in dirs
+                if level.startswith("plugin")
+                or level in {"managed", "builtin"}
+            ]
+        return self._dedupe_search_dirs(dirs)
+
+    @staticmethod
+    def _dedupe_search_dirs(dirs: list[tuple[str, Path]]) -> list[tuple[str, Path]]:
         deduped: list[tuple[str, Path]] = []
         seen: set[Path] = set()
         for level, path in dirs:
@@ -117,6 +130,22 @@ class SkillLoader:
             seen.add(key)
             deduped.append((level, expanded))
         return deduped
+
+    def _plugin_only_customization(self) -> bool:
+        try:
+            from backend.config import load_config_layer_stack
+
+            requirements = load_config_layer_stack(cwd=self._project_root).requirements
+            return requirements.restricts_customization_to_plugins("skills")
+        except Exception:
+            # A managed policy read failure must never silently widen the
+            # search surface to user/project Skills.  Fail closed and leave a
+            # diagnostic trail for operators.
+            logger.warning(
+                "Unable to determine managed plugin-only Skills policy; restricting to managed/plugin Skills",
+                exc_info=True,
+            )
+            return True
 
     def _workspace_ancestors(self) -> list[Path]:
         current = self._project_root
@@ -138,26 +167,42 @@ class SkillLoader:
         if not feature_enabled("plugin_skills", True):
             return []
         try:
-            from backend.commands.plugins import default_plugin_roots
-            from backend.services.plugin_settings_service import get_disabled_plugin_names, plugin_name_from_directory
+            from backend.plugins.manager import PluginManager
         except Exception:
             return []
 
         dirs: list[tuple[str, Path]] = []
-        disabled = get_disabled_plugin_names()
-        for root in default_plugin_roots():
-            root = root.expanduser()
-            if not root.is_dir():
+        try:
+            from backend.config import load_config_layer_stack
+
+            stack = load_config_layer_stack(cwd=self._project_root)
+            snapshot = PluginManager(config_stack=stack).snapshot()
+        except Exception:
+            logger.warning("Unified plugin snapshot unavailable for Skills", exc_info=True)
+            return []
+
+        owned_roots = [
+            (STATE_ROOT / "extensions" / "plugins").resolve(),
+        ]
+        explicit_roots = str(os.environ.get("MINICODE_PLUGINS_DIR") or "").strip()
+        if explicit_roots:
+            owned_roots.extend(Path(part).expanduser().resolve() for part in explicit_roots.split(os.pathsep) if part.strip())
+
+        for plugin in snapshot.enabled_plugins:
+            plugin_dir = Path(str(plugin.get("path") or ""))
+            plugin_name = str(plugin.get("name") or plugin.get("id") or plugin_dir.name).strip()
+            if not plugin_name or not plugin_dir.is_dir():
                 continue
-            plugin_dirs = self._candidate_plugin_dirs(root)
-            for plugin_dir in plugin_dirs:
-                plugin_name = plugin_name_from_directory(plugin_dir).strip()
-                if not plugin_name or plugin_name.casefold() in disabled:
-                    continue
-                manifest_path = plugin_dir / ".codex-plugin" / "plugin.json"
-                if not manifest_path.is_file():
-                    continue
-                skills_dirs: list[Path] = []
+            resolved_plugin_dir = plugin_dir.resolve()
+            if not any(
+                resolved_plugin_dir == root or root in resolved_plugin_dir.parents for root in owned_roots
+            ):
+                continue
+            manifest_paths = [Path(str(path)) for path in plugin.get("manifest_paths", [])]
+            if not manifest_paths:
+                manifest_paths = [plugin_dir / ".minicode-plugin" / "plugin.json"]
+            skills_dirs: list[Path] = []
+            for manifest_path in manifest_paths:
                 try:
                     raw = json.loads(manifest_path.read_text(encoding="utf-8"))
                     configured = raw.get("skills") if isinstance(raw, dict) else None
@@ -169,12 +214,12 @@ class SkillLoader:
                         candidate.relative_to(plugin_dir.resolve())
                         skills_dirs.append(candidate)
                 except (OSError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
-                    pass
-                if not skills_dirs:
-                    skills_dirs.append(plugin_dir / "skills")
-                for skills_dir in skills_dirs:
-                    if skills_dir.is_dir():
-                        dirs.append((f"plugin:{plugin_name}", skills_dir))
+                    continue
+            if not skills_dirs:
+                skills_dirs.append(plugin_dir / "skills")
+            for skills_dir in skills_dirs:
+                if skills_dir.is_dir():
+                    dirs.append((f"plugin:{plugin.get('id') or plugin_name}", skills_dir))
         return dirs
 
     @staticmethod
@@ -182,8 +227,7 @@ class SkillLoader:
         if (root / "skills").is_dir():
             return [root]
         candidates = [path for path in root.iterdir() if path.is_dir()]
-        # Codex marketplace plugins are cached as:
-        #   ~/.codex/plugins/cache/<owner>/<plugin>/<version>/skills
+        # Versioned marketplace caches may nest plugin roots three levels deep.
         cache_dir = root / "cache"
         if cache_dir.is_dir():
             candidates.extend(path for path in cache_dir.glob("*/*/*") if path.is_dir())
@@ -191,10 +235,10 @@ class SkillLoader:
 
     def discover(self) -> list[SkillMeta]:
         """
-        扫描三级目录，发现所有 SKILL.md。
+        Recursively discover Agent Skills, stopping at each skill root.
 
         只加载 Layer 1（frontmatter 元数据），不读正文。
-        高优先级目录的同名 Skill 覆盖低优先级。
+        搜索目录保持既定优先级；同名 Skill 通过绝对路径区分。
 
         Returns:
             SkillMeta 列表（已去重，高优先级优先）
@@ -210,14 +254,8 @@ class SkillLoader:
             if not base_dir.exists():
                 continue
 
-            for skill_dir in sorted(base_dir.iterdir()):
-                if not skill_dir.is_dir():
-                    continue
-
-                skill_file = skill_dir / "SKILL.md"
-                if not skill_file.exists():
-                    continue
-
+            skill_files = self._discover_skill_files(base_dir)
+            for skill_file in skill_files:
                 meta = self._parse_frontmatter(skill_file, level)
                 if meta:
                     path_key = self._path_key(meta.source_path)
@@ -233,6 +271,50 @@ class SkillLoader:
         self._full_cache.clear()
         logger.info("发现 %d 个 Skills: %s", len(catalog), ", ".join(meta.name for meta in catalog))
         return list(catalog)
+
+    @staticmethod
+    def _discover_skill_files(base_dir: Path) -> list[Path]:
+        """Apply progressive-discovery semantics to one skill root.
+
+        A directory containing ``SKILL.md`` is a complete skill and is not
+        traversed further.  Container directories may nest skills (notably
+        nested container layouts). Resolve
+        directory identities so linked directory trees cannot create cycles.
+        """
+        pending = [base_dir]
+        seen_dirs: set[str] = set()
+        found: list[Path] = []
+        excluded = {".git", ".hg", ".svn", "node_modules", "__pycache__"}
+
+        while pending:
+            current = pending.pop(0)
+            try:
+                identity = os.path.normcase(str(current.resolve()))
+            except OSError:
+                identity = os.path.normcase(str(current.absolute()))
+            if identity in seen_dirs:
+                continue
+            seen_dirs.add(identity)
+
+            skill_file = current / "SKILL.md"
+            if skill_file.is_file():
+                found.append(skill_file)
+                continue
+
+            try:
+                children = sorted(
+                    (
+                        child
+                        for child in current.iterdir()
+                        if child.name not in excluded and child.is_dir()
+                    ),
+                    key=lambda path: path.name.casefold(),
+                )
+            except OSError:
+                continue
+            pending.extend(children)
+
+        return found
 
     def load_full(self, skill_name: str, source_path: str | Path | None = None) -> SkillFull | None:
         """
@@ -317,6 +399,11 @@ class SkillLoader:
         matches = self.get_metas(skill_name)
         return matches[0] if len(matches) == 1 else None
 
+    def get_invocation_meta(self, skill_name: str) -> SkillMeta | None:
+        """Resolve an invocation only when its name has one canonical owner."""
+        matches = self.get_metas(skill_name)
+        return matches[0] if len(matches) == 1 else None
+
     def get_meta_by_path(self, source_path: str | Path | None) -> SkillMeta | None:
         if source_path is None:
             return None
@@ -351,38 +438,43 @@ class SkillLoader:
         except (OSError, UnicodeDecodeError):
             return None
 
-        # 提取 frontmatter
         fm_match = re.match(r"^---\s*\n(.*?)\n---", raw, re.DOTALL)
         if not fm_match:
             logger.warning("Ignoring skill without YAML frontmatter: %s", skill_file)
             return None
-
-        fm_text = fm_match.group(1)
-        try:
-            fm_payload = yaml.safe_load(fm_text)
-        except yaml.YAMLError as exc:
-            logger.warning("Ignoring skill with invalid YAML frontmatter %s: %s", skill_file, exc)
-            return None
-        if not isinstance(fm_payload, dict):
-            logger.warning("Ignoring skill with non-object YAML frontmatter: %s", skill_file)
-            return None
-        fm = fm_payload
-
-        name = self._metadata_text(fm.get("name"), skill_file.parent.name)
-        if not name:
-            logger.warning("Ignoring skill with invalid name metadata: %s", skill_file)
-            return None
-        description = self._metadata_text(fm.get("description"))
+        else:
+            fm_text = fm_match.group(1)
+            try:
+                fm_payload = yaml.safe_load(fm_text)
+            except yaml.YAMLError as exc:
+                logger.warning("Ignoring skill with invalid YAML frontmatter %s: %s", skill_file, exc)
+                return None
+            else:
+                if not isinstance(fm_payload, dict):
+                    logger.warning("Ignoring skill with non-object YAML frontmatter: %s", skill_file)
+                    return None
+                else:
+                    fm = fm_payload
+        raw_name = fm.get("name")
+        frontmatter_name = raw_name.strip() if isinstance(raw_name, str) and raw_name.strip() else ""
+        name = frontmatter_name or skill_file.parent.name
+        description = fm.get("description", "")
+        description = description.strip() if isinstance(description, str) else ""
         if not description:
             logger.warning("Ignoring skill without description metadata: %s", skill_file)
             return None
-        if len(name) > 64 or len(description) > 1024:
-            logger.warning("Ignoring skill with oversized metadata: %s", skill_file)
-            return None
+        for warning in self._skill_name_warnings(name, skill_file.parent.name):
+            logger.warning("Skill metadata warning for %s: %s", skill_file, warning)
+        if len(description) > 1024:
+            logger.warning(
+                "Skill metadata warning for %s: description exceeds 1024 characters (%d)",
+                skill_file,
+                len(description),
+            )
 
         plugin_namespace = level.split(":", 1)[1] if level.startswith("plugin:") else ""
         qualified_name = f"{plugin_namespace}:{name}" if plugin_namespace else name
-        agent_meta = self._load_openai_metadata(skill_file.parent)
+        agent_meta = self._load_skill_metadata(skill_file.parent)
         interface = agent_meta.get("interface") if isinstance(agent_meta.get("interface"), dict) else {}
         policy = agent_meta.get("policy") if isinstance(agent_meta.get("policy"), dict) else {}
         dependencies = agent_meta.get("dependencies") if isinstance(agent_meta.get("dependencies"), dict) else {}
@@ -394,24 +486,51 @@ class SkillLoader:
             and str(item.get("type") or "").strip().lower() == "mcp"
             and str(item.get("value") or "").strip()
         ]
+        disable_model_invocation = self._to_bool(
+            fm.get("disable-model-invocation", False),
+            default=False,
+        )
 
         return SkillMeta(
             name=qualified_name,
             description=description,
-            display_name=self._metadata_text(interface.get("display_name")),
+            display_name=(
+                self._metadata_text(interface.get("display_name"))
+            ),
             short_description=self._metadata_text(interface.get("short_description")),
             icon=self._safe_skill_asset(skill_file.parent, interface.get("icon_small")),
             icon_large=self._safe_skill_asset(skill_file.parent, interface.get("icon_large")),
             brand_color=self._metadata_text(interface.get("brand_color")),
             mcp_dependencies=mcp_dependencies,
-            allow_implicit_invocation=self._to_bool(policy.get("allow_implicit_invocation", True), default=True),
+            allow_implicit_invocation=(
+                self._to_bool(policy.get("allow_implicit_invocation", True), default=True)
+                and not disable_model_invocation
+            ),
+            user_invocable=self._to_bool(fm.get("user-invocable", True), default=True),
             default_prompt=self._metadata_text(interface.get("default_prompt")),
             source_path=skill_file,
             source_level="plugin" if plugin_namespace else level,
         )
 
     @staticmethod
-    def _load_openai_metadata(skill_dir: Path) -> dict[str, Any]:
+    def _skill_name_warnings(name: str, parent_dir_name: str) -> list[str]:
+        """Validate skill names diagnostically while preserving discoverability."""
+
+        warnings: list[str] = []
+        if name != parent_dir_name:
+            warnings.append(f'name "{name}" does not match parent directory "{parent_dir_name}"')
+        if len(name) > 64:
+            warnings.append(f"name exceeds 64 characters ({len(name)})")
+        if not re.fullmatch(r"[a-z0-9-]+", name):
+            warnings.append("name contains invalid characters (must be lowercase a-z, 0-9, hyphens only)")
+        if name.startswith("-") or name.endswith("-"):
+            warnings.append("name must not start or end with a hyphen")
+        if "--" in name:
+            warnings.append("name must not contain consecutive hyphens")
+        return warnings
+
+    @staticmethod
+    def _load_skill_metadata(skill_dir: Path) -> dict[str, Any]:
         path = skill_dir / "agents" / "openai.yaml"
         if not path.is_file():
             return {}
