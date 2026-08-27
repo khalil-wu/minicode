@@ -22,11 +22,10 @@ from backend.agent.checkpoint import (
     save_run_checkpoint,
 )
 from backend.agent.runtime import (
-    AgentRunRecord,
-    AgentRunStatus,
     AgentRuntime,
     TerminalCommitError,
 )
+from backend.agent.runtime_records import AgentRunRecord, AgentRunStatus
 from backend.agent.runtime_spans import epoch_ms, runtime_span
 from backend.agent.state import AgentState, TerminalReason, TerminalStatus
 from backend.agent.turn_input import TurnInput, TurnInputQueue

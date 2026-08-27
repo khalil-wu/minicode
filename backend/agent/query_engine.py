@@ -23,10 +23,10 @@ from backend.agent.iteration_budget import resolve_turn_max_iterations
 from backend.agent.run_events import should_emit_event
 from backend.agent.runtime import (
     AgentRuntime,
-    AgentRunStatus,
     TerminalCommitError,
     default_runtime,
 )
+from backend.agent.runtime_records import AgentRunStatus
 from backend.agent.query_recovery import prepare_query_recovery
 from backend.agent.state import AgentState
 from backend.agent.turn_budget import TurnBudgetController
