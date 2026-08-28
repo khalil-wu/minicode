@@ -93,6 +93,13 @@ from backend.llm.anthropic_protocol import (
     _strip_excess_anthropic_media,
 )
 
+_DELTA_DEBOUNCE_BYTES = 128
+
+# Anthropic 1h prompt-cache TTL requires this beta header.
+# https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching#1-hour-cache-duration
+_EXTENDED_CACHE_TTL_BETA_HEADER = "extended-cache-ttl-2025-04-11"
+
+
 class AnthropicAdapter(LLMAdapter):
     """
     Anthropic Claude 适配器。
