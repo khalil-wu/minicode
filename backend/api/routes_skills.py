@@ -17,15 +17,14 @@ from backend.services.skills_api_service import (
     import_skill,
     skills_marketplace_payload,
 )
+from backend.plugins.package import package_plugin_directory, validate_plugin_directory
+from backend.plugins.policy import PluginSettingsError
 from backend.services.plugin_settings_service import (
-    PluginSettingsError,
     get_plugin_settings,
     import_plugin_from_path,
-    package_plugin_directory,
     remove_plugin,
     resolve_plugin_asset,
     update_plugin_enabled,
-    validate_plugin_directory,
 )
 from backend.plugins.manager import MarketplaceRegistry, PluginManager
 from backend.config import load_config_layer_stack
@@ -148,7 +147,7 @@ def list_plugin_marketplaces_api(response: Response) -> dict[str, Any]:
     """List registered marketplace sources and their materialized metadata."""
     response.headers["Cache-Control"] = "no-store"
     try:
-        from backend.services.plugin_settings_service import _plugin_policy_from_stack
+        from backend.plugins.policy import _plugin_policy_from_stack
 
         stack = load_config_layer_stack()
         policy = _plugin_policy_from_stack(stack)
@@ -165,7 +164,7 @@ def reconcile_plugins_api(response: Response) -> dict[str, Any]:
     """Return one integrity report for marketplace/store/runtime state."""
     response.headers["Cache-Control"] = "no-store"
     stack = load_config_layer_stack()
-    from backend.services.plugin_settings_service import _plugin_policy_from_stack
+    from backend.plugins.policy import _plugin_policy_from_stack
 
     policy = _plugin_policy_from_stack(stack)
     manager = PluginManager(config_stack=stack)
@@ -182,7 +181,7 @@ def add_plugin_marketplace_api(
 ) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     try:
-        from backend.services.plugin_settings_service import _plugin_policy_from_stack
+        from backend.plugins.policy import _plugin_policy_from_stack
 
         policy = _plugin_policy_from_stack(load_config_layer_stack())
         record = MarketplaceRegistry().add(request.name, request.source, policy=policy)
@@ -199,7 +198,7 @@ def add_plugin_marketplace_api(
 def remove_plugin_marketplace_api(marketplace_name: str, response: Response) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     try:
-        from backend.services.plugin_settings_service import _plugin_policy_from_stack
+        from backend.plugins.policy import _plugin_policy_from_stack
 
         stack = load_config_layer_stack()
         policy = _plugin_policy_from_stack(stack)
@@ -225,7 +224,7 @@ def refresh_plugin_marketplace_api(
     del request
     response.headers["Cache-Control"] = "no-store"
     try:
-        from backend.services.plugin_settings_service import _plugin_policy_from_stack
+        from backend.plugins.policy import _plugin_policy_from_stack
 
         policy = _plugin_policy_from_stack(load_config_layer_stack())
         refreshed = MarketplaceRegistry().refresh(marketplace_name, policy=policy)

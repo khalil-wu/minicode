@@ -29,7 +29,7 @@ def _effective_marketplace_policy(policy: Any | None) -> Any:
 
     if policy is not None:
         return policy
-    from backend.services.plugin_settings_service import _plugin_policy_from_stack
+    from backend.plugins.policy import _plugin_policy_from_stack
 
     return _plugin_policy_from_stack()
 
@@ -170,10 +170,8 @@ class PluginManager:
     ) -> dict[str, Any]:
         from backend.config import SETTINGS_FILE
         from backend.hooks.runtime import run_config_change_hook
-        from backend.services.plugin_settings_service import (
-            _plugin_policy_from_stack,
-            import_plugin_from_path,
-        )
+        from backend.plugins.policy import _plugin_policy_from_stack
+        from backend.services.plugin_settings_service import import_plugin_from_path
 
         policy = _plugin_policy_from_stack(self.config_stack)
 
@@ -211,7 +209,7 @@ class PluginManager:
         from backend.services.plugin_settings_service import import_plugin_from_path
 
         registry = MarketplaceRegistry()
-        from backend.services.plugin_settings_service import _plugin_policy_from_stack
+        from backend.plugins.policy import _plugin_policy_from_stack
 
         policy = _plugin_policy_from_stack(self.config_stack)
         if refresh:
@@ -569,7 +567,7 @@ class MarketplaceRegistry:
     def list(self, *, policy: Any | None = None) -> list[dict[str, Any]]:
         effective_policy = _effective_marketplace_policy(policy)
         effective_policy.assert_policy_valid()
-        from backend.services.plugin_settings_service import PluginSettingsError
+        from backend.plugins.policy import PluginSettingsError
 
         payload = self._raw_records()
         result: list[dict[str, Any]] = []
